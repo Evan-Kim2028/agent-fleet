@@ -263,6 +263,11 @@ For repos with open `fleet/*` PRs, enable automated babysitting:
 pr_loop:
   enabled: true
   branch_prefixes: [fleet/]
+  poll_interval_s: 10          # watcher outer loop (default 10s)
+  review_poll_s: 10            # wait for GHA review comment
+  ci_poll_s: 10                # wait for CI checks to finish
+  ci_register_poll_s: 5        # wait for checks to appear after push
+  post_fix_poll_s: 15          # pause after fix push before re-checking CI
   fix_persona: coder          # review findings (workflows, config, code)
   ci_fix_persona: coder       # CI failures (default ci = lakestore-only scope)
   auto_merge: true

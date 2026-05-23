@@ -13,7 +13,11 @@ class PrLoopConfig:
 
     enabled: bool = False
     branch_prefixes: tuple[str, ...] = ("fleet/",)
-    poll_interval_s: int = 30
+    poll_interval_s: int = 10
+    review_poll_s: int = 10
+    ci_poll_s: int = 10
+    ci_register_poll_s: int = 5
+    post_fix_poll_s: int = 15
     review_poll_timeout_s: int = 1800
     ci_poll_timeout_s: int = 1800
     max_fix_attempts: int = 2
@@ -45,7 +49,11 @@ def load_pr_loop_config(_repo_root: Path, raw: dict[str, Any] | None) -> PrLoopC
     return PrLoopConfig(
         enabled=bool(section.get("enabled", False)),
         branch_prefixes=tuple(str(p) for p in branch_prefixes),
-        poll_interval_s=int(section.get("poll_interval_s", 30)),
+        poll_interval_s=int(section.get("poll_interval_s", 10)),
+        review_poll_s=int(section.get("review_poll_s", 10)),
+        ci_poll_s=int(section.get("ci_poll_s", 10)),
+        ci_register_poll_s=int(section.get("ci_register_poll_s", 5)),
+        post_fix_poll_s=int(section.get("post_fix_poll_s", 15)),
         review_poll_timeout_s=int(section.get("review_poll_timeout_s", 1800)),
         ci_poll_timeout_s=int(section.get("ci_poll_timeout_s", 1800)),
         max_fix_attempts=int(section.get("max_fix_attempts", 2)),

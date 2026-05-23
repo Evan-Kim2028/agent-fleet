@@ -54,5 +54,8 @@ critical_path_prefixes:
 #   max_ci_fix_attempts: 2
 #   merge_cooldown_s: 300
 #   tiered_merge_gate: false
+#   poll_interval_s: 10
+#   review_poll_s: 10
+#   ci_poll_s: 10
 #   fix_persona: coder
 #   ci_fix_persona: coder

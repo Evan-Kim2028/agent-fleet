@@ -148,7 +148,7 @@ def poll_for_review_comment(
     repo_root: Path,
     marker: str,
     timeout_s: int,
-    poll_s: int = 30,
+    poll_s: int = 10,
 ) -> str | None:
     deadline = time.time() + timeout_s
     while time.time() < deadline:
@@ -267,14 +267,14 @@ def wait_for_ci_green(
             ignored=loop_config.ignored_ci_checks,
         )
         if not all_checks:
-            time.sleep(15)
+            time.sleep(loop_config.ci_register_poll_s)
             continue
         if failed:
             names = [str(c.get("name", "")) for c in failed]
             return LifecycleResult("ci_failed", f"Failed checks: {names}")
         if not pending:
             return LifecycleResult("ci_green", "All checks passed")
-        time.sleep(30)
+        time.sleep(loop_config.ci_poll_s)
     return LifecycleResult("ci_timeout", "CI did not pass within timeout")
 
 
@@ -454,6 +454,7 @@ def run_pr_lifecycle(
             repo_root=repo_root,
             marker=marker,
             timeout_s=loop_config.review_poll_timeout_s,
+            poll_s=loop_config.review_poll_s,
         )
 
     needs_fix = bool(
@@ -533,6 +534,7 @@ def run_pr_lifecycle(
                 repo_root=repo_root,
                 marker=marker,
                 timeout_s=loop_config.review_poll_timeout_s,
+                poll_s=loop_config.review_poll_s,
             ) or review_body
 
     ci_fix_attempts = 0
@@ -566,7 +568,7 @@ def run_pr_lifecycle(
         )
         if not fixed:
             return LifecycleResult("ci_failed", "CI fix attempt produced no push")
-        time.sleep(60)
+        time.sleep(loop_config.post_fix_poll_s)
 
     if not loop_config.auto_merge:
         return LifecycleResult("ready", "CI green; auto_merge disabled")

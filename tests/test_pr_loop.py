@@ -53,6 +53,11 @@ def test_load_pr_loop_defaults() -> None:
     assert cfg.branch_prefixes == ("fleet/",)
     assert cfg.max_fix_attempts == 2
     assert cfg.ci_fix_persona is None
+    assert cfg.poll_interval_s == 10
+    assert cfg.review_poll_s == 10
+    assert cfg.ci_poll_s == 10
+    assert cfg.ci_register_poll_s == 5
+    assert cfg.post_fix_poll_s == 15
 
 
 def test_load_pr_loop_ci_fix_persona() -> None:

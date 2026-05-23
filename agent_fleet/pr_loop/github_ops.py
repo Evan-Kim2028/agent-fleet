@@ -178,8 +178,8 @@ def merge_pr(
     )
     if result.returncode == 0:
         return True
-    for _ in range(9):
-        time.sleep(10)
+    for _ in range(19):
+        time.sleep(5)
         state_result = _gh("pr", "view", str(pr_number), "--json", "state", cwd=cwd, check=False)
         if state_result.returncode == 0:
             state = json.loads(state_result.stdout).get("state", "")
