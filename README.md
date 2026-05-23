@@ -263,7 +263,8 @@ For repos with open `fleet/*` PRs, enable automated babysitting:
 pr_loop:
   enabled: true
   branch_prefixes: [fleet/]
-  fix_persona: coder          # same Composer/Kimi backend as fleet.yaml
+  fix_persona: coder          # review findings (workflows, config, code)
+  ci_fix_persona: coder       # CI failures (default ci = lakestore-only scope)
   auto_merge: true
   max_fix_attempts: 2
   max_ci_fix_attempts: 2

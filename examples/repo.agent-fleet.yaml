@@ -55,3 +55,4 @@ critical_path_prefixes:
 #   merge_cooldown_s: 300
 #   tiered_merge_gate: false
 #   fix_persona: coder
+#   ci_fix_persona: coder

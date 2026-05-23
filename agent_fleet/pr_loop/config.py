@@ -22,6 +22,7 @@ class PrLoopConfig:
     tiered_merge_gate: bool = False
     auto_merge: bool = True
     fix_persona: str | None = None
+    ci_fix_persona: str | None = None
     ignored_ci_checks: tuple[str, ...] = field(
         default_factory=lambda: ("composer pr analysis", "kimi pr analysis")
     )
@@ -53,6 +54,9 @@ def load_pr_loop_config(_repo_root: Path, raw: dict[str, Any] | None) -> PrLoopC
         tiered_merge_gate=bool(section.get("tiered_merge_gate", False)),
         auto_merge=bool(section.get("auto_merge", True)),
         fix_persona=(str(section["fix_persona"]) if section.get("fix_persona") else None),
+        ci_fix_persona=(
+            str(section["ci_fix_persona"]) if section.get("ci_fix_persona") else None
+        ),
         ignored_ci_checks=tuple(str(c).lower() for c in ignored),
         needs_human_review_label=str(
             section.get("needs_human_review_label", "needs-human-review")

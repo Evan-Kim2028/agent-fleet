@@ -62,6 +62,50 @@ def persona_from_branch(branch: str, default_persona: str) -> str:
     return default_persona
 
 
+def _git_changed_files(worktree: Path) -> list[str]:
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        cwd=worktree,
+        check=False,
+    )
+    return [
+        line[3:].strip()
+        for line in status.stdout.splitlines()
+        if line.strip() and len(line) > 3
+    ]
+
+
+def _pr_file_scope_prefixes(pr_files: list[str]) -> tuple[str, ...]:
+    prefixes: set[str] = set()
+    for path in pr_files:
+        prefixes.add(path)
+        if "/" in path:
+            prefixes.add(path.rsplit("/", 1)[0] + "/")
+    return tuple(prefixes)
+
+
+def _files_outside_pr_scope(pr_files: list[str], changed: list[str]) -> tuple[str, ...]:
+    prefixes = _pr_file_scope_prefixes(pr_files)
+    if not prefixes:
+        return ()
+    return files_outside_allowed_paths(prefixes, changed)
+
+
+def _review_fix_persona(loop_config: PrLoopConfig) -> str:
+    return loop_config.fix_persona or "coder"
+
+
+def _ci_fix_persona(loop_config: PrLoopConfig, branch_persona: str, repo: RepoConfig) -> str:
+    return (
+        loop_config.ci_fix_persona
+        or loop_config.fix_persona
+        or branch_persona
+        or repo.default_persona
+    )
+
+
 def _protected_paths(changed: list[str], repo: RepoConfig) -> list[str]:
     blocked: list[str] = []
     for path in changed:
@@ -132,15 +176,18 @@ def address_review_findings(
     ):
         return LifecycleResult("no_findings", "Review has no blocking findings")
 
-    fix_persona_name = loop_config.fix_persona or persona or repo.default_persona
+    fix_persona_name = _review_fix_persona(loop_config)
     config = merge_repo_into_fleet_config(fleet_config, repo)
     resolver = YamlPersonaResolver(config)
     persona_obj = resolver.load(fix_persona_name)
     backend = make_backend(config)
+    pr_files = github_ops.pr_changed_files(pr_number, cwd=repo.repo_root)
 
     verify_block = ""
     if repo.verify_commands:
         verify_block = "\n".join(f"- `{cmd}`" for cmd in repo.verify_commands)
+
+    pr_files_block = "\n".join(f"- `{path}`" for path in pr_files) or "- (unknown)"
 
     prompt = textwrap.dedent(f"""\
         The PR analyzer posted review findings on PR #{pr_number}. Address every
@@ -149,15 +196,25 @@ def address_review_findings(
         ## Review
         {review_body}
 
+        ## PR changed files (only edit these or subpaths)
+        {pr_files_block}
+
         ## Instructions
-        1. Read each finding and fix valid issues in the relevant files.
-        2. Stay within your persona scope.
+        1. Read each finding and fix valid issues in the relevant files above.
+        2. Do NOT edit files outside this PR's changed paths.
         3. Run verify commands before finishing:
         {verify_block or "- (none configured)"}
-        4. Do NOT commit — the orchestrator commits after this phase.
+        4. Do NOT commit or push — the orchestrator commits after this phase.
         5. If a finding is a false positive, note it but do not change code for it.
     """)
 
+    logger.info(
+        "Review fix PR #%s persona=%s worktree=%s pr_files=%d",
+        pr_number,
+        fix_persona_name,
+        worktree,
+        len(pr_files),
+    )
     result = backend.run(
         prompt,
         max_tokens=0,
@@ -168,27 +225,19 @@ def address_review_findings(
         allowed_tools=list(persona_obj.allowed_tools),
     )
     if result.exit_code != 0:
-        return LifecycleResult("fix_failed", result.stderr or "Fix agent failed")
+        detail = result.stderr or "Fix agent failed"
+        logger.warning("Review fix failed PR #%s: %s", pr_number, detail[:500])
+        return LifecycleResult("fix_failed", detail)
 
-    allowed = persona_obj.allowed_paths or list(
-        repo.persona_scope_allowlist.get(fix_persona_name, ())
-    )
-    if allowed:
-        status = subprocess.run(
-            ["git", "status", "--porcelain"],
-            capture_output=True,
-            text=True,
-            cwd=worktree,
-            check=False,
+    changed = _git_changed_files(worktree)
+    violating = _files_outside_pr_scope(pr_files, changed)
+    if violating:
+        logger.warning(
+            "Review fix scope violation PR #%s: %s",
+            pr_number,
+            violating,
         )
-        changed = [
-            line[3:].strip()
-            for line in status.stdout.splitlines()
-            if line.strip() and len(line) > 3
-        ]
-        violating = files_outside_allowed_paths(tuple(allowed), changed)
-        if violating:
-            return LifecycleResult("scope_violation", f"Out of scope: {violating}")
+        return LifecycleResult("scope_violation", f"Out of PR scope: {violating}")
 
     message = (
         f"fix(fleet): address PR review feedback\n\n"
@@ -237,7 +286,7 @@ def attempt_ci_fix(
     worktree: Path,
     persona: str,
 ) -> bool:
-    fix_persona_name = loop_config.fix_persona or persona or repo.default_persona
+    fix_persona_name = _ci_fix_persona(loop_config, persona, repo)
     config = merge_repo_into_fleet_config(fleet_config, repo)
     resolver = YamlPersonaResolver(config)
     persona_obj = resolver.load(fix_persona_name)
@@ -252,9 +301,16 @@ def attempt_ci_fix(
         Verify commands:
         {verify_block}
 
-        Do NOT commit — the orchestrator commits after this phase.
+        Do NOT commit or push — the orchestrator commits after this phase.
         Do NOT weaken CI workflows to make checks pass.
     """)
+    logger.info(
+        "CI fix PR #%s persona=%s worktree=%s checks=%s",
+        pr_number,
+        fix_persona_name,
+        worktree,
+        failed_checks,
+    )
     result = backend.run(
         prompt,
         max_tokens=0,
@@ -448,7 +504,24 @@ def run_pr_lifecycle(
                     label=loop_config.needs_human_review_label,
                 )
                 return LifecycleResult("parked", address.detail)
+            if address.status in {"scope_violation", "fix_failed"}:
+                logger.warning(
+                    "Review fix attempt %s/%s PR #%s: %s — %s",
+                    fix_attempts,
+                    loop_config.max_fix_attempts,
+                    pr_number,
+                    address.status,
+                    address.detail,
+                )
             if fix_attempts >= loop_config.max_fix_attempts:
+                if address.status in {"scope_violation", "fix_failed"}:
+                    park_for_human(
+                        pr_number,
+                        f"Automated review fix failed: {address.detail}",
+                        repo_root=repo_root,
+                        label=loop_config.needs_human_review_label,
+                    )
+                    return LifecycleResult("parked", address.detail)
                 return address
             review_body = poll_for_review_comment(
                 pr_number,

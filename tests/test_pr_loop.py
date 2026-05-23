@@ -10,7 +10,6 @@ from agent_fleet.pr_loop.review_parse import (
     has_blocking_findings,
     parse_review_risk,
 )
-from agent_fleet.repo import load_repo_config
 
 
 SAMPLE_REVIEW = """\
@@ -48,15 +47,45 @@ def test_find_reviewer_comment() -> None:
     assert find_reviewer_comment(comments, marker="Composer PR Analysis") == SAMPLE_REVIEW
 
 
-def test_lake_of_rage_pr_loop_config_loads() -> None:
-    repo = load_repo_config("/home/evan/Documents/lake-of-rage/.agent-fleet.yaml")
-    assert repo.pr_loop is not None
-    assert repo.pr_loop.enabled is True
-    assert repo.pr_loop.auto_merge is True
-
-
 def test_load_pr_loop_defaults() -> None:
     cfg = load_pr_loop_config(Path("/tmp"), {"pr_loop": {"enabled": True}})
     assert cfg is not None
     assert cfg.branch_prefixes == ("fleet/",)
     assert cfg.max_fix_attempts == 2
+    assert cfg.ci_fix_persona is None
+
+
+def test_load_pr_loop_ci_fix_persona() -> None:
+    cfg = load_pr_loop_config(
+        Path("/tmp"),
+        {"pr_loop": {"enabled": True, "fix_persona": "coder", "ci_fix_persona": "ci"}},
+    )
+    assert cfg is not None
+    assert cfg.fix_persona == "coder"
+    assert cfg.ci_fix_persona == "ci"
+
+
+def test_files_outside_pr_scope() -> None:
+    from agent_fleet.pr_loop.lifecycle import _files_outside_pr_scope
+
+    pr_files = [
+        ".github/workflows/pr-analyzer.yml",
+        ".agent-fleet.yaml",
+        "packages/lakestore/tests/test_agent_fleet_smoke.py",
+    ]
+    assert _files_outside_pr_scope(pr_files, [".agent-fleet.yaml"]) == ()
+    assert _files_outside_pr_scope(
+        pr_files, ["packages/lakestore/tests/test_new.py"]
+    ) == ()
+    assert _files_outside_pr_scope(pr_files, ["README.md"]) == ("README.md",)
+
+
+def test_lake_of_rage_pr_loop_config_loads() -> None:
+    raw = {
+        "name": "lake-of-rage",
+        "pr_loop": {"enabled": True, "auto_merge": True, "fix_persona": "coder"},
+    }
+    cfg = load_pr_loop_config(Path("/tmp"), raw)
+    assert cfg is not None
+    assert cfg.enabled is True
+    assert cfg.auto_merge is True

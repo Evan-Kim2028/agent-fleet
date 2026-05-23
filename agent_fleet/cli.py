@@ -103,8 +103,15 @@ def cmd_personas(args: argparse.Namespace) -> int:
 
 
 def cmd_loop(args: argparse.Namespace) -> int:
+    import logging
+
     from agent_fleet.pr_loop.lifecycle import run_pr_lifecycle
     from agent_fleet.pr_loop.watcher import PrLoopWatcher, run_watcher_once
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
     workspace = Path(args.workspace or Path.cwd()).resolve()
     if args.once:
