@@ -126,3 +126,24 @@ def test_persona_from_branch_agent_prefix() -> None:
 
     assert persona_from_branch("agent/backend/1499-abc12345", "backend") == "backend"
     assert persona_from_branch("fleet/data/1532-0837d5d0", "backend") == "data"
+
+
+def test_persona_covering_files_and_merge_scope() -> None:
+    from agent_fleet.pr_loop.lifecycle import (
+        _merge_scope_out_of_scope,
+        _persona_covering_files,
+    )
+    from agent_fleet.repo import RepoConfig
+
+    repo = RepoConfig(
+        repo_root=Path("/tmp"),
+        persona_scope_allowlist={
+            "coder": ("src/",),
+            "infra": ("infra/", "sql/"),
+        },
+    )
+    infra_files = ["infra/vps/deploy.sh", "infra/vps/rollback.sh"]
+    assert _persona_covering_files(infra_files, repo) == "infra"
+    assert _merge_scope_out_of_scope("coder", infra_files, repo) == []
+    assert _merge_scope_out_of_scope("coder", ["src/a.py"], repo) == []
+    assert _merge_scope_out_of_scope("coder", ["web/x.ts"], repo) == ["web/x.ts"]

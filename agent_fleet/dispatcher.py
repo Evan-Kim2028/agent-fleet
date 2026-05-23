@@ -368,6 +368,7 @@ class FleetDispatcher:
                         fleet_config=task_config,
                         worktree=run_workspace,
                         skip_review_wait=False,
+                        persona=task.persona,
                     )
                     pr_loop_status = loop_result.status
                     if loop_result.status == "merged":

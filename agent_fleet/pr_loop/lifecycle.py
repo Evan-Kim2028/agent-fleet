@@ -93,8 +93,48 @@ def _files_outside_pr_scope(pr_files: list[str], changed: list[str]) -> tuple[st
     return files_outside_allowed_paths(prefixes, changed)
 
 
-def _review_fix_persona(loop_config: PrLoopConfig) -> str:
-    return loop_config.fix_persona or "coder"
+def _persona_covering_files(
+    files: list[str],
+    repo: RepoConfig,
+) -> str | None:
+    """Return a persona whose allowlist covers all *files*, if any."""
+    for name, paths in repo.persona_scope_allowlist.items():
+        if paths and not files_outside_allowed_paths(paths, files):
+            return name
+    return None
+
+
+def _merge_scope_out_of_scope(
+    persona: str,
+    changed: list[str],
+    repo: RepoConfig,
+) -> list[str]:
+    """Out-of-scope paths for merge gate; infer persona from changed files when needed."""
+    allowed_paths = repo.persona_scope_allowlist.get(persona, ())
+    oos = (
+        list(files_outside_allowed_paths(allowed_paths, changed))
+        if allowed_paths
+        else []
+    )
+    if oos:
+        covering = _persona_covering_files(changed, repo)
+        if covering:
+            return []
+    return oos
+
+
+def _review_fix_persona(
+    loop_config: PrLoopConfig,
+    branch_persona: str,
+    repo: RepoConfig,
+    pr_files: list[str],
+) -> str:
+    if loop_config.fix_persona:
+        return loop_config.fix_persona
+    covering = _persona_covering_files(pr_files, repo)
+    if covering:
+        return covering
+    return branch_persona or repo.default_persona or "coder"
 
 
 def _ci_fix_persona(loop_config: PrLoopConfig, branch_persona: str, repo: RepoConfig) -> str:
@@ -175,12 +215,15 @@ def address_review_findings(
     ):
         return LifecycleResult("no_findings", "Review has no blocking findings")
 
-    fix_persona_name = _review_fix_persona(loop_config)
+    pr_files = github_ops.pr_changed_files(pr_number, cwd=repo.repo_root)
+    branch_persona = persona_from_branch(branch, repo.default_persona)
+    fix_persona_name = _review_fix_persona(
+        loop_config, branch_persona, repo, pr_files
+    )
     config = merge_repo_into_fleet_config(fleet_config, repo)
     resolver = YamlPersonaResolver(config)
     persona_obj = resolver.load(fix_persona_name)
     backend = make_backend(config)
-    pr_files = github_ops.pr_changed_files(pr_number, cwd=repo.repo_root)
 
     verify_block = ""
     if repo.verify_commands:
@@ -387,12 +430,7 @@ def try_merge(
         )
         review_addressed = bool(pr_state.get("review_addressed"))
         risk = None if review_addressed else parse_review_risk(comments)
-        allowed_paths = repo.persona_scope_allowlist.get(persona, ())
-        oos = (
-            list(files_outside_allowed_paths(allowed_paths, changed))
-            if allowed_paths
-            else []
-        )
+        oos = _merge_scope_out_of_scope(persona, changed, repo)
         allowed, reason = tiered_merge_allowed(
             ci_green=True,
             risk=risk,
@@ -425,11 +463,12 @@ def run_pr_lifecycle(
     fleet_config: FleetConfig | None = None,
     worktree: Path | None = None,
     skip_review_wait: bool = False,
+    persona: str | None = None,
 ) -> LifecycleResult:
     """Run address-review → CI wait/fix → merge for one PR."""
     fleet_config = fleet_config or load_fleet_config()
     repo_root = repo.repo_root
-    persona = persona_from_branch(branch, repo.default_persona)
+    persona = persona or persona_from_branch(branch, repo.default_persona)
     pr_config = repo.pr_review
     marker = pr_config.comment_title if pr_config else "Composer PR Analysis"
 
