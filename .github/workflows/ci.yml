@@ -22,5 +22,8 @@ jobs:
       - name: Ruff
         run: uv run ruff check agent_fleet tests integrations
 
+      - name: Ty
+        run: uv run ty check agent_fleet tests integrations
+
       - name: Pytest
         run: uv run pytest -q

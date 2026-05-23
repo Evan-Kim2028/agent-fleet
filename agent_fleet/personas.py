@@ -24,7 +24,7 @@ def _find_skill_body(skill_name: str, skill_dirs: list[Path]) -> Path | None:
 
 def _resolve_prompt_path(spec: PersonaSpec, cfg: FleetConfig) -> Path:
     prompt = spec.prompt.strip()
-    if prompt.startswith("/") or prompt.startswith("~"):
+    if prompt.startswith(("/", "~")):
         return Path(prompt).expanduser().resolve()
     direct = Path(prompt)
     if direct.is_absolute() and direct.exists():

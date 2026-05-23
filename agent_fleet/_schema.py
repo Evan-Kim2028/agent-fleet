@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import re
-from functools import lru_cache
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +16,7 @@ _SCHEMA_DIR = Path(__file__).parent / "schemas"
 _VALID_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
-@lru_cache(maxsize=None)
+@cache
 def load_schema(name: str) -> dict[str, Any]:
     """Return parsed JSON schema for *name* (e.g. "task_spec"). Cached.
 

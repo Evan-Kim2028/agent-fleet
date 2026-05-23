@@ -11,15 +11,17 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agent_fleet.contracts.implementation_brief import (
     ImplementationBrief,
     validate_implementation_brief,
 )
-from agent_fleet.contracts.research_note import ResearchNote
-from agent_fleet.contracts.task_spec import TaskSpec
-from agent_fleet.hooks import LLMBackend
+
+if TYPE_CHECKING:
+    from agent_fleet.contracts.research_note import ResearchNote
+    from agent_fleet.contracts.task_spec import TaskSpec
+    from agent_fleet.hooks import LLMBackend
 
 
 def _extract_json(text: str) -> dict[str, Any]:

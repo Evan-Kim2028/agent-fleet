@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
+
+if TYPE_CHECKING:
+    from agent_fleet.config import FleetConfig
 
 REPO_CONFIG_NAMES = (
     ".agent-fleet.yaml",
@@ -94,7 +96,7 @@ def load_repo_config(path: Path | str) -> RepoConfig:
 
     worktree_base_raw = raw.get("worktree_base")
     worktree_base = (
-        Path(os.path.expanduser(worktree_base_raw)).resolve()
+        Path(str(worktree_base_raw)).expanduser().resolve()
         if worktree_base_raw
         else None
     )
@@ -118,7 +120,10 @@ def load_repo_config(path: Path | str) -> RepoConfig:
     )
 
 
-def merge_repo_into_fleet_config(fleet_config: Any, repo: RepoConfig | None) -> Any:
+def merge_repo_into_fleet_config(
+    fleet_config: FleetConfig,
+    repo: RepoConfig | None,
+) -> FleetConfig:
     """Apply repo-local overrides onto a FleetConfig instance."""
     if repo is None:
         return fleet_config

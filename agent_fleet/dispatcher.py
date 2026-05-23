@@ -1,4 +1,4 @@
-"""Parallel fleet dispatcher — inspired by silphcoanalytics fleet admission + Hermes delegate_task."""
+"""Parallel fleet dispatcher — silphcoanalytics admission + Hermes delegate_task."""
 
 from __future__ import annotations
 
@@ -7,18 +7,27 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING
 
 from agent_fleet.admission import AdmissionController, ResourceTier
 from agent_fleet.backends import make_backend
 from agent_fleet.config import FleetConfig, load_fleet_config
-from agent_fleet.repo import find_repo_config, merge_repo_into_fleet_config
-from agent_fleet.runner import run_full_pipeline
 from agent_fleet.hooks import FleetTask, FleetTaskResult
 from agent_fleet.personas import YamlPersonaResolver
 from agent_fleet.phases import run_pipeline
+from agent_fleet.repo import find_repo_config, merge_repo_into_fleet_config
+from agent_fleet.runner import run_full_pipeline
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
+
+
+def _optional_entry_str(value: object | None, fallback: str | None) -> str | None:
+    if value is None:
+        return fallback
+    return str(value)
 
 
 def _normalize_tasks(
@@ -28,7 +37,7 @@ def _normalize_tasks(
     persona: str | None,
     workspace: str | None,
     pipeline: str | None,
-    tasks: list[dict[str, Any]] | None,
+    tasks: list[dict[str, object]] | None,
 ) -> list[FleetTask]:
     if tasks:
         normalized: list[FleetTask] = []
@@ -43,8 +52,8 @@ def _normalize_tasks(
                     goal=task_goal,
                     context=str(entry.get("context") or ""),
                     persona=str(entry.get("persona") or persona or "coder"),
-                    workspace=entry.get("workspace") or workspace,
-                    pipeline=entry.get("pipeline") or pipeline,
+                    workspace=_optional_entry_str(entry.get("workspace"), workspace),
+                    pipeline=_optional_entry_str(entry.get("pipeline"), pipeline),
                 )
             )
         if normalized:
@@ -81,7 +90,7 @@ class FleetDispatcher:
         )
         self._admission_lock = threading.Lock()
 
-    def _emit(self, event: str, **payload: Any) -> None:
+    def _emit(self, event: str, **payload: object) -> None:
         if not self.progress_callback:
             return
         try:
@@ -104,7 +113,9 @@ class FleetDispatcher:
             )
         return list(phases)
 
-    def _run_full_pipeline(self, task_index: int, task: FleetTask, workspace: Path, start: float) -> FleetTaskResult:
+    def _run_full_pipeline(
+        self, task_index: int, task: FleetTask, workspace: Path, start: float
+    ) -> FleetTaskResult:
         repo = find_repo_config(workspace)
         config = merge_repo_into_fleet_config(self.config, repo)
         result = run_full_pipeline(
@@ -245,7 +256,7 @@ class FleetDispatcher:
         persona: str | None = None,
         workspace: str | None = None,
         pipeline: str | None = None,
-        tasks: list[dict[str, Any]] | None = None,
+        tasks: list[dict[str, object]] | None = None,
     ) -> list[FleetTaskResult]:
         normalized = _normalize_tasks(
             goal=goal,
@@ -283,7 +294,7 @@ def dispatch_tasks(
     persona: str | None = None,
     workspace: str | None = None,
     pipeline: str | None = None,
-    tasks: list[dict[str, Any]] | None = None,
+    tasks: list[dict[str, object]] | None = None,
     config_path: str | None = None,
     progress_callback: Callable[..., None] | None = None,
 ) -> list[FleetTaskResult]:

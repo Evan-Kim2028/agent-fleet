@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import subprocess
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from agent_fleet.contracts.verify_result import VerifyResult, VerifySeverity
-from agent_fleet.repo import RepoConfig
 from agent_fleet.verify_core import get_changed_files
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from agent_fleet.repo import RepoConfig
 
 
 class CommandVerifier:
@@ -24,7 +28,7 @@ class CommandVerifier:
         changed_files: list[Path],
         task_id: int,
     ) -> VerifyResult:
-        del persona, task_id
+        del persona, task_id, changed_files
         rel_changed = get_changed_files(worktree)
         checks: list[dict] = []
         for cmd in self.repo.verify_commands:

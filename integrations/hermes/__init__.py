@@ -2,13 +2,28 @@
 
 import logging
 from pathlib import Path
+from typing import Protocol
 
 from . import schemas, tools
 
 logger = logging.getLogger(__name__)
 
 
-def register(ctx):
+class HermesPluginContext(Protocol):
+    def register_tool(
+        self,
+        *,
+        name: str,
+        toolset: str,
+        schema: object,
+        handler: object,
+        requires_env: list[str] | None = None,
+    ) -> None: ...
+
+    def register_skill(self, name: str, skill_md: Path) -> None: ...
+
+
+def register(ctx: HermesPluginContext) -> None:
     ctx.register_tool(
         name="coding_fleet_dispatch",
         toolset="coding_fleet",

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from agent_fleet.contracts.verify_result import VerifyResult
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from pathlib import Path
+
+    from agent_fleet.agent_mode import AgentMode
+    from agent_fleet.contracts.verify_result import VerifyResult
 
 
 @runtime_checkable
@@ -36,7 +39,7 @@ class LLMBackend(Protocol):
         allowed_tools: list[str] | None = None,
         cwd: Path | None = None,
         model: str | None = None,
-        mode: str | None = None,
+        mode: AgentMode | None = None,
     ) -> LLMResult: ...
 
 

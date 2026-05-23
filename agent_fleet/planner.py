@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agent_fleet.contracts.task_spec import (
     DecompositionDecision,
@@ -18,8 +18,10 @@ from agent_fleet.contracts.task_spec import (
     TaskSpec,
     validate_task_spec,
 )
-from agent_fleet.hooks import LLMBackend, PersonaResolver
 from agent_fleet.spine_config import SpineConfig
+
+if TYPE_CHECKING:
+    from agent_fleet.hooks import LLMBackend, PersonaResolver
 
 # JSON schema summary embedded in the prompt so the LLM knows what to produce.
 _SCHEMA_SUMMARY = """\
@@ -74,7 +76,7 @@ def _is_cross_cutting(
             any(p.startswith(prefix) for p in allowed_paths)
             for prefix in group
         )
-        if prefixes_hit >= 2:  # noqa: PLR2004
+        if prefixes_hit >= 2:
             return True
     return False
 
@@ -110,12 +112,16 @@ def _build_prompt(
     issue_number: int,
     issue_title: str,
     issue_body: str,
+    *,
+    persona_names: tuple[str, ...],
 ) -> str:
     """Construct the structured prompt sent to the LLM backend."""
+    personas_line = ", ".join(persona_names) if persona_names else "(none configured)"
     return (
         f"You are the Planner phase of a software-agent fleet.\n"
         f"Analyse the task below and produce a TaskSpec JSON object.\n"
         f"Respond with ONLY the JSON — no prose before or after.\n\n"
+        f"Available personas: {personas_line}\n\n"
         f"Task #{issue_number}: {issue_title}\n\n"
         f"{issue_body}\n\n"
         f"---\n"
@@ -129,7 +135,7 @@ def plan(
     issue_body: str,
     *,
     backend: LLMBackend,
-    persona_resolver: PersonaResolver,  # noqa: ARG001 — reserved for future persona-aware prompting
+    persona_resolver: PersonaResolver,
     spine_config: SpineConfig | None = None,
     max_tokens: int = 4096,
     timeout_s: int = 720,
@@ -153,7 +159,12 @@ def plan(
     Raises ValueError after exhausting retries.
     """
     _spine = spine_config if spine_config is not None else SpineConfig.defaults()
-    base_prompt = _build_prompt(issue_number, issue_title, issue_body)
+    base_prompt = _build_prompt(
+        issue_number,
+        issue_title,
+        issue_body,
+        persona_names=tuple(sorted(persona_resolver.list_personas())),
+    )
     last_error: str | None = None
     data: dict[str, Any] | None = None
 

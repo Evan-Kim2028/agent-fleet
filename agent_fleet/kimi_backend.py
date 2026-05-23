@@ -15,7 +15,8 @@ from pathlib import Path
 
 
 def _find_kimi_bin() -> str:
-    for candidate in (shutil.which("kimi-cli"), os.path.expanduser("~/.local/bin/kimi-cli")):
+    local_bin = Path("~/.local/bin/kimi-cli").expanduser()
+    for candidate in (shutil.which("kimi-cli"), str(local_bin)):
         if candidate and Path(candidate).exists():
             return candidate
     return "kimi-cli"
@@ -33,8 +34,9 @@ def call_kimi(
     """Run kimi-cli with an isolated config. Returns plain text output."""
     bin_path = kimi_bin or _find_kimi_bin()
     with tempfile.TemporaryDirectory() as tmpdir:
-        config_path = os.path.join(tmpdir, "config.toml")
-        with open(config_path, "w", encoding="utf-8") as handle:
+        tmp_path = Path(tmpdir)
+        config_path = tmp_path / "config.toml"
+        with config_path.open("w", encoding="utf-8") as handle:
             handle.write(
                 textwrap.dedent(
                     f"""\
@@ -55,16 +57,16 @@ def call_kimi(
                 )
             )
 
-        mcp_path = os.path.join(tmpdir, "mcp.json")
-        with open(mcp_path, "w", encoding="utf-8") as handle:
+        mcp_path = tmp_path / "mcp.json"
+        with mcp_path.open("w", encoding="utf-8") as handle:
             json.dump({"mcpServers": {}}, handle)
 
         kimi_cmd = [
             bin_path,
             "--config-file",
-            config_path,
+            str(config_path),
             "--mcp-config-file",
-            mcp_path,
+            str(mcp_path),
             "--work-dir",
             work_dir,
             "--print",
@@ -88,7 +90,8 @@ def call_kimi(
                 "--property=MemorySwapMax=0",
                 "--collect",
                 "--quiet",
-            ] + kimi_cmd
+                *kimi_cmd,
+            ]
 
         env = os.environ.copy()
         env["KIMI_API_KEY"] = api_key
@@ -107,10 +110,9 @@ def call_kimi(
                 f"kimi-cli failed (exit {result.returncode}): {result.stderr[:500]}"
             )
 
-        output = re.sub(
+        return re.sub(
             r"\nTo resume this session:.*$", "", result.stdout, flags=re.MULTILINE
         ).strip()
-        return output
 
 
 @dataclass(frozen=True)

@@ -4,6 +4,11 @@ from agent_fleet.contracts.implementation_brief import (
     ImplementationBrief,
     validate_implementation_brief,
 )
+from agent_fleet.contracts.improvement_proposal import (
+    ConfigChange,
+    ImprovementProposal,
+    PersonaChange,
+)
 from agent_fleet.contracts.repo_context import RepoContext, validate_repo_context
 from agent_fleet.contracts.research_note import (
     Confidence,
@@ -23,11 +28,6 @@ from agent_fleet.contracts.tech_lead_review import (
     TechLeadVerdict,
     validate_tech_lead_review,
 )
-from agent_fleet.contracts.improvement_proposal import (
-    ConfigChange,
-    ImprovementProposal,
-    PersonaChange,
-)
 from agent_fleet.contracts.verify_result import (
     VerifyResult,
     VerifySeverity,
@@ -35,11 +35,11 @@ from agent_fleet.contracts.verify_result import (
 )
 
 __all__ = [
-    "ConfigChange",
     "Confidence",
+    "ConfigChange",
     "DecompositionDecision",
-    "ImprovementProposal",
     "ImplementationBrief",
+    "ImprovementProposal",
     "PersonaChange",
     "RepoContext",
     "ResearchNote",

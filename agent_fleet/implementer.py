@@ -11,11 +11,14 @@ inside the worktree directly).
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-from agent_fleet.contracts.implementation_brief import ImplementationBrief
-from agent_fleet.contracts.task_spec import TaskSpec
-from agent_fleet.hooks import LLMBackend, LLMResult, PersonaResolver
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from agent_fleet.contracts.implementation_brief import ImplementationBrief
+    from agent_fleet.contracts.task_spec import TaskSpec
+    from agent_fleet.hooks import LLMBackend, LLMResult, PersonaResolver
 
 _DEFAULT_PERSONA_PROMPT = "You are a helpful coding assistant."
 
@@ -24,7 +27,7 @@ def implement(
     brief: ImplementationBrief,
     task_spec: TaskSpec,
     worktree_path: Path,
-    branch_name: str,
+    _branch_name: str,
     *,
     backend: LLMBackend,
     persona_resolver: PersonaResolver,

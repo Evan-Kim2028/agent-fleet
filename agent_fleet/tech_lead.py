@@ -11,20 +11,25 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from agent_fleet.contracts.review import ReviewResult
 from agent_fleet.contracts.task_spec import RiskTier, TaskSpec
-from agent_fleet.contracts.tech_lead_review import TechLeadReview, TechLeadVerdict, validate_tech_lead_review
-from agent_fleet.hooks import LLMBackend
+from agent_fleet.contracts.tech_lead_review import (
+    TechLeadReview,
+    TechLeadVerdict,
+    validate_tech_lead_review,
+)
 
+if TYPE_CHECKING:
+    from agent_fleet.contracts.review import ReviewResult
+    from agent_fleet.hooks import LLMBackend
 
 # ---------------------------------------------------------------------------
 # Trigger guard
 # ---------------------------------------------------------------------------
 
 
-def _should_trigger(task_spec: TaskSpec, reviews: list[ReviewResult]) -> bool:  # noqa: ARG001
+def _should_trigger(task_spec: TaskSpec, _reviews: list[ReviewResult]) -> bool:
     """Return True if the Tech Lead phase should run.
 
     Triggers when ANY of:
@@ -39,13 +44,10 @@ def _should_trigger(task_spec: TaskSpec, reviews: list[ReviewResult]) -> bool:  
     if task_spec.critical_paths_touched:
         return True
 
-    if (
+    return bool(
         task_spec.coordination_spec is not None
         and task_spec.coordination_spec.get("merge_order")
-    ):
-        return True
-
-    return False
+    )
 
 
 # Expose the same name the plan spec references as the public API.
@@ -104,7 +106,8 @@ def _build_prompt(
         "  2. Schema breakage or backwards-incompatible changes\n"
         "  3. Deploy ordering issues (e.g. database migration must land before API change)\n"
         "  4. Disagreements with Planner scope or decomposition decisions\n\n"
-        "If you disagree with the Planner's decomposition or scope decision, set verdict='escalate'.\n"
+        "If you disagree with the Planner's decomposition or scope decision, "
+        "set verdict='escalate'.\n"
         "If any concern is severe enough to block shipping, set verdict='block'.\n"
         "If everything looks acceptable, set verdict='approve'.\n\n"
         f"PR under review: #{pr_number}\n\n"

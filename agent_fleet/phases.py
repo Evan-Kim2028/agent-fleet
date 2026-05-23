@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from agent_fleet.hooks import FleetTask, LLMBackend, Persona
-from agent_fleet.personas import YamlPersonaResolver
+from agent_fleet.agent_mode import parse_agent_mode
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from agent_fleet.hooks import FleetTask, LLMBackend, Persona
+    from agent_fleet.personas import YamlPersonaResolver
 
 
 def _read_persona_prompt(persona: Persona) -> str:
@@ -74,7 +78,7 @@ def run_execute_phase(
         timeout_s=timeout_s,
         cwd=workspace,
         model=persona.model,
-        mode=persona.mode,
+        mode=parse_agent_mode(persona.mode),
     )
     return {
         "phase": "execute",
@@ -105,7 +109,7 @@ def run_review_phase(
         timeout_s=timeout_s,
         cwd=workspace,
         model=persona.model,
-        mode=persona.mode,
+        mode=parse_agent_mode(persona.mode),
     )
     return {
         "phase": "review",

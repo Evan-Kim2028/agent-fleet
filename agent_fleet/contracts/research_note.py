@@ -11,7 +11,7 @@ import jsonschema
 from agent_fleet._schema import load_schema
 
 
-class Confidence(str, enum.Enum):
+class Confidence(enum.StrEnum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"

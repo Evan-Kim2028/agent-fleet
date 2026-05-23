@@ -7,13 +7,12 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agent_fleet.contracts.review import ReviewResult, ReviewVerdict
 from agent_fleet.contracts.task_spec import DecompositionDecision, TaskSpec
 from agent_fleet.contracts.tech_lead_review import TechLeadReview, TechLeadVerdict
 from agent_fleet.contracts.verify_result import VerifySeverity
-from agent_fleet.hooks import GitOps, LLMBackend, PersonaResolver, Verifier
 from agent_fleet.implementer import implement
 from agent_fleet.planner import plan
 from agent_fleet.repo import RepoConfig, find_repo_config
@@ -23,6 +22,9 @@ from agent_fleet.spine_config import SpineConfig
 from agent_fleet.synthesizer import synthesize
 from agent_fleet.tech_lead import should_invoke_tech_lead, tech_lead_review
 from agent_fleet.verify_core import get_changed_files
+
+if TYPE_CHECKING:
+    from agent_fleet.hooks import GitOps, LLMBackend, PersonaResolver, Verifier
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +93,9 @@ def _spine_from_repo(repo: RepoConfig | None) -> SpineConfig:
         persona_scope_allowlist=repo.persona_scope_allowlist or base.persona_scope_allowlist,
         cross_cutting_groups=repo.cross_cutting_groups or base.cross_cutting_groups,
         fleet_critical_prefixes=repo.critical_path_prefixes or base.fleet_critical_prefixes,
-        design_review_enabled=bool(overrides.get("design_review_enabled", base.design_review_enabled)),
+        design_review_enabled=bool(
+            overrides.get("design_review_enabled", base.design_review_enabled)
+        ),
         design_visual_surface_globs=tuple(
             overrides.get("design_visual_surface_globs", base.design_visual_surface_globs)
         ),
@@ -272,7 +276,9 @@ class LocalFleetRunner:
             tech_lead: TechLeadReview | None = None
             if should_invoke_tech_lead(task_spec, review_results):
                 logger.info("[%s] TECH_LEAD", run_id)
-                tech_lead = tech_lead_review(task_spec, review_results, task_id, backend=self._backend)
+                tech_lead = tech_lead_review(
+                    task_spec, review_results, task_id, backend=self._backend
+                )
                 if tech_lead:
                     phases["TECH_LEAD"] = tech_lead.to_dict()
 

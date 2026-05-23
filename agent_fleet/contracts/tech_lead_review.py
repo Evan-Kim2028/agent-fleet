@@ -11,7 +11,7 @@ import jsonschema
 from agent_fleet._schema import load_schema
 
 
-class TechLeadVerdict(str, enum.Enum):
+class TechLeadVerdict(enum.StrEnum):
     APPROVE = "approve"
     BLOCK = "block"
     ESCALATE = "escalate"

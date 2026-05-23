@@ -5,9 +5,9 @@ from __future__ import annotations
 import ast
 import re
 import subprocess
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable
 
 from agent_fleet.contracts.verify_result import VerifyResult, VerifySeverity
 
@@ -269,7 +269,16 @@ def check_tests_for_modified_code(
 
     missing: list[str] = []
     for src in src_files:
-        if any(x in src for x in ["config", "types", ".d.ts", "stories", "mocks", "scripts/", "research/"]):
+        skip_markers = (
+            "config",
+            "types",
+            ".d.ts",
+            "stories",
+            "mocks",
+            "scripts/",
+            "research/",
+        )
+        if any(x in src for x in skip_markers):
             continue
 
         base = src.rsplit(".", 1)[0]
@@ -329,9 +338,12 @@ def _python_debug_violations(content: str) -> list[tuple[int, str]]:
         elif isinstance(node, ast.ImportFrom):
             if node.module == "pdb":
                 violations.append((node.lineno, "import pdb"))
-        elif isinstance(node, ast.Call):
-            if isinstance(node.func, ast.Name) and node.func.id == "breakpoint":
-                violations.append((node.lineno, "breakpoint()"))
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "breakpoint"
+        ):
+            violations.append((node.lineno, "breakpoint()"))
     return violations
 
 
@@ -426,7 +438,9 @@ def _has_tsconfig(path: Path) -> bool:
     )
 
 
-def check_type_checking_ran(worktree_path: Path, files: list[str], issue_number: int) -> CheckResult:
+def check_type_checking_ran(
+    worktree_path: Path, files: list[str], issue_number: int
+) -> CheckResult:
     del issue_number  # unused but required by Check signature
     """Heuristic: if .py changed, require pyright/mypy/ruff config in tree.
     If .ts/.tsx changed, require tsconfig.json.

@@ -6,8 +6,10 @@ import logging
 import shutil
 import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from agent_fleet.repo import RepoConfig
+if TYPE_CHECKING:
+    from agent_fleet.repo import RepoConfig
 
 logger = logging.getLogger(__name__)
 

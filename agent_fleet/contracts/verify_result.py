@@ -11,7 +11,7 @@ import jsonschema
 from agent_fleet._schema import load_schema
 
 
-class VerifySeverity(str, enum.Enum):
+class VerifySeverity(enum.StrEnum):
     OK = "ok"
     RETRY = "retry"
     FATAL = "fatal"

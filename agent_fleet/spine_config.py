@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import functools
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 
 @dataclass(frozen=True)
@@ -75,7 +75,7 @@ class SpineConfig:
     # ------------------------------------------------------------------
 
     @classmethod
-    def defaults(cls) -> "SpineConfig":
+    def defaults(cls) -> SpineConfig:
         """Return a SpineConfig populated with exactly the pre-refactor hardcoded values.
 
         Calling SpineConfig.defaults() must reproduce the exact same behaviour
@@ -123,7 +123,7 @@ class SpineConfig:
         )
 
     @classmethod
-    def _from_toml_uncached(cls, config_path: Path | None = None) -> "SpineConfig":
+    def _from_toml_uncached(cls, config_path: Path | None = None) -> SpineConfig:
         """Parse a SpineConfig from *config_path* without caching.
 
         This is the raw implementation.  Callers should use :meth:`from_toml`
@@ -137,11 +137,6 @@ class SpineConfig:
 
         if not resolved.exists():
             return defaults
-
-        try:
-            import tomllib
-        except ImportError:
-            import tomli as tomllib  # type: ignore[no-reassign]
 
         try:
             with resolved.open("rb") as fh:
@@ -158,11 +153,11 @@ class SpineConfig:
             design = {}
 
         # Helper: extract from spine table with type-checked fallback to default.
-        def _get(key: str, default: Any) -> Any:
+        def _get(key: str, default: object) -> object:
             return spine.get(key, default)
 
         # Helper: extract from design table with type-checked fallback.
-        def _dget(key: str, default: Any) -> Any:
+        def _dget(key: str, default: object) -> object:
             return design.get(key, default)
 
         # worktree_base: string → Path
@@ -185,61 +180,70 @@ class SpineConfig:
         if not isinstance(coop_label_prefix, str):
             coop_label_prefix = defaults.coop_label_prefix
 
-        coop_parent_label_prefix = _get("coop_parent_label_prefix", defaults.coop_parent_label_prefix)
+        coop_parent_label_prefix = _get(
+            "coop_parent_label_prefix", defaults.coop_parent_label_prefix
+        )
         if not isinstance(coop_parent_label_prefix, str):
             coop_parent_label_prefix = defaults.coop_parent_label_prefix
 
         # persona_scope_allowlist: {persona: [path, ...]}
-        psa_raw = _get("persona_scope_allowlist", None)
-        if isinstance(psa_raw, dict) and all(
-            isinstance(k, str) and isinstance(v, list) for k, v in psa_raw.items()
-        ):
-            persona_scope_allowlist: dict[str, tuple[str, ...]] = {
-                k: tuple(v) for k, v in psa_raw.items()
-            }
-        else:
-            persona_scope_allowlist = defaults.persona_scope_allowlist
+        psa_raw = spine.get("persona_scope_allowlist")
+        persona_scope_allowlist = defaults.persona_scope_allowlist
+        if isinstance(psa_raw, dict):
+            parsed_psa: dict[str, tuple[str, ...]] = {}
+            for key, value in psa_raw.items():
+                if isinstance(key, str) and isinstance(value, list):
+                    parsed_psa[key] = tuple(str(path) for path in value)
+            if parsed_psa:
+                persona_scope_allowlist = parsed_psa
 
         # cross_cutting_groups: [[path, ...], ...]
-        ccg_raw = _get("cross_cutting_groups", None)
-        if isinstance(ccg_raw, list) and all(
-            isinstance(g, list) and all(isinstance(p, str) for p in g)
-            for g in ccg_raw
-        ):
-            cross_cutting_groups: tuple[frozenset[str], ...] = tuple(
-                frozenset(g) for g in ccg_raw
-            )
-        else:
-            cross_cutting_groups = defaults.cross_cutting_groups
+        ccg_raw = spine.get("cross_cutting_groups")
+        cross_cutting_groups = defaults.cross_cutting_groups
+        if isinstance(ccg_raw, list):
+            parsed_ccg: list[frozenset[str]] = []
+            for group in ccg_raw:
+                if isinstance(group, list) and all(isinstance(path, str) for path in group):
+                    parsed_ccg.append(frozenset(str(path) for path in group))
+            if parsed_ccg:
+                cross_cutting_groups = tuple(parsed_ccg)
 
         # fleet_critical_prefixes: [path, ...]
-        fcp_raw = _get("fleet_critical_prefixes", None)
-        if isinstance(fcp_raw, list) and all(isinstance(p, str) for p in fcp_raw):
-            fleet_critical_prefixes: tuple[str, ...] = tuple(fcp_raw)
-        else:
-            fleet_critical_prefixes = defaults.fleet_critical_prefixes
+        fcp_raw = spine.get("fleet_critical_prefixes")
+        fleet_critical_prefixes = defaults.fleet_critical_prefixes
+        if isinstance(fcp_raw, list) and all(isinstance(path, str) for path in fcp_raw):
+            fleet_critical_prefixes = tuple(fcp_raw)
 
         # ------------------------------------------------------------------
         # [design] table fields — all default to OFF
         # ------------------------------------------------------------------
 
         design_review_enabled_raw = _dget("enabled", defaults.design_review_enabled)
-        design_review_enabled = bool(design_review_enabled_raw) if isinstance(design_review_enabled_raw, (bool, int)) else defaults.design_review_enabled
+        design_review_enabled = (
+            bool(design_review_enabled_raw)
+            if isinstance(design_review_enabled_raw, (bool, int))
+            else defaults.design_review_enabled
+        )
 
-        dvsg_raw = _dget("visual_surface_globs", None)
-        if isinstance(dvsg_raw, list) and all(isinstance(p, str) for p in dvsg_raw):
-            design_visual_surface_globs: tuple[str, ...] = tuple(dvsg_raw)
-        else:
-            design_visual_surface_globs = defaults.design_visual_surface_globs
+        dvsg_raw = design.get("visual_surface_globs")
+        design_visual_surface_globs = defaults.design_visual_surface_globs
+        if isinstance(dvsg_raw, list) and all(isinstance(path, str) for path in dvsg_raw):
+            design_visual_surface_globs = tuple(dvsg_raw)
 
         dst_raw = _dget("score_threshold", defaults.design_score_threshold)
-        design_score_threshold = int(dst_raw) if isinstance(dst_raw, int) else defaults.design_score_threshold
+        design_score_threshold = (
+            int(dst_raw) if isinstance(dst_raw, int) else defaults.design_score_threshold
+        )
 
         dek_raw = _dget("executor_key", defaults.design_executor_key)
-        design_executor_key = str(dek_raw) if isinstance(dek_raw, str) else defaults.design_executor_key
+        design_executor_key = (
+            str(dek_raw) if isinstance(dek_raw, str) else defaults.design_executor_key
+        )
 
         drp_raw = _dget("rubric_path", defaults.design_rubric_path)
-        design_rubric_path = str(drp_raw) if isinstance(drp_raw, str) else defaults.design_rubric_path
+        design_rubric_path = (
+            str(drp_raw) if isinstance(drp_raw, str) else defaults.design_rubric_path
+        )
 
         return cls(
             worktree_base=worktree_base,
@@ -259,7 +263,7 @@ class SpineConfig:
         )
 
     @classmethod
-    def from_toml(cls, config_path: Path | None = None) -> "SpineConfig":
+    def from_toml(cls, config_path: Path | None = None) -> SpineConfig:
         """Return a cached :class:`SpineConfig` for *config_path*.
 
         Parses and returns a :class:`SpineConfig` from *config_path* (or the

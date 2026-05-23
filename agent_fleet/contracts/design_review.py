@@ -24,7 +24,7 @@ import jsonschema
 from agent_fleet._schema import load_schema
 
 
-class DesignVerdict(str, enum.Enum):
+class DesignVerdict(enum.StrEnum):
     PASS = "pass"
     NEEDS_WORK = "needs_work"
     BLOCK = "block"
@@ -56,7 +56,7 @@ class DesignReview:
     verdict: DesignVerdict
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "DesignReview":
+    def from_dict(cls, data: dict[str, Any]) -> DesignReview:
         """Construct from a raw dict, validating against the JSON schema first."""
         validate_design_review(data)
         issues = [
@@ -90,7 +90,7 @@ class DesignReview:
         }
 
     @classmethod
-    def neutral_pass(cls, dimensions: tuple[str, ...] = ()) -> "DesignReview":
+    def neutral_pass(cls, dimensions: tuple[str, ...] = ()) -> DesignReview:
         """Return a schema-valid neutral pass result (no executor call needed).
 
         Used when there are no capture artifacts to review — the design review
@@ -101,7 +101,7 @@ class DesignReview:
                 neutral score of 100.  When empty, ``scores`` is ``{}``.
         """
         return cls(
-            scores={dim: 100 for dim in dimensions},
+            scores=dict.fromkeys(dimensions, 100),
             issues=[],
             verdict=DesignVerdict.PASS,
         )

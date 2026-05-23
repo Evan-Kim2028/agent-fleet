@@ -4,7 +4,7 @@ from __future__ import annotations
 
 
 class NoOpForge:
-    def open_pr(self, **kwargs) -> int:
+    def open_pr(self, **kwargs: object) -> int:
         del kwargs
         return 0
 

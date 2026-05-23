@@ -18,10 +18,7 @@ from agent_fleet.runner import run_full_pipeline
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    if args.config:
-        config = load_fleet_config(args.config)
-    else:
-        config = load_fleet_config()
+    config = load_fleet_config(args.config) if args.config else load_fleet_config()
     backend_name = config.default_backend.lower()
     if backend_name == "cursor" and not os.environ.get("CURSOR_API_KEY"):
         print("error: CURSOR_API_KEY is not set", file=sys.stderr)
@@ -69,7 +66,12 @@ def cmd_personas(args: argparse.Namespace) -> int:
     if repo and repo.personas_dir:
         config.personas_dir = repo.personas_dir
     resolver = YamlPersonaResolver(config)
-    print(json.dumps({"personas": resolver.list_personas(), "pipelines": config.pipelines}, indent=2))
+    print(
+        json.dumps(
+            {"personas": resolver.list_personas(), "pipelines": config.pipelines},
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -88,7 +90,10 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agent-fleet", description="Agentic coding fleet CLI")
-    parser.add_argument("--config", help="Path to fleet.yaml (default: ~/.hermes/coding_fleet/fleet.yaml)")
+    parser.add_argument(
+        "--config",
+        help="Path to fleet.yaml (default: ~/.hermes/coding_fleet/fleet.yaml)",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     run_p = sub.add_parser("run", help="Run a coding task")

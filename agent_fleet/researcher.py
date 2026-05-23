@@ -10,11 +10,14 @@ from __future__ import annotations
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agent_fleet.contracts.research_note import Confidence, ResearchNote, validate_research_note
-from agent_fleet.hooks import LLMBackend
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from agent_fleet.hooks import LLMBackend
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -217,7 +220,7 @@ def research_all(
         return []
 
     def _capture_duration(item: dict[str, Any]) -> ResearchNote:
-        note, dur = _research_with_duration(
+        note, _dur = _research_with_duration(
             item["id"],
             item["question"],
             item["scope_paths"],
@@ -231,6 +234,5 @@ def research_all(
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # executor.map preserves plan order: results are yielded in the same order
         # as the input research_plan, while still running items concurrently.
-        notes = list(executor.map(_capture_duration, research_plan))
+        return list(executor.map(_capture_duration, research_plan))
 
-    return notes

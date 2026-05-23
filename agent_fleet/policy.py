@@ -5,24 +5,26 @@ from __future__ import annotations
 import enum
 import hashlib
 import json
-from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from agent_fleet.contracts.design_review import DesignReview, DesignVerdict
-from agent_fleet.contracts.review import ReviewResult
 from agent_fleet.contracts.task_spec import RiskTier, TaskSpec
 from agent_fleet.contracts.verify_result import VerifyResult, VerifySeverity
-from agent_fleet.hooks import Persona
-from agent_fleet.spine_config import SpineConfig
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from agent_fleet.contracts.review import ReviewResult
+    from agent_fleet.hooks import Persona
+    from agent_fleet.spine_config import SpineConfig
 
 # ---------------------------------------------------------------------------
 # Decision enums
 # ---------------------------------------------------------------------------
 
 
-class MergeDecision(str, enum.Enum):
+class MergeDecision(enum.StrEnum):
     """Possible outcomes of the merge-gate check."""
 
     ALLOW = "allow"
@@ -30,7 +32,7 @@ class MergeDecision(str, enum.Enum):
     NEEDS_HUMAN = "needs_human"
 
 
-class EscalationTier(str, enum.Enum):
+class EscalationTier(enum.StrEnum):
     """Which tier should receive an escalation, or none at all."""
 
     NONE = "none"
@@ -38,7 +40,7 @@ class EscalationTier(str, enum.Enum):
     HUMAN = "human"
 
 
-class Action(str, enum.Enum):
+class Action(enum.StrEnum):
     """How the runner should react to a verify result."""
 
     OK = "ok"
@@ -76,7 +78,7 @@ class PolicyDecision:
         }
 
 
-def _hash_inputs(inputs: Any) -> str:
+def _hash_inputs(inputs: object) -> str:
     """Return an 8-char hex prefix of sha256(json(inputs)).
 
     ``inputs`` must be JSON-serialisable.  Non-serialisable inputs fall back

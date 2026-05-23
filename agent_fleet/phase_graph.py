@@ -40,8 +40,10 @@ from __future__ import annotations
 
 import fnmatch
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
 
 # ---------------------------------------------------------------------------
 # PhaseRunContext — thin context bag passed to condition predicates
@@ -131,7 +133,7 @@ class PhaseGraph:
             seen.add(spec.name)
         self._phases = list(phases)
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[PhaseSpec]:
         return iter(self._phases)
 
     def __len__(self) -> int:
@@ -167,12 +169,7 @@ def _tech_lead_condition(ctx: PhaseRunContext) -> bool:
         return True
     if ts.critical_paths_touched:
         return True
-    if (
-        ts.coordination_spec is not None
-        and ts.coordination_spec.get("merge_order")
-    ):
-        return True
-    return False
+    return bool(ts.coordination_spec is not None and ts.coordination_spec.get("merge_order"))
 
 
 # ---------------------------------------------------------------------------

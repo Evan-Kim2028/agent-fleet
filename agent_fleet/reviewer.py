@@ -9,12 +9,14 @@ within a manageable context window.
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from agent_fleet.contracts.review import ReviewResult, ReviewVerdict, validate_review  # noqa: F401
-from agent_fleet.hooks import LLMBackend
+from agent_fleet.contracts.review import ReviewResult, ReviewVerdict, validate_review
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from agent_fleet.hooks import LLMBackend
 
 # Files-changed threshold above which reviewer shards into multiple LLM calls.
 DEFAULT_FANOUT_THRESHOLD = 20
@@ -154,14 +156,6 @@ def review(
     Returns ``list[ReviewResult]`` (always at least one element).
     Raises ``ValueError`` on JSON parse failure or schema validation error.
     """
-    kwargs = dict(
-        backend=backend,
-        max_tokens=max_tokens,
-        timeout_s=timeout_s,
-        memory_limit=memory_limit,
-        cwd=cwd,
-    )
-
     if len(changed_files) <= fanout_threshold:
         return [
             _call_backend(
@@ -169,7 +163,11 @@ def review(
                 changed_files,
                 pr_diff,
                 None,
-                **kwargs,  # type: ignore[arg-type]
+                backend=backend,
+                max_tokens=max_tokens,
+                timeout_s=timeout_s,
+                memory_limit=memory_limit,
+                cwd=cwd,
             )
         ]
 
@@ -182,7 +180,11 @@ def review(
                 shard_files,
                 pr_diff,
                 shard_id,
-                **kwargs,  # type: ignore[arg-type]
+                backend=backend,
+                max_tokens=max_tokens,
+                timeout_s=timeout_s,
+                memory_limit=memory_limit,
+                cwd=cwd,
             )
         )
     return results

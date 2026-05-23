@@ -11,7 +11,7 @@ import jsonschema
 from agent_fleet._schema import load_schema
 
 
-class ReviewVerdict(str, enum.Enum):
+class ReviewVerdict(enum.StrEnum):
     APPROVE = "approve"
     BLOCK = "block"
     REQUEST_CHANGES = "request_changes"

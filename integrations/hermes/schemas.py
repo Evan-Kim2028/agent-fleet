@@ -16,7 +16,10 @@ CODING_FLEET_DISPATCH = {
             },
             "persona": {"type": "string", "description": "Persona id from fleet.yaml"},
             "workspace": {"type": "string", "description": "Absolute path to repo/workspace"},
-            "pipeline": {"type": "string", "description": "Pipeline name (simple, code_review, full)"},
+            "pipeline": {
+                "type": "string",
+                "description": "Pipeline name (simple, code_review, full)",
+            },
             "tasks": {
                 "type": "array",
                 "description": "Batch mode: parallel tasks",

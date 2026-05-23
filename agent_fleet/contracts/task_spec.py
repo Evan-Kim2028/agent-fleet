@@ -16,13 +16,13 @@ import jsonschema
 from agent_fleet._schema import load_schema
 
 
-class DecompositionDecision(str, enum.Enum):
+class DecompositionDecision(enum.StrEnum):
     SINGLE = "single"
     DECOMPOSE = "decompose"
     REJECTED = "rejected"
 
 
-class RiskTier(str, enum.Enum):
+class RiskTier(enum.StrEnum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"

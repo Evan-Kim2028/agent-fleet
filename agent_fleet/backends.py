@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import os
+from typing import TYPE_CHECKING
 
-from agent_fleet.config import FleetConfig
+from agent_fleet.agent_mode import coerce_agent_mode
 from agent_fleet.cursor_backend import CursorBackend
-from agent_fleet.hooks import LLMBackend
 from agent_fleet.kimi_backend import KimiBackend
+
+if TYPE_CHECKING:
+    from agent_fleet.config import FleetConfig
+    from agent_fleet.hooks import LLMBackend
 
 
 def make_backend(config: FleetConfig) -> LLMBackend:
@@ -25,4 +29,7 @@ def make_backend(config: FleetConfig) -> LLMBackend:
         raise ValueError(f"Unknown default_backend {name!r}. Use 'cursor' or 'kimi'.")
     if not os.environ.get("CURSOR_API_KEY"):
         pass  # CursorBackend returns a clear error at run time
-    return CursorBackend(default_model=config.default_model, default_mode=config.default_mode)
+    return CursorBackend(
+        default_model=config.default_model,
+        default_mode=coerce_agent_mode(config.default_mode),
+    )

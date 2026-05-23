@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from pathlib import Path
+
+from agent_fleet.agent_mode import AgentMode, coerce_agent_mode
 
 
 @dataclass(frozen=True)
@@ -25,7 +28,7 @@ class CursorBackend:
         self,
         *,
         default_model: str = "composer-2.5",
-        default_mode: str = "agent",
+        default_mode: AgentMode = "agent",
         api_key: str | None = None,
     ) -> None:
         self.default_model = default_model
@@ -42,7 +45,7 @@ class CursorBackend:
         allowed_tools: list[str] | None = None,
         cwd: Path | None = None,
         model: str | None = None,
-        mode: str | None = None,
+        mode: AgentMode | None = None,
     ) -> CursorLLMResult:
         del max_tokens, memory_limit, allowed_tools
 
@@ -66,7 +69,7 @@ class CursorBackend:
 
         work_dir = str(cwd or Path.cwd())
         selected_model = model or self.default_model
-        selected_mode = mode or self.default_mode
+        selected_mode = coerce_agent_mode(mode, default=self.default_mode)
         t0 = time.monotonic()
 
         def _execute() -> CursorLLMResult:

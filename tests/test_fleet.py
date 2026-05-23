@@ -2,54 +2,54 @@
 
 from __future__ import annotations
 
+import argparse
 import textwrap
 from pathlib import Path
 
 import pytest
 
 from agent_fleet.backends import make_backend
-from agent_fleet.config import load_fleet_config
+from agent_fleet.cli import cmd_init
+from agent_fleet.config import FleetConfig, load_fleet_config
+from agent_fleet.contracts.review import ReviewResult, ReviewVerdict
+from agent_fleet.contracts.task_spec import validate_task_spec
+from agent_fleet.contracts.tech_lead_review import TechLeadReview, TechLeadVerdict
 from agent_fleet.cursor_backend import CursorBackend
 from agent_fleet.dispatcher import _normalize_tasks
 from agent_fleet.personas import YamlPersonaResolver
-from agent_fleet.repo import load_repo_config
 from agent_fleet.phase_graph import default_phase_graph
-from agent_fleet.contracts.task_spec import validate_task_spec
-from agent_fleet.contracts.review import ReviewResult, ReviewVerdict
-from agent_fleet.contracts.tech_lead_review import TechLeadReview, TechLeadVerdict
+from agent_fleet.repo import load_repo_config
 from agent_fleet.runner import _run_outcome, _spine_from_repo
-from agent_fleet.cli import cmd_init
-
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture
-def fleet_config():
+def fleet_config() -> FleetConfig:
     return load_fleet_config(ROOT / "fleet.example.yaml")
 
 
-def test_load_fleet_config(fleet_config):
+def test_load_fleet_config(fleet_config: FleetConfig) -> None:
     assert fleet_config.default_model == "composer-2.5"
     assert "coder" in fleet_config.personas
     assert "full" in fleet_config.pipelines
 
 
-def test_list_personas(fleet_config):
+def test_list_personas(fleet_config: FleetConfig) -> None:
     resolver = YamlPersonaResolver(fleet_config)
     names = resolver.list_personas()
     assert "coder" in names
     assert "reviewer" in names
 
 
-def test_load_persona_prompt(fleet_config):
+def test_load_persona_prompt(fleet_config: FleetConfig) -> None:
     resolver = YamlPersonaResolver(fleet_config)
     persona = resolver.load("coder")
     assert persona.prompt_path.exists()
     assert persona.allowed_tools
 
 
-def test_normalize_single_task():
+def test_normalize_single_task() -> None:
     tasks = _normalize_tasks(
         goal="Fix the bug",
         context="see auth.py",
@@ -62,7 +62,7 @@ def test_normalize_single_task():
     assert tasks[0].goal == "Fix the bug"
 
 
-def test_normalize_batch():
+def test_normalize_batch() -> None:
     tasks = _normalize_tasks(
         goal=None,
         context=None,
@@ -75,7 +75,7 @@ def test_normalize_batch():
     assert tasks[1].persona == "explorer"
 
 
-def test_normalize_requires_input():
+def test_normalize_requires_input() -> None:
     with pytest.raises(ValueError):
         _normalize_tasks(
             goal=None,
@@ -87,14 +87,14 @@ def test_normalize_requires_input():
         )
 
 
-def test_repo_config_example():
+def test_repo_config_example() -> None:
     repo = load_repo_config(ROOT / "examples" / "repo.agent-fleet.yaml")
     assert repo.repo_root == (ROOT / "examples").resolve()
     assert repo.default_persona == "coder"
     assert "pytest -q" in repo.verify_commands
 
 
-def test_default_phase_graph():
+def test_default_phase_graph() -> None:
     graph = default_phase_graph()
     names = [p.name for p in graph]
     assert names[0] == "PLAN"
@@ -102,7 +102,7 @@ def test_default_phase_graph():
     assert "VERIFY" in names
 
 
-def test_task_spec_schema_minimal():
+def test_task_spec_schema_minimal() -> None:
     data = {
         "issue_number": 1,
         "decomposition_decision": "single",
@@ -125,13 +125,16 @@ def test_task_spec_schema_minimal():
     validate_task_spec(data)
 
 
-def test_pipelines_merge_with_defaults(fleet_config):
+def test_pipelines_merge_with_defaults(fleet_config: FleetConfig) -> None:
     assert "simple" in fleet_config.pipelines
     assert "code_review" in fleet_config.pipelines
     assert "full" in fleet_config.pipelines
 
 
-def test_repo_persona_scope_overrides_global(fleet_config, tmp_path):
+def test_repo_persona_scope_overrides_global(
+    fleet_config: FleetConfig,
+    tmp_path: Path,
+) -> None:
     repo_yaml = tmp_path / ".agent-fleet.yaml"
     repo_yaml.write_text(
         textwrap.dedent(
@@ -150,7 +153,7 @@ def test_repo_persona_scope_overrides_global(fleet_config, tmp_path):
     assert persona.allowed_paths == ("src/",)
 
 
-def test_spine_from_repo_applies_cross_cutting_without_scope(tmp_path):
+def test_spine_from_repo_applies_cross_cutting_without_scope(tmp_path: Path) -> None:
     repo_yaml = tmp_path / ".agent-fleet.yaml"
     repo_yaml.write_text(
         textwrap.dedent(
@@ -169,7 +172,7 @@ def test_spine_from_repo_applies_cross_cutting_without_scope(tmp_path):
     assert ".github/workflows/" in spine.fleet_critical_prefixes
 
 
-def test_run_outcome_blocks_on_review():
+def test_run_outcome_blocks_on_review() -> None:
     reviews = [
         ReviewResult(
             pr_number=1,
@@ -182,7 +185,7 @@ def test_run_outcome_blocks_on_review():
     assert _run_outcome(reviews, None) == "review_blocked"
 
 
-def test_run_outcome_blocks_on_tech_lead():
+def test_run_outcome_blocks_on_tech_lead() -> None:
     tech_lead = TechLeadReview(
         pr_number=1,
         verdict=TechLeadVerdict.ESCALATE,
@@ -194,18 +197,19 @@ def test_run_outcome_blocks_on_tech_lead():
     assert _run_outcome([], tech_lead) == "tech_lead_blocked"
 
 
-def test_init_creates_directory_and_config(tmp_path):
+def test_init_creates_directory_and_config(tmp_path: Path) -> None:
     target = tmp_path / "new-repo"
-    assert cmd_init(type("Args", (), {"path": str(target), "force": False})()) == 0
+    args = argparse.Namespace(path=str(target), force=False)
+    assert cmd_init(args) == 0
     assert (target / ".agent-fleet.yaml").exists()
 
 
-def test_make_backend_cursor_default(fleet_config):
+def test_make_backend_cursor_default(fleet_config: FleetConfig) -> None:
     backend = make_backend(fleet_config)
     assert isinstance(backend, CursorBackend)
 
 
-def test_make_backend_kimi(monkeypatch):
+def test_make_backend_kimi(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KIMI_API_KEY", "sk-kimi-test")
     cfg = load_fleet_config(ROOT / "fleet.example.yaml")
     cfg.default_backend = "kimi"

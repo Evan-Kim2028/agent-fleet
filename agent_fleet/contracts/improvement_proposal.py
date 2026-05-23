@@ -27,7 +27,7 @@ class ImprovementProposal:
     data_window_runs: int = 0
 
     @classmethod
-    def from_dict(cls, d: dict) -> "ImprovementProposal":
+    def from_dict(cls, d: dict) -> ImprovementProposal:
         return cls(
             config_changes=[ConfigChange(**c) for c in d.get("config_changes", [])],
             persona_changes=[PersonaChange(**p) for p in d.get("persona_changes", [])],
