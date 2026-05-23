@@ -109,3 +109,20 @@ def test_pr_loop_config_loads() -> None:
     assert cfg is not None
     assert cfg.enabled is True
     assert cfg.auto_merge is True
+
+
+def test_worktree_candidates_legacy_kimi() -> None:
+    from agent_fleet.pr_loop.worktree import worktree_candidates
+
+    base = Path("/tmp/agent-worktrees")
+    cands = worktree_candidates("fleet/data/1532-0837d5d0", base)
+    assert cands[0] == base / "1532-data-0837d5d0"
+    assert base / "0837d5d0" in cands
+    assert base / "fleet_data_1532-0837d5d0" in cands
+
+
+def test_persona_from_branch_agent_prefix() -> None:
+    from agent_fleet.pr_loop.lifecycle import persona_from_branch
+
+    assert persona_from_branch("agent/backend/1499-abc12345", "backend") == "backend"
+    assert persona_from_branch("fleet/data/1532-0837d5d0", "backend") == "data"

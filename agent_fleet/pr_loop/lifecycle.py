@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import re
 import subprocess
 import textwrap
 import time
@@ -55,7 +54,7 @@ def _diff_is_deletion_only(diff_text: str) -> bool:
 
 def persona_from_branch(branch: str, default_persona: str) -> str:
     parts = branch.split("/")
-    if len(parts) >= 3 and parts[0] == "fleet":
+    if len(parts) >= 3 and parts[0] in ("fleet", "agent"):
         return parts[1]
     if len(parts) >= 2 and parts[0] == "fleet" and parts[1].startswith("task-"):
         return default_persona
@@ -446,9 +445,13 @@ def run_pr_lifecycle(
         if head_ref.returncode == 0 and head_ref.stdout.strip() == branch:
             wt = repo_root
         else:
-            safe_branch = re.sub(r"[^\w.-]+", "_", branch)
+            from agent_fleet.pr_loop.worktree import resolve_worktree_path
+
             base = repo.worktree_base or Path("/tmp/agent-fleet-loop")
-            wt = Path(base) / safe_branch
+            wt = resolve_worktree_path(
+                branch, repo_root=repo_root, worktree_base=base
+            )
+            logger.info("Resolved worktree for %s → %s", branch, wt)
 
     review_body: str | None = find_reviewer_comment(
         github_ops.pr_comments(pr_number, cwd=repo_root),
@@ -481,7 +484,7 @@ def run_pr_lifecycle(
             needs_fix = False
 
     if needs_fix and review_body:
-        github_ops.checkout_branch(branch, wt, repo_root=repo_root)
+        wt = github_ops.checkout_branch(branch, wt, repo_root=repo_root)
         fix_attempts = 0
         while fix_attempts < loop_config.max_fix_attempts:
             fix_attempts += 1
@@ -565,7 +568,7 @@ def run_pr_lifecycle(
             ignored=loop_config.ignored_ci_checks,
         )
         failed_names = [str(c.get("name", "")) for c in failed]
-        github_ops.checkout_branch(branch, wt, repo_root=repo_root)
+        wt = github_ops.checkout_branch(branch, wt, repo_root=repo_root)
         fixed = attempt_ci_fix(
             pr_number=pr_number,
             branch=branch,

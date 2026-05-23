@@ -6,10 +6,8 @@ import json
 import logging
 import subprocess
 import time
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -195,7 +193,25 @@ def mark_pr_ready(pr_number: int, *, cwd: Path | None = None) -> None:
     _gh("pr", "ready", str(pr_number), cwd=cwd, check=False)
 
 
-def checkout_branch(branch: str, worktree: Path, *, repo_root: Path) -> None:
+def checkout_branch(branch: str, worktree: Path, *, repo_root: Path) -> Path:
+    from agent_fleet.pr_loop.worktree import (
+        registered_worktree_for_branch,
+        resolve_worktree_path,
+    )
+
+    registered = registered_worktree_for_branch(repo_root, branch)
+    if registered is not None:
+        worktree = registered
+    elif not (
+        worktree.exists()
+        and ((worktree / ".git").exists() or (worktree / ".git").is_file())
+    ):
+        worktree = resolve_worktree_path(
+            branch,
+            repo_root=repo_root,
+            worktree_base=worktree.parent,
+        )
+
     worktree.parent.mkdir(parents=True, exist_ok=True)
     if worktree.exists() and (
         (worktree / ".git").exists() or (worktree / ".git").is_file()
@@ -208,21 +224,7 @@ def checkout_branch(branch: str, worktree: Path, *, repo_root: Path) -> None:
             check=True,
             timeout=60,
         )
-        return
-
-    listed = subprocess.run(
-        ["git", "worktree", "list", "--porcelain"],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if listed.returncode == 0:
-        for line in listed.stdout.splitlines():
-            if line.startswith("worktree ") and line.endswith(f"/{branch}"):
-                return
-            if line.startswith("branch ") and line.endswith(f"/{branch}"):
-                return
+        return worktree
 
     subprocess.run(
         ["git", "fetch", "origin", branch],
@@ -259,8 +261,9 @@ def checkout_branch(branch: str, worktree: Path, *, repo_root: Path) -> None:
                     check=True,
                     timeout=60,
                 )
-                return
+                return Path(path)
         add.check_returncode()
+    return worktree
 
 
 def commit_and_push(
