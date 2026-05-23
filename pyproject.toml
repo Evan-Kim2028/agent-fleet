@@ -21,6 +21,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.4"]
 
+[dependency-groups]
+dev = ["pytest>=8.0", "ruff>=0.4"]
+
 [project.scripts]
 agent-fleet = "agent_fleet.cli:main"
 
