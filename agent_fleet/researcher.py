@@ -174,16 +174,41 @@ Scope paths:
 Return ONLY the JSON object — no prose before or after it.
 """
 
-    result = backend.run(
-        prompt,
-        max_tokens=max_tokens,
-        timeout_s=timeout_s,
-        memory_limit=memory_limit,
-        allowed_tools=allowed_tools,
-        cwd=cwd,
-    )
-
-    raw = _extract_json(result.stdout)
+    last_error: Exception | None = None
+    raw_text = ""
+    duration_total = 0.0
+    raw: dict[str, Any] | None = None
+    for attempt in range(2):
+        current_prompt = prompt
+        if attempt == 1:
+            current_prompt = (
+                f"{prompt}\n\n"
+                "IMPORTANT: Your previous response contained no parseable JSON "
+                "object. Return ONLY the JSON object — no prose, no markdown "
+                "fences, no commentary. The response MUST start with '{' and "
+                "end with '}'."
+            )
+        result = backend.run(
+            current_prompt,
+            max_tokens=max_tokens,
+            timeout_s=timeout_s,
+            memory_limit=memory_limit,
+            allowed_tools=allowed_tools,
+            cwd=cwd,
+        )
+        raw_text = result.stdout
+        duration_total += result.duration_s
+        try:
+            raw = _extract_json(raw_text)
+            break
+        except ValueError as exc:
+            last_error = exc
+            continue
+    if raw is None:
+        raise ValueError(
+            f"Researcher: could not parse LLM output as JSON after 2 attempts: "
+            f"{last_error}\n--- last raw output (first 500 chars) ---\n{raw_text[:500]}"
+        )
     raw["research_id"] = research_id
 
     try:
@@ -199,7 +224,7 @@ Return ONLY the JSON object — no prose before or after it.
         referenced_files=list(raw["referenced_files"]),
         confidence=Confidence(raw["confidence"]),
     )
-    return note, result.duration_s
+    return note, duration_total
 
 
 def research_all(
