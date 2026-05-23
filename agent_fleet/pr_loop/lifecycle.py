@@ -381,7 +381,14 @@ def try_merge(
 
     if loop_config.tiered_merge_gate:
         comments = github_ops.pr_comments(pr_number, cwd=repo_root)
-        risk = parse_review_risk(comments)
+        from agent_fleet.pr_loop.state import get_pr_state, load_state
+
+        pr_state = get_pr_state(
+            load_state(repo_root / loop_config.state_file),
+            pr_number,
+        )
+        review_addressed = bool(pr_state.get("review_addressed"))
+        risk = None if review_addressed else parse_review_risk(comments)
         allowed_paths = repo.persona_scope_allowlist.get(persona, ())
         oos = (
             list(files_outside_allowed_paths(allowed_paths, changed))

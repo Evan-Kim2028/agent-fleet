@@ -183,6 +183,121 @@ def coding_fleet_pr_review(args: dict[str, object], **kwargs: object) -> str:
     return json.dumps(result, default=str)
 
 
+def coding_fleet_pr_loop(args: dict[str, object], **kwargs: object) -> str:
+    del kwargs
+    try:
+        load_fleet_config, _, _ = _ensure_agent_fleet()
+    except RuntimeError as exc:
+        return json.dumps({"error": str(exc)})
+
+    config_path_raw = args.get("config_path") or os.environ.get("CODING_FLEET_CONFIG")
+    config_path = _optional_str(config_path_raw)
+    config = load_fleet_config(config_path) if config_path else load_fleet_config()
+
+    backend_name = config.default_backend.lower()
+    if backend_name == "cursor" and not os.environ.get("CURSOR_API_KEY"):
+        return json.dumps(
+            {
+                "error": "CURSOR_API_KEY is not set. "
+                "Add it to ~/.hermes/.env (see https://cursor.com/dashboard/integrations)"
+            }
+        )
+    if backend_name == "kimi" and not os.environ.get("KIMI_API_KEY"):
+        return json.dumps(
+            {
+                "error": "KIMI_API_KEY is not set. "
+                "Use Kimi Code subscription key (https://platform.kimi.ai) "
+                "or set default_backend: cursor in fleet.yaml"
+            }
+        )
+
+    workspace_raw = args.get("workspace")
+    if not workspace_raw:
+        return json.dumps({"error": "workspace is required"})
+    workspace = Path(str(workspace_raw)).expanduser().resolve()
+
+    mode = str(args.get("mode") or "once").lower()
+    if mode not in {"once", "pr"}:
+        return json.dumps({"error": "mode must be 'once' or 'pr'"})
+
+    from agent_fleet.pr_loop.config import load_pr_loop_config
+    from agent_fleet.repo import find_repo_config
+    import yaml
+
+    repo = find_repo_config(workspace)
+    if repo is None:
+        return json.dumps({"error": f"No .agent-fleet.yaml under {workspace}"})
+
+    raw: dict[str, object] = {}
+    for name in (".agent-fleet.yaml", ".agent-fleet.yml"):
+        path = repo.repo_root / name
+        if path.exists():
+            raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            break
+    loop_config = load_pr_loop_config(repo.repo_root, raw)
+    if loop_config is None or not loop_config.enabled:
+        return json.dumps({"error": "pr_loop.enabled is not true in .agent-fleet.yaml"})
+
+    if mode == "once":
+        from agent_fleet.pr_loop.watcher import run_watcher_once
+
+        try:
+            results = run_watcher_once(workspace)
+        except Exception as exc:
+            return json.dumps({"error": str(exc)})
+        return json.dumps({"mode": "once", "results": results})
+
+    pr_number_raw = args.get("pr_number")
+    if not pr_number_raw:
+        return json.dumps({"error": "pr_number is required when mode=pr"})
+    pr_number = int(pr_number_raw)
+
+    branch = _optional_str(args.get("branch"))
+    if not branch:
+        import subprocess
+
+        result = subprocess.run(
+            ["gh", "pr", "view", str(pr_number), "--json", "headRefName"],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=workspace,
+        )
+        if result.returncode != 0:
+            return json.dumps({"error": "branch required or gh must resolve PR head"})
+        branch = json.loads(result.stdout).get("headRefName", "")
+
+    from agent_fleet.pr_loop.lifecycle import run_pr_lifecycle
+
+    skip_review_wait = args.get("skip_review_wait")
+    if skip_review_wait is None:
+        skip_review_wait = True
+    else:
+        skip_review_wait = bool(skip_review_wait)
+
+    try:
+        outcome = run_pr_lifecycle(
+            pr_number=pr_number,
+            branch=str(branch),
+            repo=repo,
+            loop_config=loop_config,
+            fleet_config=config,
+            skip_review_wait=skip_review_wait,
+        )
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+    return json.dumps(
+        {
+            "mode": "pr",
+            "pr_number": pr_number,
+            "branch": branch,
+            "status": outcome.status,
+            "detail": outcome.detail,
+        }
+    )
+
+
 def coding_fleet_list_personas(args: dict[str, object], **kwargs: object) -> str:
     del args, kwargs
     try:

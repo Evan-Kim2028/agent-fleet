@@ -12,6 +12,34 @@ metadata:
 
 When the user mentions **coding fleet**, **PR analyzer**, or gives `persona` + `pipeline` for a repo path: call the appropriate tool in your first turn.
 
+## PR loop (review → fix → CI → merge)
+
+For repos with `pr_loop.enabled: true` in `.agent-fleet.yaml` (e.g. lake-of-rage after bootstrap):
+
+**Poll all open `fleet/*` PRs once:**
+
+```json
+{
+  "workspace": "/home/evan/Documents/lake-of-rage",
+  "mode": "once"
+}
+```
+
+**Run full lifecycle for one PR** (address review findings → wait CI → merge):
+
+```json
+{
+  "workspace": "/home/evan/Documents/lake-of-rage",
+  "mode": "pr",
+  "pr_number": 49,
+  "skip_review_wait": true
+}
+```
+
+Tool: `coding_fleet_pr_loop`
+
+Requires `gh` authenticated, `CURSOR_API_KEY`, and `pr_loop` + `pr_review` in repo config. PRs touching `.github/workflows/` auto-park for human review.
+
 ## Implement / review dispatch
 
 ```json

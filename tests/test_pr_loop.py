@@ -85,6 +85,22 @@ def test_files_outside_pr_scope() -> None:
     assert _files_outside_pr_scope(pr_files, ["README.md"]) == ("README.md",)
 
 
+def test_tiered_merge_allowed_with_and_without_risk() -> None:
+    from agent_fleet.pr_loop.lifecycle import tiered_merge_allowed
+
+    blocked, reason = tiered_merge_allowed(
+        ci_green=True, risk="MEDIUM", out_of_scope=[], parked=False
+    )
+    assert blocked is False
+    assert "MEDIUM" in reason
+
+    allowed, reason = tiered_merge_allowed(
+        ci_green=True, risk=None, out_of_scope=[], parked=False
+    )
+    assert allowed is True
+    assert reason == ""
+
+
 def test_lake_of_rage_pr_loop_config_loads() -> None:
     raw = {
         "name": "lake-of-rage",

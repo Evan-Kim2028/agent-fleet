@@ -45,6 +45,40 @@ CODING_FLEET_LIST_PERSONAS = {
     "parameters": {"type": "object", "properties": {}},
 }
 
+CODING_FLEET_PR_LOOP = {
+    "name": "coding_fleet_pr_loop",
+    "description": (
+        "Run the Agent Fleet PR loop: address Composer PR review findings, "
+        "wait for CI green, and auto-merge fleet/* PRs when allowed."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "workspace": {
+                "type": "string",
+                "description": "Absolute path to git repo with pr_loop.enabled in .agent-fleet.yaml",
+            },
+            "mode": {
+                "type": "string",
+                "description": "once (poll all open fleet PRs) or pr (single PR lifecycle)",
+            },
+            "pr_number": {
+                "type": "integer",
+                "description": "PR number (required when mode=pr)",
+            },
+            "branch": {
+                "type": "string",
+                "description": "Head branch (optional; resolved via gh when mode=pr)",
+            },
+            "skip_review_wait": {
+                "type": "boolean",
+                "description": "Skip waiting for review comment when mode=pr (default true)",
+            },
+        },
+        "required": ["workspace"],
+    },
+}
+
 CODING_FLEET_PR_REVIEW = {
     "name": "coding_fleet_pr_review",
     "description": (
