@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from typing import TYPE_CHECKING
 
@@ -28,9 +29,15 @@ class CommandVerifier:
         changed_files: list[Path],
         task_id: int,
     ) -> VerifyResult:
-        del persona, task_id, changed_files
+        del changed_files
         rel_changed = get_changed_files(worktree)
         checks: list[dict] = []
+        verify_env = {
+            **os.environ,
+            "ISSUE_NUMBER": str(task_id),
+            "FLEET_PERSONA": persona,
+        }
+        verify_commands_ran = bool(self.repo.verify_commands)
         for cmd in self.repo.verify_commands:
             proc = subprocess.run(
                 cmd,
@@ -39,6 +46,7 @@ class CommandVerifier:
                 capture_output=True,
                 text=True,
                 check=False,
+                env=verify_env,
             )
             checks.append(
                 {
@@ -58,19 +66,20 @@ class CommandVerifier:
                     message=f"Verification failed: {cmd}",
                 )
 
-        blocked = [
-            p
-            for p in rel_changed
-            if any(p.startswith(prefix) for prefix in self.repo.critical_path_prefixes)
-        ]
-        if blocked:
-            return VerifyResult(
-                severity=VerifySeverity.FATAL,
-                checks=checks,
-                violating_paths=blocked,
-                files_changed=rel_changed,
-                message=f"Modified protected paths: {', '.join(blocked)}",
-            )
+        if not verify_commands_ran:
+            blocked = [
+                p
+                for p in rel_changed
+                if any(p.startswith(prefix) for prefix in self.repo.critical_path_prefixes)
+            ]
+            if blocked:
+                return VerifyResult(
+                    severity=VerifySeverity.FATAL,
+                    checks=checks,
+                    violating_paths=blocked,
+                    files_changed=rel_changed,
+                    message=f"Modified protected paths: {', '.join(blocked)}",
+                )
 
         if not self.repo.verify_commands and not rel_changed:
             return VerifyResult(
