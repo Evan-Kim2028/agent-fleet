@@ -6,8 +6,10 @@ import json
 import logging
 import subprocess
 import time
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -245,7 +247,12 @@ def checkout_branch(branch: str, worktree: Path, *, repo_root: Path) -> None:
         for row in existing.stdout.splitlines():
             if branch in row:
                 path = row.split()[0]
-                subprocess.run(["git", "fetch", "origin", branch], cwd=path, check=True, timeout=120)
+                subprocess.run(
+                    ["git", "fetch", "origin", branch],
+                    cwd=path,
+                    check=True,
+                    timeout=120,
+                )
                 subprocess.run(
                     ["git", "reset", "--hard", f"origin/{branch}"],
                     cwd=path,
@@ -279,7 +286,7 @@ def commit_and_push(
     ]
     if not changed:
         return False
-    subprocess.run(["git", "add", "--"] + changed, cwd=worktree, check=True, timeout=60)
+    subprocess.run(["git", "add", "--", *changed], cwd=worktree, check=True, timeout=60)
     commit = subprocess.run(
         ["git", "commit", "-m", message],
         cwd=worktree,

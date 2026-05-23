@@ -10,7 +10,7 @@ from pathlib import Path
 from agent_fleet.backends import make_backend
 from agent_fleet.config import load_fleet_config
 from agent_fleet.pr_review.analyzer import analyze_changes
-from agent_fleet.pr_review.config import load_pr_review_config
+from agent_fleet.pr_review.config import PrReviewConfig, load_pr_review_config
 from agent_fleet.pr_review.format import format_comment
 from agent_fleet.pr_review.git import (
     get_changed_files,
@@ -60,7 +60,7 @@ def main() -> int:
                 break
     pr_config = load_pr_review_config(repo_config.repo_root if repo_config else workspace, raw)
     if pr_config is None:
-        pr_config = load_pr_review_config(workspace, {"pr_review": {}})
+        pr_config = PrReviewConfig()
 
     fleet_config = load_fleet_config()
     backend = make_backend(fleet_config)

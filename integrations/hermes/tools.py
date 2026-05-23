@@ -66,6 +66,12 @@ def _optional_str(value: object | None) -> str | None:
     return str(value) if value is not None else None
 
 
+def _int_arg(value: object | None, default: int = 0) -> int:
+    if value is None:
+        return default
+    return int(str(value))
+
+
 def _optional_task_list(value: object | None) -> list[dict[str, object]] | None:
     if not isinstance(value, list):
         return None
@@ -172,7 +178,7 @@ def coding_fleet_pr_review(args: dict[str, object], **kwargs: object) -> str:
             workspace=workspace,
             fleet_config=config,
             base_branch=str(args.get("base_branch") or "main"),
-            pr_number=int(args.get("pr_number") or 0),
+            pr_number=_int_arg(args.get("pr_number")),
         )
     except Exception as exc:
         return json.dumps({"error": str(exc)})
@@ -220,9 +226,10 @@ def coding_fleet_pr_loop(args: dict[str, object], **kwargs: object) -> str:
     if mode not in {"once", "pr"}:
         return json.dumps({"error": "mode must be 'once' or 'pr'"})
 
+    import yaml
+
     from agent_fleet.pr_loop.config import load_pr_loop_config
     from agent_fleet.repo import find_repo_config
-    import yaml
 
     repo = find_repo_config(workspace)
     if repo is None:
@@ -250,7 +257,7 @@ def coding_fleet_pr_loop(args: dict[str, object], **kwargs: object) -> str:
     pr_number_raw = args.get("pr_number")
     if not pr_number_raw:
         return json.dumps({"error": "pr_number is required when mode=pr"})
-    pr_number = int(pr_number_raw)
+    pr_number = _int_arg(pr_number_raw)
 
     branch = _optional_str(args.get("branch"))
     if not branch:
@@ -270,10 +277,7 @@ def coding_fleet_pr_loop(args: dict[str, object], **kwargs: object) -> str:
     from agent_fleet.pr_loop.lifecycle import run_pr_lifecycle
 
     skip_review_wait = args.get("skip_review_wait")
-    if skip_review_wait is None:
-        skip_review_wait = True
-    else:
-        skip_review_wait = bool(skip_review_wait)
+    skip_review_wait = True if skip_review_wait is None else bool(skip_review_wait)
 
     try:
         outcome = run_pr_lifecycle(
@@ -327,7 +331,7 @@ def coding_fleet_scope(args: dict[str, object], **kwargs: object) -> str:
             workspace=workspace,
             fleet_config=config,
             github_repo=_optional_str(args.get("github_repo")),
-            issue_limit=int(args.get("issue_limit") or 20),
+            issue_limit=_int_arg(args.get("issue_limit"), default=20),
         )
     except Exception as exc:
         return json.dumps({"error": str(exc)})

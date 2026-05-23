@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import pytest
-
-from agent_fleet.pr_review.config import load_pr_review_config
 from agent_fleet.pr_review.prompts import build_prompt
 from agent_fleet.pr_review.runner import run_pr_review
 from agent_fleet.repo import find_repo_config, load_repo_config
+
+if TYPE_CHECKING:
+    from agent_fleet.agent_mode import AgentMode
 
 
 @dataclass
@@ -37,7 +38,7 @@ class _MockBackend:
         allowed_tools: list[str] | None = None,
         cwd: Path | None = None,
         model: str | None = None,
-        mode: str = "agent",
+        mode: AgentMode | None = None,
     ) -> _MockResult:
         del prompt, max_tokens, timeout_s, memory_limit, allowed_tools, cwd, model, mode
         body = self.responses.pop(0) if self.responses else "{}"
@@ -106,7 +107,11 @@ def test_run_pr_review_mock_backend_on_lake_of_rage() -> None:
 
 
 def test_hermes_pr_review_schema_registered() -> None:
-    from agent_fleet.integrations.hermes import schemas
+    from typing import Any, cast
 
-    assert schemas.CODING_FLEET_PR_REVIEW["name"] == "coding_fleet_pr_review"
-    assert "workspace" in schemas.CODING_FLEET_PR_REVIEW["parameters"]["properties"]
+    from integrations.hermes import schemas
+
+    schema = cast("dict[str, Any]", schemas.CODING_FLEET_PR_REVIEW)
+    assert schema["name"] == "coding_fleet_pr_review"
+    params = cast("dict[str, Any]", schema["parameters"])
+    assert "workspace" in params["properties"]

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import time
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from agent_fleet.config import load_fleet_config
@@ -19,11 +18,13 @@ from agent_fleet.pr_loop.state import (
     set_pr_state,
     state_path,
 )
-from agent_fleet.repo import RepoConfig
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from agent_fleet.config import FleetConfig
     from agent_fleet.pr_loop.config import PrLoopConfig
+    from agent_fleet.repo import RepoConfig
 
 logger = logging.getLogger(__name__)
 

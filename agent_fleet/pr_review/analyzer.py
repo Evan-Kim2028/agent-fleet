@@ -8,12 +8,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from agent_fleet.pr_review.config import PrReviewConfig
 from agent_fleet.pr_review.git import classify_files, is_deletion_only_pr
 from agent_fleet.pr_review.prompts import build_prompt
 
 if TYPE_CHECKING:
     from agent_fleet.hooks import LLMBackend
+    from agent_fleet.pr_review.config import PrReviewConfig
 
 _DELETION_INAPPLICABLE = {"integration-tests-present", "debug-code-removed"}
 
@@ -130,7 +130,7 @@ def merge_analyses(analyses: list[dict[str, Any]]) -> dict[str, Any]:
         if checklist:
             existing = merged.get("methodology_checklist") or {}
             for ck, cv in checklist.items():
-                if ck.endswith("_present") or ck.endswith("_verified"):
+                if ck.endswith(("_present", "_verified")):
                     existing[ck] = existing.get(ck, False) or bool(cv)
                 elif cv:
                     existing[ck] = cv

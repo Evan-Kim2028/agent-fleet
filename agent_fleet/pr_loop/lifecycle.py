@@ -169,7 +169,6 @@ def address_review_findings(
     loop_config: PrLoopConfig,
     fleet_config: FleetConfig,
     worktree: Path,
-    persona: str,
 ) -> LifecycleResult:
     if not has_blocking_findings(
         review_body,
@@ -494,10 +493,14 @@ def run_pr_lifecycle(
                 loop_config=loop_config,
                 fleet_config=fleet_config,
                 worktree=wt,
-                persona=persona,
             )
             if address.status in {"no_findings", "addressed"}:
-                from agent_fleet.pr_loop.state import get_pr_state, load_state, save_state, set_pr_state
+                from agent_fleet.pr_loop.state import (
+                    get_pr_state,
+                    load_state,
+                    save_state,
+                    set_pr_state,
+                )
 
                 state_file = repo_root / loop_config.state_file
                 state = load_state(state_file)

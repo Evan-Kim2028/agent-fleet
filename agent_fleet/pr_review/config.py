@@ -6,8 +6,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 DEFAULT_TRIVIAL_PATTERNS = (
     r"\.md$",
     r"\.txt$",
@@ -53,7 +51,7 @@ class PrReviewConfig:
     quality_review_skill: str = "thermo-nuclear-code-quality-review"
 
 
-def _tuple_paths(value: Any) -> tuple[str, ...]:
+def _tuple_paths(value: object) -> tuple[str, ...]:
     if not isinstance(value, list):
         return ()
     return tuple(str(item) for item in value)
@@ -62,9 +60,7 @@ def _tuple_paths(value: Any) -> tuple[str, ...]:
 def load_pr_review_config(repo_root: Path, raw: dict[str, Any] | None) -> PrReviewConfig | None:
     """Load pr_review section from parsed .agent-fleet.yaml dict."""
     section = (raw or {}).get("pr_review")
-    if not section:
-        return None
-    if section is False:
+    if section is None or section is False:
         return None
     if not isinstance(section, dict):
         return PrReviewConfig()

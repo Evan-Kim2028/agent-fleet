@@ -78,7 +78,9 @@ def format_comment(
     checklist_md = ""
     if checklist:
         checklist_md = (
-            "\n### Methodology Checklist\n| Check | Status | Detail |\n|-------|--------|--------|\n"
+            "\n### Methodology Checklist\n"
+            "| Check | Status | Detail |\n"
+            "|-------|--------|--------|\n"
         )
         for label, status_key, detail_key in (
             ("Integration tests", "integration_tests_present", "integration_tests_detail"),

@@ -82,7 +82,9 @@ CODING_FLEET_PR_LOOP = {
         "properties": {
             "workspace": {
                 "type": "string",
-                "description": "Absolute path to git repo with pr_loop.enabled in .agent-fleet.yaml",
+                "description": (
+                    "Absolute path to git repo with pr_loop.enabled in .agent-fleet.yaml"
+                ),
             },
             "mode": {
                 "type": "string",

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.backends import make_backend
@@ -15,6 +14,8 @@ from agent_fleet.pr_review.verdict import analysis_to_review_result, risk_to_ver
 from agent_fleet.repo import RepoConfig, find_repo_config, merge_repo_into_fleet_config
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from agent_fleet.hooks import LLMBackend
 
 
@@ -91,7 +92,7 @@ def run_pr_review(
         "risk_level": analysis.get("risk_level", "low"),
         "risk_to_verdict": risk_to_verdict(
             str(analysis.get("risk_level", "low")),
-            list(analysis.get("findings") or []),
+            [item for item in (analysis.get("findings") or []) if isinstance(item, dict)],
         ).value,
         "comment_markdown": comment,
         "changed_files": files,

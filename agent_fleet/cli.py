@@ -216,7 +216,11 @@ def main(argv: list[str] | None = None) -> int:
     run_p.add_argument("--title", help="Short title for full pipeline")
     run_p.add_argument("--persona", help="Persona id (default: repo or fleet config)")
     run_p.add_argument("--workspace", help="Repo path")
-    run_p.add_argument("--pipeline", default="simple", help="simple | code_review | pr_review | full")
+    run_p.add_argument(
+        "--pipeline",
+        default="simple",
+        help="simple | code_review | pr_review | full",
+    )
     run_p.set_defaults(func=cmd_run)
 
     review_p = sub.add_parser("review", help="Run two-pass PR analyzer on workspace diff")

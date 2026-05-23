@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import re
 import subprocess
-from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def get_merge_base(base_ref: str, head_ref: str, *, cwd: Path) -> str:
@@ -125,7 +128,7 @@ def is_deletion_only_pr(diff: str) -> bool:
     added = 0
     removed = 0
     for line in diff.splitlines():
-        if line.startswith("+++") or line.startswith("---"):
+        if line.startswith(("+++", "---")):
             continue
         if line.startswith("+"):
             added += 1

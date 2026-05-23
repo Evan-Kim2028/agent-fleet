@@ -11,7 +11,6 @@ from agent_fleet.pr_loop.review_parse import (
     parse_review_risk,
 )
 
-
 SAMPLE_REVIEW = """\
 ## 🤖 Composer PR Analysis
 
@@ -35,7 +34,7 @@ def test_has_blocking_findings_low() -> None:
 
 
 def test_parse_review_risk_skips_agent_comments() -> None:
-    comments = [
+    comments: list[dict[str, object]] = [
         {"body": "🤖 Agent: noop"},
         {"body": SAMPLE_REVIEW},
     ]
@@ -43,7 +42,7 @@ def test_parse_review_risk_skips_agent_comments() -> None:
 
 
 def test_find_reviewer_comment() -> None:
-    comments = [{"body": SAMPLE_REVIEW}]
+    comments: list[dict[str, object]] = [{"body": SAMPLE_REVIEW}]
     assert find_reviewer_comment(comments, marker="Composer PR Analysis") == SAMPLE_REVIEW
 
 

@@ -7,8 +7,8 @@ from agent_fleet.pr_review.verdict import analysis_to_review_result, risk_to_ver
 
 __all__ = [
     "PrReviewConfig",
-    "analyze_changes",
     "analysis_to_review_result",
+    "analyze_changes",
     "format_comment",
     "load_pr_review_config",
     "risk_to_verdict",

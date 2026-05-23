@@ -6,6 +6,7 @@ import json
 import os
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 
@@ -78,7 +79,7 @@ def load_github_event() -> dict[str, Any]:
     event_path = os.environ.get("GITHUB_EVENT_PATH")
     if not event_path:
         raise RuntimeError("GITHUB_EVENT_PATH is required")
-    with open(event_path, encoding="utf-8") as handle:
+    with Path(event_path).open(encoding="utf-8") as handle:
         payload = json.load(handle)
     if not isinstance(payload, dict):
         raise RuntimeError("invalid GitHub event payload")

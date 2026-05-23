@@ -29,7 +29,9 @@ JSON_OUTPUT_SPEC = textwrap.dedent("""\
       },
       "methodology_checklist": {
         "integration_tests_present": true,
-        "integration_tests_detail": "which files contain the integration tests, or why none are needed",
+        "integration_tests_detail": (
+            "which files contain the integration tests, or why none are needed"
+        ),
         "error_paths_tested": true,
         "error_paths_detail": "which tests cover error/failure paths",
         "cross_system_contracts_verified": true,

@@ -28,13 +28,15 @@ def analysis_to_review_result(
 ) -> ReviewResult:
     findings = list(analysis.get("findings") or [])
     verdict = risk_to_verdict(str(analysis.get("risk_level", "low")), findings)
-    issues = [
+    issues: list[dict[str, str | None]] = [
         {
             "severity": str(item.get("severity", "medium")),
             "file": str(item.get("file") or item.get("area") or ""),
             "message": str(item.get("message") or ""),
+            "line": None,
         }
         for item in findings
+        if isinstance(item, dict)
     ]
     return ReviewResult(
         pr_number=pr_number,

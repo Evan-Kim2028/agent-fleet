@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import subprocess
 import textwrap
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.backends import make_backend
@@ -14,6 +13,8 @@ from agent_fleet.repo import RepoConfig, find_repo_config, merge_repo_into_fleet
 from agent_fleet.skills_lib import DEFAULT_QUALITY_REVIEW_SKILL, load_skill_text
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from agent_fleet.hooks import LLMBackend
 
 _SCOPE_JSON = textwrap.dedent("""\
@@ -112,10 +113,7 @@ def _repo_github_slug(repo: RepoConfig) -> str | None:
     if "github.com" not in url:
         return None
     slug = url.rstrip("/").removesuffix(".git")
-    if slug.startswith("git@"):
-        slug = slug.split(":", 1)[-1]
-    else:
-        slug = slug.split("github.com/", 1)[-1]
+    slug = slug.split(":", 1)[-1] if slug.startswith("git@") else slug.split("github.com/", 1)[-1]
     return slug or None
 
 

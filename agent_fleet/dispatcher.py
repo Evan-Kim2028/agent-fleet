@@ -302,10 +302,11 @@ class FleetDispatcher:
                 repo=repo_config or git_repo,
             )
             phase_results.extend(pipeline_results)
-            agent_id = None
+            agent_id: str | None = None
             for phase in reversed(phase_results):
-                if phase.get("agent_id"):
-                    agent_id = phase["agent_id"]
+                raw_id = phase.get("agent_id")
+                if raw_id:
+                    agent_id = str(raw_id)
                     break
 
             status, error = resolve_pipeline_outcome(phase_results, exit_code)
