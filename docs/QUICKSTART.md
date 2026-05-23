@@ -5,8 +5,8 @@ Get from zero to a first fleet run in ~15 minutes.
 ## 1. Install
 
 ```bash
-git clone <your-private-repo-url> agent_fleet
-cd agent_fleet
+git clone https://github.com/Evan-Kim2028/agent-fleet.git
+cd agent-fleet
 pip install -e ".[dev]"
 ```
 
