@@ -47,6 +47,12 @@ Copy the example config if you haven't already:
 
 ```bash
 mkdir -p ~/.hermes/coding_fleet
+cp examples/fleet.kimi.yaml ~/.hermes/coding_fleet/fleet.yaml
+```
+
+Or start from the Cursor example and edit manually:
+
+```bash
 cp fleet.example.yaml ~/.hermes/coding_fleet/fleet.yaml
 ```
 
