@@ -79,10 +79,11 @@ Optional per-persona path hints in `fleet.yaml`:
 
 ```yaml
 personas:
-  lakestore:
-    prompt: lakestore.md
+  backend:
+    prompt: backend.md
     allowed_paths:
-      - packages/lakestore/
+      - src/
+      - api/
 ```
 
 Injected into the agent prompt as "only modify paths matching: …"
@@ -92,25 +93,25 @@ Injected into the agent prompt as "only modify paths matching: …"
 Generated via `agent-fleet init /path/to/repo`.
 
 ```yaml
-name: lake-of-rage
-default_persona: lakestore
+name: my-app
+default_persona: backend
 default_branch: main
 
-test_command: uv run pytest -q packages/lakestore/tests
-lint_command: uv run ruff check packages/lakestore
+test_command: pytest -q
+lint_command: ruff check .
 
 personas_dir: agents/personas   # optional repo-local persona markdown
 
 persona_scope_allowlist:
-  lakestore:
-    - packages/lakestore/
-  pokemontcg-pipe:
-    - pipelines/pokemontcg_pipe/
-  ebay-scraper:
-    - pipelines/ebay_scraper/
+  backend:
+    - src/
+    - api/
+  frontend:
+    - web/
+    - apps/web/
 
 cross_cutting_groups:
-  - [packages/lakestore/, pipelines/pokemontcg_pipe/]
+  - [web/, api/]
 
 critical_path_prefixes:
   - .github/workflows/
@@ -150,30 +151,30 @@ Used by the **full** pipeline (`--pipeline full`):
 
 ### Step 1 — markdown body
 
-Create `agents/personas/lakestore.md` in your repo (or add to global `personas_dir`):
+Create `agents/personas/backend.md` in your repo (or add to global `personas_dir`):
 
 ```markdown
 ## Role
 
-Iceberg / lakestore engineer for this monorepo.
+Backend engineer for this repo.
 
 ## Methodology
 
-1. Read `.cursor/skills/apache-lakehouse/SKILL.md` when touching lake I/O.
-2. Run `uv run pytest -q packages/lakestore/tests` before finishing.
+1. Read project conventions in CONTRIBUTING.md when present.
+2. Run `pytest -q` (or the repo test command) before finishing.
 3. Minimal diff — no unrelated refactors.
 
 ## Scope
 
-Only edit `packages/lakestore/` unless the task explicitly spans pipelines.
+Only edit `src/` and `api/` unless the task explicitly spans packages.
 ```
 
 ### Step 2 — register in fleet.yaml
 
 ```yaml
 personas:
-  lakestore:
-    prompt: lakestore.md
+  backend:
+    prompt: backend.md
     model: composer-2.5
 ```
 
@@ -183,17 +184,18 @@ If using repo-local `personas_dir`, the prompt filename is relative to that dire
 
 ```yaml
 persona_scope_allowlist:
-  lakestore:
-    - packages/lakestore/
+  backend:
+    - src/
+    - api/
 ```
 
 ### Step 4 — verify
 
 ```bash
 agent-fleet personas --workspace /path/to/repo
-agent-fleet run "Add round-trip test for NameMapping" \
+agent-fleet run "Add unit test for user validation" \
   --workspace /path/to/repo \
-  --persona lakestore \
+  --persona backend \
   --pipeline code_review
 ```
 
@@ -216,11 +218,11 @@ Tool: `coding_fleet_dispatch`
 
 ```json
 {
-  "goal": "Implement issue #10 — recursive NameMapping",
-  "workspace": "/home/evan/Documents/lake-of-rage",
-  "persona": "lakestore",
+  "goal": "Implement issue #10 — fix user validation",
+  "workspace": "/absolute/path/to/repo",
+  "persona": "backend",
   "pipeline": "code_review",
-  "context": "Primary file: packages/lakestore/src/lakestore/_catalog.py. Verify: uv run pytest -q packages/lakestore/tests"
+  "context": "Primary file: src/models/user.py. Verify: pytest -q tests/test_user.py"
 }
 ```
 
@@ -229,8 +231,8 @@ Batch (parallel, up to `max_parallel`):
 ```json
 {
   "tasks": [
-    {"goal": "Fix _catalog.py", "persona": "lakestore", "workspace": "/path/to/repo"},
-    {"goal": "Add tests", "persona": "lakestore", "workspace": "/path/to/repo"}
+    {"goal": "Fix user.py validation", "persona": "backend", "workspace": "/path/to/repo"},
+    {"goal": "Add tests", "persona": "backend", "workspace": "/path/to/repo"}
   ],
   "pipeline": "code_review"
 }
@@ -238,15 +240,15 @@ Batch (parallel, up to `max_parallel`):
 
 **Safe batch rule:** parallel dispatch on the same repo auto-isolates each task in its own git worktree and branch. Completed runs keep the worktree path in the result (`worktree`, `branch_name`) for review/merge; failed runs tear down automatically.
 
-## Routing cheat sheet (lake-of-rage example)
+## Routing cheat sheet (example monorepo)
 
 | Path touched | Persona | Pipeline |
 |--------------|---------|----------|
-| `packages/lakestore/` | `lakestore` | `code_review` |
-| `pipelines/pokemontcg_pipe/` | `pokemontcg-pipe` | `code_review` |
-| `pipelines/ebay_scraper/` | `ebay-scraper` | `code_review` |
-| `infra/` | `lake-ops` | `simple` or `code_review` |
-| spans lakestore + pipeline | batch 2 tasks | `code_review` |
+| `src/`, `api/` | `backend` | `code_review` |
+| `web/`, `apps/web/` | `frontend` | `code_review` |
+| `pipeline/`, `data/` | `data` | `code_review` |
+| `infra/` | `infra` | `simple` or `code_review` |
+| spans backend + frontend | batch 2 tasks | `code_review` |
 | architecture / read-only | `explorer` | `simple` |
 
 ## Outcomes (full pipeline)

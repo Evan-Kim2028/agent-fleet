@@ -4,7 +4,7 @@ A multi-agent coding orchestrator: scoped personas, review pipelines, and parall
 
 **Default backend:** Cursor SDK (`composer-2.5`). **Optional:** Kimi Code CLI subscription (`kimi-for-coding`) — same personas, pipelines, and repo scope.
 
-**Docs:** [Quickstart](docs/QUICKSTART.md) · [Personas](docs/PERSONAS.md) · [Kimi backend](docs/KIMI.md) (optional)
+**Docs:** [Quickstart](docs/QUICKSTART.md) · [New repo setup](docs/NEW-REPO.md) · [Personas](docs/PERSONAS.md) · [Kimi backend](docs/KIMI.md) (optional)
 
 ## What Agent Fleet does
 
@@ -97,17 +97,17 @@ agent-fleet init /absolute/path/to/your/repo
 
 Think **dev factory**, not one mega-agent:
 
-1. **One persona per domain** — e.g. `lakestore`, `frontend`, `infra`. Give each a markdown prompt with verify commands and anti-patterns.
+1. **One persona per domain** — e.g. `backend`, `frontend`, `infra`. Give each a markdown prompt with verify commands and anti-patterns.
 2. **Scope every persona** — `persona_scope_allowlist` in `.agent-fleet.yaml` (or `allowed_paths` in `fleet.yaml`). This is the highest-leverage setting.
 3. **Default to `code_review`** for anything merge-bound. Use `simple` only for trivial, low-risk edits.
 4. **Small, file-specific goals** — pass paths and verify commands in `context`:
 
    ```bash
-   agent-fleet run "Fix NameMapping for nested structs" \
+   agent-fleet run "Fix validation for nested structs" \
      --workspace /path/to/repo \
-     --persona lakestore \
+     --persona backend \
      --pipeline code_review \
-     --context "File: packages/lakestore/src/lakestore/_catalog.py. Verify: uv run pytest -q packages/lakestore/tests"
+     --context "File: src/models/user.py. Verify: pytest -q tests/test_user.py"
    ```
 
 5. **Parallelize independent work** — batch via Python/Hermes when tasks touch different files (source + tests in different packages, or two packages). Parallel batch dispatch **auto-isolates** same-repo tasks in git worktrees (one branch per task). Set `use_worktree: true` in `.agent-fleet.yaml` to isolate single-task runs too.
@@ -150,6 +150,8 @@ agent-fleet init /path/to/your/repo
 ```
 
 ## Integrate any repo
+
+See **[docs/NEW-REPO.md](docs/NEW-REPO.md)** for the full checklist (local dispatch → GitHub PR analyzer → PR loop).
 
 Drop `.agent-fleet.yaml` in your repo root (see `examples/repo.agent-fleet.yaml`):
 
@@ -251,6 +253,7 @@ results = dispatch_tasks(
 ```
 
 - [docs/QUICKSTART.md](docs/QUICKSTART.md) — 15-minute setup
+- [docs/NEW-REPO.md](docs/NEW-REPO.md) — integrate any repo (scope, GHA, PR loop)
 - [docs/PERSONAS.md](docs/PERSONAS.md) — persona fleet cookbook
 - [docs/KIMI.md](docs/KIMI.md) — Kimi Code CLI backend (optional)
 
@@ -269,7 +272,7 @@ pr_loop:
   ci_register_poll_s: 5        # wait for checks to appear after push
   post_fix_poll_s: 15          # pause after fix push before re-checking CI
   fix_persona: coder          # review findings (workflows, config, code)
-  ci_fix_persona: coder       # CI failures (default ci = lakestore-only scope)
+  ci_fix_persona: coder       # CI failures — use a persona scoped to fix CI/config paths
   auto_merge: true
   max_fix_attempts: 2
   max_ci_fix_attempts: 2

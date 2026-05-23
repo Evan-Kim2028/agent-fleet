@@ -45,6 +45,7 @@ critical_path_prefixes:
 #   worktree_base: /tmp/agent-fleet-worktrees
 
 # Automated PR lifecycle (requires pr-analyzer workflow + local watcher)
+# Full example: examples/repo-full.agent-fleet.yaml — see docs/NEW-REPO.md
 # pr_loop:
 #   enabled: true
 #   branch_prefixes: [fleet/]

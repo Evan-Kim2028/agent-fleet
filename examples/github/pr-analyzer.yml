@@ -1,7 +1,9 @@
-# Agent Fleet PR analyzer (Composer 2.5 default, repo-tuned via .agent-fleet.yaml)
+# Agent Fleet PR analyzer (Composer default, repo-tuned via .agent-fleet.yaml)
 #
-# Copy to .github/workflows/pr-analyzer.yml and set secrets:
-#   CURSOR_API_KEY — or KIMI_API_KEY with AGENT_FLEET_BACKEND=kimi
+# Copy to .github/workflows/pr-analyzer.yml
+# Secrets: CURSOR_API_KEY (or KIMI_API_KEY with AGENT_FLEET_BACKEND=kimi)
+#
+# Pin agent-fleet to a release tag or commit SHA — replace v0.2.0 before deploying.
 
 name: pr-analyzer
 
@@ -16,6 +18,7 @@ concurrency:
 permissions:
   contents: read
   pull-requests: write
+  issues: write
 
 jobs:
   analyze:
@@ -32,7 +35,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install agent-fleet
-        run: pip install -e /path/to/agent_fleet
+        run: pip install "git+https://github.com/Evan-Kim2028/agent-fleet.git@v0.2.0"
 
       - name: Analyze PR
         env:
@@ -41,4 +44,4 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_EVENT_PATH: ${{ github.event_path }}
           AGENT_FLEET_BACKEND: cursor
-        run: python3 /path/to/agent_fleet/scripts/pr_analyzer_github.py
+        run: agent-fleet-pr-analyzer

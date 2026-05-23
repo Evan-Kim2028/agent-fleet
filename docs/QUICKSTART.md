@@ -196,7 +196,9 @@ The execution backend is read from `fleet.yaml` automatically.
 
 ## Next
 
+- [NEW-REPO.md](NEW-REPO.md) — full repo integration (GitHub PR analyzer, PR loop)
 - [PERSONAS.md](PERSONAS.md) — customize personas and fleets
 - [KIMI.md](KIMI.md) — Kimi Code CLI backend
-- [../examples/repo.agent-fleet.yaml](../examples/repo.agent-fleet.yaml) — repo config template
-- [../examples/silphco.agent-fleet.yaml](../examples/silphco.agent-fleet.yaml) — multi-persona monorepo
+- [../examples/repo.agent-fleet.yaml](../examples/repo.agent-fleet.yaml) — minimal repo config
+- [../examples/repo-full.agent-fleet.yaml](../examples/repo-full.agent-fleet.yaml) — PR review + PR loop
+- [../examples/monorepo.agent-fleet.yaml](../examples/monorepo.agent-fleet.yaml) — multi-persona monorepo

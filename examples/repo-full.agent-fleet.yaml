@@ -1,0 +1,50 @@
+# Full repo integration — PR analyzer (GHA) + optional PR loop
+# Copy sections into your repo's .agent-fleet.yaml as needed.
+
+name: my-app
+default_persona: coder
+default_branch: main
+
+test_command: pytest -q
+lint_command: ruff check .
+
+persona_scope_allowlist:
+  backend:
+    - src/
+    - api/
+  frontend:
+    - web/
+
+critical_path_prefixes:
+  - .github/workflows/
+  - infra/
+
+# --- Composer PR analysis (GitHub Action + local pr-review) ---
+pr_review:
+  enabled: true
+  use_in_code_review: true
+  overlay: agents/pr_review_overlay.md
+  comment_title: Composer PR Analysis
+  area_prefixes:
+    frontend: [frontend/, web/, apps/web/]
+    backend: [src/, api/, packages/, services/]
+  # quality_review: false   # disable thermo-nuclear quality pass
+  # passes: [backend-security, frontend]
+
+# --- Automated PR lifecycle (local watcher or Hermes coding_fleet_pr_loop) ---
+# Requires: pr_review above, gh authenticated, bootstrap PR merged on main
+pr_loop:
+  enabled: true
+  branch_prefixes: [fleet/]
+  poll_interval_s: 10
+  review_poll_s: 10
+  ci_poll_s: 10
+  ci_register_poll_s: 5
+  post_fix_poll_s: 15
+  fix_persona: coder
+  ci_fix_persona: coder
+  auto_merge: true
+  max_fix_attempts: 2
+  max_ci_fix_attempts: 2
+  # ignored_ci_checks:
+  #   - optional linter name from gh pr checks

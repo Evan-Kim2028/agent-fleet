@@ -1,0 +1,39 @@
+# Multi-persona monorepo example
+# Copy to your repo as .agent-fleet.yaml and adjust paths.
+
+name: my-monorepo
+default_persona: backend
+default_branch: main
+
+personas_dir: agents/personas
+
+test_command: pytest -q
+lint_command: ruff check src/ api/ web/
+
+persona_scope_allowlist:
+  backend:
+    - src/
+    - api/
+    - services/
+  frontend:
+    - web/
+    - apps/web/
+  data:
+    - pipeline/
+    - data/
+  infra:
+    - infra/
+    - deploy/
+
+cross_cutting_groups:
+  - [web/, api/]
+  - [pipeline/, api/]
+  - [infra/, api/]
+
+critical_path_prefixes:
+  - .github/workflows/
+  - infra/prod/
+
+spine:
+  branch_prefix: fleet
+  worktree_base: /tmp/agent-fleet-worktrees

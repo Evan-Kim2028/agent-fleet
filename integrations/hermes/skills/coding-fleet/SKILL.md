@@ -14,13 +14,13 @@ When the user mentions **coding fleet**, **PR analyzer**, or gives `persona` + `
 
 ## PR loop (review → fix → CI → merge)
 
-For repos with `pr_loop.enabled: true` in `.agent-fleet.yaml` (e.g. lake-of-rage after bootstrap):
+For repos with `pr_loop.enabled: true` in `.agent-fleet.yaml`:
 
 **Poll all open `fleet/*` PRs once:**
 
 ```json
 {
-  "workspace": "/home/evan/Documents/lake-of-rage",
+  "workspace": "/absolute/path/to/repo",
   "mode": "once"
 }
 ```
@@ -29,9 +29,9 @@ For repos with `pr_loop.enabled: true` in `.agent-fleet.yaml` (e.g. lake-of-rage
 
 ```json
 {
-  "workspace": "/home/evan/Documents/lake-of-rage",
+  "workspace": "/absolute/path/to/repo",
   "mode": "pr",
-  "pr_number": 49,
+  "pr_number": 42,
   "skip_review_wait": true
 }
 ```
@@ -46,8 +46,8 @@ Rank dispatchable tasks from open issues + large-file hotspots:
 
 ```json
 {
-  "workspace": "/home/evan/Documents/silphcoanalytics",
-  "github_repo": "Evan-Kim2028/silphcoanalytics",
+  "workspace": "/absolute/path/to/repo",
+  "github_repo": "owner/repo",
   "issue_limit": 20
 }
 ```
@@ -122,8 +122,10 @@ pr_review:
   overlay: agents/pr_review_overlay.md
   area_prefixes:
     frontend: [frontend/, web/]
-    backend: [packages/, pipelines/, api/]
+    backend: [src/, api/, packages/]
 ```
+
+See `docs/NEW-REPO.md` in the agent-fleet repo for full setup.
 
 ## Requirements
 

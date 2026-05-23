@@ -4,9 +4,9 @@ After=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/evan/Documents/lake-of-rage
+WorkingDirectory=/absolute/path/to/your/repo
 Environment=CURSOR_API_KEY=%i
-ExecStart=/usr/bin/python3 /home/evan/Documents/agent_fleet/scripts/pr_loop_watcher.py --workspace /home/evan/Documents/lake-of-rage
+ExecStart=/usr/bin/agent-fleet-pr-loop --workspace /absolute/path/to/your/repo
 Restart=always
 RestartSec=5
 
