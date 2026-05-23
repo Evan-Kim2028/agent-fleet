@@ -65,8 +65,11 @@ fi
 
 echo "==> Restart Hermes gateway"
 if command -v hermes >/dev/null 2>&1; then
-  hermes gateway restart
-  hermes gateway status
+  if ! timeout 120 hermes gateway restart; then
+    echo "⚠ hermes gateway restart timed out; forcing systemd restart"
+    systemctl --user restart hermes-gateway.service
+  fi
+  hermes gateway status || systemctl --user status hermes-gateway.service --no-pager
 else
   systemctl --user restart hermes-gateway.service
   systemctl --user status hermes-gateway.service --no-pager

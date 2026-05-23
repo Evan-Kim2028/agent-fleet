@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import subprocess
 from typing import TYPE_CHECKING
 
@@ -26,8 +28,6 @@ def find_pr_for_branch(branch: str, *, cwd: Path) -> int | None:
     )
     if result.returncode != 0 or not result.stdout.strip():
         return None
-    import json
-
     try:
         items = json.loads(result.stdout)
     except json.JSONDecodeError:
@@ -67,12 +67,56 @@ def create_pr(
     if result.returncode != 0:
         logger.warning("gh pr create failed: %s", result.stderr[:500])
         return find_pr_for_branch(branch, cwd=cwd)
-    import re
-
     match = re.search(r"/pull/(\d+)", result.stdout or result.stderr or "")
     if match:
         return int(match.group(1))
     return find_pr_for_branch(branch, cwd=cwd)
+
+
+def _rev_list_count(worktree: Path, range_spec: str) -> int | None:
+    result = subprocess.run(
+        ["git", "rev-list", "--count", range_spec],
+        capture_output=True,
+        text=True,
+        cwd=worktree,
+        check=False,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        return int(result.stdout.strip())
+    except ValueError:
+        return None
+
+
+def commits_ahead_of_base(worktree: Path, branch: str, base: str) -> int:
+    """Count commits on branch ahead of base (local HEAD or remote tracking ref)."""
+    for tip in (f"origin/{branch}", branch, "HEAD"):
+        for upstream in (f"origin/{base}", base):
+            count = _rev_list_count(worktree, f"{upstream}..{tip}")
+            if count is not None and count > 0:
+                return count
+    return 0
+
+
+def push_branch_if_ahead(worktree: Path, branch: str) -> bool:
+    """Push when HEAD is ahead of origin/branch (including already-committed work)."""
+    ahead = _rev_list_count(worktree, f"origin/{branch}..HEAD")
+    if ahead is not None and ahead <= 0:
+        return False
+    push = subprocess.run(
+        ["git", "push", "-u", "origin", f"HEAD:{branch}"],
+        capture_output=True,
+        text=True,
+        cwd=worktree,
+        check=False,
+        timeout=180,
+    )
+    if push.returncode != 0:
+        logger.warning("push failed for %s: %s", branch, push.stderr[:300])
+        return False
+    return True
 
 
 def publish_fleet_branch(
@@ -87,15 +131,19 @@ def publish_fleet_branch(
     message = f"feat(fleet): {task_goal[:72]}\n\n🤖 Agent: persona={persona}"
     pushed = github_ops.commit_and_push(worktree, message, branch)
     if not pushed:
-        existing = find_pr_for_branch(branch, cwd=repo.repo_root)
-        if existing:
-            return existing
-        logger.warning("No changes to push for branch %s", branch)
-        return None
+        push_branch_if_ahead(worktree, branch)
 
     existing = find_pr_for_branch(branch, cwd=repo.repo_root)
     if existing:
         return existing
+
+    if commits_ahead_of_base(worktree, branch, repo.default_branch) <= 0:
+        logger.warning(
+            "No commits on branch %s ahead of %s — skipping PR create",
+            branch,
+            repo.default_branch,
+        )
+        return None
 
     title = f"[Fleet/{persona}] {task_goal[:80]}"
     body = (
@@ -104,6 +152,7 @@ def publish_fleet_branch(
         f"**Goal:** {task_goal}\n\n"
         f"🤖 Agent: persona={persona}"
     )
+    logger.info("Opening PR for branch %s (base=%s)", branch, repo.default_branch)
     return create_pr(
         branch=branch,
         base=repo.default_branch,
