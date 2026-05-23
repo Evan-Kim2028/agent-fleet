@@ -182,8 +182,10 @@ class FleetTaskResult:
     error: str | None
     duration_seconds: float
     agent_id: str | None = None
-    phases: dict[str, Any] | None = None
-    task_spec: dict[str, Any] | None = None
+    phases: dict[str, object] | None = None
+    task_spec: dict[str, object] | None = None
     changed_files: list[str] | None = None
     worktree: str | None = None
     branch_name: str | None = None
+    pr_number: int | None = None
+    pr_loop_status: str | None = None

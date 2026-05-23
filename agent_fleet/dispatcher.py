@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from agent_fleet.admission import AdmissionController, ResourceTier
 from agent_fleet.backends import make_backend
+from agent_fleet.code_review import publish_fleet_branch, run_code_review_with_auto_fix
 from agent_fleet.config import FleetConfig, load_fleet_config
 from agent_fleet.hooks import FleetTask, FleetTaskResult
 from agent_fleet.personas import YamlPersonaResolver
@@ -292,15 +293,35 @@ class FleetDispatcher:
                     }
                 )
 
-            pipeline_results, summary, exit_code, changed_files = run_pipeline(
-                backend=self.backend,
-                resolver=resolver,
-                task=task,
-                workspace=run_workspace,
-                timeout_s=task_config.timeout_seconds,
-                phases=phases,
-                repo=repo_config or git_repo,
+            pipeline_name = task.pipeline or task_config.default_pipeline
+            code_review_cfg = (repo_config or git_repo).code_review if (repo_config or git_repo) else None
+            use_auto_fix = (
+                pipeline_name == "code_review"
+                and code_review_cfg is not None
+                and code_review_cfg.auto_fix
             )
+
+            if use_auto_fix:
+                pipeline_results, summary, exit_code, changed_files = run_code_review_with_auto_fix(
+                    backend=self.backend,
+                    resolver=resolver,
+                    task=task,
+                    workspace=run_workspace,
+                    timeout_s=task_config.timeout_seconds,
+                    phases=phases,
+                    repo=repo_config or git_repo,
+                    config=code_review_cfg,
+                )
+            else:
+                pipeline_results, summary, exit_code, changed_files = run_pipeline(
+                    backend=self.backend,
+                    resolver=resolver,
+                    task=task,
+                    workspace=run_workspace,
+                    timeout_s=task_config.timeout_seconds,
+                    phases=phases,
+                    repo=repo_config or git_repo,
+                )
             phase_results.extend(pipeline_results)
             agent_id: str | None = None
             for phase in reversed(phase_results):
@@ -310,6 +331,54 @@ class FleetDispatcher:
                     break
 
             status, error = resolve_pipeline_outcome(phase_results, exit_code)
+
+            pr_number: int | None = None
+            pr_loop_status: str | None = None
+            repo_for_publish = repo_config or git_repo
+            if (
+                status == "completed"
+                and code_review_cfg
+                and code_review_cfg.auto_push
+                and task_workspace
+                and task_workspace.isolated
+                and task_workspace.branch_name
+                and repo_for_publish
+            ):
+                pr_number = publish_fleet_branch(
+                    worktree=run_workspace,
+                    branch=task_workspace.branch_name,
+                    repo=repo_for_publish,
+                    task_goal=task.goal,
+                    persona=task.persona,
+                )
+                if (
+                    pr_number
+                    and code_review_cfg.auto_pr_loop
+                    and repo_for_publish.pr_loop
+                    and repo_for_publish.pr_loop.enabled
+                ):
+                    from agent_fleet.pr_loop.lifecycle import run_pr_lifecycle
+
+                    loop_result = run_pr_lifecycle(
+                        pr_number=pr_number,
+                        branch=task_workspace.branch_name,
+                        repo=repo_for_publish,
+                        loop_config=repo_for_publish.pr_loop,
+                        fleet_config=task_config,
+                        worktree=run_workspace,
+                        skip_review_wait=False,
+                    )
+                    pr_loop_status = loop_result.status
+                    if loop_result.status == "merged":
+                        status = "merged"
+                        error = None
+
+            keep_worktree = status in {"completed", "merged"} or (
+                code_review_cfg is not None
+                and code_review_cfg.auto_push
+                and task_workspace is not None
+                and task_workspace.isolated
+            )
 
             result = FleetTaskResult(
                 task_index=task_index,
@@ -324,6 +393,8 @@ class FleetDispatcher:
                 changed_files=changed_files or None,
                 worktree=str(task_workspace.path) if task_workspace else None,
                 branch_name=task_workspace.branch_name if task_workspace else None,
+                pr_number=pr_number,
+                pr_loop_status=pr_loop_status,
             )
             self._emit(
                 "fleet.task.complete",
@@ -333,7 +404,7 @@ class FleetDispatcher:
                 duration_seconds=result.duration_seconds,
             )
             if task_workspace is not None:
-                task_workspace.teardown(keep=status == "completed")
+                task_workspace.teardown(keep=keep_worktree)
             return result
         except Exception as exc:
             logger.exception("Fleet task %s failed", task_index)

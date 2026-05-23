@@ -7,6 +7,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.contracts.review import ReviewResult, ReviewVerdict
@@ -24,7 +25,7 @@ from agent_fleet.tech_lead import should_invoke_tech_lead, tech_lead_review
 from agent_fleet.verify_core import get_changed_files
 
 if TYPE_CHECKING:
-    from agent_fleet.hooks import GitOps, LLMBackend, PersonaResolver, Verifier
+    from agent_fleet.hooks import GitForge, GitOps, LLMBackend, PersonaResolver, Verifier
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,7 @@ class FleetRunResult:
     tech_lead: dict[str, Any] | None = None
     commit_sha: str | None = None
     branch_name: str | None = None
+    pr_number: int | None = None
     phases: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
     duration_seconds: float = 0.0
@@ -119,6 +121,7 @@ class LocalFleetRunner:
         verifier: Verifier,
         spine: SpineConfig | None = None,
         config: FleetRunConfig | None = None,
+        forge: GitForge | None = None,
     ) -> None:
         self._backend = backend
         self._persona_resolver = persona_resolver
@@ -126,6 +129,18 @@ class LocalFleetRunner:
         self._verifier = verifier
         self._spine = spine or SpineConfig.defaults()
         self._config = config or FleetRunConfig()
+        self._forge = forge
+
+    def _pr_labels_for_issue(self, issue_number: int | None, base_labels: list[str]) -> list[str]:
+        if self._forge is None or issue_number is None:
+            return list(base_labels)
+        try:
+            issue_labels = self._forge.get_labels(issue_number)
+        except Exception:
+            return list(base_labels)
+        prefix = self._spine.coop_parent_label_prefix + "/"
+        propagated = [name for name in issue_labels if name.startswith(prefix)]
+        return list(base_labels) + propagated
 
     def run(
         self,
@@ -136,6 +151,10 @@ class LocalFleetRunner:
         persona: str,
         repo_root: Path,
         base_branch: str = "main",
+        pr_title: str | None = None,
+        pr_body_builder: Callable[[str, str | None], str] | None = None,
+        pr_labels: list[str] | None = None,
+        issue_number: int | None = None,
     ) -> FleetRunResult:
         start = time.monotonic()
         run_id = str(uuid.uuid4())[:8]
@@ -196,8 +215,13 @@ class LocalFleetRunner:
             phases["SYNTHESIZE"] = brief.to_dict()
 
             logger.info("[%s] IMPLEMENT", run_id)
-            worktree = self._git_ops.setup_workspace(repo_root, run_id, base_branch)
-            if self._config.create_branch:
+            worktree = self._git_ops.setup_workspace(
+                repo_root,
+                run_id,
+                base_branch,
+                branch_name=branch_name if self._config.create_branch else None,
+            )
+            if self._config.create_branch and not getattr(self._git_ops, "use_worktree", False):
                 self._git_ops.create_branch(worktree, branch_name)
 
             implement(
@@ -264,9 +288,39 @@ class LocalFleetRunner:
             changed_files = get_changed_files(worktree)
             diff = self._git_ops.diff_summary(worktree)
 
+            commit_sha = None
+            if self._config.commit_changes:
+                commit_sha = self._git_ops.commit_changes(
+                    worktree,
+                    f"fleet({persona}): {title[:72]}",
+                )
+
+            pr_number: int | None = None
+            if self._forge is not None:
+                logger.info("[%s] OPEN_PR", run_id)
+                self._git_ops.push_branch(worktree, branch_name)
+                pr_body = (
+                    pr_body_builder(run_id, brief.summary)
+                    if pr_body_builder
+                    else f"Automated fleet PR. Run: {run_id}\n\nCloses #{task_id}"
+                )
+                labels = self._pr_labels_for_issue(
+                    issue_number or task_id,
+                    pr_labels or [self._spine.pr_ready_label],
+                )
+                pr_number = self._forge.open_pr(
+                    title=pr_title or f"{branch_name}",
+                    body=pr_body,
+                    branch=branch_name,
+                    base=base_branch,
+                    draft=True,
+                    labels=labels,
+                )
+                phases["OPEN_PR"] = {"pr_number": pr_number, "branch": branch_name}
+
             logger.info("[%s] REVIEW", run_id)
             review_results = review(
-                task_id,
+                pr_number or task_id,
                 diff,
                 changed_files,
                 backend=self._backend,
@@ -277,17 +331,10 @@ class LocalFleetRunner:
             if should_invoke_tech_lead(task_spec, review_results):
                 logger.info("[%s] TECH_LEAD", run_id)
                 tech_lead = tech_lead_review(
-                    task_spec, review_results, task_id, backend=self._backend
+                    task_spec, review_results, pr_number or task_id, backend=self._backend
                 )
                 if tech_lead:
                     phases["TECH_LEAD"] = tech_lead.to_dict()
-
-            commit_sha = None
-            if self._config.commit_changes:
-                commit_sha = self._git_ops.commit_changes(
-                    worktree,
-                    f"fleet({persona}): {title[:72]}",
-                )
 
             summary_parts = [brief.summary]
             if review_results:
@@ -308,6 +355,7 @@ class LocalFleetRunner:
                 tech_lead=tech_lead.to_dict() if tech_lead else None,
                 commit_sha=commit_sha,
                 branch_name=branch_name,
+                pr_number=pr_number,
                 phases=phases,
                 duration_seconds=round(time.monotonic() - start, 2),
             )

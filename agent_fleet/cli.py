@@ -67,6 +67,31 @@ def cmd_scope(args: argparse.Namespace) -> int:
     return 0 if "error" not in result else 1
 
 
+def cmd_scout(args: argparse.Namespace) -> int:
+    from agent_fleet.scouts import run_scout
+
+    workspace = Path(args.workspace or Path.cwd()).resolve()
+    config = load_fleet_config(args.config) if args.config else load_fleet_config()
+    backend_name = config.default_backend.lower()
+    if backend_name == "cursor" and not os.environ.get("CURSOR_API_KEY"):
+        print("error: CURSOR_API_KEY is not set", file=sys.stderr)
+        return 1
+    if backend_name == "kimi" and not os.environ.get("KIMI_API_KEY"):
+        print("error: KIMI_API_KEY is not set", file=sys.stderr)
+        return 1
+
+    result = run_scout(
+        workspace=workspace,
+        fleet_config=config,
+        github_repo=args.github_repo,
+        issue_limit=args.issue_limit,
+        product_context=args.product_context or "",
+        depth=args.depth,
+    )
+    print(json.dumps(result, indent=2, default=str))
+    return 0 if "error" not in result else 1
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     config = load_fleet_config(args.config) if args.config else load_fleet_config()
     backend_name = config.default_backend.lower()

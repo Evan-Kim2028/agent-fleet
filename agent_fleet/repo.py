@@ -11,7 +11,9 @@ import yaml
 from agent_fleet.pr_review.config import PrReviewConfig, load_pr_review_config
 
 if TYPE_CHECKING:
+    from agent_fleet.code_review.config import CodeReviewConfig
     from agent_fleet.config import FleetConfig
+    from agent_fleet.issue_loop.config import IssueDispatchConfig
     from agent_fleet.pr_loop.config import PrLoopConfig
 
 REPO_CONFIG_NAMES = (
@@ -43,6 +45,8 @@ class RepoConfig:
     spine_overrides: dict[str, Any] = field(default_factory=dict)
     pr_review: PrReviewConfig | None = None
     pr_loop: PrLoopConfig | None = None
+    code_review: CodeReviewConfig | None = None
+    issue_dispatch: IssueDispatchConfig | None = None
 
     @property
     def display_name(self) -> str:
@@ -106,6 +110,7 @@ def load_repo_config(path: Path | str) -> RepoConfig:
         else None
     )
 
+    pr_loop_cfg = _load_pr_loop(repo_root, raw)
     return RepoConfig(
         repo_root=repo_root,
         name=str(raw.get("name") or ""),
@@ -123,14 +128,31 @@ def load_repo_config(path: Path | str) -> RepoConfig:
         critical_path_prefixes=tuple(str(p) for p in (raw.get("critical_path_prefixes") or [])),
         spine_overrides=dict(raw.get("spine") or {}),
         pr_review=load_pr_review_config(repo_root, raw),
-        pr_loop=_load_pr_loop(repo_root, raw),
+        pr_loop=pr_loop_cfg,
+        code_review=_load_code_review(raw, pr_loop_cfg),
+        issue_dispatch=_load_issue_dispatch(repo_root, raw),
     )
+
+
+def _load_code_review(
+    raw: dict[str, Any],
+    pr_loop: PrLoopConfig | None,
+) -> CodeReviewConfig | None:
+    from agent_fleet.code_review.config import resolve_code_review_config
+
+    return resolve_code_review_config(raw, pr_loop=pr_loop)
 
 
 def _load_pr_loop(repo_root: Path, raw: dict[str, Any]) -> PrLoopConfig | None:
     from agent_fleet.pr_loop.config import load_pr_loop_config
 
     return load_pr_loop_config(repo_root, raw)
+
+
+def _load_issue_dispatch(repo_root: Path, raw: dict[str, Any]) -> IssueDispatchConfig | None:
+    from agent_fleet.issue_loop.config import load_issue_dispatch_config
+
+    return load_issue_dispatch_config(repo_root, raw)
 
 
 def merge_repo_into_fleet_config(
