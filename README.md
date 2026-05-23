@@ -7,8 +7,8 @@ Standalone Python package for orchestrating **Composer/Cursor SDK** coding agent
 ## Install
 
 ```bash
-git clone <your-repo-url> agent_fleet
-cd agent_fleet
+git clone https://github.com/Evan-Kim2028/agent-fleet.git
+cd agent-fleet
 pip install -e ".[dev]"
 export CURSOR_API_KEY=...   # https://cursor.com/dashboard/integrations
 ```
