@@ -11,6 +11,30 @@ How to define, scope, and route coding agents.
 
 Both merge at dispatch time. Repo settings override global defaults where noted below.
 
+## Backend: Cursor vs Kimi
+
+Set in `fleet.yaml`:
+
+```yaml
+# Cursor (default) — Cursor SDK, composer-2.5, CURSOR_API_KEY
+default_backend: cursor
+default_model: composer-2.5
+
+# Kimi (optional) — kimi-cli, Kimi Code subscription, KIMI_API_KEY
+# default_backend: kimi
+# default_model: kimi-for-coding
+# kimi_bin: ~/.local/bin/kimi-cli
+```
+
+| Setting | Cursor | Kimi |
+|---------|--------|------|
+| `default_backend` | `cursor` | `kimi` |
+| API key env | `CURSOR_API_KEY` | `KIMI_API_KEY` |
+| Default model | `composer-2.5` | `kimi-for-coding` |
+| Runtime | `cursor-sdk` (pip) | `kimi-cli` binary |
+
+Personas, pipelines, repo scope, and Hermes dispatch are **backend-agnostic**. Full Kimi guide: **[KIMI.md](KIMI.md)**.
+
 ## Global fleet (`fleet.yaml`)
 
 Copy from `fleet.example.yaml`:

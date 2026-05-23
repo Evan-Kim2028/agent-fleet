@@ -4,7 +4,7 @@ Orchestrate **Cursor Composer** or **Kimi Code CLI** as scoped coding agents: im
 
 **Default backend:** Cursor SDK (`composer-2.5`). **Optional:** Kimi Code CLI subscription (`kimi-for-coding`) — same personas, pipelines, and repo scope.
 
-**Docs:** [Quickstart](docs/QUICKSTART.md) · [Personas](docs/PERSONAS.md)
+**Docs:** [Quickstart](docs/QUICKSTART.md) · [Personas](docs/PERSONAS.md) · [Kimi backend](docs/KIMI.md) (optional)
 
 ## Why use this?
 
@@ -86,6 +86,8 @@ Switch back anytime with `default_backend: cursor` and `CURSOR_API_KEY`.
 | **Billing** | Cursor API usage | Kimi Code subscription |
 
 Personas, pipelines, `.agent-fleet.yaml` scope, and Hermes dispatch work identically — only the backend adapter changes (`LLMBackend` protocol).
+
+Full Kimi setup guide: **[docs/KIMI.md](docs/KIMI.md)**
 
 Optional — scaffold repo integration:
 
@@ -235,6 +237,7 @@ results = dispatch_tasks(
 
 - [docs/QUICKSTART.md](docs/QUICKSTART.md) — 15-minute setup
 - [docs/PERSONAS.md](docs/PERSONAS.md) — persona fleet cookbook
+- [docs/KIMI.md](docs/KIMI.md) — Kimi Code CLI backend (optional)
 
 ## Development
 

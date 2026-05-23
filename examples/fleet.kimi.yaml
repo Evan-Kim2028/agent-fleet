@@ -1,0 +1,36 @@
+# Kimi Code CLI fleet config — copy to ~/.hermes/coding_fleet/fleet.yaml
+# Requires: kimi-cli on PATH, export KIMI_API_KEY=sk-kimi-...
+
+default_backend: kimi
+default_model: kimi-for-coding
+default_persona: coder
+default_mode: agent
+max_parallel: 3
+timeout_seconds: 900
+default_pipeline: code_review
+
+# Optional if kimi-cli is not on PATH:
+# kimi_bin: ~/.local/bin/kimi-cli
+
+personas:
+  coder:
+    prompt: coder.md
+  reviewer:
+    prompt: reviewer.md
+  explorer:
+    prompt: explorer.md
+    mode: plan
+
+pipelines:
+  simple:
+    - execute
+  code_review:
+    - execute
+    - review
+  full:
+    - plan
+    - research
+    - synthesize
+    - implement
+    - verify
+    - review

@@ -1,6 +1,6 @@
 ---
 name: coding-fleet
-description: Orchestrate parallel Cursor SDK coding agents with pluggable personas and pipelines
+description: Orchestrate parallel Cursor SDK or Kimi Code CLI coding agents with pluggable personas and pipelines
 metadata:
   hermes:
     category: autonomous-ai-agents
@@ -22,7 +22,16 @@ When the user mentions **coding fleet** or gives `persona` + `pipeline` for a re
 }
 ```
 
-Tell the user the fleet is running — dispatch usually takes **30–90 seconds**.
+Tell the user the fleet is running — dispatch usually takes **30–120 seconds**.
+
+## Backend (from fleet.yaml)
+
+| `default_backend` | Key required | Model default |
+|-------------------|--------------|---------------|
+| `cursor` (default) | `CURSOR_API_KEY` | `composer-2.5` |
+| `kimi` (optional) | `KIMI_API_KEY` | `kimi-for-coding` |
+
+Same personas and pipelines for both. Kimi setup: repo `docs/KIMI.md`.
 
 ## Pipelines
 
@@ -32,5 +41,7 @@ Tell the user the fleet is running — dispatch usually takes **30–90 seconds*
 
 ## Requirements
 
-- `CURSOR_API_KEY` in environment
-- `pip install -e /path/to/agent_fleet`
+- Fleet config: `~/.hermes/coding_fleet/fleet.yaml`
+- Cursor path: `CURSOR_API_KEY` in `~/.hermes/.env`
+- Kimi path: `KIMI_API_KEY` + `kimi-cli` on PATH, `default_backend: kimi`
+- `pip install -e /path/to/agent-fleet`
