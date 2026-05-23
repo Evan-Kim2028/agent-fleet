@@ -57,6 +57,59 @@ def test_prepare_task_workspace_creates_isolated_paths(tmp_path: Path) -> None:
     assert not second.path.exists()
 
 
+def test_commit_changes_retries_after_pre_commit_autofix(tmp_path: Path) -> None:
+    """Pre-commit hooks (e.g. ruff format) often rewrite files and exit 1;
+    commit_changes should re-stage and retry instead of crashing the run."""
+    from agent_fleet.integrations.local_git import LocalGitOps
+
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+
+    hook = repo_path / ".git" / "hooks" / "pre-commit"
+    counter = tmp_path / "hook_calls"
+    hook.write_text(
+        "#!/usr/bin/env bash\n"
+        f"n=$(cat {counter} 2>/dev/null || echo 0)\n"
+        f"echo $((n+1)) > {counter}\n"
+        "if [ \"$n\" -eq 0 ]; then\n"
+        "  printf 'rewritten\\n' > rewritten.txt\n"
+        "  exit 1\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    hook.chmod(0o755)
+    (repo_path / "feature.txt").write_text("new feature\n", encoding="utf-8")
+
+    ops = LocalGitOps(repo_path, use_worktree=False)
+    sha = ops.commit_changes(repo_path, "test: autofix retry")
+    assert sha is not None
+    assert (repo_path / "rewritten.txt").read_text() == "rewritten\n"
+    # Hook ran twice: once with autofix exit 1, then a clean pass.
+    assert counter.read_text().strip() == "2"
+
+
+def test_commit_changes_raises_when_hook_keeps_failing(tmp_path: Path) -> None:
+    """If pre-commit fails without modifying anything, retry shouldn't paper over it."""
+    from agent_fleet.integrations.local_git import LocalGitOps
+
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+
+    hook = repo_path / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/usr/bin/env bash\necho 'real failure' >&2\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    (repo_path / "feature.txt").write_text("new feature\n", encoding="utf-8")
+
+    ops = LocalGitOps(repo_path, use_worktree=False)
+    try:
+        ops.commit_changes(repo_path, "test: real failure")
+    except RuntimeError as exc:
+        assert "git commit failed" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError when pre-commit fails without auto-fix")
+
+
 def test_prepare_task_workspace_keep_on_success(tmp_path: Path) -> None:
     repo_path = tmp_path / "repo"
     _init_git_repo(repo_path)

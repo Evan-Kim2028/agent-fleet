@@ -154,16 +154,34 @@ class LocalGitOps:
         if result.returncode != 0:
             raise RuntimeError(f"git checkout -b failed: {result.stderr.strip()}")
 
-    def commit_changes(self, worktree: Path, message: str) -> str | None:
+    def commit_changes(
+        self,
+        worktree: Path,
+        message: str,
+        *,
+        max_hook_retries: int = 2,
+    ) -> str | None:
         status = self._run(["status", "--porcelain"], cwd=worktree)
         if not status.stdout.strip():
             return None
-        self._run(["add", "-A"], cwd=worktree)
-        result = self._run(["commit", "-m", message], cwd=worktree)
-        if result.returncode != 0:
-            raise RuntimeError(f"git commit failed: {result.stderr.strip()}")
-        sha = self._run(["rev-parse", "HEAD"], cwd=worktree)
-        return sha.stdout.strip() or None
+        last_stderr = ""
+        last_stdout = ""
+        for _ in range(max_hook_retries + 1):
+            self._run(["add", "-A"], cwd=worktree)
+            result = self._run(["commit", "-m", message], cwd=worktree)
+            if result.returncode == 0:
+                sha = self._run(["rev-parse", "HEAD"], cwd=worktree)
+                return sha.stdout.strip() or None
+            last_stderr = result.stderr.strip()
+            last_stdout = result.stdout.strip()
+            # Pre-commit hooks (ruff format, end-of-file-fixer, etc.) often
+            # exit non-zero after auto-fixing files. Retry once those fixes
+            # show up as unstaged modifications; otherwise it's a real failure.
+            post_status = self._run(["status", "--porcelain"], cwd=worktree)
+            if not post_status.stdout.strip():
+                break
+        combined = "\n".join(part for part in (last_stdout, last_stderr) if part)
+        raise RuntimeError(f"git commit failed: {combined}")
 
     def push_branch(self, worktree: Path, branch_name: str) -> None:
         result = self._run(["push", "-u", "origin", branch_name], cwd=worktree)
