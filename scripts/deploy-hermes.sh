@@ -64,15 +64,14 @@ if [[ "$NO_RESTART" -eq 1 ]]; then
 fi
 
 echo "==> Restart Hermes gateway"
-if command -v hermes >/dev/null 2>&1; then
-  if ! timeout 120 hermes gateway restart; then
-    echo "⚠ hermes gateway restart timed out; forcing systemd restart"
-    systemctl --user restart hermes-gateway.service
-  fi
-  hermes gateway status || systemctl --user status hermes-gateway.service --no-pager
-else
-  systemctl --user restart hermes-gateway.service
-  systemctl --user status hermes-gateway.service --no-pager
+systemctl --user reset-failed hermes-gateway.service 2>/dev/null || true
+if systemctl --user is-active --quiet hermes-gateway.service; then
+  echo "    stopping existing gateway (SIGKILL if drain hangs)"
+  systemctl --user kill -s SIGKILL hermes-gateway.service 2>/dev/null || true
+  sleep 2
 fi
+systemctl --user start hermes-gateway.service
+sleep 3
+systemctl --user status hermes-gateway.service --no-pager | sed -n '1,12p'
 
 echo "==> Done"
