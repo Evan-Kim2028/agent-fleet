@@ -185,6 +185,48 @@ def park_for_human(
     )
 
 
+def _file_scope_violation_followup(
+    *,
+    pr_number: int,
+    branch: str,
+    violation_detail: str,
+    review_body: str,
+    repo: RepoConfig,
+) -> int | None:
+    """File a follow-up issue for review findings that lie outside this PR's scope.
+
+    Returns the new issue number, or None if filing failed.
+    """
+    persona = persona_from_branch(branch, default_persona=repo.default_persona or "coder")
+    title = f"[follow-up from PR #{pr_number}] Out-of-scope review findings"
+    body = textwrap.dedent(
+        f"""\
+        Spun off automatically by the PR-loop because the reviewer-suggested fix touches files
+        outside the original PR scope. The PR's own CI fix path will continue independently.
+
+        **Source PR:** #{pr_number} (branch `{branch}`, persona `{persona}`)
+
+        **Scope violation detail:**
+        ```
+        {violation_detail}
+        ```
+
+        **Original review findings:**
+
+        {review_body or '_(no review body captured)_'}
+
+        ---
+        Filed by agent-fleet PR-loop. Triage and dispatch as a normal issue when ready.
+        """
+    )
+    return github_ops.create_issue(
+        title=title,
+        body=body,
+        labels=["agent-fleet", "follow-up", f"persona:{persona}"],
+        cwd=repo.repo_root,
+    )
+
+
 def poll_for_review_comment(
     pr_number: int,
     *,
@@ -584,8 +626,32 @@ def run_pr_lifecycle(
                     address.status,
                     address.detail,
                 )
+            if address.status == "scope_violation":
+                followup = _file_scope_violation_followup(
+                    pr_number=pr_number,
+                    branch=branch,
+                    violation_detail=address.detail,
+                    review_body=review_body,
+                    repo=repo,
+                )
+                github_ops.post_pr_comment(
+                    (
+                        "Review-fix path detected findings that belong outside this PR's "
+                        f"scope. Continuing to CI fix; follow-up issue: "
+                        f"{'#' + str(followup) if followup else '(filing failed; see watcher log)'}.\n\n"
+                        f"Out-of-scope detail: `{address.detail}`"
+                    ),
+                    pr_number,
+                    cwd=repo_root,
+                )
+                logger.info(
+                    "Review fix scope_violation PR #%s: filed follow-up %s; continuing to CI",
+                    pr_number,
+                    followup,
+                )
+                break
             if fix_attempts >= loop_config.max_fix_attempts:
-                if address.status in {"scope_violation", "fix_failed"}:
+                if address.status == "fix_failed":
                     park_for_human(
                         pr_number,
                         f"Automated review fix failed: {address.detail}",

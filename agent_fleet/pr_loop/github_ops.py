@@ -152,6 +152,31 @@ def post_pr_comment(body: str, pr_number: int, *, cwd: Path | None = None) -> No
     _gh("pr", "comment", str(pr_number), "--body", body, cwd=cwd)
 
 
+def create_issue(
+    *,
+    title: str,
+    body: str,
+    labels: list[str] | None = None,
+    cwd: Path | None = None,
+) -> int | None:
+    """Create a GitHub issue. Returns the issue number, or None on failure."""
+    cmd = ["issue", "create", "--title", title, "--body", body]
+    for label in labels or []:
+        cmd.extend(["--label", label])
+    result = _gh(*cmd, cwd=cwd, check=False)
+    if result.returncode != 0:
+        logger.warning("create_issue failed: %s", (result.stderr or "").strip()[:300])
+        return None
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if "/issues/" in line:
+            try:
+                return int(line.rsplit("/", 1)[1])
+            except ValueError:
+                continue
+    return None
+
+
 def add_pr_label(pr_number: int, label: str, *, cwd: Path | None = None) -> None:
     _gh("label", "create", label, "--force", cwd=cwd, check=False)
     _gh("pr", "edit", str(pr_number), "--add-label", label, cwd=cwd, check=False)
