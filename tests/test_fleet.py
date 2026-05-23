@@ -7,7 +7,9 @@ from pathlib import Path
 
 import pytest
 
+from agent_fleet.backends import make_backend
 from agent_fleet.config import load_fleet_config
+from agent_fleet.cursor_backend import CursorBackend
 from agent_fleet.dispatcher import _normalize_tasks
 from agent_fleet.personas import YamlPersonaResolver
 from agent_fleet.repo import load_repo_config
@@ -196,3 +198,19 @@ def test_init_creates_directory_and_config(tmp_path):
     target = tmp_path / "new-repo"
     assert cmd_init(type("Args", (), {"path": str(target), "force": False})()) == 0
     assert (target / ".agent-fleet.yaml").exists()
+
+
+def test_make_backend_cursor_default(fleet_config):
+    backend = make_backend(fleet_config)
+    assert isinstance(backend, CursorBackend)
+
+
+def test_make_backend_kimi(monkeypatch):
+    monkeypatch.setenv("KIMI_API_KEY", "sk-kimi-test")
+    cfg = load_fleet_config(ROOT / "fleet.example.yaml")
+    cfg.default_backend = "kimi"
+    backend = make_backend(cfg)
+    from agent_fleet.kimi_backend import KimiBackend
+
+    assert isinstance(backend, KimiBackend)
+    assert backend.model == "kimi-for-coding"

@@ -5,8 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from agent_fleet.cursor_backend import CursorBackend
-from agent_fleet.hooks import FleetTask, Persona
+from agent_fleet.hooks import FleetTask, LLMBackend, Persona
 from agent_fleet.personas import YamlPersonaResolver
 
 
@@ -61,7 +60,7 @@ def _build_review_prompt(
 
 def run_execute_phase(
     *,
-    backend: CursorBackend,
+    backend: LLMBackend,
     resolver: YamlPersonaResolver,
     task: FleetTask,
     workspace: Path,
@@ -90,7 +89,7 @@ def run_execute_phase(
 
 def run_review_phase(
     *,
-    backend: CursorBackend,
+    backend: LLMBackend,
     resolver: YamlPersonaResolver,
     task: FleetTask,
     workspace: Path,
@@ -121,7 +120,7 @@ def run_review_phase(
 
 def run_pipeline(
     *,
-    backend: CursorBackend,
+    backend: LLMBackend,
     resolver: YamlPersonaResolver,
     task: FleetTask,
     workspace: Path,

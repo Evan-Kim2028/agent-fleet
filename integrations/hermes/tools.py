@@ -48,16 +48,25 @@ def coding_fleet_dispatch(args: dict, **kwargs) -> str:
     except RuntimeError as exc:
         return json.dumps({"error": str(exc)})
 
-    if not os.environ.get("CURSOR_API_KEY"):
+    config_path = args.get("config_path") or os.environ.get("CODING_FLEET_CONFIG")
+    config = load_fleet_config(config_path) if config_path else load_fleet_config()
+
+    backend_name = config.default_backend.lower()
+    if backend_name == "cursor" and not os.environ.get("CURSOR_API_KEY"):
         return json.dumps(
             {
                 "error": "CURSOR_API_KEY is not set. "
                 "Add it to ~/.hermes/.env (see https://cursor.com/dashboard/integrations)"
             }
         )
-
-    config_path = args.get("config_path") or os.environ.get("CODING_FLEET_CONFIG")
-    config = load_fleet_config(config_path) if config_path else load_fleet_config()
+    if backend_name == "kimi" and not os.environ.get("KIMI_API_KEY"):
+        return json.dumps(
+            {
+                "error": "KIMI_API_KEY is not set. "
+                "Use Kimi Code subscription key (https://platform.kimi.ai) "
+                "or set default_backend: cursor in fleet.yaml"
+            }
+        )
 
     dispatcher = FleetDispatcher(
         config=config,

@@ -9,8 +9,8 @@ import os
 import sys
 from pathlib import Path
 
+from agent_fleet.backends import make_backend
 from agent_fleet.config import load_fleet_config
-from agent_fleet.cursor_backend import CursorBackend
 from agent_fleet.dispatcher import dispatch_tasks
 from agent_fleet.personas import YamlPersonaResolver
 from agent_fleet.repo import find_repo_config
@@ -18,19 +18,26 @@ from agent_fleet.runner import run_full_pipeline
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    if not os.environ.get("CURSOR_API_KEY"):
+    if args.config:
+        config = load_fleet_config(args.config)
+    else:
+        config = load_fleet_config()
+    backend_name = config.default_backend.lower()
+    if backend_name == "cursor" and not os.environ.get("CURSOR_API_KEY"):
         print("error: CURSOR_API_KEY is not set", file=sys.stderr)
+        return 1
+    if backend_name == "kimi" and not os.environ.get("KIMI_API_KEY"):
+        print("error: KIMI_API_KEY is not set (Kimi Code subscription)", file=sys.stderr)
         return 1
 
     workspace = Path(args.workspace or Path.cwd()).resolve()
     repo = find_repo_config(workspace)
 
     if args.pipeline == "full":
-        config = load_fleet_config(args.config)
         if repo and repo.personas_dir:
             config.personas_dir = repo.personas_dir
         resolver = YamlPersonaResolver(config)
-        backend = CursorBackend(default_model=config.default_model, default_mode=config.default_mode)
+        backend = make_backend(config)
         result = run_full_pipeline(
             goal=args.goal,
             context=args.context or "",

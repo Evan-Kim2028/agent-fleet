@@ -33,6 +33,8 @@ class PersonaSpec:
 class FleetConfig:
     default_model: str = "composer-2.5"
     default_mode: str = "agent"
+    default_backend: str = "cursor"
+    kimi_bin: str | None = None
     default_persona: str = "coder"
     max_parallel: int = 3
     timeout_seconds: int = 900
@@ -102,6 +104,10 @@ def load_fleet_config(
         default_mode=str(
             overrides.get("default_mode") or data.get("default_mode") or "agent"
         ),
+        default_backend=str(
+            overrides.get("default_backend") or data.get("default_backend") or "cursor"
+        ),
+        kimi_bin=overrides.get("kimi_bin") or data.get("kimi_bin"),
         max_parallel=int(
             overrides.get("max_parallel") or data.get("max_parallel") or 3
         ),

@@ -10,10 +10,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 from agent_fleet.admission import AdmissionController, ResourceTier
+from agent_fleet.backends import make_backend
 from agent_fleet.config import FleetConfig, load_fleet_config
 from agent_fleet.repo import find_repo_config, merge_repo_into_fleet_config
 from agent_fleet.runner import run_full_pipeline
-from agent_fleet.cursor_backend import CursorBackend
 from agent_fleet.hooks import FleetTask, FleetTaskResult
 from agent_fleet.personas import YamlPersonaResolver
 from agent_fleet.phases import run_pipeline
@@ -71,10 +71,7 @@ class FleetDispatcher:
     ) -> None:
         self.config = config or load_fleet_config()
         self.resolver = YamlPersonaResolver(self.config)
-        self.backend = CursorBackend(
-            default_model=self.config.default_model,
-            default_mode=self.config.default_mode,
-        )
+        self.backend = make_backend(self.config)
         self.progress_callback = progress_callback
         self._admission = AdmissionController(
             ram_budget_gb=self.config.ram_budget_gb,

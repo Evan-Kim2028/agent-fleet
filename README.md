@@ -1,6 +1,8 @@
 # Agent Fleet
 
-Orchestrate **Cursor Composer** (`composer-2.5` by default) as scoped coding agents: implement, review, and run in parallel — from CLI, Python, or Hermes.
+Orchestrate **Cursor Composer** or **Kimi Code CLI** as scoped coding agents: implement, review, and run in parallel — from CLI, Python, or Hermes.
+
+**Default backend:** Cursor SDK (`composer-2.5`). **Optional:** Kimi Code CLI subscription (`kimi-for-coding`) — same personas, pipelines, and repo scope.
 
 **Docs:** [Quickstart](docs/QUICKSTART.md) · [Personas](docs/PERSONAS.md)
 
@@ -51,6 +53,39 @@ Verify setup:
 ```bash
 agent-fleet personas   # coder, reviewer, explorer
 ```
+
+## Optional: Kimi Code CLI (subscription)
+
+Same fleet (personas, `code_review`, repo scope) — different execution backend. Uses `kimi-cli` against the [Kimi Code API](https://platform.kimi.ai) with your subscription key. This is the path we used in silphco before Cursor SDK was the default.
+
+**Requires:** `kimi-cli` on PATH, `KIMI_API_KEY` (typically `sk-kimi-...`).
+
+```bash
+# Install kimi-cli (see Kimi Code docs), then:
+export KIMI_API_KEY=your_kimi_code_key
+
+# Switch fleet config to Kimi backend
+cat >> ~/.hermes/coding_fleet/fleet.yaml <<'EOF'
+default_backend: kimi
+default_model: kimi-for-coding
+EOF
+
+# Same commands as Cursor — backend comes from fleet.yaml
+agent-fleet run "Add a one-line project description to README" \
+  --workspace /absolute/path/to/your/repo \
+  --pipeline code_review
+```
+
+Switch back anytime with `default_backend: cursor` and `CURSOR_API_KEY`.
+
+| | Cursor (default) | Kimi (optional) |
+|--|------------------|-----------------|
+| **Key** | `CURSOR_API_KEY` | `KIMI_API_KEY` |
+| **Binary/SDK** | `cursor-sdk` (pip) | `kimi-cli` (Kimi Code install) |
+| **Default model** | `composer-2.5` | `kimi-for-coding` |
+| **Billing** | Cursor API usage | Kimi Code subscription |
+
+Personas, pipelines, `.agent-fleet.yaml` scope, and Hermes dispatch work identically — only the backend adapter changes (`LLMBackend` protocol).
 
 Optional — scaffold repo integration:
 
