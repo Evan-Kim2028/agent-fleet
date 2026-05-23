@@ -125,6 +125,32 @@ def test_task_spec_schema_minimal() -> None:
     validate_task_spec(data)
 
 
+def test_task_spec_schema_coordination_spec_accepts_nulls() -> None:
+    """Composer commonly emits `null` for unset optional coordination_spec
+    fields; the schema must accept that instead of failing PLAN with
+    'None is not of type string'."""
+    data = {
+        "issue_number": 1,
+        "decomposition_decision": "single",
+        "decomposition_reason": "small change",
+        "child_issues_proposed": [],
+        "scope": {"allowed_paths": ["src/"], "forbidden_paths": []},
+        "research_plan": [],
+        "acceptance_criteria": ["Tests pass"],
+        "risk_tier": "low",
+        "critical_paths_touched": [],
+        "coordination_spec": {
+            "merge_order": [],
+            "schema_contracts_added": [],
+            "schema_contracts_removed": [],
+            "smoke_test_suggestion": None,
+            "shared_branch": None,
+            "interface_brief": None,
+        },
+    }
+    validate_task_spec(data)
+
+
 def test_pipelines_merge_with_defaults(fleet_config: FleetConfig) -> None:
     assert "simple" in fleet_config.pipelines
     assert "code_review" in fleet_config.pipelines

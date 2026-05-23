@@ -82,23 +82,28 @@
             "merge_order": {"type": "array", "items": {"type": "string"}},
             "schema_contracts_added": {"type": "array", "items": {"type": "string"}},
             "schema_contracts_removed": {"type": "array", "items": {"type": "string"}},
-            "smoke_test_suggestion": {"type": "string"},
-            "shared_branch": {"type": "string"},
+            "smoke_test_suggestion": {"type": ["string", "null"]},
+            "shared_branch": {"type": ["string", "null"]},
             "interface_brief": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["kind"],
-              "properties": {
-                "kind": {
-                  "type": "string",
-                  "enum": ["http_route", "parquet_schema", "json_schema", "function_signature"]
-                },
-                "route": {"type": "string"},
-                "request_shape": {"type": "object"},
-                "response_shape": {"type": "object"},
-                "fixture_path": {"type": "string"},
-                "notes": {"type": "string"}
-              }
+              "oneOf": [
+                {"type": "null"},
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["kind"],
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": ["http_route", "parquet_schema", "json_schema", "function_signature"]
+                    },
+                    "route": {"type": ["string", "null"]},
+                    "request_shape": {"type": ["object", "null"]},
+                    "response_shape": {"type": ["object", "null"]},
+                    "fixture_path": {"type": ["string", "null"]},
+                    "notes": {"type": ["string", "null"]}
+                  }
+                }
+              ]
             }
           }
         }
