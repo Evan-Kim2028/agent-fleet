@@ -125,10 +125,10 @@ Scope applies to Kimi runs the same way — injected into the persona prompt at 
 
 ## Hermes / Discord
 
-1. Symlink the plugin (if not already):
+1. Deploy the plugin (pull + install + symlink + restart):
 
    ```bash
-   ln -sf /path/to/agent-fleet/integrations/hermes ~/.hermes/plugins/cursor-fleet
+   ./scripts/deploy-hermes.sh
    ```
 
 2. Set `default_backend: kimi` in `~/.hermes/coding_fleet/fleet.yaml`

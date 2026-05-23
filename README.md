@@ -207,7 +207,13 @@ persona_scope_allowlist:
 
 ## Hermes integration (optional)
 
-Plugin source lives in this repo at `integrations/hermes/`. Symlink into Hermes:
+Plugin source lives in this repo at `integrations/hermes/`. One command to pull, install, link, and restart:
+
+```bash
+./scripts/deploy-hermes.sh
+```
+
+Manual setup (first time only):
 
 ```bash
 ln -sf "$(pwd)/integrations/hermes" ~/.hermes/plugins/cursor-fleet

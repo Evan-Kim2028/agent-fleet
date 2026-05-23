@@ -131,7 +131,13 @@ agent-fleet run "Fix failing test in src/" \
 
 ## 5. Hermes (optional)
 
-For Discord / Hermes orchestration, symlink the bundled plugin:
+For Discord / Hermes orchestration, deploy the bundled plugin (pull + pip install + symlink + gateway restart):
+
+```bash
+./scripts/deploy-hermes.sh
+```
+
+First-time manual link (if you prefer):
 
 ```bash
 ln -sf "$(pwd)/integrations/hermes" ~/.hermes/plugins/cursor-fleet
