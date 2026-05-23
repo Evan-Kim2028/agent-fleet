@@ -367,6 +367,19 @@ def check_tests_for_modified_code(
         if any(x in src for x in skip_markers):
             continue
 
+        # Skip private modules (Python convention: `_foo.py`). These are
+        # internal implementation details — typically extracted from a public
+        # module during a move-only refactor — and are tested transitively
+        # through their public consumer's test file. `__init__.py` is excluded
+        # since it's a package marker, not a private module.
+        basename = src.rsplit("/", 1)[-1]
+        if (
+            basename.startswith("_")
+            and not basename.startswith("__")
+            and basename.endswith(".py")
+        ):
+            continue
+
         base = src.rsplit(".", 1)[0]
         # Note: `base.replace("/", "/tests/") + ".py"` is intentionally omitted
         # for root-level files (no "/" in base) to avoid treating the source file
