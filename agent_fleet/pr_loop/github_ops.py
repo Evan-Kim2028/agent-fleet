@@ -164,16 +164,14 @@ def pr_is_draft(pr_number: int, *, cwd: Path | None = None) -> bool:
     return bool(json.loads(result.stdout).get("isDraft"))
 
 
-def merge_pr(
+def _attempt_squash_merge(
     pr_number: int,
     *,
     subject: str,
     body: str,
-    cwd: Path | None = None,
-) -> bool:
-    if pr_is_draft(pr_number, cwd=cwd):
-        mark_pr_ready(pr_number, cwd=cwd)
-    result = _gh(
+    cwd: Path | None,
+) -> subprocess.CompletedProcess[str]:
+    return _gh(
         "pr",
         "merge",
         str(pr_number),
@@ -185,8 +183,59 @@ def merge_pr(
         cwd=cwd,
         check=False,
     )
+
+
+def _pr_is_behind_base(pr_number: int, *, cwd: Path | None) -> bool:
+    """Detect 'PR branch is behind main' state via mergeStateStatus."""
+    result = _gh(
+        "pr",
+        "view",
+        str(pr_number),
+        "--json",
+        "mergeStateStatus",
+        cwd=cwd,
+        check=False,
+    )
+    if result.returncode != 0:
+        return False
+    status = json.loads(result.stdout).get("mergeStateStatus", "")
+    return status == "BEHIND"
+
+
+def update_branch(pr_number: int, *, cwd: Path | None = None) -> bool:
+    """Server-side merge of base into the PR branch via `gh pr update-branch`.
+
+    Returns True if GitHub accepted the request (branch was updated or already
+    up to date). Returns False if there is a real merge conflict — only a human
+    or the implementer agent can resolve that.
+    """
+    result = _gh("pr", "update-branch", str(pr_number), cwd=cwd, check=False)
     if result.returncode == 0:
         return True
+    logger.warning("update-branch failed for PR #%s: %s", pr_number, result.stderr[:300])
+    return False
+
+
+def merge_pr(
+    pr_number: int,
+    *,
+    subject: str,
+    body: str,
+    cwd: Path | None = None,
+) -> bool:
+    if pr_is_draft(pr_number, cwd=cwd):
+        mark_pr_ready(pr_number, cwd=cwd)
+    result = _attempt_squash_merge(pr_number, subject=subject, body=body, cwd=cwd)
+    if result.returncode == 0:
+        return True
+    # Common mechanical failure: PR branch is behind main. Ask GitHub to merge
+    # main into the PR branch server-side, then retry the squash merge.
+    if _pr_is_behind_base(pr_number, cwd=cwd) and update_branch(pr_number, cwd=cwd):
+        # update-branch triggers a new CI run; give it a moment and retry once.
+        time.sleep(10)
+        retry = _attempt_squash_merge(pr_number, subject=subject, body=body, cwd=cwd)
+        if retry.returncode == 0:
+            return True
     for _ in range(19):
         time.sleep(5)
         state_result = _gh("pr", "view", str(pr_number), "--json", "state", cwd=cwd, check=False)
@@ -298,18 +347,33 @@ def commit_and_push(
     ]
     if not changed:
         return False
-    subprocess.run(["git", "add", "--", *changed], cwd=worktree, check=True, timeout=60)
-    commit = subprocess.run(
-        ["git", "commit", "-m", message],
-        cwd=worktree,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=120,
-    )
-    if commit.returncode != 0:
-        logger.warning("commit failed: %s", commit.stderr[:300])
-        return False
+    max_hook_retries = 2
+    for attempt in range(max_hook_retries + 1):
+        # Re-add: a previous attempt's pre-commit hook may have auto-formatted
+        # files (ruff format, eol-fixer); re-staging picks those up.
+        subprocess.run(["git", "add", "-A"], cwd=worktree, check=True, timeout=60)
+        commit = subprocess.run(
+            ["git", "commit", "-m", message],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
+        )
+        if commit.returncode == 0:
+            break
+        post_status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            cwd=worktree,
+            check=False,
+            timeout=30,
+        )
+        if not post_status.stdout.strip() or attempt == max_hook_retries:
+            logger.warning("commit failed: %s", commit.stderr[:300])
+            return False
+        logger.info("commit attempt %d failed (hook autofix?), retrying", attempt + 1)
     push = subprocess.run(
         ["git", "push", "origin", f"HEAD:{branch}"],
         cwd=worktree,

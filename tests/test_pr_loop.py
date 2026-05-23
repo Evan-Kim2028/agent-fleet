@@ -163,3 +163,62 @@ def test_persona_covering_files_and_merge_scope() -> None:
     assert _merge_scope_out_of_scope("coder", ["web/x.ts"], repo) == ["web/x.ts"]
     mixed = ["infra/vps/deploy.sh", "pipelines/pokemontcg_pipe/src/pipe/promote.py"]
     assert _merge_scope_out_of_scope("lakestore", mixed, repo) == []
+
+
+def _init_repo_with_remote(tmp_path: Path) -> tuple[Path, Path]:
+    """Set up a bare remote + local clone so commit_and_push can push."""
+    import subprocess
+
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    local = tmp_path / "local"
+    subprocess.run(
+        ["git", "clone", str(remote), str(local)], check=True, capture_output=True
+    )
+    subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=local, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=local, check=True)
+    (local / "seed.txt").write_text("seed\n", encoding="utf-8")
+    subprocess.run(["git", "add", "seed.txt"], cwd=local, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=local, check=True)
+    subprocess.run(["git", "push", "origin", "HEAD:main"], cwd=local, check=True, capture_output=True)
+    return remote, local
+
+
+def test_commit_and_push_retries_after_pre_commit_autofix(tmp_path: Path) -> None:
+    """Pre-commit hook auto-rewrites a file and exits 1 on first call;
+    commit_and_push should re-stage and succeed instead of returning False."""
+    from agent_fleet.pr_loop.github_ops import commit_and_push
+
+    _, local = _init_repo_with_remote(tmp_path)
+    counter = tmp_path / "hook_calls"
+    hook = local / ".git" / "hooks" / "pre-commit"
+    hook.write_text(
+        "#!/usr/bin/env bash\n"
+        f"n=$(cat {counter} 2>/dev/null || echo 0)\n"
+        f"echo $((n+1)) > {counter}\n"
+        'if [ "$n" -eq 0 ]; then\n'
+        "  printf 'autofix\\n' > autofixed.txt\n"
+        "  exit 1\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    hook.chmod(0o755)
+    (local / "feature.txt").write_text("feature\n", encoding="utf-8")
+
+    assert commit_and_push(local, "test: autofix retry", "feature-branch") is True
+    assert (local / "autofixed.txt").read_text() == "autofix\n"
+    assert counter.read_text().strip() == "2"
+
+
+def test_commit_and_push_returns_false_when_hook_keeps_failing(tmp_path: Path) -> None:
+    """Hook fails without modifying anything — retry shouldn't paper over it."""
+    from agent_fleet.pr_loop.github_ops import commit_and_push
+
+    _, local = _init_repo_with_remote(tmp_path)
+    hook = local / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/usr/bin/env bash\necho fail >&2\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    (local / "feature.txt").write_text("feature\n", encoding="utf-8")
+
+    assert commit_and_push(local, "test: real fail", "feature-branch") is False
