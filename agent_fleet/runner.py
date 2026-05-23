@@ -330,6 +330,42 @@ class LocalFleetRunner:
                     f"fleet({persona}): {title[:72]}",
                 )
 
+            if self._config.commit_changes and commit_sha is None and not changed_files:
+                logger.info(
+                    "[%s] NOOP: implementer produced no changes; skipping OPEN_PR/REVIEW",
+                    run_id,
+                )
+                phases["NOOP"] = {
+                    "reason": "implementer determined no code changes were required",
+                }
+                if self._forge is not None and (issue_number or task_id):
+                    try:
+                        self._forge.comment(
+                            issue_number or task_id,
+                            (
+                                f"Fleet run `{run_id}` completed with no code changes — "
+                                "the implementer determined the requested work was already "
+                                "satisfied by existing code. No PR was opened."
+                            ),
+                        )
+                    except Exception:
+                        logger.exception("[%s] NOOP comment failed", run_id)
+                result = FleetRunResult(
+                    run_id=run_id,
+                    task_id=task_id,
+                    persona=persona,
+                    outcome="completed_noop",
+                    task_spec=task_spec.to_dict(),
+                    summary=brief.summary if brief else "",
+                    changed_files=changed_files,
+                    commit_sha=None,
+                    branch_name=branch_name,
+                    pr_number=None,
+                    phases=phases,
+                    duration_seconds=round(time.monotonic() - start, 2),
+                )
+                return result
+
             pr_number: int | None = None
             if self._forge is not None:
                 if brief is None:
