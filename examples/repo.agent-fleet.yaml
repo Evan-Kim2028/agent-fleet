@@ -43,3 +43,15 @@ critical_path_prefixes:
 # spine:
 #   branch_prefix: fleet
 #   worktree_base: /tmp/agent-fleet-worktrees
+
+# Automated PR lifecycle (requires pr-analyzer workflow + local watcher)
+# pr_loop:
+#   enabled: true
+#   branch_prefixes: [fleet/]
+#   poll_interval_s: 30
+#   auto_merge: true
+#   max_fix_attempts: 2
+#   max_ci_fix_attempts: 2
+#   merge_cooldown_s: 300
+#   tiered_merge_gate: false
+#   fix_persona: coder

@@ -1,0 +1,14 @@
+[Unit]
+Description=Agent Fleet PR loop watcher (review-fix-merge)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/evan/Documents/lake-of-rage
+Environment=CURSOR_API_KEY=%i
+ExecStart=/usr/bin/python3 /home/evan/Documents/agent_fleet/scripts/pr_loop_watcher.py --workspace /home/evan/Documents/lake-of-rage
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -20,6 +20,7 @@ _PACKAGE_PERSONAS = Path(__file__).resolve().parent / "personas"
 _DEFAULT_PIPELINES: dict[str, list[str]] = {
     "simple": ["execute"],
     "code_review": ["execute", "review"],
+    "pr_review": ["analyze"],
     "full": ["plan", "research", "synthesize", "implement", "verify", "review"],
 }
 

@@ -8,8 +8,11 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
+from agent_fleet.pr_review.config import PrReviewConfig, load_pr_review_config
+
 if TYPE_CHECKING:
     from agent_fleet.config import FleetConfig
+    from agent_fleet.pr_loop.config import PrLoopConfig
 
 REPO_CONFIG_NAMES = (
     ".agent-fleet.yaml",
@@ -38,6 +41,8 @@ class RepoConfig:
     cross_cutting_groups: tuple[frozenset[str], ...] = ()
     critical_path_prefixes: tuple[str, ...] = ()
     spine_overrides: dict[str, Any] = field(default_factory=dict)
+    pr_review: PrReviewConfig | None = None
+    pr_loop: PrLoopConfig | None = None
 
     @property
     def display_name(self) -> str:
@@ -117,7 +122,15 @@ def load_repo_config(path: Path | str) -> RepoConfig:
         cross_cutting_groups=tuple(cross_cutting),
         critical_path_prefixes=tuple(str(p) for p in (raw.get("critical_path_prefixes") or [])),
         spine_overrides=dict(raw.get("spine") or {}),
+        pr_review=load_pr_review_config(repo_root, raw),
+        pr_loop=_load_pr_loop(repo_root, raw),
     )
+
+
+def _load_pr_loop(repo_root: Path, raw: dict[str, Any]) -> PrLoopConfig | None:
+    from agent_fleet.pr_loop.config import load_pr_loop_config
+
+    return load_pr_loop_config(repo_root, raw)
 
 
 def merge_repo_into_fleet_config(
