@@ -260,7 +260,10 @@ def commit_and_push(
     worktree: Path,
     message: str,
     branch: str,
+    *,
+    exclude: tuple[str, ...] = (),
 ) -> bool:
+    exclude_set = set(exclude)
     status = subprocess.run(
         ["git", "status", "--porcelain"],
         capture_output=True,
@@ -269,9 +272,14 @@ def commit_and_push(
         check=False,
         timeout=30,
     )
-    if not status.stdout.strip():
+    changed = [
+        line[3:].strip()
+        for line in status.stdout.splitlines()
+        if line.strip() and len(line) > 3 and line[3:].strip() not in exclude_set
+    ]
+    if not changed:
         return False
-    subprocess.run(["git", "add", "-A"], cwd=worktree, check=True, timeout=60)
+    subprocess.run(["git", "add", "--"] + changed, cwd=worktree, check=True, timeout=60)
     commit = subprocess.run(
         ["git", "commit", "-m", message],
         cwd=worktree,

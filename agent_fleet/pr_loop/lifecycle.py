@@ -62,7 +62,8 @@ def persona_from_branch(branch: str, default_persona: str) -> str:
     return default_persona
 
 
-def _git_changed_files(worktree: Path) -> list[str]:
+def _git_changed_files(worktree: Path, *, exclude: tuple[str, ...] = ()) -> list[str]:
+    exclude_set = set(exclude)
     status = subprocess.run(
         ["git", "status", "--porcelain"],
         capture_output=True,
@@ -73,7 +74,7 @@ def _git_changed_files(worktree: Path) -> list[str]:
     return [
         line[3:].strip()
         for line in status.stdout.splitlines()
-        if line.strip() and len(line) > 3
+        if line.strip() and len(line) > 3 and line[3:].strip() not in exclude_set
     ]
 
 
@@ -229,7 +230,7 @@ def address_review_findings(
         logger.warning("Review fix failed PR #%s: %s", pr_number, detail[:500])
         return LifecycleResult("fix_failed", detail)
 
-    changed = _git_changed_files(worktree)
+    changed = _git_changed_files(worktree, exclude=(loop_config.state_file,))
     violating = _files_outside_pr_scope(pr_files, changed)
     if violating:
         logger.warning(
@@ -243,7 +244,9 @@ def address_review_findings(
         f"fix(fleet): address PR review feedback\n\n"
         f"{_AGENT_FOOTER} persona={fix_persona_name} | PR #{pr_number}"
     )
-    pushed = github_ops.commit_and_push(worktree, message, branch)
+    pushed = github_ops.commit_and_push(
+        worktree, message, branch, exclude=(loop_config.state_file,)
+    )
     if not pushed:
         return LifecycleResult("ignored", "Review had findings but no fix commit was pushed")
     return LifecycleResult("addressed", "Fix pushed for review findings")
@@ -326,7 +329,9 @@ def attempt_ci_fix(
         f"fix(fleet): CI failures on PR #{pr_number}\n\n"
         f"{_AGENT_FOOTER} persona={fix_persona_name}"
     )
-    return github_ops.commit_and_push(worktree, message, branch)
+    return github_ops.commit_and_push(
+        worktree, message, branch, exclude=(loop_config.state_file,)
+    )
 
 
 def tiered_merge_allowed(
