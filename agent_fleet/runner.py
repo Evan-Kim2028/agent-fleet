@@ -53,6 +53,8 @@ class FleetRunConfig:
     memory_limit_research: str = "2G"
     create_branch: bool = True
     commit_changes: bool = True
+    resume: bool = True
+    preserve_worktree_on_failure: bool = True
 
 
 @dataclass
@@ -163,8 +165,25 @@ class LocalFleetRunner:
         phases: dict[str, Any] = {}
         task_spec: TaskSpec | None = None
         branch_name = f"{self._spine.branch_prefix}/{persona}/{task_id}-{run_id}"
+        notes = None
+        brief = None
+        resume_mode = False
+        result: FleetRunResult | None = None
 
         try:
+            if self._config.resume and hasattr(self._git_ops, "find_resume_branch"):
+                resumed = self._git_ops.find_resume_branch(
+                    task_id,
+                    persona,
+                    self._spine.branch_prefix,
+                )
+                if resumed is not None:
+                    branch_name, run_id = resumed
+                    worktree = self._git_ops.attach_worktree(branch_name, run_id)
+                    resume_mode = True
+                    logger.info("[%s] RESUME on %s", run_id, branch_name)
+                    phases["RESUME"] = {"branch": branch_name, "worktree": str(worktree)}
+
             logger.info("[%s] PLAN", run_id)
             task_spec = plan(
                 task_id,
@@ -177,7 +196,7 @@ class LocalFleetRunner:
             phases["PLAN"] = task_spec.to_dict()
 
             if task_spec.decomposition_decision == DecompositionDecision.REJECTED:
-                return FleetRunResult(
+                result = FleetRunResult(
                     run_id=run_id,
                     task_id=task_id,
                     persona=persona,
@@ -187,9 +206,10 @@ class LocalFleetRunner:
                     phases=phases,
                     duration_seconds=round(time.monotonic() - start, 2),
                 )
+                return result
 
             if task_spec.decomposition_decision == DecompositionDecision.DECOMPOSE:
-                return FleetRunResult(
+                result = FleetRunResult(
                     run_id=run_id,
                     task_id=task_id,
                     persona=persona,
@@ -200,43 +220,46 @@ class LocalFleetRunner:
                     error="Task requires decomposition — dispatch child tasks separately",
                     duration_seconds=round(time.monotonic() - start, 2),
                 )
+                return result
 
-            logger.info("[%s] RESEARCH (%d items)", run_id, len(task_spec.research_plan))
-            notes = research_all(
-                task_spec.research_plan,
-                backend=self._backend,
-                memory_limit=self._config.memory_limit_research,
-                max_workers=self._config.max_research_workers,
-                cwd=repo_root,
-            )
-            phases["RESEARCH"] = [n.to_dict() for n in notes]
+            if not resume_mode:
+                logger.info("[%s] RESEARCH (%d items)", run_id, len(task_spec.research_plan))
+                notes = research_all(
+                    task_spec.research_plan,
+                    backend=self._backend,
+                    memory_limit=self._config.memory_limit_research,
+                    max_workers=self._config.max_research_workers,
+                    cwd=repo_root,
+                )
+                phases["RESEARCH"] = [n.to_dict() for n in notes]
 
-            logger.info("[%s] SYNTHESIZE", run_id)
-            brief = synthesize(task_spec, notes, backend=self._backend)
-            phases["SYNTHESIZE"] = brief.to_dict()
+                logger.info("[%s] SYNTHESIZE", run_id)
+                brief = synthesize(task_spec, notes, backend=self._backend)
+                phases["SYNTHESIZE"] = brief.to_dict()
 
-            logger.info("[%s] IMPLEMENT", run_id)
-            worktree = self._git_ops.setup_workspace(
-                repo_root,
-                run_id,
-                base_branch,
-                branch_name=branch_name if self._config.create_branch else None,
-            )
-            if self._config.create_branch and not getattr(self._git_ops, "use_worktree", False):
-                self._git_ops.create_branch(worktree, branch_name)
+                logger.info("[%s] IMPLEMENT", run_id)
+                worktree = self._git_ops.setup_workspace(
+                    repo_root,
+                    run_id,
+                    base_branch,
+                    branch_name=branch_name if self._config.create_branch else None,
+                )
+                if self._config.create_branch and not getattr(self._git_ops, "use_worktree", False):
+                    self._git_ops.create_branch(worktree, branch_name)
 
-            implement(
-                brief,
-                task_spec,
-                worktree,
-                branch_name,
-                backend=self._backend,
-                persona_resolver=self._persona_resolver,
-                persona_name=persona,
-                memory_limit=self._config.memory_limit_parent,
-            )
-            phases["IMPLEMENT"] = {"branch": branch_name, "worktree": str(worktree)}
+                implement(
+                    brief,
+                    task_spec,
+                    worktree,
+                    branch_name,
+                    backend=self._backend,
+                    persona_resolver=self._persona_resolver,
+                    persona_name=persona,
+                    memory_limit=self._config.memory_limit_parent,
+                )
+                phases["IMPLEMENT"] = {"branch": branch_name, "worktree": str(worktree)}
 
+            assert worktree is not None
             verify_attempts = 0
             verify_result = None
             while verify_attempts <= self._config.max_verify_retries:
@@ -256,6 +279,16 @@ class LocalFleetRunner:
                 verify_attempts += 1
                 if verify_attempts > self._config.max_verify_retries:
                     break
+                if notes is None:
+                    logger.info("[%s] RESEARCH (resume retry)", run_id)
+                    notes = research_all(
+                        task_spec.research_plan,
+                        backend=self._backend,
+                        memory_limit=self._config.memory_limit_research,
+                        max_workers=self._config.max_research_workers,
+                        cwd=repo_root,
+                    )
+                    phases.setdefault("RESEARCH", [n.to_dict() for n in notes])
                 brief = synthesize(
                     task_spec,
                     notes,
@@ -274,7 +307,7 @@ class LocalFleetRunner:
                 )
 
             if verify_result is None or verify_result.severity != VerifySeverity.OK:
-                return FleetRunResult(
+                result = FleetRunResult(
                     run_id=run_id,
                     task_id=task_id,
                     persona=persona,
@@ -285,6 +318,7 @@ class LocalFleetRunner:
                     error=verify_result.message if verify_result else "verify failed",
                     duration_seconds=round(time.monotonic() - start, 2),
                 )
+                return result
 
             changed_files = get_changed_files(worktree)
             diff = self._git_ops.diff_summary(worktree)
@@ -298,6 +332,16 @@ class LocalFleetRunner:
 
             pr_number: int | None = None
             if self._forge is not None:
+                if brief is None:
+                    if notes is None:
+                        notes = research_all(
+                            task_spec.research_plan,
+                            backend=self._backend,
+                            memory_limit=self._config.memory_limit_research,
+                            max_workers=self._config.max_research_workers,
+                            cwd=repo_root,
+                        )
+                    brief = synthesize(task_spec, notes, backend=self._backend)
                 logger.info("[%s] OPEN_PR", run_id)
                 self._git_ops.push_branch(worktree, branch_name)
                 pr_body = (
@@ -314,7 +358,7 @@ class LocalFleetRunner:
                     body=pr_body,
                     branch=branch_name,
                     base=base_branch,
-                    draft=True,
+                    draft=False,
                     labels=labels,
                 )
                 phases["OPEN_PR"] = {"pr_number": pr_number, "branch": branch_name}
@@ -344,7 +388,7 @@ class LocalFleetRunner:
 
             outcome = _run_outcome(review_results, tech_lead)
 
-            return FleetRunResult(
+            result = FleetRunResult(
                 run_id=run_id,
                 task_id=task_id,
                 persona=persona,
@@ -360,9 +404,10 @@ class LocalFleetRunner:
                 phases=phases,
                 duration_seconds=round(time.monotonic() - start, 2),
             )
+            return result
         except Exception as exc:
             logger.exception("[%s] fleet run failed", run_id)
-            return FleetRunResult(
+            result = FleetRunResult(
                 run_id=run_id,
                 task_id=task_id,
                 persona=persona,
@@ -372,9 +417,15 @@ class LocalFleetRunner:
                 error=str(exc),
                 duration_seconds=round(time.monotonic() - start, 2),
             )
+            return result
         finally:
             if worktree is not None:
-                self._git_ops.teardown_workspace(worktree)
+                forensic = self._config.preserve_worktree_on_failure and (
+                    result is None
+                    or result.outcome
+                    in ("verify_failed", "error", "review_blocked", "tech_lead_blocked")
+                )
+                self._git_ops.teardown_workspace(worktree, forensic=forensic)
 
 
 def run_full_pipeline(

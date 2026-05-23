@@ -408,6 +408,15 @@ def try_merge(
     loop_config: PrLoopConfig,
 ) -> LifecycleResult:
     repo_root = repo.repo_root
+    from agent_fleet.pr_loop.state import load_state, merge_cooldown_remaining
+
+    state = load_state(repo_root / loop_config.state_file)
+    remaining = merge_cooldown_remaining(state, loop_config.merge_cooldown_s)
+    if remaining > 0:
+        return LifecycleResult(
+            "cooldown",
+            f"Merge cooldown ({remaining:.0f}s remaining)",
+        )
     if github_ops.pr_has_blocking_review(pr_number, cwd=repo_root):
         return LifecycleResult("blocked", "Human requested changes")
     if github_ops.pr_has_label(pr_number, loop_config.needs_human_review_label, cwd=repo_root):

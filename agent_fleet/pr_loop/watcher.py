@@ -29,6 +29,37 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def prioritize_fleet_prs(
+    prs: list[dict[str, object]],
+    state: dict[str, object],
+    *,
+    fleet_ready_label: str = "fleet-ready",
+) -> list[dict[str, object]]:
+    """Sort open fleet PRs: ready + newest first; deprioritize parked/merged entries."""
+
+    def score(pr: dict[str, object]) -> int:
+        pr_number = int(pr["number"])
+        entry = get_pr_state(state, pr_number)
+        if entry.get("merged"):
+            return -10_000
+        if entry.get("parked"):
+            return -5_000
+        value = pr_number
+        labels = pr.get("labels") or []
+        label_names = {
+            str(item.get("name", ""))
+            for item in labels
+            if isinstance(item, dict)
+        }
+        if fleet_ready_label in label_names:
+            value += 10_000
+        if pr.get("isDraft"):
+            value -= 500
+        return value
+
+    return sorted(prs, key=score, reverse=True)
+
+
 class PrLoopWatcher:
     """Long-running watcher for fleet PR lifecycle automation."""
 
@@ -47,8 +78,10 @@ class PrLoopWatcher:
         state = load_state(self.state_file)
         remaining = merge_cooldown_remaining(state, self.loop_config.merge_cooldown_s)
         if remaining > 0:
-            logger.info("Merge cooldown active (%.0fs remaining)", remaining)
-            return [{"status": "cooldown", "detail": f"{remaining:.0f}s"}]
+            logger.info(
+                "Merge cooldown active (%.0fs remaining); review/fix still runs",
+                remaining,
+            )
 
         results: list[dict[str, str]] = []
         prs = github_ops.list_open_fleet_prs(
@@ -57,6 +90,15 @@ class PrLoopWatcher:
         )
         if not prs:
             return results
+
+        ready_label = str(
+            self.repo.spine_overrides.get("pr_ready_label") or "fleet-ready"
+        )
+        prs = prioritize_fleet_prs(
+            prs,
+            state,
+            fleet_ready_label=ready_label,
+        )
 
         marker = (
             self.repo.pr_review.comment_title

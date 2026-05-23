@@ -1,5 +1,10 @@
-"""Tests for issue comment trigger parsing."""
+"""Tests for issue comment trigger parsing and GitHub polling helpers."""
 
+from agent_fleet.issue_loop.github_ops import (
+    as_comment_pages,
+    flatten_issue_comment_pages,
+    parse_paginated_json_arrays,
+)
 from agent_fleet.issue_loop.triggers import (
     extract_issue_number,
     extract_persona,
@@ -23,3 +28,31 @@ def test_watcher_marker() -> None:
 
 def test_issue_number_from_url() -> None:
     assert extract_issue_number("https://api.github.com/repos/o/r/issues/1499") == 1499
+
+
+def test_parse_slurped_comment_pages() -> None:
+    stdout = '[[{"id": 1, "body": "/agent --persona backend"}]]'
+    pages = parse_paginated_json_arrays(stdout)
+    comments = flatten_issue_comment_pages(as_comment_pages(pages))
+    assert len(comments) == 1
+    assert comments[0]["body"] == "/agent --persona backend"
+
+
+def test_parse_concatenated_comment_pages() -> None:
+    stdout = '[{"id": 1}][{"id": 2}]'
+    pages = parse_paginated_json_arrays(stdout)
+    comments = flatten_issue_comment_pages(as_comment_pages(pages))
+    assert [comment["id"] for comment in comments] == [1, 2]
+
+
+def test_parse_single_comment_page() -> None:
+    stdout = '[{"id": 1, "body": "hello"}, {"id": 2, "body": "/agent stop"}]'
+    pages = parse_paginated_json_arrays(stdout)
+    comments = flatten_issue_comment_pages(as_comment_pages(pages))
+    assert len(comments) == 2
+
+
+def test_parse_api_error_returns_empty_pages() -> None:
+    stdout = '{"message":"Not Found","status":"404"}'
+    pages = parse_paginated_json_arrays(stdout)
+    assert pages == [{"message": "Not Found", "status": "404"}]

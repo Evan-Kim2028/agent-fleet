@@ -111,6 +111,19 @@ def test_pr_loop_config_loads() -> None:
     assert cfg.auto_merge is True
 
 
+def test_prioritize_fleet_prs_newest_ready_first() -> None:
+    from agent_fleet.pr_loop.watcher import prioritize_fleet_prs
+
+    prs = [
+        {"number": 1601, "labels": [], "isDraft": False},
+        {"number": 1625, "labels": [{"name": "fleet-ready"}], "isDraft": False},
+        {"number": 1624, "labels": [{"name": "fleet-ready"}], "isDraft": True},
+    ]
+    state = {"pr:1601": {"parked": True}}
+    ordered = prioritize_fleet_prs(prs, state, fleet_ready_label="fleet-ready")
+    assert [int(p["number"]) for p in ordered] == [1625, 1624, 1601]
+
+
 def test_worktree_candidates_legacy_kimi() -> None:
     from agent_fleet.pr_loop.worktree import worktree_candidates
 

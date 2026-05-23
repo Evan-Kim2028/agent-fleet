@@ -97,7 +97,7 @@ def run_issue_dispatch(
         git_ops=git_ops,
         verifier=CommandVerifier(repo),
         spine=spine,
-        config=FleetRunConfig(create_branch=True, commit_changes=True),
+        config=FleetRunConfig(create_branch=True, commit_changes=True, resume=True),
         forge=GitHubForge(cwd=repo.repo_root),
     )
 

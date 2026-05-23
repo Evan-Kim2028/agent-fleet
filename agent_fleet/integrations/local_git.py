@@ -52,6 +52,68 @@ class LocalGitOps:
             check=False,
         )
 
+    def find_resume_branch(
+        self,
+        task_id: int,
+        persona: str,
+        branch_prefix: str,
+    ) -> tuple[str, str] | None:
+        """Return (branch_name, run_id) for an in-progress fleet branch with local changes."""
+        prefix = f"{branch_prefix}/{persona}/{task_id}-"
+        result = self._run(["branch", "--list", f"{prefix}*"], cwd=self.repo_root)
+        candidates = [
+            line.strip().lstrip("* ")
+            for line in result.stdout.splitlines()
+            if line.strip() and line.strip().lstrip("* ").startswith(prefix)
+        ]
+        for branch_name in reversed(candidates):
+            run_id = branch_name.rsplit("-", 1)[-1]
+            worktree = self.attach_worktree(branch_name, run_id, create=False)
+            if worktree is not None and self.has_workspace_changes(worktree):
+                return branch_name, run_id
+        return None
+
+    def attach_worktree(
+        self,
+        branch_name: str,
+        run_id: str,
+        *,
+        create: bool = True,
+    ) -> Path | None:
+        """Resolve or create a worktree for an existing fleet branch."""
+        if not self.use_worktree:
+            return self.repo_root
+
+        from agent_fleet.pr_loop.worktree import resolve_worktree_path
+
+        target = resolve_worktree_path(
+            branch_name,
+            repo_root=self.repo_root,
+            worktree_base=self.worktree_base,
+        )
+        if target.exists() and ((target / ".git").exists() or (target / ".git").is_file()):
+            self._active_worktrees.append(target)
+            return target
+        if not create:
+            return None
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        result = self._run(["worktree", "add", str(target), branch_name], cwd=self.repo_root)
+        if result.returncode != 0:
+            raise RuntimeError(f"git worktree add failed: {result.stderr.strip()}")
+        self._active_worktrees.append(target)
+        return target
+
+    def has_workspace_changes(self, worktree: Path) -> bool:
+        status = self._run(["status", "--porcelain"], cwd=worktree)
+        if status.stdout.strip():
+            return True
+        ahead = self._run(["rev-list", "--count", "HEAD", "--not", "--remotes"], cwd=worktree)
+        try:
+            return int(ahead.stdout.strip() or "0") > 0
+        except ValueError:
+            return False
+
     def setup_workspace(
         self,
         repo_root: Path,
@@ -79,7 +141,8 @@ class LocalGitOps:
         return target
 
     def teardown_workspace(self, worktree: Path, *, forensic: bool = False) -> None:
-        del forensic
+        if forensic:
+            return
         if not self.use_worktree or worktree.resolve() == self.repo_root.resolve():
             return
         self._run(["worktree", "remove", "--force", str(worktree)], cwd=self.repo_root)

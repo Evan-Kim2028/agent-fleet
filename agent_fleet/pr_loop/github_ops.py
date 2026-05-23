@@ -44,7 +44,7 @@ def list_open_fleet_prs(
         "--state",
         "open",
         "--json",
-        "number,headRefName,labels,isDraft,mergeable,mergeStateStatus",
+        "number,headRefName,labels,isDraft,mergeable,mergeStateStatus,createdAt",
         "--limit",
         "50",
         cwd=cwd,
@@ -157,6 +157,13 @@ def add_pr_label(pr_number: int, label: str, *, cwd: Path | None = None) -> None
     _gh("pr", "edit", str(pr_number), "--add-label", label, cwd=cwd, check=False)
 
 
+def pr_is_draft(pr_number: int, *, cwd: Path | None = None) -> bool:
+    result = _gh("pr", "view", str(pr_number), "--json", "isDraft", cwd=cwd, check=False)
+    if result.returncode != 0:
+        return False
+    return bool(json.loads(result.stdout).get("isDraft"))
+
+
 def merge_pr(
     pr_number: int,
     *,
@@ -164,6 +171,8 @@ def merge_pr(
     body: str,
     cwd: Path | None = None,
 ) -> bool:
+    if pr_is_draft(pr_number, cwd=cwd):
+        mark_pr_ready(pr_number, cwd=cwd)
     result = _gh(
         "pr",
         "merge",

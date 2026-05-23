@@ -39,33 +39,92 @@ def repo_full_name(*, cwd: Path | None = None) -> str:
     return result.stdout.strip()
 
 
+def flatten_issue_comment_pages(pages: list[Any]) -> list[dict[str, Any]]:
+    """Flatten gh api --paginate --slurp output into issue comment dicts."""
+    comments: list[dict[str, Any]] = []
+    for page in pages:
+        if isinstance(page, list):
+            comments.extend(item for item in page if isinstance(item, dict))
+    return comments
+
+
+def parse_paginated_json_arrays(stdout: str) -> list[Any]:
+    """Parse one or more JSON arrays/objects emitted by gh api --paginate."""
+    text = stdout.strip()
+    if not text:
+        return []
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        payload = None
+
+    if isinstance(payload, list):
+        if payload and all(isinstance(page, list) for page in payload):
+            return payload
+        if payload and all(isinstance(item, dict) for item in payload):
+            return [payload]
+        return payload
+
+    values: list[Any] = []
+    decoder = json.JSONDecoder()
+    idx = 0
+    while idx < len(text):
+        rest = text[idx:].lstrip()
+        if not rest:
+            break
+        value, end = decoder.raw_decode(rest)
+        values.append(value)
+        idx += len(text[idx:]) - len(rest) + end
+    return values
+
+
+def as_comment_pages(values: list[Any]) -> list[list[Any]]:
+    """Normalize gh paginate output into a list of comment pages."""
+    if not values:
+        return []
+    if isinstance(values[0], list):
+        return [page for page in values if isinstance(page, list)]
+    if isinstance(values[0], dict):
+        return [values]
+    return []
+
+
 def poll_issue_comments(
     repo: str,
     since: str,
     *,
     cwd: Path | None = None,
 ) -> list[dict[str, Any]]:
+    # gh api -f since=... does not apply correctly to this REST endpoint; use query param.
+    endpoint = f"repos/{repo}/issues/comments?since={since}"
     result = _gh(
         "api",
-        f"repos/{repo}/issues/comments",
-        "-f",
-        f"since={since}",
+        endpoint,
         "--paginate",
+        "--slurp",
         cwd=cwd,
         check=False,
     )
     if result.returncode != 0 or not result.stdout.strip():
+        logger.debug(
+            "poll_issue_comments failed: rc=%s stderr=%s",
+            result.returncode,
+            result.stderr.strip(),
+        )
         return []
-    comments: list[dict[str, Any]] = []
-    for line in result.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            comments.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return comments
+
+    try:
+        pages = parse_paginated_json_arrays(result.stdout)
+    except json.JSONDecodeError:
+        logger.debug("poll_issue_comments: invalid JSON in gh output")
+        return []
+
+    if pages and isinstance(pages[0], dict) and pages[0].get("message"):
+        logger.debug("poll_issue_comments API error: %s", pages[0].get("message"))
+        return []
+
+    return flatten_issue_comment_pages(as_comment_pages(pages))
 
 
 def issue_view(issue_number: int, *, cwd: Path | None = None) -> dict[str, Any]:
