@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from agent_fleet.pr_review.prompts import build_prompt
 from agent_fleet.pr_review.runner import run_pr_review
 from agent_fleet.repo import find_repo_config, load_repo_config
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from agent_fleet.agent_mode import AgentMode
 
 
@@ -48,7 +52,7 @@ class _MockBackend:
 _MOCK_ANALYSIS = json.dumps(
     {
         "pr_type": "backend",
-        "primary_areas": ["lakestore"],
+        "primary_areas": ["backend"],
         "risk_level": "low",
         "risk_reasoning": "Mock analysis passed.",
         "summary": "Test change looks fine.",
@@ -72,8 +76,32 @@ _MOCK_ANALYSIS = json.dumps(
 )
 
 
-def test_lake_of_rage_pr_review_config_loads() -> None:
-    repo = load_repo_config("/home/evan/Documents/lake-of-rage/.agent-fleet.yaml")
+@pytest.fixture
+def sample_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "sample-repo"
+    repo.mkdir()
+    overlay_dir = repo / "agents"
+    overlay_dir.mkdir()
+    (overlay_dir / "pr_review_overlay.md").write_text(
+        "## Repository-specific invariants\n\nAlways validate user input.\n",
+        encoding="utf-8",
+    )
+    (repo / ".agent-fleet.yaml").write_text(
+        """\
+name: sample-app
+default_branch: main
+pr_review:
+  enabled: true
+  use_in_code_review: true
+  overlay: agents/pr_review_overlay.md
+""",
+        encoding="utf-8",
+    )
+    return repo
+
+
+def test_pr_review_config_loads(sample_repo: Path) -> None:
+    repo = load_repo_config(sample_repo / ".agent-fleet.yaml")
     assert repo.pr_review is not None
     assert repo.pr_review.enabled is True
     assert repo.pr_review.use_in_code_review is True
@@ -81,23 +109,31 @@ def test_lake_of_rage_pr_review_config_loads() -> None:
     assert repo.pr_review.overlay_path.name == "pr_review_overlay.md"
 
 
-def test_lake_of_rage_overlay_in_prompt() -> None:
-    repo = find_repo_config("/home/evan/Documents/lake-of-rage")
+def test_overlay_in_prompt(sample_repo: Path) -> None:
+    repo = find_repo_config(sample_repo)
     assert repo is not None and repo.pr_review is not None
     prompt = build_prompt(
-        "diff --git a/x.py b/x.py\n+pass\n",
-        ["packages/lakestore/x.py"],
+        "diff --git a/src/app.py b/src/app.py\n+pass\n",
+        ["src/app.py"],
         "backend-security",
         repo.pr_review,
     )
     assert "Repository-specific invariants" in prompt
-    assert "solana_client.py" in prompt
+    assert "Always validate user input" in prompt
 
 
-def test_run_pr_review_mock_backend_on_lake_of_rage() -> None:
+@patch("agent_fleet.pr_review.runner.get_working_tree_diff")
+def test_run_pr_review_mock_backend(
+    mock_diff: MagicMock,
+    sample_repo: Path,
+) -> None:
+    mock_diff.return_value = (
+        "diff --git a/src/app.py b/src/app.py\n+pass\n",
+        ["src/app.py"],
+    )
     backend = _MockBackend(responses=[_MOCK_ANALYSIS, _MOCK_ANALYSIS])
     result = run_pr_review(
-        workspace=Path("/home/evan/Documents/lake-of-rage"),
+        workspace=sample_repo,
         backend=backend,
         base_branch="main",
     )

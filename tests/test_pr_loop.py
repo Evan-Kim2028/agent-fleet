@@ -75,11 +75,11 @@ def test_files_outside_pr_scope() -> None:
     pr_files = [
         ".github/workflows/pr-analyzer.yml",
         ".agent-fleet.yaml",
-        "packages/lakestore/tests/test_agent_fleet_smoke.py",
+        "src/tests/test_agent_fleet_smoke.py",
     ]
     assert _files_outside_pr_scope(pr_files, [".agent-fleet.yaml"]) == ()
     assert _files_outside_pr_scope(
-        pr_files, ["packages/lakestore/tests/test_new.py"]
+        pr_files, ["src/tests/test_new.py"]
     ) == ()
     assert _files_outside_pr_scope(pr_files, ["README.md"]) == ("README.md",)
 
@@ -100,9 +100,9 @@ def test_tiered_merge_allowed_with_and_without_risk() -> None:
     assert reason == ""
 
 
-def test_lake_of_rage_pr_loop_config_loads() -> None:
+def test_pr_loop_config_loads() -> None:
     raw = {
-        "name": "lake-of-rage",
+        "name": "sample-app",
         "pr_loop": {"enabled": True, "auto_merge": True, "fix_persona": "coder"},
     }
     cfg = load_pr_loop_config(Path("/tmp"), raw)
