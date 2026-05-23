@@ -1,7 +1,7 @@
 # Global agent fleet config
 # Default location: ~/.hermes/coding_fleet/fleet.yaml
 
-# Default backend: cursor (Cursor SDK / Composer) or kimi (Kimi Code CLI)
+# Default backend: cursor (Cursor SDK) or kimi (Kimi Code CLI)
 default_backend: cursor
 default_model: composer-2.5
 default_mode: agent
@@ -10,7 +10,7 @@ max_parallel: 3
 timeout_seconds: 900
 default_pipeline: simple
 
-# --- Optional: Kimi Code CLI (subscription) instead of Cursor ---
+# --- Optional: Kimi Code CLI execution backend ---
 # Requires: pip install not needed; install kimi-cli from Kimi Code
 # export KIMI_API_KEY=sk-kimi-...   # https://platform.kimi.ai
 # default_backend: kimi
@@ -26,6 +26,10 @@ personas:
     prompt: coder.md
   reviewer:
     prompt: reviewer.md
+  pr-analyzer:
+    prompt: pr-analyzer.md
+    model: composer-2.5
+    mode: plan
   explorer:
     prompt: explorer.md
     mode: plan
@@ -36,6 +40,8 @@ pipelines:
   code_review:
     - execute
     - review
+  pr_review:
+    - analyze
   full:
     - plan
     - research

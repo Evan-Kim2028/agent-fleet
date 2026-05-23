@@ -1,6 +1,6 @@
 ---
 name: coding-fleet
-description: Orchestrate parallel Cursor SDK or Kimi Code CLI coding agents with pluggable personas and pipelines
+description: Dispatch scoped coding personas through Agent Fleet review pipelines — parallel runs from Hermes with pluggable execution backends
 metadata:
   hermes:
     category: autonomous-ai-agents
@@ -10,7 +10,9 @@ metadata:
 
 # Coding Fleet
 
-When the user mentions **coding fleet** or gives `persona` + `pipeline` for a repo path: call `coding_fleet_dispatch` in your first tool turn.
+When the user mentions **coding fleet**, **PR analyzer**, or gives `persona` + `pipeline` for a repo path: call the appropriate tool in your first turn.
+
+## Implement / review dispatch
 
 ```json
 {
@@ -22,26 +24,64 @@ When the user mentions **coding fleet** or gives `persona` + `pipeline` for a re
 }
 ```
 
-Tell the user the fleet is running — dispatch usually takes **30–120 seconds**.
+Repos with `pr_review.use_in_code_review: true` in `.agent-fleet.yaml` automatically use the **two-pass PR analyzer** (Composer 2.5) for the review phase instead of the generic reviewer.
 
-## Backend (from fleet.yaml)
+## PR analyzer only (no implementer)
+
+Use when reviewing an existing branch or worktree diff:
+
+```json
+{
+  "workspace": "/absolute/path/to/repo",
+  "base_branch": "main",
+  "output_format": "json"
+}
+```
+
+Tool: `coding_fleet_pr_review`
+
+Or dispatch with pipeline `pr_review`:
+
+```json
+{
+  "goal": "Analyze current branch diff",
+  "workspace": "/absolute/path/to/repo",
+  "persona": "pr-analyzer",
+  "pipeline": "pr_review"
+}
+```
+
+## Execution backend (from fleet.yaml)
 
 | `default_backend` | Key required | Model default |
 |-------------------|--------------|---------------|
 | `cursor` (default) | `CURSOR_API_KEY` | `composer-2.5` |
 | `kimi` (optional) | `KIMI_API_KEY` | `kimi-for-coding` |
 
-Same personas and pipelines for both. Kimi setup: repo `docs/KIMI.md`.
-
 ## Pipelines
 
 - `simple` — implement only
-- `code_review` — implement then reviewer persona
+- `code_review` — implement → scope → verify? → **PR analyzer review** (when repo configured)
+- `pr_review` — analyze diff only (two-pass backend/security + frontend)
 - `full` — plan → research → implement → verify → review
+
+## Repo tuning
+
+Add to `.agent-fleet.yaml`:
+
+```yaml
+pr_review:
+  enabled: true
+  use_in_code_review: true
+  overlay: agents/pr_review_overlay.md
+  area_prefixes:
+    frontend: [frontend/, web/]
+    backend: [packages/, pipelines/, api/]
+```
 
 ## Requirements
 
 - Fleet config: `~/.hermes/coding_fleet/fleet.yaml`
-- Cursor path: `CURSOR_API_KEY` in `~/.hermes/.env`
-- Kimi path: `KIMI_API_KEY` + `kimi-cli` on PATH, `default_backend: kimi`
+- Cursor SDK backend: `CURSOR_API_KEY` in `~/.hermes/.env`
+- Kimi backend: `KIMI_API_KEY` + `kimi-cli` on PATH, `default_backend: kimi`
 - `pip install -e /path/to/agent-fleet`

@@ -14,14 +14,26 @@ from agent_fleet.backends import make_backend
 from agent_fleet.config import FleetConfig, load_fleet_config
 from agent_fleet.hooks import FleetTask, FleetTaskResult
 from agent_fleet.personas import YamlPersonaResolver
-from agent_fleet.phases import run_pipeline
-from agent_fleet.repo import find_repo_config, merge_repo_into_fleet_config
+from agent_fleet.phases import resolve_pipeline_outcome, run_pipeline
+from agent_fleet.repo import RepoConfig, find_repo_config, merge_repo_into_fleet_config
 from agent_fleet.runner import run_full_pipeline
+from agent_fleet.worktree import TaskWorkspace, prepare_task_workspace, should_isolate_worktree
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
+
+
+def _phase_map(phase_results: list[dict[str, object]]) -> dict[str, object]:
+    mapped: dict[str, object] = {}
+    counts: dict[str, int] = {}
+    for item in phase_results:
+        base = str(item.get("phase", "?"))
+        counts[base] = counts.get(base, 0) + 1
+        key = base if counts[base] == 1 else f"{base}_{counts[base]}"
+        mapped[key] = item
+    return mapped
 
 
 def _optional_entry_str(value: object | None, fallback: str | None) -> str | None:
@@ -89,6 +101,28 @@ class FleetDispatcher:
             },
         )
         self._admission_lock = threading.Lock()
+        self._worktree_lock = threading.Lock()
+
+    def _workspace_key(self, task: FleetTask) -> str:
+        return str(self._resolve_workspace(task))
+
+    def _workspace_task_counts(self, tasks: list[FleetTask]) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for task in tasks:
+            key = self._workspace_key(task)
+            counts[key] = counts.get(key, 0) + 1
+        return counts
+
+    def _isolation_repo(self, workspace: Path) -> RepoConfig | None:
+        repo_config = find_repo_config(workspace)
+        git_root = repo_config.repo_root if repo_config else workspace
+        from agent_fleet.verify_core import is_git_repo
+
+        if not is_git_repo(git_root):
+            return None
+        if repo_config is not None:
+            return repo_config
+        return RepoConfig(repo_root=git_root)
 
     def _emit(self, event: str, **payload: object) -> None:
         if not self.progress_callback:
@@ -141,7 +175,14 @@ class FleetDispatcher:
             changed_files=result.changed_files,
         )
 
-    def _run_one(self, task_index: int, task: FleetTask) -> FleetTaskResult:
+    def _run_one(
+        self,
+        task_index: int,
+        task: FleetTask,
+        *,
+        batch_size: int = 1,
+        same_workspace_tasks: int = 1,
+    ) -> FleetTaskResult:
         start = time.monotonic()
         self._emit(
             "fleet.task.start",
@@ -151,6 +192,7 @@ class FleetDispatcher:
         )
 
         token = None
+        task_workspace: TaskWorkspace | None = None
         with self._admission_lock:
             token = self._admission.try_admit("agent")
         if token is None:
@@ -177,13 +219,57 @@ class FleetDispatcher:
                     duration_seconds=round(time.monotonic() - start, 2),
                 )
 
-            repo = find_repo_config(workspace)
-            task_config = merge_repo_into_fleet_config(self.config, repo)
-            resolver = YamlPersonaResolver(task_config)
+            repo_config = find_repo_config(workspace)
+            git_repo = self._isolation_repo(workspace)
 
             phases = self._resolve_pipeline(task)
+            force_parallel = batch_size > 1 and same_workspace_tasks > 1
+            isolate = phases != ["full"] and should_isolate_worktree(
+                repo_config or git_repo,
+                batch_size=batch_size,
+                same_workspace_tasks=same_workspace_tasks,
+            )
+            if isolate:
+                if git_repo is None:
+                    return FleetTaskResult(
+                        task_index=task_index,
+                        persona=task.persona,
+                        goal=task.goal,
+                        status="error",
+                        summary=None,
+                        error=(
+                            "Parallel fleet dispatch requires a git repository. "
+                            f"Initialize git in {workspace} or dispatch sequentially."
+                        ),
+                        duration_seconds=round(time.monotonic() - start, 2),
+                    )
+                try:
+                    with self._worktree_lock:
+                        task_workspace = prepare_task_workspace(
+                            git_repo,
+                            task_index=task_index,
+                            force_isolation=force_parallel,
+                        )
+                except RuntimeError as exc:
+                    return FleetTaskResult(
+                        task_index=task_index,
+                        persona=task.persona,
+                        goal=task.goal,
+                        status="error",
+                        summary=None,
+                        error=str(exc),
+                        duration_seconds=round(time.monotonic() - start, 2),
+                    )
+
+            run_workspace = task_workspace.path if task_workspace else workspace
+            task_config = merge_repo_into_fleet_config(
+                self.config,
+                repo_config or git_repo,
+            )
+            resolver = YamlPersonaResolver(task_config)
+
             if phases == ["full"]:
-                result = self._run_full_pipeline(task_index, task, workspace, start)
+                result = self._run_full_pipeline(task_index, task, run_workspace, start)
                 self._emit(
                     "fleet.task.complete",
                     task_index=task_index,
@@ -191,27 +277,38 @@ class FleetDispatcher:
                     status=result.status,
                     duration_seconds=result.duration_seconds,
                 )
+                if task_workspace is not None:
+                    task_workspace.teardown(keep=result.status == "completed")
                 return result
 
-            phase_results, summary, exit_code = run_pipeline(
+            phase_results: list[dict[str, object]] = []
+            if task_workspace is not None and task_workspace.isolated:
+                phase_results.append(
+                    {
+                        "phase": "worktree",
+                        "path": str(task_workspace.path),
+                        "branch": task_workspace.branch_name,
+                        "run_id": task_workspace.run_id,
+                    }
+                )
+
+            pipeline_results, summary, exit_code, changed_files = run_pipeline(
                 backend=self.backend,
                 resolver=resolver,
                 task=task,
-                workspace=workspace,
+                workspace=run_workspace,
                 timeout_s=task_config.timeout_seconds,
                 phases=phases,
+                repo=repo_config or git_repo,
             )
+            phase_results.extend(pipeline_results)
             agent_id = None
             for phase in reversed(phase_results):
                 if phase.get("agent_id"):
                     agent_id = phase["agent_id"]
                     break
 
-            status = "completed" if exit_code == 0 else "error"
-            error = None
-            if exit_code != 0:
-                last = phase_results[-1] if phase_results else {}
-                error = last.get("stderr") or last.get("error") or "Cursor agent failed"
+            status, error = resolve_pipeline_outcome(phase_results, exit_code)
 
             result = FleetTaskResult(
                 task_index=task_index,
@@ -222,7 +319,10 @@ class FleetDispatcher:
                 error=error,
                 duration_seconds=round(time.monotonic() - start, 2),
                 agent_id=agent_id,
-                phases={p.get("phase", "?"): p for p in phase_results},
+                phases=_phase_map(phase_results),
+                changed_files=changed_files or None,
+                worktree=str(task_workspace.path) if task_workspace else None,
+                branch_name=task_workspace.branch_name if task_workspace else None,
             )
             self._emit(
                 "fleet.task.complete",
@@ -231,9 +331,13 @@ class FleetDispatcher:
                 status=status,
                 duration_seconds=result.duration_seconds,
             )
+            if task_workspace is not None:
+                task_workspace.teardown(keep=status == "completed")
             return result
         except Exception as exc:
             logger.exception("Fleet task %s failed", task_index)
+            if task_workspace is not None:
+                task_workspace.teardown(keep=False)
             return FleetTaskResult(
                 task_index=task_index,
                 persona=task.persona,
@@ -272,13 +376,30 @@ class FleetDispatcher:
                 f"max_parallel={self.config.max_parallel}"
             )
 
-        if len(normalized) == 1:
-            return [self._run_one(0, normalized[0])]
+        batch_size = len(normalized)
+        workspace_counts = self._workspace_task_counts(normalized)
 
-        results: list[FleetTaskResult | None] = [None] * len(normalized)
-        with ThreadPoolExecutor(max_workers=len(normalized)) as pool:
+        if batch_size == 1:
+            task = normalized[0]
+            return [
+                self._run_one(
+                    0,
+                    task,
+                    batch_size=1,
+                    same_workspace_tasks=workspace_counts[self._workspace_key(task)],
+                )
+            ]
+
+        results: list[FleetTaskResult | None] = [None] * batch_size
+        with ThreadPoolExecutor(max_workers=batch_size) as pool:
             futures = {
-                pool.submit(self._run_one, idx, task): idx
+                pool.submit(
+                    self._run_one,
+                    idx,
+                    task,
+                    batch_size=batch_size,
+                    same_workspace_tasks=workspace_counts[self._workspace_key(task)],
+                ): idx
                 for idx, task in enumerate(normalized)
             }
             for future in as_completed(futures):

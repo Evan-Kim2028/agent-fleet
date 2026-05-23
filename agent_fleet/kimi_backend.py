@@ -150,7 +150,7 @@ class KimiBackend:
         model: str | None = None,
         mode: str | None = None,
     ) -> KimiLLMResult:
-        del max_tokens, memory_limit, allowed_tools, mode
+        del max_tokens, memory_limit, mode
 
         if not self.api_key:
             return KimiLLMResult(
@@ -162,10 +162,23 @@ class KimiBackend:
 
         work_dir = str(cwd or Path.cwd())
         selected_model = model or self.model
+        scope_note = ""
+        if allowed_tools:
+            scoped = [
+                tool.removeprefix("path:")
+                for tool in allowed_tools
+                if tool.startswith("path:")
+            ]
+            if scoped:
+                scope_note = (
+                    "\n\nHard scope constraint: only modify files under these prefixes: "
+                    + ", ".join(scoped)
+                )
+        prompt_with_scope = f"{prompt}{scope_note}" if scope_note else prompt
         t0 = time.monotonic()
         try:
             stdout = call_kimi(
-                prompt,
+                prompt_with_scope,
                 api_key=self.api_key,
                 work_dir=work_dir,
                 timeout=timeout_s if timeout_s > 0 else 720,

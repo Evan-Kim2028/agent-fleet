@@ -1,6 +1,6 @@
 name: cursor-fleet
 version: 0.2.0
-description: Parallel Cursor SDK coding agents with pluggable personas and pipelines
+description: Agent Fleet — parallel scoped coding personas with review pipelines
 requires_env:
   - name: CURSOR_API_KEY
     description: Cursor API key from dashboard Integrations
@@ -9,3 +9,4 @@ requires_env:
 provides_tools:
   - coding_fleet_dispatch
   - coding_fleet_list_personas
+  - coding_fleet_pr_review

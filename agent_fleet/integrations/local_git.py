@@ -14,6 +14,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _resolve_base_ref(repo_root: Path, base_branch: str) -> str:
+    for candidate in (base_branch, "main", "master", "HEAD"):
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", candidate],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            return candidate
+    return "HEAD"
+
+
 class LocalGitOps:
     """Git operations scoped to a repository."""
 
@@ -38,17 +52,27 @@ class LocalGitOps:
             check=False,
         )
 
-    def setup_workspace(self, repo_root: Path, run_id: str, base_branch: str) -> Path:
+    def setup_workspace(
+        self,
+        repo_root: Path,
+        run_id: str,
+        base_branch: str,
+        *,
+        branch_name: str | None = None,
+    ) -> Path:
         if not self.use_worktree:
             return repo_root.resolve()
         self.worktree_base.mkdir(parents=True, exist_ok=True)
         target = self.worktree_base / run_id
         if target.exists():
             shutil.rmtree(target, ignore_errors=True)
-        result = self._run(
-            ["worktree", "add", str(target), base_branch],
-            cwd=repo_root,
-        )
+        start_ref = _resolve_base_ref(repo_root, base_branch)
+        args = ["worktree", "add"]
+        if branch_name:
+            args.extend(["-b", branch_name, str(target), start_ref])
+        else:
+            args.extend([str(target), start_ref])
+        result = self._run(args, cwd=repo_root)
         if result.returncode != 0:
             raise RuntimeError(f"git worktree add failed: {result.stderr.strip()}")
         self._active_worktrees.append(target)

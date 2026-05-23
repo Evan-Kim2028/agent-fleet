@@ -132,6 +132,57 @@ def coding_fleet_dispatch(args: dict[str, object], **kwargs: object) -> str:
     )
 
 
+def coding_fleet_pr_review(args: dict[str, object], **kwargs: object) -> str:
+    del kwargs
+    try:
+        load_fleet_config, _, _ = _ensure_agent_fleet()
+    except RuntimeError as exc:
+        return json.dumps({"error": str(exc)})
+
+    config_path_raw = args.get("config_path") or os.environ.get("CODING_FLEET_CONFIG")
+    config_path = _optional_str(config_path_raw)
+    config = load_fleet_config(config_path) if config_path else load_fleet_config()
+
+    backend_name = config.default_backend.lower()
+    if backend_name == "cursor" and not os.environ.get("CURSOR_API_KEY"):
+        return json.dumps(
+            {
+                "error": "CURSOR_API_KEY is not set. "
+                "Add it to ~/.hermes/.env (see https://cursor.com/dashboard/integrations)"
+            }
+        )
+    if backend_name == "kimi" and not os.environ.get("KIMI_API_KEY"):
+        return json.dumps(
+            {
+                "error": "KIMI_API_KEY is not set. "
+                "Use Kimi Code subscription key (https://platform.kimi.ai) "
+                "or set default_backend: cursor in fleet.yaml"
+            }
+        )
+
+    workspace_raw = args.get("workspace")
+    if not workspace_raw:
+        return json.dumps({"error": "workspace is required"})
+    workspace = Path(str(workspace_raw)).expanduser().resolve()
+
+    from agent_fleet.pr_review.runner import run_pr_review
+
+    try:
+        result = run_pr_review(
+            workspace=workspace,
+            fleet_config=config,
+            base_branch=str(args.get("base_branch") or "main"),
+            pr_number=int(args.get("pr_number") or 0),
+        )
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+    output_format = str(args.get("output_format") or "json").lower()
+    if output_format == "comment":
+        return str(result.get("comment_markdown") or "")
+    return json.dumps(result, default=str)
+
+
 def coding_fleet_list_personas(args: dict[str, object], **kwargs: object) -> str:
     del args, kwargs
     try:

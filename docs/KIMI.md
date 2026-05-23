@@ -1,16 +1,19 @@
 # Kimi Code CLI backend (optional)
 
-Use your **Kimi Code subscription** instead of Cursor API credits. Same agent fleet — personas, pipelines, repo scope, Hermes dispatch — different execution backend (`kimi-cli` subprocess).
+Agent Fleet can execute fleet runs through **Kimi Code CLI** (`kimi-cli` subprocess) instead of the default Cursor SDK backend. Personas, pipelines, repo scope, and Hermes dispatch are unchanged — only the execution adapter differs.
 
-## When to use Kimi vs Cursor
+## Kimi execution backend
 
-| Use Kimi | Use Cursor (default) |
-|----------|----------------------|
-| You have a Kimi Code CLI subscription | You have Cursor API / Composer access |
-| You want `KIMI_API_KEY` billing | You want `CURSOR_API_KEY` billing |
-| Silphco-style `kimi-cli` runs work for you | You want native Cursor SDK integration |
+Use this backend when your fleet should run via `kimi-cli` and a Kimi Code subscription (`KIMI_API_KEY`).
 
-Everything else (personas, `code_review`, `.agent-fleet.yaml`, batch dispatch) is identical.
+| Setting | Value |
+|---------|-------|
+| `default_backend` | `kimi` |
+| API key | `KIMI_API_KEY` (often `sk-kimi-...`) |
+| Default model | `kimi-for-coding` |
+| Runtime | `kimi-cli` binary |
+
+Personas, `code_review`, `.agent-fleet.yaml`, and batch dispatch work the same as with the default backend.
 
 ## Prerequisites
 
@@ -50,13 +53,13 @@ mkdir -p ~/.hermes/coding_fleet
 cp examples/fleet.kimi.yaml ~/.hermes/coding_fleet/fleet.yaml
 ```
 
-Or start from the Cursor example and edit manually:
+Or start from the default example and edit manually:
 
 ```bash
 cp fleet.example.yaml ~/.hermes/coding_fleet/fleet.yaml
 ```
 
-Edit `~/.hermes/coding_fleet/fleet.yaml` — switch backend to Kimi:
+Edit `~/.hermes/coding_fleet/fleet.yaml` — set the Kimi backend:
 
 ```yaml
 default_backend: kimi
@@ -78,16 +81,18 @@ personas:
     mode: plan
 ```
 
-**Do not set** `CURSOR_API_KEY` as required when running Kimi-only — the CLI checks the backend from `fleet.yaml`.
+When `default_backend: kimi`, the fleet uses `KIMI_API_KEY` — `CURSOR_API_KEY` is not required.
 
-### Switch back to Cursor
+### Default backend (Cursor SDK)
+
+To return to the default execution backend:
 
 ```yaml
 default_backend: cursor
 default_model: composer-2.5
 ```
 
-And export `CURSOR_API_KEY` instead.
+And export `CURSOR_API_KEY`.
 
 ## First run (CLI)
 
@@ -111,7 +116,7 @@ Verify personas load:
 agent-fleet personas
 ```
 
-## Repo scope (same as Cursor)
+## Repo scope
 
 `agent-fleet init /path/to/repo` and set scope in `.agent-fleet.yaml`:
 
@@ -121,7 +126,7 @@ persona_scope_allowlist:
     - src/
 ```
 
-Scope applies to Kimi runs the same way — injected into the persona prompt at dispatch.
+Scope is injected into the persona prompt at dispatch — same behavior regardless of backend.
 
 ## Hermes / Discord
 
@@ -204,7 +209,7 @@ Persona `model` is passed through to the backend when supported.
 - Uses model `kimi-for-coding` by default
 - Implements the same `LLMBackend` protocol as `CursorBackend`
 
-This is the same adapter pattern used in silphcoanalytics; the standalone package ships both backends.
+Both backends share the same adapter pattern; the standalone package ships both.
 
 ## See also
 

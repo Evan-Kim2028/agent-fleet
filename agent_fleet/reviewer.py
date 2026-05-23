@@ -67,21 +67,34 @@ def _build_prompt(
     shard_files: list[str],
     pr_diff: str,
     shard_id: str | None,
+    *,
+    task_goal: str = "",
+    task_context: str = "",
+    implementation_summary: str = "",
 ) -> str:
     """Return the reviewer prompt for a single LLM call."""
     shard_note = (
         f"You are reviewing shard '{shard_id}' (files listed below)."
         if shard_id is not None
-        else "You are reviewing the entire pull request."
+        else "You are reviewing the entire change set."
     )
     files_block = "\n".join(f"  - {f}" for f in shard_files)
+    task_block = ""
+    if task_goal.strip():
+        task_block = f"\nOriginal task:\n{task_goal.strip()}\n"
+    if task_context.strip():
+        task_block += f"\nTask context:\n{task_context.strip()}\n"
+    if implementation_summary.strip():
+        task_block += f"\nImplementer summary:\n{implementation_summary.strip()}\n"
+
     return (
-        f"You are a senior code reviewer for pull request #{pr_number}.\n"
+        f"You are a senior code reviewer for change set #{pr_number}.\n"
         f"{shard_note}\n\n"
-        f"Files in scope for this review:\n{files_block}\n\n"
-        f"Full PR diff (for global context):\n{pr_diff}\n\n"
+        f"Files in scope for this review:\n{files_block}\n"
+        f"{task_block}\n"
+        f"Diff:\n{pr_diff or '(no diff captured — review from changed files and summary)'}\n\n"
         "Return ONLY a JSON object with these fields:\n"
-        "  pr_number   (integer) — the PR number above\n"
+        "  pr_number   (integer) — the change set number above\n"
         "  verdict     (string)  — one of: approve | block | request_changes\n"
         "  summary     (string)  — concise review summary\n"
         "  issues      (array)   — each item: {severity, file, message}\n"
@@ -102,16 +115,31 @@ def _call_backend(
     timeout_s: int,
     memory_limit: str,
     cwd: Path | None = None,
+    task_goal: str = "",
+    task_context: str = "",
+    implementation_summary: str = "",
+    model: str | None = None,
+    allowed_tools: list[str] | None = None,
 ) -> ReviewResult:
     """Issue one LLM call and parse the result into a ReviewResult."""
-    prompt = _build_prompt(pr_number, shard_files, pr_diff, shard_id)
+    prompt = _build_prompt(
+        pr_number,
+        shard_files,
+        pr_diff,
+        shard_id,
+        task_goal=task_goal,
+        task_context=task_context,
+        implementation_summary=implementation_summary,
+    )
     result = backend.run(
         prompt,
         max_tokens=max_tokens,
         timeout_s=timeout_s,
         memory_limit=memory_limit,
-        allowed_tools=[],
+        allowed_tools=allowed_tools or [],
         cwd=cwd,
+        model=model,
+        mode="plan",
     )
     raw = _extract_json(result.stdout)
     # Enforce shard_id matches what we requested.
@@ -127,6 +155,18 @@ def _call_backend(
     )
 
 
+def aggregate_verdict(reviews: list[ReviewResult]) -> ReviewVerdict:
+    """Return the strictest verdict across shard reviews."""
+    priority = {
+        ReviewVerdict.BLOCK: 3,
+        ReviewVerdict.REQUEST_CHANGES: 2,
+        ReviewVerdict.APPROVE: 1,
+    }
+    if not reviews:
+        return ReviewVerdict.REQUEST_CHANGES
+    return max(reviews, key=lambda review: priority[review.verdict]).verdict
+
+
 def review(
     pr_number: int,
     pr_diff: str,
@@ -138,6 +178,11 @@ def review(
     timeout_s: int = 720,
     memory_limit: str = "2G",
     cwd: Path | None = None,
+    task_goal: str = "",
+    task_context: str = "",
+    implementation_summary: str = "",
+    model: str | None = None,
+    allowed_tools: list[str] | None = None,
 ) -> list[ReviewResult]:
     """Run the Reviewer phase.
 
@@ -168,6 +213,11 @@ def review(
                 timeout_s=timeout_s,
                 memory_limit=memory_limit,
                 cwd=cwd,
+                task_goal=task_goal,
+                task_context=task_context,
+                implementation_summary=implementation_summary,
+                model=model,
+                allowed_tools=allowed_tools,
             )
         ]
 
@@ -185,6 +235,11 @@ def review(
                 timeout_s=timeout_s,
                 memory_limit=memory_limit,
                 cwd=cwd,
+                task_goal=task_goal,
+                task_context=task_context,
+                implementation_summary=implementation_summary,
+                model=model,
+                allowed_tools=allowed_tools,
             )
         )
     return results

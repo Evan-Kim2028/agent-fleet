@@ -47,7 +47,7 @@ class CursorBackend:
         model: str | None = None,
         mode: AgentMode | None = None,
     ) -> CursorLLMResult:
-        del max_tokens, memory_limit, allowed_tools
+        del max_tokens, memory_limit
 
         if not self.api_key:
             return CursorLLMResult(
@@ -70,12 +70,25 @@ class CursorBackend:
         work_dir = str(cwd or Path.cwd())
         selected_model = model or self.default_model
         selected_mode = coerce_agent_mode(mode, default=self.default_mode)
+        scope_note = ""
+        if allowed_tools:
+            scoped = [
+                tool.removeprefix("path:")
+                for tool in allowed_tools
+                if tool.startswith("path:")
+            ]
+            if scoped:
+                scope_note = (
+                    "\n\nHard scope constraint: only modify files under these prefixes: "
+                    + ", ".join(scoped)
+                )
+        prompt_with_scope = f"{prompt}{scope_note}" if scope_note else prompt
         t0 = time.monotonic()
 
         def _execute() -> CursorLLMResult:
             try:
                 result = Agent.prompt(
-                    prompt,
+                    prompt_with_scope,
                     AgentOptions(
                         model=selected_model,
                         mode=selected_mode,

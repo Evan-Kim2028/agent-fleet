@@ -2,12 +2,12 @@
 
 Get from zero to a first fleet run in ~15 minutes.
 
-Choose a backend:
+Agent Fleet runs scoped personas through review pipelines against a git workspace. Pick an **execution backend** in `fleet.yaml` (Cursor SDK is the default; Kimi Code CLI is optional).
 
-| Track | Key | Guide section |
-|-------|-----|----------------|
-| **Cursor** (default) | `CURSOR_API_KEY` | [§3 First run](#3-first-run-cursor-default) |
-| **Kimi Code CLI** (optional) | `KIMI_API_KEY` | [§3b Kimi](#3b-first-run-kimi-code-cli-optional) · [KIMI.md](KIMI.md) |
+| Backend | Key | Setup section |
+|---------|-----|---------------|
+| **Cursor SDK** (default) | `CURSOR_API_KEY` | [§2 Default backend](#2-global-fleet-config) · [§3 First run](#3-first-run) |
+| **Kimi Code CLI** (optional) | `KIMI_API_KEY` | [§2 Kimi backend](#kimi-backend-optional) · [§3b First run](#3b-first-run-kimi-backend-optional) · [KIMI.md](KIMI.md) |
 
 ## 1. Install
 
@@ -26,7 +26,7 @@ mkdir -p ~/.hermes/coding_fleet
 cp fleet.example.yaml ~/.hermes/coding_fleet/fleet.yaml
 ```
 
-### Cursor (default)
+### Default backend (Cursor SDK)
 
 ```bash
 export CURSOR_API_KEY=your_key_here   # https://cursor.com/dashboard/integrations
@@ -39,7 +39,7 @@ default_backend: cursor
 default_model: composer-2.5
 ```
 
-### Kimi (optional)
+### Kimi backend (optional)
 
 ```bash
 export KIMI_API_KEY=sk-kimi-...       # https://platform.kimi.ai
@@ -55,14 +55,14 @@ default_model: kimi-for-coding
 
 See **[KIMI.md](KIMI.md)** for full Kimi Code CLI setup.
 
-Verify either backend:
+Verify personas load with either backend:
 
 ```bash
 agent-fleet personas
 # → coder, reviewer, explorer
 ```
 
-## 3. First run (Cursor default)
+## 3. First run
 
 Pick any git repo and run:
 
@@ -74,13 +74,13 @@ agent-fleet run "Add a one-line comment to README explaining the project" \
 
 Expected behavior:
 
-- Takes ~30–120 seconds (Cursor Composer runs in the repo)
-- Prints JSON with `phases.execute` and `phases.review`
-- Reviewer verdict: `APPROVE` or `REQUEST_CHANGES`
+- Takes ~30–120 seconds (fleet agents run in the repo)
+- Prints JSON with `phases.execute`, optional `phases.scope` / `phases.verify`, and `phases.review`
+- Final `status`: `completed`, `scope_violation`, `verify_failed`, `review_changes_requested`, or `review_blocked`
 
-## 3b. First run (Kimi Code CLI, optional)
+## 3b. First run (Kimi backend, optional)
 
-Same command — backend comes from `fleet.yaml`:
+Set `default_backend: kimi` in `fleet.yaml`, then use the same command:
 
 ```bash
 export KIMI_API_KEY=sk-kimi-...
@@ -93,9 +93,9 @@ agent-fleet run "Add a one-line comment to README explaining the project" \
 Expected behavior:
 
 - Takes ~30–180 seconds (`kimi-cli` runs in the repo)
-- Same JSON shape as Cursor (`phases.execute`, `phases.review`)
+- Same JSON shape (`phases.execute`, `phases.review`)
 
-Switch backends anytime by editing `default_backend` in `fleet.yaml`.
+Change backends anytime by editing `default_backend` in `fleet.yaml`.
 
 ## 4. Repo integration (recommended)
 
@@ -120,7 +120,7 @@ persona_scope_allowlist:
     - web/
 ```
 
-Re-run with repo scope applied automatically (Cursor or Kimi):
+Re-run with repo scope applied automatically:
 
 ```bash
 agent-fleet run "Fix failing test in src/" \
@@ -155,10 +155,10 @@ toolsets:
 Put the API key for your chosen backend in `~/.hermes/.env`:
 
 ```bash
-# Cursor (default)
+# Cursor SDK (default)
 CURSOR_API_KEY=...
 
-# Or Kimi (when default_backend: kimi in fleet.yaml)
+# Kimi backend (when default_backend: kimi in fleet.yaml)
 KIMI_API_KEY=sk-kimi-...
 ```
 
@@ -180,7 +180,7 @@ results = dispatch_tasks(
 )
 ```
 
-Backend (Cursor vs Kimi) is read from `fleet.yaml` automatically.
+The execution backend is read from `fleet.yaml` automatically.
 
 ## Troubleshooting
 
@@ -192,7 +192,7 @@ Backend (Cursor vs Kimi) is read from `fleet.yaml` automatically.
 | `agent-fleet: command not found` | Re-run `pip install -e ".[dev]"` |
 | Persona not found | Run `agent-fleet personas`; check `fleet.yaml` |
 | Agent edits wrong directories | Set `persona_scope_allowlist` in `.agent-fleet.yaml` |
-| Parallel tasks overwrite each other | Enable `use_worktree: true` in `.agent-fleet.yaml` |
+| Parallel tasks overwrite each other | Parallel batch auto-creates one worktree + branch per task; or set `use_worktree: true` for single runs |
 
 ## Next
 

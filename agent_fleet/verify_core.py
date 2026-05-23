@@ -98,6 +98,92 @@ def get_changed_files(worktree_path: Path) -> list[str]:
     return sorted(f for f in files if f)
 
 
+def is_git_repo(workspace: Path) -> bool:
+    result = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0 and result.stdout.strip() == "true"
+
+
+def get_working_tree_changes(workspace: Path) -> list[str]:
+    """Return repo-relative paths with uncommitted changes in *workspace*."""
+    if not is_git_repo(workspace):
+        return []
+
+    result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return []
+
+    files: set[str] = set()
+    for line in result.stdout.splitlines():
+        if len(line) < 4:
+            continue
+        path = line[3:].strip()
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        if path:
+            files.add(path)
+    return sorted(files)
+
+
+def get_working_tree_diff(workspace: Path, *, max_chars: int = 120_000) -> str:
+    """Return unified diff for uncommitted changes (tracked + staged)."""
+    if not is_git_repo(workspace):
+        return ""
+
+    parts: list[str] = []
+    for args in (["diff", "HEAD"], ["diff", "--cached"]):
+        result = subprocess.run(
+            ["git", *args],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            parts.append(result.stdout)
+
+    diff = "\n".join(parts).strip()
+    if len(diff) <= max_chars:
+        return diff
+    return (
+        diff[:max_chars]
+        + f"\n\n... diff truncated at {max_chars} characters ..."
+    )
+
+
+def run_shell_verify(workspace: Path, command: str, *, timeout_s: int = 600) -> dict[str, object]:
+    """Run a repo verify command and return a phase-shaped result dict."""
+    result = subprocess.run(
+        command,
+        shell=True,
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=timeout_s,
+    )
+    combined = (result.stdout or "") + (result.stderr or "")
+    return {
+        "command": command,
+        "exit_code": result.returncode,
+        "stdout": result.stdout or "",
+        "stderr": result.stderr or "",
+        "passed": result.returncode == 0,
+        "detail": combined[-4000:] if combined else "",
+    }
+
+
 def _check_result_to_dict(result: CheckResult) -> dict[str, object]:
     """Convert a CheckResult to the schema-compliant check entry dict."""
     return {

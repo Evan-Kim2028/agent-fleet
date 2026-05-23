@@ -185,3 +185,5 @@ class FleetTaskResult:
     phases: dict[str, Any] | None = None
     task_spec: dict[str, Any] | None = None
     changed_files: list[str] | None = None
+    worktree: str | None = None
+    branch_name: str | None = None

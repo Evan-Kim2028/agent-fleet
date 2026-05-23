@@ -11,29 +11,29 @@ How to define, scope, and route coding agents.
 
 Both merge at dispatch time. Repo settings override global defaults where noted below.
 
-## Backend: Cursor vs Kimi
+## Execution backends
 
-Set in `fleet.yaml`:
+Agent Fleet runs the same personas and pipelines through a pluggable execution backend. Set `default_backend` in `fleet.yaml`:
 
 ```yaml
-# Cursor (default) — Cursor SDK, composer-2.5, CURSOR_API_KEY
+# Default — Cursor SDK, composer-2.5, CURSOR_API_KEY
 default_backend: cursor
 default_model: composer-2.5
 
-# Kimi (optional) — kimi-cli, Kimi Code subscription, KIMI_API_KEY
+# Optional — kimi-cli, Kimi Code subscription, KIMI_API_KEY
 # default_backend: kimi
 # default_model: kimi-for-coding
 # kimi_bin: ~/.local/bin/kimi-cli
 ```
 
-| Setting | Cursor | Kimi |
-|---------|--------|------|
+| Setting | Cursor SDK (default) | Kimi Code CLI |
+|---------|----------------------|---------------|
 | `default_backend` | `cursor` | `kimi` |
 | API key env | `CURSOR_API_KEY` | `KIMI_API_KEY` |
 | Default model | `composer-2.5` | `kimi-for-coding` |
 | Runtime | `cursor-sdk` (pip) | `kimi-cli` binary |
 
-Personas, pipelines, repo scope, and Hermes dispatch are **backend-agnostic**. Full Kimi guide: **[KIMI.md](KIMI.md)**.
+Personas, pipelines, repo scope, and Hermes dispatch are **backend-agnostic**. Kimi setup: **[KIMI.md](KIMI.md)**.
 
 ## Global fleet (`fleet.yaml`)
 
@@ -141,7 +141,7 @@ Used by the **full** pipeline (`--pipeline full`):
 | Name | CLI / Hermes | Phases |
 |------|--------------|--------|
 | `simple` | default | execute |
-| `code_review` | recommended | execute → review |
+| `code_review` | recommended | execute → scope → verify? → review |
 | `full` | `--pipeline full` | PLAN → RESEARCH → SYNTHESIZE → IMPLEMENT → VERIFY → REVIEW → TECH_LEAD? |
 
 `full` is a special orchestrator mode (branch + worktree + verify loop). The `pipelines.full` list in yaml is documentation only for that path.
@@ -199,7 +199,7 @@ agent-fleet run "Add round-trip test for NameMapping" \
 
 ## Skill-backed personas
 
-Bind a Hermes/Cursor skill as the persona body:
+Bind a skill as the persona body:
 
 ```yaml
 personas:
@@ -236,7 +236,7 @@ Batch (parallel, up to `max_parallel`):
 }
 ```
 
-**Safe batch rule:** different files/packages only. Same file → sequential dispatch or enable `use_worktree: true`.
+**Safe batch rule:** parallel dispatch on the same repo auto-isolates each task in its own git worktree and branch. Completed runs keep the worktree path in the result (`worktree`, `branch_name`) for review/merge; failed runs tear down automatically.
 
 ## Routing cheat sheet (lake-of-rage example)
 

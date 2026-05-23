@@ -3,8 +3,8 @@
 CODING_FLEET_DISPATCH = {
     "name": "coding_fleet_dispatch",
     "description": (
-        "Spawn one or more Cursor SDK (Composer) coding agents with pluggable personas. "
-        "Use for repo work: implement features, explore codebases, or run execute+review pipelines."
+        "Dispatch one or more Agent Fleet coding personas against a repo workspace. "
+        "Use for implement, explore, execute+review, or pr_review analyze pipelines."
     ),
     "parameters": {
         "type": "object",
@@ -18,7 +18,7 @@ CODING_FLEET_DISPATCH = {
             "workspace": {"type": "string", "description": "Absolute path to repo/workspace"},
             "pipeline": {
                 "type": "string",
-                "description": "Pipeline name (simple, code_review, full)",
+                "description": "Pipeline name (simple, code_review, pr_review, full)",
             },
             "tasks": {
                 "type": "array",
@@ -43,4 +43,34 @@ CODING_FLEET_LIST_PERSONAS = {
     "name": "coding_fleet_list_personas",
     "description": "List available coding fleet personas and pipelines from fleet.yaml",
     "parameters": {"type": "object", "properties": {}},
+}
+
+CODING_FLEET_PR_REVIEW = {
+    "name": "coding_fleet_pr_review",
+    "description": (
+        "Run the repo-tuned two-pass PR analyzer (Composer 2.5 by default) on a "
+        "workspace diff. Uses pr_review settings from .agent-fleet.yaml when present."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "workspace": {
+                "type": "string",
+                "description": "Absolute path to git repo with changes to review",
+            },
+            "base_branch": {
+                "type": "string",
+                "description": "Base branch for merge-base diff (default: main)",
+            },
+            "pr_number": {
+                "type": "integer",
+                "description": "Optional PR number for analyzer logs",
+            },
+            "output_format": {
+                "type": "string",
+                "description": "json (default) or comment (GitHub markdown)",
+            },
+        },
+        "required": ["workspace"],
+    },
 }
