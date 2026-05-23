@@ -140,6 +140,7 @@ def test_persona_covering_files_and_merge_scope() -> None:
         persona_scope_allowlist={
             "coder": ("src/",),
             "infra": ("infra/", "sql/"),
+            "pipe": ("pipelines/",),
         },
     )
     infra_files = ["infra/vps/deploy.sh", "infra/vps/rollback.sh"]
@@ -147,3 +148,5 @@ def test_persona_covering_files_and_merge_scope() -> None:
     assert _merge_scope_out_of_scope("coder", infra_files, repo) == []
     assert _merge_scope_out_of_scope("coder", ["src/a.py"], repo) == []
     assert _merge_scope_out_of_scope("coder", ["web/x.ts"], repo) == ["web/x.ts"]
+    mixed = ["infra/vps/deploy.sh", "pipelines/pokemontcg_pipe/src/pipe/promote.py"]
+    assert _merge_scope_out_of_scope("lakestore", mixed, repo) == []

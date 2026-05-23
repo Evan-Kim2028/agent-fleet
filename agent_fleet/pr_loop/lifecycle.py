@@ -109,18 +109,22 @@ def _merge_scope_out_of_scope(
     changed: list[str],
     repo: RepoConfig,
 ) -> list[str]:
-    """Out-of-scope paths for merge gate; infer persona from changed files when needed."""
+    """Out-of-scope paths for merge gate; allow files covered by any persona."""
+    if not changed:
+        return []
+
     allowed_paths = repo.persona_scope_allowlist.get(persona, ())
-    oos = (
-        list(files_outside_allowed_paths(allowed_paths, changed))
-        if allowed_paths
-        else []
-    )
-    if oos:
-        covering = _persona_covering_files(changed, repo)
-        if covering:
+    if allowed_paths and not files_outside_allowed_paths(allowed_paths, changed):
+        return []
+
+    uncovered = list(changed)
+    for paths in repo.persona_scope_allowlist.values():
+        if not paths:
+            continue
+        uncovered = list(files_outside_allowed_paths(paths, uncovered))
+        if not uncovered:
             return []
-    return oos
+    return uncovered
 
 
 def _review_fix_persona(
