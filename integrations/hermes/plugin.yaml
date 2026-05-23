@@ -12,3 +12,4 @@ provides_tools:
   - coding_fleet_pr_review
   - coding_fleet_pr_loop
   - coding_fleet_scope
+  - coding_fleet_scout

@@ -30,14 +30,13 @@ def resolve_code_review_config(
 
     inherited = CodeReviewConfig()
     if pr_loop and pr_loop.enabled and section is None:
-        inherited = CodeReviewConfig(
+        return CodeReviewConfig(
             auto_fix=True,
             max_fix_attempts=pr_loop.max_fix_attempts,
             fix_persona=pr_loop.fix_persona,
             auto_push=True,
             auto_pr_loop=True,
         )
-        return inherited
 
     if not isinstance(section, dict):
         return None

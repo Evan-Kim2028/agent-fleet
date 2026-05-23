@@ -71,6 +71,40 @@ CODING_FLEET_SCOPE = {
     },
 }
 
+CODING_FLEET_SCOUT = {
+    "name": "coding_fleet_scout",
+    "description": (
+        "Run Fleet Scouts (read-only): product discovery + technical repo map, "
+        "returning a ScoutBrief with recommended_next_moves for dispatch."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "workspace": {
+                "type": "string",
+                "description": "Absolute path to git repo with .agent-fleet.yaml",
+            },
+            "github_repo": {
+                "type": "string",
+                "description": "Optional owner/repo for gh issue lookup",
+            },
+            "issue_limit": {
+                "type": "integer",
+                "description": "Max open issues for product scout (default 20)",
+            },
+            "product_context": {
+                "type": "string",
+                "description": "Extra product/business context for the product scout",
+            },
+            "depth": {
+                "type": "string",
+                "description": "light (default) or deep",
+            },
+        },
+        "required": ["workspace"],
+    },
+}
+
 CODING_FLEET_PR_LOOP = {
     "name": "coding_fleet_pr_loop",
     "description": (

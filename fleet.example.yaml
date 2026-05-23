@@ -33,6 +33,12 @@ personas:
   explorer:
     prompt: explorer.md
     mode: plan
+  product-scout:
+    prompt: product-scout.md
+    mode: plan
+  tech-scout:
+    prompt: tech-scout.md
+    mode: plan
 
 pipelines:
   simple:
@@ -42,6 +48,10 @@ pipelines:
     - review
   pr_review:
     - analyze
+  scout:
+    - product_scout
+    - tech_scout
+    - synthesize_scout
   full:
     - plan
     - research

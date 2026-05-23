@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import sys
@@ -16,7 +17,7 @@ from agent_fleet.issue_loop import github_ops
 from agent_fleet.issue_loop.config import IssueDispatchConfig
 from agent_fleet.issue_loop.triggers import extract_persona
 from agent_fleet.personas import YamlPersonaResolver
-from agent_fleet.repo import RepoConfig, find_repo_config
+from agent_fleet.repo import find_repo_config
 from agent_fleet.runner import FleetRunConfig, LocalFleetRunner, _spine_from_repo
 
 logger = logging.getLogger(__name__)
@@ -136,10 +137,8 @@ def run_issue_dispatch(
         logger.warning("Failed to post completion comment: %s", exc)
     finally:
         for label in (mutex_label, running_label):
-            try:
+            with contextlib.suppress(Exception):
                 github_ops.remove_label(issue_number, label, cwd=repo.repo_root)
-            except Exception:
-                pass
 
     return 0 if result.outcome in {"completed", "review_changes_requested"} else 1
 

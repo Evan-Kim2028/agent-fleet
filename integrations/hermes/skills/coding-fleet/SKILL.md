@@ -40,6 +40,22 @@ Tool: `coding_fleet_pr_loop`
 
 Requires `gh` authenticated, `CURSOR_API_KEY`, and `pr_loop` + `pr_review` in repo config. PRs touching `.github/workflows/` auto-park for human review.
 
+## Fleet Scouts (intake — read only)
+
+Product + technical discovery before dispatch:
+
+```json
+{
+  "workspace": "/absolute/path/to/repo",
+  "depth": "light",
+  "product_context": "optional business context"
+}
+```
+
+Tool: `coding_fleet_scout`
+
+Then: `coding_fleet_scope` → `coding_fleet_dispatch`.
+
 ## Scope fleet work (thermo-nuclear quality review)
 
 Rank dispatchable tasks from open issues + large-file hotspots:
@@ -71,6 +87,8 @@ PR reviews automatically include a **quality pass** using the bundled `thermo-nu
 ```
 
 Repos with `pr_review.use_in_code_review: true` in `.agent-fleet.yaml` automatically use the **two-pass PR analyzer** (Composer 2.5) for the review phase instead of the generic reviewer.
+
+When `pr_loop.enabled: true`, `code_review` dispatch also **auto-fixes** review/verify failures, pushes the branch, and runs `coding_fleet_pr_loop` on the new PR.
 
 ## PR analyzer only (no implementer)
 

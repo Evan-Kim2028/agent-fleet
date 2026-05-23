@@ -66,8 +66,7 @@ def create_pr(
     )
     if result.returncode != 0:
         logger.warning("gh pr create failed: %s", result.stderr[:500])
-        existing = find_pr_for_branch(branch, cwd=cwd)
-        return existing
+        return find_pr_for_branch(branch, cwd=cwd)
     import re
 
     match = re.search(r"/pull/(\d+)", result.stdout or result.stderr or "")

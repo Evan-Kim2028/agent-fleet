@@ -31,7 +31,6 @@ def _rerun_quality_gates(
     workspace: Path,
     timeout_s: int,
     repo: RepoConfig | None,
-    implementer_persona: str,
     implementation_summary: str,
     reviewer_persona: str = "reviewer",
 ) -> tuple[list[dict[str, Any]], str, int, list[str]]:
@@ -135,7 +134,6 @@ def run_code_review_with_auto_fix(
             workspace=workspace,
             timeout_s=timeout_s,
             repo=repo,
-            implementer_persona=task.persona,
             implementation_summary=summary,
             reviewer_persona=reviewer_persona,
         )

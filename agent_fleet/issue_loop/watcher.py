@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.issue_loop import github_ops
-from agent_fleet.issue_loop.config import IssueDispatchConfig
 from agent_fleet.issue_loop.state import load_state, now_iso, save_state, state_path
 from agent_fleet.issue_loop.triggers import (
     extract_issue_number,
@@ -22,7 +21,9 @@ from agent_fleet.issue_loop.triggers import (
 )
 from agent_fleet.repo import RepoConfig, find_repo_config
 
-from agent_fleet.pr_loop.config import PrLoopConfig
+if TYPE_CHECKING:
+    from agent_fleet.issue_loop.config import IssueDispatchConfig
+    from agent_fleet.pr_loop.config import PrLoopConfig
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,7 @@ def _dispatch_executable() -> list[str]:
 
 def _pid_is_dispatch(pid: int) -> bool:
     try:
-        with open(f"/proc/{pid}/cmdline", "rb") as handle:
+        with Path(f"/proc/{pid}/cmdline").open("rb") as handle:
             return b"agent_fleet.issue_loop.dispatch" in handle.read()
     except (FileNotFoundError, ProcessLookupError, PermissionError):
         return False
@@ -140,7 +141,13 @@ class IssueLoopWatcher:
             )
             if pid is not None:
                 in_flight.append({"pid": pid, "persona": persona})
-                results.append({"issue": str(issue_number), "status": "dispatched", "pid": str(pid)})
+                results.append(
+                    {
+                        "issue": str(issue_number),
+                        "status": "dispatched",
+                        "pid": str(pid),
+                    }
+                )
 
         state["since"] = new_since
         save_state(self.state_file, state)

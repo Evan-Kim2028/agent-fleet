@@ -131,7 +131,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         config_path=args.config,
     )
     print(json.dumps([r.__dict__ for r in results], indent=2, default=str))
-    return 0 if results and results[0].status == "completed" else 1
+    return 0 if results and results[0].status in {"completed", "merged"} else 1
 
 
 def cmd_personas(args: argparse.Namespace) -> int:
@@ -268,6 +268,22 @@ def main(argv: list[str] | None = None) -> int:
     scope_p.add_argument("--github-repo", help="owner/repo override for gh issues")
     scope_p.add_argument("--issue-limit", type=int, default=20)
     scope_p.set_defaults(func=cmd_scope)
+
+    scout_p = sub.add_parser(
+        "scout",
+        help="Fleet Scouts — product + technical intake (read-only)",
+    )
+    scout_p.add_argument("--workspace", help="Repo path")
+    scout_p.add_argument("--github-repo", help="owner/repo override for gh issues")
+    scout_p.add_argument("--issue-limit", type=int, default=20)
+    scout_p.add_argument("--product-context", help="Extra product/business context")
+    scout_p.add_argument(
+        "--depth",
+        choices=("light", "deep"),
+        default="light",
+        help="Scout depth (default: light)",
+    )
+    scout_p.set_defaults(func=cmd_scout)
 
     personas_p = sub.add_parser("personas", help="List personas")
     personas_p.add_argument("--workspace", help="Repo path (for repo-local personas)")

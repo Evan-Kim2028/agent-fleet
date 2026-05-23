@@ -294,7 +294,8 @@ class FleetDispatcher:
                 )
 
             pipeline_name = task.pipeline or task_config.default_pipeline
-            code_review_cfg = (repo_config or git_repo).code_review if (repo_config or git_repo) else None
+            repo_for_publish = repo_config or git_repo
+            code_review_cfg = repo_for_publish.code_review if repo_for_publish else None
             use_auto_fix = (
                 pipeline_name == "code_review"
                 and code_review_cfg is not None

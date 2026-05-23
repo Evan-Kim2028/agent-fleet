@@ -4,7 +4,7 @@ A multi-agent coding orchestrator: scoped personas, review pipelines, and parall
 
 **Default backend:** Cursor SDK (`composer-2.5`). **Optional:** Kimi Code CLI subscription (`kimi-for-coding`) — same personas, pipelines, and repo scope.
 
-**Docs:** [Quickstart](docs/QUICKSTART.md) · [New repo setup](docs/NEW-REPO.md) · [Personas](docs/PERSONAS.md) · [Kimi backend](docs/KIMI.md) (optional)
+**Docs:** [Quickstart](docs/QUICKSTART.md) · [New repo setup](docs/NEW-REPO.md) · [Fleet Scouts](docs/SCOUTS.md) · [Personas](docs/PERSONAS.md) · [Kimi backend](docs/KIMI.md) (optional)
 
 ## What Agent Fleet does
 
@@ -200,10 +200,12 @@ persona_scope_allowlist:
 | Pipeline | Phases |
 |----------|--------|
 | `simple` | execute |
-| `code_review` | execute → scope → verify (if configured) → review |
+| `code_review` | execute → scope → verify (if configured) → review → **auto-fix?** |
 | `full` | PLAN → RESEARCH → SYNTHESIZE → IMPLEMENT → VERIFY → REVIEW → TECH_LEAD? |
 
 `code_review` runs mechanical scope checks on changed files, optional verify commands from `.agent-fleet.yaml`, then a diff-based reviewer that returns a typed verdict (`approve`, `request_changes`, `block`).
+
+When `pr_loop.enabled: true` (or explicit `code_review.auto_fix: true`), the dispatcher **automatically re-dispatches a fix persona** on `request_changes` or `verify_failed`, then re-runs scope/verify/review. With `auto_push` + `auto_pr_loop`, it opens/updates the PR and runs the merge lifecycle.
 
 | Outcome | Meaning |
 |---------|---------|

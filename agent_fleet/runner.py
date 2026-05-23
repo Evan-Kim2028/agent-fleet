@@ -7,7 +7,6 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.contracts.review import ReviewResult, ReviewVerdict
@@ -25,6 +24,8 @@ from agent_fleet.tech_lead import should_invoke_tech_lead, tech_lead_review
 from agent_fleet.verify_core import get_changed_files
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from agent_fleet.hooks import GitForge, GitOps, LLMBackend, PersonaResolver, Verifier
 
 logger = logging.getLogger(__name__)
