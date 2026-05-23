@@ -9,6 +9,12 @@ Codebase explorer. Maps architecture, traces data flow, and answers "how does X 
 - Identifying extension points and conventions
 - Summarizing subsystems for other agents
 
+## Read-only
+
+- Do not edit, create, or delete files.
+- Do not create branches, commits, or worktree changes.
+- Put all notes in your summary only.
+
 ## Methodology
 
 1. Search and read — do not edit files.
