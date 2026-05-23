@@ -192,23 +192,66 @@ def synthesize(
     if extra_context:
         prompt = f"{extra_context}\n\n{prompt}"
 
-    result = backend.run(
+    data, raw = _run_with_json_retry(
+        backend,
         prompt,
         max_tokens=max_tokens,
         timeout_s=timeout_s,
         memory_limit=memory_limit,
-        allowed_tools=[],
     )
-
-    raw = result.stdout
-    try:
-        data = _extract_json(raw)
-    except ValueError as exc:
-        raise ValueError(f"Synthesizer: could not parse LLM output as JSON: {exc}") from exc
 
     try:
         validate_implementation_brief(data)
     except Exception as exc:
-        raise ValueError(f"Synthesizer: LLM output failed schema validation: {exc}") from exc
+        raise ValueError(
+            f"Synthesizer: LLM output failed schema validation: {exc}\n"
+            f"--- raw output (first 500 chars) ---\n{raw[:500]}"
+        ) from exc
 
     return ImplementationBrief.from_dict(data)
+
+
+def _run_with_json_retry(
+    backend: LLMBackend,
+    prompt: str,
+    *,
+    max_tokens: int,
+    timeout_s: int,
+    memory_limit: str,
+) -> tuple[dict[str, Any], str]:
+    """Invoke *backend* and parse JSON, retrying once if no JSON is found.
+
+    The first retry re-prompts the LLM with an explicit "your previous output
+    contained no JSON — return ONLY the JSON object" suffix. Without this,
+    Composer occasionally returns conversational prose during verify_failed
+    retries and the whole fleet run dies silently.
+    """
+    last_error: Exception | None = None
+    raw = ""
+    for attempt in range(2):
+        current_prompt = prompt
+        if attempt == 1:
+            current_prompt = (
+                f"{prompt}\n\n"
+                "IMPORTANT: Your previous response contained no parseable JSON "
+                "object. Return ONLY the JSON object — no prose, no markdown "
+                "fences, no commentary. The response MUST start with '{' and "
+                "end with '}'."
+            )
+        result = backend.run(
+            current_prompt,
+            max_tokens=max_tokens,
+            timeout_s=timeout_s,
+            memory_limit=memory_limit,
+            allowed_tools=[],
+        )
+        raw = result.stdout
+        try:
+            return _extract_json(raw), raw
+        except ValueError as exc:
+            last_error = exc
+            continue
+    raise ValueError(
+        f"Synthesizer: could not parse LLM output as JSON after 2 attempts: {last_error}\n"
+        f"--- last raw output (first 500 chars) ---\n{raw[:500]}"
+    )
