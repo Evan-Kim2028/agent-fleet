@@ -1,0 +1,108 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TaskSpec",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "issue_number",
+    "decomposition_decision",
+    "decomposition_reason",
+    "child_issues_proposed",
+    "scope",
+    "research_plan",
+    "acceptance_criteria",
+    "risk_tier",
+    "critical_paths_touched",
+    "coordination_spec"
+  ],
+  "properties": {
+    "issue_number": {"type": "integer", "minimum": 1},
+    "decomposition_decision": {
+      "type": "string",
+      "enum": ["single", "decompose", "rejected"]
+    },
+    "decomposition_reason": {"type": "string"},
+    "cross_cutting_acknowledged": {
+      "type": "boolean",
+      "description": "When true, the LLM has explicitly judged that allowed_paths crossing persona boundaries is acceptable for a single agent. Suppresses the mechanical override that would otherwise force decompose."
+    },
+    "child_issues_proposed": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "body", "persona"],
+        "properties": {
+          "title": {"type": "string"},
+          "body": {"type": "string"},
+          "persona": {
+            "type": "string",
+            "enum": ["backend", "frontend", "data", "pokemon_analyst", "security_qa"]
+          },
+          "allowed_paths": {
+            "type": "array",
+            "items": {"type": "string"}
+          }
+        }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allowed_paths", "forbidden_paths"],
+      "properties": {
+        "allowed_paths": {"type": "array", "items": {"type": "string"}},
+        "forbidden_paths": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "research_plan": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "question", "scope_paths", "needs_browser"],
+        "properties": {
+          "id": {"type": "string"},
+          "question": {"type": "string"},
+          "scope_paths": {"type": "array", "items": {"type": "string"}},
+          "needs_browser": {"type": "boolean"}
+        }
+      }
+    },
+    "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
+    "risk_tier": {"type": "string", "enum": ["low", "medium", "high"]},
+    "critical_paths_touched": {"type": "array", "items": {"type": "string"}},
+    "coordination_spec": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "merge_order": {"type": "array", "items": {"type": "string"}},
+            "schema_contracts_added": {"type": "array", "items": {"type": "string"}},
+            "schema_contracts_removed": {"type": "array", "items": {"type": "string"}},
+            "smoke_test_suggestion": {"type": "string"},
+            "shared_branch": {"type": "string"},
+            "interface_brief": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind"],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": ["http_route", "parquet_schema", "json_schema", "function_signature"]
+                },
+                "route": {"type": "string"},
+                "request_shape": {"type": "object"},
+                "response_shape": {"type": "object"},
+                "fixture_path": {"type": "string"},
+                "notes": {"type": "string"}
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

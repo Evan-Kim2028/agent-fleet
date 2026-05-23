@@ -1,0 +1,36 @@
+# Global agent fleet config
+# Default location: ~/.hermes/coding_fleet/fleet.yaml
+
+default_model: composer-2.5
+default_mode: agent
+default_persona: coder
+max_parallel: 3
+timeout_seconds: 900
+default_pipeline: simple
+
+# Bundled personas ship inside the agent_fleet package (agent_fleet/personas/).
+# Override only for repo-local or custom persona directories:
+# personas_dir: /path/to/my/personas
+
+personas:
+  coder:
+    prompt: coder.md
+  reviewer:
+    prompt: reviewer.md
+  explorer:
+    prompt: explorer.md
+    mode: plan
+
+pipelines:
+  simple:
+    - execute
+  code_review:
+    - execute
+    - review
+  full:
+    - plan
+    - research
+    - synthesize
+    - implement
+    - verify
+    - review

@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "VerifyResult",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["severity", "checks", "violating_paths", "files_changed", "message"],
+  "properties": {
+    "severity": {"type": "string", "enum": ["ok", "retry", "fatal"]},
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "passed", "detail"],
+        "properties": {
+          "name": {"type": "string"},
+          "passed": {"type": "boolean"},
+          "detail": {"type": "string"}
+        }
+      }
+    },
+    "violating_paths": {"type": "array", "items": {"type": "string"}},
+    "files_changed": {"type": "array", "items": {"type": "string"}},
+    "message": {"type": "string"}
+  }
+}

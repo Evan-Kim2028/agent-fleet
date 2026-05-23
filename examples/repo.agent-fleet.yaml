@@ -1,0 +1,45 @@
+# Repo integration
+name: my-project
+default_persona: coder
+default_branch: main
+
+# Optional: isolated worktree per run (default: edit in-place)
+# use_worktree: true
+# worktree_base: /tmp/agent-fleet-worktrees
+
+# Repo-local personas (overrides global fleet.yaml personas_dir)
+# personas_dir: default_personas
+
+# Verification commands run after IMPLEMENT (any failure triggers retry)
+test_command: pytest -q
+lint_command: ruff check .
+# typecheck_command: mypy .
+
+# Or explicit list:
+# verify_commands:
+#   - npm test
+#   - npm run lint
+
+# Persona scope restrictions (path prefixes)
+persona_scope_allowlist:
+  backend:
+    - backend/
+    - api/
+  frontend:
+    - frontend/
+    - src/
+
+# Cross-cutting boundaries — planner forces decomposition when scope spans groups
+cross_cutting_groups:
+  - [frontend/, backend/]
+  - [frontend/, api/]
+
+# Protected paths agents must not modify
+critical_path_prefixes:
+  - .github/workflows/
+  - ops/
+
+# Optional spine overrides (advanced)
+# spine:
+#   branch_prefix: fleet
+#   worktree_base: /tmp/agent-fleet-worktrees

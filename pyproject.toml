@@ -1,0 +1,42 @@
+[project]
+name = "agent-fleet"
+version = "0.2.0"
+description = "Generic agentic coding fleet — pluggable personas, full pipeline, Cursor SDK backend"
+readme = "README.md"
+requires-python = ">=3.11"
+keywords = ["agents", "cursor", "composer", "coding-agent", "fleet"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development",
+]
+dependencies = [
+    "cursor-sdk>=0.1.0",
+    "jsonschema>=4.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.4"]
+
+[project.scripts]
+agent-fleet = "agent_fleet.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["agent_fleet*"]
+
+[tool.setuptools.package-data]
+agent_fleet = ["personas/*.md", "schemas/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100

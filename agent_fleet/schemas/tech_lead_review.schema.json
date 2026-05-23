@@ -1,0 +1,15 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TechLeadReview",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["pr_number", "verdict", "summary", "escalation_required", "disagreement_with_planner", "cross_pr_concerns"],
+  "properties": {
+    "pr_number": {"type": "integer", "minimum": 1},
+    "verdict": {"type": "string", "enum": ["approve", "block", "escalate"]},
+    "summary": {"type": "string"},
+    "escalation_required": {"type": "boolean"},
+    "disagreement_with_planner": {"oneOf": [{"type": "null"}, {"type": "string"}]},
+    "cross_pr_concerns": {"type": "array", "items": {"type": "string"}}
+  }
+}

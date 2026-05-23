@@ -1,0 +1,44 @@
+# SilphCo Analytics — example repo config
+# Copy to your repo as .agent-fleet.yaml
+
+name: silphcoanalytics
+default_persona: backend
+default_branch: main
+
+personas_dir: agents/personas
+
+test_command: cd agents && python -m pytest fleet/tests -q
+lint_command: ruff check agents/fleet agents/silphco
+
+persona_scope_allowlist:
+  backend:
+    - api/
+    - pipeline/src/models/
+    - pipeline/src/queries/
+  frontend:
+    - frontend/
+  data:
+    - pipeline/
+    - data/
+  pokemon_analyst:
+    - pipeline/
+    - data/
+    - research/
+  security_qa: []
+
+cross_cutting_groups:
+  - [frontend/, api/]
+  - [pipeline/, api/]
+  - [agents/, api/]
+  - [agents/, pipeline/]
+  - [frontend/, pipeline/]
+
+critical_path_prefixes:
+  - agents/agents/
+  - agents/fleet/
+  - agents/silphco/
+  - .github/workflows/
+
+spine:
+  branch_prefix: fleet
+  worktree_base: /tmp/agent-worktrees

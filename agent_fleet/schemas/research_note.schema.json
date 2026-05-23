@@ -1,0 +1,15 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ResearchNote",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["research_id", "question", "findings", "scope_paths", "referenced_files", "confidence"],
+  "properties": {
+    "research_id": {"type": "string"},
+    "question": {"type": "string"},
+    "findings": {"type": "string"},
+    "scope_paths": {"type": "array", "items": {"type": "string"}},
+    "referenced_files": {"type": "array", "items": {"type": "string"}},
+    "confidence": {"type": "string", "enum": ["low", "medium", "high"]}
+  }
+}

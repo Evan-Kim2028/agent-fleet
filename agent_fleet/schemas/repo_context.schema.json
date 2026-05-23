@@ -1,0 +1,12 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RepoContext",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["scope_paths", "referenced_files", "notes"],
+  "properties": {
+    "scope_paths": {"type": "array", "items": {"type": "string"}},
+    "referenced_files": {"type": "array", "items": {"type": "string"}},
+    "notes": {"type": "string"}
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ImplementationBrief",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["issue_number", "summary", "files_to_create", "files_to_modify", "test_strategy", "acceptance_criteria", "references"],
+  "properties": {
+    "issue_number": {"type": "integer", "minimum": 1},
+    "summary": {"type": "string"},
+    "files_to_create": {"type": "array", "items": {"type": "string"}},
+    "files_to_modify": {"type": "array", "items": {"type": "string"}},
+    "test_strategy": {"type": "string"},
+    "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
+    "references": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["research_id", "key_finding"],
+        "properties": {
+          "research_id": {"type": "string"},
+          "key_finding": {"type": "string"}
+        }
+      }
+    },
+    "rollback_plan": {"type": ["string", "null"]}
+  }
+}

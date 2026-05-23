@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ReviewResult",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["pr_number", "verdict", "summary", "issues", "shard_id"],
+  "properties": {
+    "pr_number": {"type": "integer", "minimum": 1},
+    "verdict": {"type": "string", "enum": ["approve", "block", "request_changes"]},
+    "summary": {"type": "string"},
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "file", "message"],
+        "properties": {
+          "severity": {"type": "string", "enum": ["low", "medium", "high"]},
+          "file": {"oneOf": [{"type": "null"}, {"type": "string"}]},
+          "message": {"type": "string"}
+        }
+      }
+    },
+    "shard_id": {"oneOf": [{"type": "null"}, {"type": "string"}]}
+  }
+}

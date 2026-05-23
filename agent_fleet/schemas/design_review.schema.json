@@ -1,0 +1,49 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DesignReview",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["scores", "issues", "verdict"],
+  "properties": {
+    "scores": {
+      "type": "object",
+      "description": "Map of dimension name → integer score 0-100. Dimensions are data-driven (from rubric/config); the schema only constrains value type.",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 100
+      }
+    },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "area", "fix"],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": ["low", "medium", "high"]
+          },
+          "area": {
+            "type": "string",
+            "description": "Design dimension or surface area (e.g. 'spacing', 'contrast')."
+          },
+          "screenshot_ref": {
+            "oneOf": [{"type": "null"}, {"type": "string"}],
+            "description": "CaptureArtifact ref string this issue was found in, or null."
+          },
+          "fix": {
+            "type": "string",
+            "description": "Concrete actionable fix recommendation."
+          }
+        }
+      }
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["pass", "needs_work", "block"],
+      "description": "Overall design verdict: pass = ship, needs_work = advisory, block = gate."
+    }
+  }
+}
