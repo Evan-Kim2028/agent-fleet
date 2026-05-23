@@ -45,6 +45,32 @@ CODING_FLEET_LIST_PERSONAS = {
     "parameters": {"type": "object", "properties": {}},
 }
 
+CODING_FLEET_SCOPE = {
+    "name": "coding_fleet_scope",
+    "description": (
+        "Rank fleet-dispatchable tasks for a repo using thermo-nuclear code "
+        "quality review standards. Returns JSON with ranked goals for dispatch."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "workspace": {
+                "type": "string",
+                "description": "Absolute path to git repo with .agent-fleet.yaml",
+            },
+            "github_repo": {
+                "type": "string",
+                "description": "Optional owner/repo for gh issue lookup",
+            },
+            "issue_limit": {
+                "type": "integer",
+                "description": "Max open issues to include (default 20)",
+            },
+        },
+        "required": ["workspace"],
+    },
+}
+
 CODING_FLEET_PR_LOOP = {
     "name": "coding_fleet_pr_loop",
     "description": (

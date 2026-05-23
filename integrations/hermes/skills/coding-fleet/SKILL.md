@@ -40,6 +40,24 @@ Tool: `coding_fleet_pr_loop`
 
 Requires `gh` authenticated, `CURSOR_API_KEY`, and `pr_loop` + `pr_review` in repo config. PRs touching `.github/workflows/` auto-park for human review.
 
+## Scope fleet work (thermo-nuclear quality review)
+
+Rank dispatchable tasks from open issues + large-file hotspots:
+
+```json
+{
+  "workspace": "/home/evan/Documents/silphcoanalytics",
+  "github_repo": "Evan-Kim2028/silphcoanalytics",
+  "issue_limit": 20
+}
+```
+
+Tool: `coding_fleet_scope`
+
+Then dispatch top-ranked tasks with `coding_fleet_dispatch`.
+
+PR reviews automatically include a **quality pass** using the bundled `thermo-nuclear-code-quality-review` skill (maintainability, 1k-line guardrails, code-judo).
+
 ## Implement / review dispatch
 
 ```json

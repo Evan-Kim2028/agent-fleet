@@ -6,6 +6,7 @@ import textwrap
 
 from agent_fleet.pr_review.config import PrReviewConfig, load_overlay_text
 from agent_fleet.pr_review.git import classify_files, diff_for_files, truncate_diff
+from agent_fleet.skills_lib import DEFAULT_QUALITY_REVIEW_SKILL, load_skill_text
 
 JSON_OUTPUT_SPEC = textwrap.dedent("""\
     Return your complete assessment as **strict JSON**:
@@ -84,6 +85,8 @@ def build_prompt(
     files: list[str],
     mode: str,
     config: PrReviewConfig,
+    *,
+    skill_dirs: list | None = None,
 ) -> str:
     """Build a mode-specific review prompt with optional repo overlay."""
     classified = classify_files(files, config.area_prefixes)
@@ -170,6 +173,37 @@ def build_prompt(
             ## Cross-cutting prospective audit (mandatory)
             Check FE/BE/ops seams when the full diff spans multiple areas:
             API field ↔ consumer, env var ↔ docs, schema ↔ tests, etc.
+        """)
+        )
+
+    elif mode == "quality":
+        full_diff = truncate_diff(diff, config.max_diff_chars)
+        skill_name = config.quality_review_skill or DEFAULT_QUALITY_REVIEW_SKILL
+        quality_body = ""
+        if config.quality_review_enabled and skill_dirs:
+            try:
+                quality_body = load_skill_text(skill_name, skill_dirs)
+            except FileNotFoundError:
+                quality_body = ""
+        sections.append(
+            textwrap.dedent(f"""\
+            ## Thermo-nuclear code quality review (mandatory)
+
+            Apply the maintainability standards below to the **entire diff**.
+            Flag structural regressions, file-size explosions (>1k lines),
+            spaghetti branching, and missed code-judo simplifications.
+
+            {quality_body or "(quality review skill not found — apply strict maintainability bar)"}
+
+            Changed files ({len(files)}):
+            {chr(10).join(f"  {path}" for path in files[:40])}
+
+            ```diff
+            {full_diff}
+            ```
+
+            Map quality findings to `findings` with area `backend` or `frontend`
+            and severity medium+ when they should block merge.
         """)
         )
 

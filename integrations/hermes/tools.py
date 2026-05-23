@@ -298,6 +298,43 @@ def coding_fleet_pr_loop(args: dict[str, object], **kwargs: object) -> str:
     )
 
 
+def coding_fleet_scope(args: dict[str, object], **kwargs: object) -> str:
+    del kwargs
+    try:
+        load_fleet_config, _, _ = _ensure_agent_fleet()
+    except RuntimeError as exc:
+        return json.dumps({"error": str(exc)})
+
+    config_path_raw = args.get("config_path") or os.environ.get("CODING_FLEET_CONFIG")
+    config_path = _optional_str(config_path_raw)
+    config = load_fleet_config(config_path) if config_path else load_fleet_config()
+
+    backend_name = config.default_backend.lower()
+    if backend_name == "cursor" and not os.environ.get("CURSOR_API_KEY"):
+        return json.dumps({"error": "CURSOR_API_KEY is not set"})
+    if backend_name == "kimi" and not os.environ.get("KIMI_API_KEY"):
+        return json.dumps({"error": "KIMI_API_KEY is not set"})
+
+    workspace_raw = args.get("workspace")
+    if not workspace_raw:
+        return json.dumps({"error": "workspace is required"})
+    workspace = Path(str(workspace_raw)).expanduser().resolve()
+
+    from agent_fleet.fleet_scope import run_scope
+
+    try:
+        result = run_scope(
+            workspace=workspace,
+            fleet_config=config,
+            github_repo=_optional_str(args.get("github_repo")),
+            issue_limit=int(args.get("issue_limit") or 20),
+        )
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+    return json.dumps(result, default=str)
+
+
 def coding_fleet_list_personas(args: dict[str, object], **kwargs: object) -> str:
     del args, kwargs
     try:

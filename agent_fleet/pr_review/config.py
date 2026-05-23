@@ -49,6 +49,8 @@ class PrReviewConfig:
     max_diff_chars: int = 8000
     fanout_threshold: int = 20
     log_dir: Path | None = None
+    quality_review_enabled: bool = True
+    quality_review_skill: str = "thermo-nuclear-code-quality-review"
 
 
 def _tuple_paths(value: Any) -> tuple[str, ...]:
@@ -90,6 +92,17 @@ def load_pr_review_config(repo_root: Path, raw: dict[str, Any] | None) -> PrRevi
     log_dir_raw = section.get("log_dir")
     log_dir = Path(str(log_dir_raw)).expanduser() if log_dir_raw else None
 
+    quality_raw = section.get("quality_review")
+    quality_enabled = True
+    quality_skill = "thermo-nuclear-code-quality-review"
+    if quality_raw is False:
+        quality_enabled = False
+    elif isinstance(quality_raw, dict):
+        quality_enabled = bool(quality_raw.get("enabled", True))
+        quality_skill = str(
+            quality_raw.get("skill") or "thermo-nuclear-code-quality-review"
+        )
+
     return PrReviewConfig(
         enabled=bool(section.get("enabled", True)),
         use_in_code_review=bool(section.get("use_in_code_review", True)),
@@ -105,6 +118,8 @@ def load_pr_review_config(repo_root: Path, raw: dict[str, Any] | None) -> PrRevi
         max_diff_chars=int(section.get("max_diff_chars") or 8000),
         fanout_threshold=int(section.get("fanout_threshold") or 20),
         log_dir=log_dir,
+        quality_review_enabled=quality_enabled,
+        quality_review_skill=quality_skill,
     )
 
 

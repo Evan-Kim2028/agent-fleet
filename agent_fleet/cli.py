@@ -44,6 +44,29 @@ def cmd_review(args: argparse.Namespace) -> int:
     return 0 if verdict == "approve" else 1
 
 
+def cmd_scope(args: argparse.Namespace) -> int:
+    from agent_fleet.fleet_scope import run_scope
+
+    workspace = Path(args.workspace or Path.cwd()).resolve()
+    config = load_fleet_config(args.config) if args.config else load_fleet_config()
+    backend_name = config.default_backend.lower()
+    if backend_name == "cursor" and not os.environ.get("CURSOR_API_KEY"):
+        print("error: CURSOR_API_KEY is not set", file=sys.stderr)
+        return 1
+    if backend_name == "kimi" and not os.environ.get("KIMI_API_KEY"):
+        print("error: KIMI_API_KEY is not set", file=sys.stderr)
+        return 1
+
+    result = run_scope(
+        workspace=workspace,
+        fleet_config=config,
+        github_repo=args.github_repo,
+        issue_limit=args.issue_limit,
+    )
+    print(json.dumps(result, indent=2, default=str))
+    return 0 if "error" not in result else 1
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     config = load_fleet_config(args.config) if args.config else load_fleet_config()
     backend_name = config.default_backend.lower()
@@ -207,6 +230,15 @@ def main(argv: list[str] | None = None) -> int:
         help="Output JSON result or GitHub comment markdown",
     )
     review_p.set_defaults(func=cmd_review)
+
+    scope_p = sub.add_parser(
+        "scope",
+        help="Rank fleet-dispatchable tasks using thermo-nuclear quality review",
+    )
+    scope_p.add_argument("--workspace", help="Repo path")
+    scope_p.add_argument("--github-repo", help="owner/repo override for gh issues")
+    scope_p.add_argument("--issue-limit", type=int, default=20)
+    scope_p.set_defaults(func=cmd_scope)
 
     personas_p = sub.add_parser("personas", help="List personas")
     personas_p.add_argument("--workspace", help="Repo path (for repo-local personas)")

@@ -171,8 +171,9 @@ def _run_pass(
     model: str | None,
     timeout_s: int,
     allowed_tools: list[str] | None,
+    skill_dirs: list | None = None,
 ) -> dict[str, Any] | None:
-    prompt = build_prompt(diff, files, mode, config)
+    prompt = build_prompt(diff, files, mode, config, skill_dirs=skill_dirs or [])
     result = backend.run(
         prompt,
         max_tokens=8192,
@@ -224,6 +225,8 @@ def passes_for_files(files: list[str], config: PrReviewConfig) -> list[str]:
         selected.append("backend-security")
     if "frontend" in config.passes and classified["frontend"]:
         selected.append("frontend")
+    if config.quality_review_enabled and "quality" not in selected:
+        selected.append("quality")
     return selected or ["backend-security"]
 
 
@@ -238,6 +241,7 @@ def analyze_changes(
     model: str | None = None,
     timeout_s: int = 900,
     allowed_tools: list[str] | None = None,
+    skill_dirs: list | None = None,
 ) -> dict[str, Any]:
     """Run configured analysis passes and return merged JSON analysis."""
     modes = passes_for_files(files, config)
@@ -254,6 +258,7 @@ def analyze_changes(
             model=model,
             timeout_s=timeout_s,
             allowed_tools=allowed_tools,
+            skill_dirs=skill_dirs,
         )
         if parsed:
             analyses.append(parsed)

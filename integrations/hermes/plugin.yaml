@@ -11,3 +11,4 @@ provides_tools:
   - coding_fleet_list_personas
   - coding_fleet_pr_review
   - coding_fleet_pr_loop
+  - coding_fleet_scope

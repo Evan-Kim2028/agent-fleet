@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from agent_fleet.agent_mode import coerce_agent_mode
+from agent_fleet.skills_lib import bundled_skill_dirs, merge_skill_dirs
 
 if TYPE_CHECKING:
     from agent_fleet.agent_mode import AgentMode
@@ -111,13 +112,13 @@ def load_fleet_config(
         personas_dir_resolved = (base / personas_path).resolve()
     else:
         personas_dir_resolved = _expand_path(str(personas_dir_raw))
-    skill_dirs_resolved = [
-        _expand_path(str(p))
-        for p in (skill_dirs or data.get("skill_dirs") or [])
-    ]
+    skill_dirs_resolved = merge_skill_dirs(
+        bundled_skill_dirs(),
+        [_expand_path(str(p)) for p in (skill_dirs or data.get("skill_dirs") or [])],
+    )
     default_skill_dir = Path.home() / ".hermes" / "skills"
-    if default_skill_dir.exists() and default_skill_dir not in skill_dirs_resolved:
-        skill_dirs_resolved.append(default_skill_dir)
+    if default_skill_dir.exists():
+        skill_dirs_resolved = merge_skill_dirs(skill_dirs_resolved, [default_skill_dir])
 
     return FleetConfig(
         default_model=str(default_model or data.get("default_model") or "composer-2.5"),

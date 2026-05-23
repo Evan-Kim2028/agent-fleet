@@ -51,6 +51,13 @@ def register(ctx: HermesPluginContext) -> None:
         handler=tools.coding_fleet_pr_loop,
         requires_env=["CURSOR_API_KEY"],
     )
+    ctx.register_tool(
+        name="coding_fleet_scope",
+        toolset="coding_fleet",
+        schema=schemas.CODING_FLEET_SCOPE,
+        handler=tools.coding_fleet_scope,
+        requires_env=["CURSOR_API_KEY"],
+    )
     skills_dir = Path(__file__).parent / "skills"
     if skills_dir.is_dir():
         for child in sorted(skills_dir.iterdir()):

@@ -75,6 +75,7 @@ def run_pr_review(
             pr_number=pr_number,
             model=config.default_model,
             timeout_s=config.timeout_seconds,
+            skill_dirs=list(config.skill_dirs),
         )
 
     review = analysis_to_review_result(analysis, pr_number=pr_number or 1)

@@ -6,20 +6,9 @@ from pathlib import Path
 
 from agent_fleet.config import FleetConfig, PersonaSpec
 from agent_fleet.hooks import Persona
+from agent_fleet.skills_lib import find_skill_path
 
 _DEFAULT_ALLOWED_TOOLS = ["read_file", "write_file", "run_command"]
-
-
-def _find_skill_body(skill_name: str, skill_dirs: list[Path]) -> Path | None:
-    for base in skill_dirs:
-        for candidate in (
-            base / skill_name / "SKILL.md",
-            base / f"{skill_name}.md",
-            base / skill_name / "skill.md",
-        ):
-            if candidate.exists():
-                return candidate
-    return None
 
 
 def _resolve_prompt_path(spec: PersonaSpec, cfg: FleetConfig) -> Path:
@@ -39,7 +28,7 @@ def _resolve_prompt_path(spec: PersonaSpec, cfg: FleetConfig) -> Path:
         if with_suffix.exists():
             return with_suffix.resolve()
     if spec.skill:
-        skill_path = _find_skill_body(spec.skill, cfg.skill_dirs)
+        skill_path = find_skill_path(spec.skill, cfg.skill_dirs)
         if skill_path:
             return skill_path
     raise ValueError(
