@@ -43,14 +43,38 @@ class LocalGitOps:
         self.worktree_base = (worktree_base or Path("/tmp/agent-fleet-worktrees")).resolve()
         self._active_worktrees: list[Path] = []
 
-    def _run(self, args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            ["git", *args],
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+    # Default cap on any git invocation; raised for commit which may run
+    # user-defined pre-commit hooks (e.g. gitleaks-via-docker) that can hang.
+    _DEFAULT_GIT_TIMEOUT_S = 60
+    _COMMIT_GIT_TIMEOUT_S = 600
+
+    def _run(
+        self,
+        args: list[str],
+        *,
+        cwd: Path,
+        timeout: int | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        effective_timeout = timeout if timeout is not None else self._DEFAULT_GIT_TIMEOUT_S
+        try:
+            return subprocess.run(
+                ["git", *args],
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=effective_timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+            stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+            logger.error(
+                "git %s timed out after %ss in %s", " ".join(args), effective_timeout, cwd
+            )
+            raise RuntimeError(
+                f"git {' '.join(args)} timed out after {effective_timeout}s "
+                f"(likely a hung pre-commit hook). stdout={stdout!r} stderr={stderr!r}"
+            ) from exc
 
     def find_resume_branch(
         self,
@@ -168,7 +192,11 @@ class LocalGitOps:
         last_stdout = ""
         for _ in range(max_hook_retries + 1):
             self._run(["add", "-A"], cwd=worktree)
-            result = self._run(["commit", "-m", message], cwd=worktree)
+            result = self._run(
+                ["commit", "-m", message],
+                cwd=worktree,
+                timeout=self._COMMIT_GIT_TIMEOUT_S,
+            )
             if result.returncode == 0:
                 sha = self._run(["rev-parse", "HEAD"], cwd=worktree)
                 return sha.stdout.strip() or None
