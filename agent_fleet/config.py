@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -9,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from agent_fleet.agent_mode import coerce_agent_mode
+from agent_fleet.contracts.mcp import McpServerSpec, parse_mcp_server_spec
 from agent_fleet.skills_lib import bundled_skill_dirs, merge_skill_dirs
 
 if TYPE_CHECKING:
@@ -34,6 +37,7 @@ class PersonaSpec:
     skill: str | None = None
     allowed_paths: list[str] = field(default_factory=list)
     extra_instructions: str = ""
+    mcp_servers: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -53,13 +57,45 @@ class FleetConfig:
     default_pipeline: str = "simple"
     default_workspace: str | None = None
     repo_config: RepoConfig | None = None
+    mcp_servers: dict[str, McpServerSpec] = field(default_factory=dict)
 
 
 def _expand_path(value: str) -> Path:
     return Path(value).expanduser().resolve()
 
 
-def _parse_persona_specs(raw: dict[str, Any]) -> dict[str, PersonaSpec]:
+_ENV_VAR_RE = re.compile(r"\$\{([A-Z0-9_]+)\}")
+
+
+def _expand_env(value: Any) -> Any:  # noqa: ANN401
+    """Recursively expand ${VAR} occurrences in strings inside dicts/lists."""
+    if isinstance(value, str):
+        def _sub(match: re.Match[str]) -> str:
+            var = match.group(1)
+            if var not in os.environ:
+                raise ValueError(f"environment variable {var!r} required but not set")
+            return os.environ[var]
+        return _ENV_VAR_RE.sub(_sub, value)
+    if isinstance(value, dict):
+        return {k: _expand_env(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_expand_env(v) for v in value]
+    return value
+
+
+def _parse_mcp_catalog(raw: dict[str, Any]) -> dict[str, McpServerSpec]:
+    catalog: dict[str, McpServerSpec] = {}
+    for name, entry in (raw or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        expanded = _expand_env(entry)
+        catalog[name] = parse_mcp_server_spec(name, expanded)
+    return catalog
+
+
+def _parse_persona_specs(
+    raw: dict[str, Any], catalog: dict[str, McpServerSpec]
+) -> dict[str, PersonaSpec]:
     specs: dict[str, PersonaSpec] = {}
     for name, entry in (raw or {}).items():
         if isinstance(entry, str):
@@ -67,6 +103,13 @@ def _parse_persona_specs(raw: dict[str, Any]) -> dict[str, PersonaSpec]:
             continue
         if not isinstance(entry, dict):
             continue
+        mcp_names = list(entry.get("mcp_servers") or [])
+        for mcp_name in mcp_names:
+            if mcp_name not in catalog:
+                raise ValueError(
+                    f"persona {name!r} references unknown MCP server {mcp_name!r}; "
+                    f"known: {sorted(catalog)}"
+                )
         specs[name] = PersonaSpec(
             prompt=str(entry.get("prompt") or f"{name}.md"),
             model=entry.get("model"),
@@ -74,6 +117,7 @@ def _parse_persona_specs(raw: dict[str, Any]) -> dict[str, PersonaSpec]:
             skill=entry.get("skill"),
             allowed_paths=list(entry.get("allowed_paths") or []),
             extra_instructions=str(entry.get("extra_instructions") or ""),
+            mcp_servers=mcp_names,
         )
     return specs
 
@@ -120,6 +164,8 @@ def load_fleet_config(
     if default_skill_dir.exists():
         skill_dirs_resolved = merge_skill_dirs(skill_dirs_resolved, [default_skill_dir])
 
+    mcp_catalog = _parse_mcp_catalog(data.get("mcp_servers") or {})
+
     return FleetConfig(
         default_model=str(default_model or data.get("default_model") or "composer-2.5"),
         default_mode=coerce_agent_mode(
@@ -132,11 +178,12 @@ def load_fleet_config(
         ram_budget_gb=int(ram_budget_gb or data.get("ram_budget_gb") or 24),
         personas_dir=personas_dir_resolved,
         skill_dirs=skill_dirs_resolved,
-        personas=_parse_persona_specs(data.get("personas") or {}),
+        personas=_parse_persona_specs(data.get("personas") or {}, mcp_catalog),
         pipelines={**_DEFAULT_PIPELINES, **dict(data.get("pipelines") or {})},
         default_pipeline=str(
             default_pipeline or data.get("default_pipeline") or "simple"
         ),
         default_persona=str(default_persona or data.get("default_persona") or "coder"),
         default_workspace=default_workspace or data.get("default_workspace"),
+        mcp_servers=mcp_catalog,
     )
