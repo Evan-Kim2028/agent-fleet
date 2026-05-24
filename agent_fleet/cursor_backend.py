@@ -272,6 +272,15 @@ class CursorBackend:
                         duration_s=duration_s,
                         agent_id=agent_id,
                     )
+                # Defensive: empty result is a backend failure, not success
+                if not text or not text.strip():
+                    return CursorLLMResult(
+                        stdout="",
+                        stderr="Cursor returned empty result (likely backend timeout or resource exhaustion)",
+                        exit_code=1,
+                        duration_s=duration_s,
+                        agent_id=agent_id,
+                    )
                 return CursorLLMResult(
                     stdout=text or "",
                     stderr="",

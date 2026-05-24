@@ -188,9 +188,9 @@ Return ONLY the JSON object — no prose before or after it.
     raw_text = ""
     duration_total = 0.0
     raw: dict[str, Any] | None = None
-    for attempt in range(2):
+    for attempt in range(3):
         current_prompt = prompt
-        if attempt == 1:
+        if attempt >= 1:
             current_prompt = (
                 f"{prompt}\n\n"
                 "IMPORTANT: Your previous response contained no parseable JSON "
@@ -216,6 +216,12 @@ Return ONLY the JSON object — no prose before or after it.
             )
         raw_text = result.stdout
         duration_total += result.duration_s
+        # Defensive: backend-level failure should not even attempt JSON parse
+        if result.exit_code != 0:
+            last_error = ValueError(
+                f"Backend error (exit {result.exit_code}): {result.stderr or 'unknown error'}"
+            )
+            continue
         try:
             raw = _extract_json(raw_text)
             break
@@ -224,7 +230,7 @@ Return ONLY the JSON object — no prose before or after it.
             continue
     if raw is None:
         raise ValueError(
-            f"Researcher: could not parse LLM output as JSON after 2 attempts: "
+            f"Researcher: could not parse LLM output as JSON after 3 attempts: "
             f"{last_error}\n--- last raw output (first 500 chars) ---\n{raw_text[:500]}"
         )
     raw["research_id"] = research_id
