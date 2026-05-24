@@ -72,3 +72,21 @@ def test_cleanup_playwright_mcp_processes_force_kills_when_stuck() -> None:
     assert result.force_killed == (111, 222)
     assert result.after == 0
     assert result.cleaned is True
+
+
+def test_cleanup_orphan_force_kills_remaining_after_partial_graceful_exit() -> None:
+    wait_result = McpCleanupResult(
+        before=2,
+        after=1,
+        waited_s=10.0,
+        force_killed=(),
+        cleaned=True,
+    )
+    with patch("agent_fleet.memory.wait_for_playwright_mcp_cleanup", return_value=wait_result):
+        with patch("agent_fleet.memory.iter_playwright_mcp_pids", return_value=[999]):
+            with patch("agent_fleet.memory._terminate_pids", return_value=(999,)) as kill:
+                with patch("agent_fleet.memory.count_playwright_mcp_processes", return_value=0):
+                    result = cleanup_playwright_mcp_processes(force_kill=True)
+
+    kill.assert_called_once_with([999])
+    assert result.after == 0

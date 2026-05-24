@@ -177,21 +177,29 @@ def cleanup_playwright_mcp_processes(
         wait_s=wait_s,
         poll_interval_s=poll_interval_s,
     )
-    target = baseline if baseline is not None else result.before
-    if result.cleaned or not force_kill or result.after == 0:
+    if not force_kill:
+        return result
+    if result.after == 0:
         return result
     if baseline is not None and result.after < baseline:
-        return result
+        return McpCleanupResult(
+            before=result.before,
+            after=result.after,
+            waited_s=result.waited_s,
+            force_killed=(),
+            cleaned=True,
+        )
 
     pids = iter_playwright_mcp_pids()
     killed = _terminate_pids(pids)
     after = count_playwright_mcp_processes()
+    cleaned = after == 0 if baseline is None else after < baseline
     return McpCleanupResult(
         before=result.before,
         after=after,
         waited_s=result.waited_s,
         force_killed=killed,
-        cleaned=after < target,
+        cleaned=cleaned,
     )
 
 
