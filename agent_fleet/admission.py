@@ -1,4 +1,7 @@
-"""Admission controller — gate parallel agent spawns."""
+"""Admission controller for CLI batch dispatch (``agent-fleet run --tasks``).
+
+Issue-loop watcher admission uses ``agent_fleet.capacity.FleetCapacityGate`` instead.
+"""
 
 from __future__ import annotations
 

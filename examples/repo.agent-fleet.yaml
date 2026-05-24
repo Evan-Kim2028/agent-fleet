@@ -44,6 +44,26 @@ critical_path_prefixes:
 #   branch_prefix: fleet
 #   worktree_base: /tmp/agent-fleet-worktrees
 
+# Optional issue comment dispatch (/agent --persona <name>)
+# issue_dispatch:
+#   enabled: true
+#   poll_interval_s: 30
+#
+# Unified concurrency (watcher subprocess limits + per-run RESEARCH workers)
+# capacity:
+#   max_dispatches: 8
+#   tiers:
+#     visual_audit:
+#       max_concurrent: 4
+#       ram_gb: 6
+#       min_free_ram_gb: 10
+#   per_issue:
+#     default: 2
+#     visual_audit: 1
+#   run:
+#     max_research_workers: 4
+#     max_verify_retries: 3
+
 # Automated PR lifecycle (requires pr-analyzer workflow + local watcher)
 # Full example: examples/repo-full.agent-fleet.yaml — see docs/NEW-REPO.md
 # pr_loop:

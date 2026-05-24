@@ -8,6 +8,7 @@ import os
 import sys
 from pathlib import Path
 
+from agent_fleet.capacity import FleetCapacity, is_visual_audit_dispatch
 from agent_fleet.backends import make_backend
 from agent_fleet.config import load_fleet_config
 from agent_fleet.integrations.command_verifier import CommandVerifier
@@ -76,7 +77,7 @@ def run_issue_dispatch(
     title = str(issue.get("title") or f"Issue #{issue_number}")
     body = str(issue.get("body") or "")
     issue_labels = github_ops.issue_labels(issue_number, cwd=repo.repo_root)
-    is_visual_audit = "visual-audit" in issue_labels or "[Visual]" in title
+    is_visual_audit = is_visual_audit_dispatch(issue_labels=issue_labels, title=title, body=body)
     if is_visual_audit:
         memory_snapshot(label=f"dispatch start issue #{issue_number}")
     if comment_body.strip():
@@ -98,13 +99,23 @@ def run_issue_dispatch(
         use_worktree=True,
         worktree_base=spine.worktree_base,
     )
+    capacity = repo.capacity or FleetCapacity.defaults()
+    run_capacity = capacity.run
     runner = LocalFleetRunner(
         backend=make_backend(fleet_config),
         persona_resolver=YamlPersonaResolver(fleet_config),
         git_ops=git_ops,
         verifier=CommandVerifier(repo),
         spine=spine,
-        config=FleetRunConfig(create_branch=True, commit_changes=True, resume=True),
+        config=FleetRunConfig(
+            create_branch=True,
+            commit_changes=True,
+            resume=True,
+            max_research_workers=run_capacity.max_research_workers,
+            max_verify_retries=run_capacity.max_verify_retries,
+            memory_limit_parent=run_capacity.memory_limit_parent,
+            memory_limit_research=run_capacity.memory_limit_research,
+        ),
         forge=GitHubForge(cwd=repo.repo_root),
         fleet_config=fleet_config,
     )

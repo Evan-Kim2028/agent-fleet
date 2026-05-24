@@ -11,6 +11,7 @@ import yaml
 from agent_fleet.pr_review.config import PrReviewConfig, load_pr_review_config
 
 if TYPE_CHECKING:
+    from agent_fleet.capacity.config import FleetCapacity
     from agent_fleet.code_review.config import CodeReviewConfig
     from agent_fleet.config import FleetConfig
     from agent_fleet.issue_loop.config import IssueDispatchConfig
@@ -47,6 +48,7 @@ class RepoConfig:
     pr_loop: PrLoopConfig | None = None
     code_review: CodeReviewConfig | None = None
     issue_dispatch: IssueDispatchConfig | None = None
+    capacity: FleetCapacity | None = None
 
     @property
     def display_name(self) -> str:
@@ -111,6 +113,7 @@ def load_repo_config(path: Path | str) -> RepoConfig:
     )
 
     pr_loop_cfg = _load_pr_loop(repo_root, raw)
+    capacity_cfg = _load_capacity(raw)
     return RepoConfig(
         repo_root=repo_root,
         name=str(raw.get("name") or ""),
@@ -131,6 +134,7 @@ def load_repo_config(path: Path | str) -> RepoConfig:
         pr_loop=pr_loop_cfg,
         code_review=_load_code_review(raw, pr_loop_cfg),
         issue_dispatch=_load_issue_dispatch(repo_root, raw),
+        capacity=capacity_cfg,
     )
 
 
@@ -155,6 +159,12 @@ def _load_issue_dispatch(repo_root: Path, raw: dict[str, Any]) -> IssueDispatchC
     return load_issue_dispatch_config(repo_root, raw)
 
 
+def _load_capacity(raw: dict[str, Any]) -> FleetCapacity:
+    from agent_fleet.capacity.config import load_capacity_config
+
+    return load_capacity_config(raw)
+
+
 def merge_repo_into_fleet_config(
     fleet_config: FleetConfig,
     repo: RepoConfig | None,
@@ -166,5 +176,7 @@ def merge_repo_into_fleet_config(
         fleet_config.personas_dir = repo.personas_dir
     if repo.default_persona:
         fleet_config.default_persona = repo.default_persona
+    if repo.capacity is not None:
+        fleet_config.max_parallel = repo.capacity.max_dispatches
     fleet_config.repo_config = repo
     return fleet_config

@@ -11,8 +11,14 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from agent_fleet.capacity import (
+    FleetCapacity,
+    FleetCapacityGate,
+    RETRYABLE_ADMISSION_REASONS,
+    count_visual_in_flight,
+    is_visual_audit_dispatch,
+)
 from agent_fleet.issue_loop import github_ops
-from agent_fleet.issue_loop.admission import check_dispatch_admission
 from agent_fleet.issue_loop.state import load_state, now_iso, save_state, state_path
 from agent_fleet.memory import (
     available_ram_gb,
@@ -22,7 +28,6 @@ from agent_fleet.memory import (
 )
 from agent_fleet.observability.events import FleetEvent
 from agent_fleet.observability.sinks import PythonLoggingSink
-from agent_fleet.runner import _requires_playwright_mcp
 from agent_fleet.issue_loop.triggers import (
     extract_issue_number,
     extract_persona,
@@ -69,18 +74,9 @@ def _reap_in_flight(state: dict[str, Any]) -> None:
             in_flight.pop(issue_key, None)
 
 
-def _count_in_flight_visual_audits(state: dict[str, Any]) -> int:
-    return sum(
-        1
-        for runs in state.get("in_flight", {}).values()
-        for run in runs
-        if run.get("visual_audit")
-    )
-
-
 def _cleanup_orphaned_playwright_mcp(state: dict[str, Any]) -> None:
     """Force-kill lingering Playwright MCP processes when no visual audits are active."""
-    if _count_in_flight_visual_audits(state) > 0:
+    if count_visual_in_flight(state) > 0:
         return
     before = count_playwright_mcp_processes()
     if before == 0:
@@ -136,6 +132,8 @@ class IssueLoopWatcher:
         self.repo = repo
         self.config = dispatch_config
         self.state_file = state_path(repo.repo_root, dispatch_config.state_file)
+        capacity = repo.capacity or FleetCapacity.defaults()
+        self.capacity_gate = FleetCapacityGate(capacity)
 
     def poll_once(self, state: dict[str, Any] | None = None) -> list[dict[str, str]]:
         if state is None:
@@ -188,13 +186,12 @@ class IssueLoopWatcher:
                     exc,
                 )
 
-            is_visual_audit = _requires_playwright_mcp(
+            is_visual_audit = is_visual_audit_dispatch(
                 issue_labels=issue_labels,
                 title=issue_title,
                 body=issue_body,
             )
-            admission = check_dispatch_admission(
-                self.config,
+            admission = self.capacity_gate.try_admit(
                 state,
                 issue_number=issue_number,
                 persona=persona,
@@ -202,12 +199,7 @@ class IssueLoopWatcher:
                 available_ram_gb=available_ram_gb(),
             )
             if not admission.allowed:
-                retryable = admission.reason in {
-                    "fleet_at_capacity",
-                    "visual_audit_at_capacity",
-                    "insufficient_ram",
-                    "visual_audit_ram_reserved",
-                }
+                retryable = admission.reason in RETRYABLE_ADMISSION_REASONS
                 _watcher_event_sink.emit(
                     FleetEvent.now(
                         run_id=f"issue-{issue_number}",

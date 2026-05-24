@@ -10,6 +10,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from agent_fleet.capacity import is_visual_audit_dispatch
 from agent_fleet.contracts.review import ReviewResult, ReviewVerdict
 from agent_fleet.contracts.task_spec import DecompositionDecision, TaskSpec
 from agent_fleet.contracts.tech_lead_review import TechLeadReview, TechLeadVerdict
@@ -42,18 +43,6 @@ if TYPE_CHECKING:
     )
 
 logger = logging.getLogger(__name__)
-
-
-def _requires_playwright_mcp(
-    *,
-    issue_labels: list[str] | None,
-    title: str,
-    body: str,
-) -> bool:
-    if issue_labels and "visual-audit" in issue_labels:
-        return True
-    combined = f"{title}\n{body}".lower()
-    return "playwright mcp" in combined or "[visual]" in title.lower()
 
 
 def _task_spec_with_browser_research(task_spec: TaskSpec) -> TaskSpec:
@@ -206,7 +195,7 @@ class LocalFleetRunner:
         result: FleetRunResult | None = None
         session: LLMSession | None = None
         browser_session_factory: Callable[[], LLMSession | None] | None = None
-        require_mcp = _requires_playwright_mcp(
+        require_mcp = is_visual_audit_dispatch(
             issue_labels=issue_labels,
             title=title,
             body=body,
