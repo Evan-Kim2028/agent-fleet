@@ -9,26 +9,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+from agent_fleet.integrations.github_cli import gh as _gh
+
 logger = logging.getLogger(__name__)
-
-
-def _gh(
-    *args: str,
-    cwd: Path | None = None,
-    check: bool = True,
-) -> subprocess.CompletedProcess[str]:
-    cmd = ["gh", *args]
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        cwd=str(cwd) if cwd else None,
-        check=False,
-        timeout=120,
-    )
-    if check and result.returncode != 0:
-        raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
-    return result
 
 
 def list_open_fleet_prs(

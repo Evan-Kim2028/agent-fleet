@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import logging
 import sys
 from pathlib import Path
 
@@ -31,10 +30,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--comment", default="", help="Trigger comment for --issue dispatch")
     args = parser.parse_args(argv)
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    from agent_fleet.logging_config import configure_fleet_logging
+
+    configure_fleet_logging()
 
     workspace = Path(args.workspace or Path.cwd()).resolve()
 

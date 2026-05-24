@@ -259,3 +259,5 @@ class FleetTaskResult:
     branch_name: str | None = None
     pr_number: int | None = None
     pr_loop_status: str | None = None
+    stderr: str = ""
+    files_modified: tuple[str, ...] = ()

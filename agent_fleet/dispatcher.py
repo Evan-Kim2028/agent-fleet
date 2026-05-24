@@ -6,39 +6,34 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from agent_fleet.admission import AdmissionController, ResourceTier
 from agent_fleet.backends import make_backend
-from agent_fleet.code_review import publish_fleet_branch, run_code_review_with_auto_fix
 from agent_fleet.config import FleetConfig, load_fleet_config
-from agent_fleet.hooks import FleetTask, FleetTaskResult, SessionCapableBackend
+from agent_fleet.dispatcher_task import (
+    build_task_result,
+    maybe_publish_and_pr_loop,
+    prepare_task_workspace_if_needed,
+    run_configured_pipeline,
+)
+from agent_fleet.handoff_context import apply_handoff_to_task
+from agent_fleet.hooks import FleetTask, FleetTaskResult
+from agent_fleet.observability.fleet_logger import FleetLogger
 from agent_fleet.personas import YamlPersonaResolver
-from agent_fleet.phases import resolve_pipeline_outcome, run_pipeline
 from agent_fleet.redispatch import dispatch_with_retry
 from agent_fleet.repo import RepoConfig, find_repo_config, merge_repo_into_fleet_config
 from agent_fleet.runner import run_full_pipeline
-from agent_fleet.worktree import TaskWorkspace, prepare_task_workspace, should_isolate_worktree
+from agent_fleet.verify_core import is_git_repo
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from agent_fleet.contracts.handoff import HandoffNote
-    from agent_fleet.hooks import LLMSession
 
 logger = logging.getLogger(__name__)
-
-
-def _phase_map(phase_results: list[dict[str, object]]) -> dict[str, object]:
-    mapped: dict[str, object] = {}
-    counts: dict[str, int] = {}
-    for item in phase_results:
-        base = str(item.get("phase", "?"))
-        counts[base] = counts.get(base, 0) + 1
-        key = base if counts[base] == 1 else f"{base}_{counts[base]}"
-        mapped[key] = item
-    return mapped
 
 
 def _optional_entry_str(value: object | None, fallback: str | None) -> str | None:
@@ -121,21 +116,11 @@ class FleetDispatcher:
     def _isolation_repo(self, workspace: Path) -> RepoConfig | None:
         repo_config = find_repo_config(workspace)
         git_root = repo_config.repo_root if repo_config else workspace
-        from agent_fleet.verify_core import is_git_repo
-
         if not is_git_repo(git_root):
             return None
         if repo_config is not None:
             return repo_config
         return RepoConfig(repo_root=git_root)
-
-    def _emit(self, event: str, **payload: object) -> None:
-        if not self.progress_callback:
-            return
-        try:
-            self.progress_callback(event, **payload)
-        except Exception as exc:
-            logger.debug("Fleet progress callback failed: %s", exc)
 
     def _resolve_workspace(self, task: FleetTask) -> Path:
         raw = task.workspace or self.config.default_workspace or "."
@@ -153,20 +138,35 @@ class FleetDispatcher:
         return list(phases)
 
     def _run_full_pipeline(
-        self, task_index: int, task: FleetTask, workspace: Path, start: float
+        self,
+        task_index: int,
+        task: FleetTask,
+        workspace: Path,
+        start: float,
+        *,
+        handoff: HandoffNote | None,
+        fleet_log: FleetLogger,
     ) -> FleetTaskResult:
         repo = find_repo_config(workspace)
         config = merge_repo_into_fleet_config(self.config, repo)
+        effective = apply_handoff_to_task(task, handoff)
         result = run_full_pipeline(
-            goal=task.goal,
-            context=task.context,
+            goal=effective.goal,
+            context=effective.context,
             title=task.title,
-            persona=task.persona or config.default_persona,
+            persona=effective.persona or config.default_persona,
             workspace=workspace,
             backend=self.backend,
             persona_resolver=self.resolver,
         )
         status = "completed" if result.outcome == "completed" else "error"
+        fleet_log.emit(
+            "fleet.task.complete",
+            task_index=task_index,
+            persona=task.persona,
+            status=status,
+            duration_seconds=round(time.monotonic() - start, 2),
+        )
         return FleetTaskResult(
             task_index=task_index,
             persona=task.persona,
@@ -178,23 +178,11 @@ class FleetDispatcher:
             phases=result.phases,
             task_spec=result.task_spec,
             changed_files=result.changed_files,
+            stderr=result.error or "",
+            files_modified=tuple(result.changed_files or ()),
         )
 
     def _run_one(self, task: FleetTask, *, handoff: HandoffNote | None = None) -> FleetTaskResult:
-        """Thin retry-aware wrapper called by dispatch_with_retry.
-
-        ``handoff`` carries context from a previous failed attempt.  It is
-        forwarded to ``_execute_task`` where it will be consumed once the
-        runner grows handoff support (Task 5).  For now it is accepted and
-        logged but otherwise unused downstream.
-        """
-        if handoff is not None:
-            logger.debug(
-                "Redispatch attempt #%s for task %r (failure_mode=%r)",
-                handoff.attempt_number,
-                task.goal[:60],
-                handoff.failure_mode,
-            )
         return self._execute_task(0, task, batch_size=1, same_workspace_tasks=1, handoff=handoff)
 
     def _execute_task(
@@ -204,275 +192,184 @@ class FleetDispatcher:
         *,
         batch_size: int = 1,
         same_workspace_tasks: int = 1,
-        handoff: HandoffNote | None = None,  # noqa: ARG002 — wired by Task 5
+        handoff: HandoffNote | None = None,
     ) -> FleetTaskResult:
         start = time.monotonic()
-        self._emit(
-            "fleet.task.start",
+        fleet_log = FleetLogger.for_dispatch(
             task_index=task_index,
             persona=task.persona,
-            goal=task.goal[:120],
+            progress_callback=self.progress_callback,
         )
 
-        token = None
-        task_workspace: TaskWorkspace | None = None
-        with self._admission_lock:
-            token = self._admission.try_admit("agent")
-        if token is None:
-            return FleetTaskResult(
+        with fleet_log.bind():
+            fleet_log.emit(
+                "fleet.task.start",
                 task_index=task_index,
                 persona=task.persona,
-                goal=task.goal,
-                status="error",
-                summary=None,
-                error="Fleet admission denied (max parallel agents reached)",
-                duration_seconds=round(time.monotonic() - start, 2),
+                goal=task.goal[:120],
+                has_handoff=handoff is not None,
             )
+            if handoff is not None:
+                fleet_log.emit(
+                    "redispatch.handoff",
+                    attempt=handoff.attempt_number,
+                    failure_mode=handoff.failure_mode,
+                )
 
-        try:
-            workspace = self._resolve_workspace(task)
-            if not workspace.exists():
+            token = None
+            task_workspace = None
+            with self._admission_lock:
+                token = self._admission.try_admit("agent")
+            if token is None:
+                fleet_log.emit("admission.denied", reason="max_parallel")
                 return FleetTaskResult(
                     task_index=task_index,
                     persona=task.persona,
                     goal=task.goal,
                     status="error",
                     summary=None,
-                    error=f"Workspace does not exist: {workspace}",
+                    error="Fleet admission denied (max parallel agents reached)",
                     duration_seconds=round(time.monotonic() - start, 2),
                 )
 
-            repo_config = find_repo_config(workspace)
-            git_repo = self._isolation_repo(workspace)
-
-            phases = self._resolve_pipeline(task)
-            force_parallel = batch_size > 1 and same_workspace_tasks > 1
-            isolate = phases != ["full"] and should_isolate_worktree(
-                repo_config or git_repo,
-                batch_size=batch_size,
-                same_workspace_tasks=same_workspace_tasks,
-            )
-            if isolate:
-                if git_repo is None:
+            try:
+                workspace = self._resolve_workspace(task)
+                if not workspace.exists():
                     return FleetTaskResult(
                         task_index=task_index,
                         persona=task.persona,
                         goal=task.goal,
                         status="error",
                         summary=None,
-                        error=(
-                            "Parallel fleet dispatch requires a git repository. "
-                            f"Initialize git in {workspace} or dispatch sequentially."
-                        ),
-                        duration_seconds=round(time.monotonic() - start, 2),
-                    )
-                try:
-                    with self._worktree_lock:
-                        task_workspace = prepare_task_workspace(
-                            git_repo,
-                            task_index=task_index,
-                            force_isolation=force_parallel,
-                        )
-                except RuntimeError as exc:
-                    return FleetTaskResult(
-                        task_index=task_index,
-                        persona=task.persona,
-                        goal=task.goal,
-                        status="error",
-                        summary=None,
-                        error=str(exc),
+                        error=f"Workspace does not exist: {workspace}",
                         duration_seconds=round(time.monotonic() - start, 2),
                     )
 
-            run_workspace = task_workspace.path if task_workspace else workspace
-            task_config = merge_repo_into_fleet_config(
-                self.config,
-                repo_config or git_repo,
-            )
-            resolver = YamlPersonaResolver(task_config)
+                repo_config = find_repo_config(workspace)
+                git_repo = self._isolation_repo(workspace)
+                phases = self._resolve_pipeline(task)
 
-            if phases == ["full"]:
-                result = self._run_full_pipeline(task_index, task, run_workspace, start)
-                self._emit(
-                    "fleet.task.complete",
+                if phases == ["full"]:
+                    return self._run_full_pipeline(
+                        task_index, task, workspace, start, handoff=handoff, fleet_log=fleet_log
+                    )
+
+                run_workspace, task_workspace, wt_error = prepare_task_workspace_if_needed(
                     task_index=task_index,
-                    persona=task.persona,
-                    status=result.status,
-                    duration_seconds=result.duration_seconds,
+                    workspace=workspace,
+                    repo_config=repo_config,
+                    git_repo=git_repo,
+                    phases=phases,
+                    batch_size=batch_size,
+                    same_workspace_tasks=same_workspace_tasks,
+                    worktree_lock=self._worktree_lock,
+                )
+                if wt_error:
+                    return FleetTaskResult(
+                        task_index=task_index,
+                        persona=task.persona,
+                        goal=task.goal,
+                        status="error",
+                        summary=None,
+                        error=wt_error,
+                        duration_seconds=round(time.monotonic() - start, 2),
+                    )
+
+                task_config = merge_repo_into_fleet_config(
+                    self.config,
+                    repo_config or git_repo,
+                )
+                resolver = YamlPersonaResolver(task_config)
+
+                phase_results: list[dict[str, object]] = []
+                if task_workspace is not None and task_workspace.isolated:
+                    phase_results.append(
+                        {
+                            "phase": "worktree",
+                            "path": str(task_workspace.path),
+                            "branch": task_workspace.branch_name,
+                            "run_id": task_workspace.run_id,
+                        }
+                    )
+
+                pipeline_results, summary, exit_code, changed_files = run_configured_pipeline(
+                    backend=self.backend,
+                    resolver=resolver,
+                    task=task,
+                    run_workspace=run_workspace,
+                    task_config=task_config,
+                    phases=phases,
+                    repo_config=repo_config,
+                    git_repo=git_repo,
+                    handoff=handoff,
+                )
+                phase_results.extend(pipeline_results)
+
+                result = build_task_result(
+                    task_index=task_index,
+                    task=task,
+                    start=start,
+                    phase_results=phase_results,
+                    summary=summary,
+                    exit_code=exit_code,
+                    changed_files=changed_files,
+                    task_workspace=task_workspace,
+                    fleet_log=fleet_log,
+                )
+
+                repo_for_publish = repo_config or git_repo
+                code_review_cfg = repo_for_publish.code_review if repo_for_publish else None
+                pr_number = result.pr_number
+                pr_loop_status = result.pr_loop_status
+                status = result.status
+                error = result.error
+                if repo_for_publish is not None:
+                    status, error, pr_number, pr_loop_status = maybe_publish_and_pr_loop(
+                        status=result.status,
+                        task=task,
+                        run_workspace=run_workspace,
+                        task_workspace=task_workspace,
+                        repo_for_publish=repo_for_publish,
+                        task_config=task_config,
+                        code_review_cfg=code_review_cfg,
+                    )
+                if pr_number or pr_loop_status or status != result.status:
+                    result = replace(
+                        result,
+                        status=status,
+                        error=error,
+                        pr_number=pr_number,
+                        pr_loop_status=pr_loop_status,
+                    )
+
+                keep_worktree = result.status in {"completed", "merged"} or (
+                    code_review_cfg is not None
+                    and code_review_cfg.auto_push
+                    and task_workspace is not None
+                    and task_workspace.isolated
                 )
                 if task_workspace is not None:
-                    task_workspace.teardown(keep=result.status == "completed")
+                    task_workspace.teardown(keep=keep_worktree)
                 return result
-
-            phase_results: list[dict[str, object]] = []
-            if task_workspace is not None and task_workspace.isolated:
-                phase_results.append(
-                    {
-                        "phase": "worktree",
-                        "path": str(task_workspace.path),
-                        "branch": task_workspace.branch_name,
-                        "run_id": task_workspace.run_id,
-                    }
-                )
-
-            pipeline_name = task.pipeline or task_config.default_pipeline
-            repo_for_publish = repo_config or git_repo
-            code_review_cfg = repo_for_publish.code_review if repo_for_publish else None
-            use_auto_fix = (
-                pipeline_name == "code_review"
-                and code_review_cfg is not None
-                and code_review_cfg.auto_fix
-            )
-
-            session: LLMSession | None = None
-            if isinstance(self.backend, SessionCapableBackend) and not use_auto_fix:
-                persona_spec = resolver.load(task.persona)
-                mcp_specs = {
-                    name: task_config.mcp_servers[name]
-                    for name in (getattr(persona_spec, "mcp_servers", []) or [])
-                    if name in task_config.mcp_servers
-                }
-                session = self.backend.create_session(
-                    persona_name=task.persona,
-                    cwd=run_workspace,
-                    mcp_servers=mcp_specs,
-                    model=persona_spec.model,
-                    mode=persona_spec.mode,
-                )
-
-            try:
-                if use_auto_fix:
-                    (
-                        pipeline_results,
-                        summary,
-                        exit_code,
-                        changed_files,
-                    ) = run_code_review_with_auto_fix(
-                        backend=self.backend,
-                        resolver=resolver,
-                        task=task,
-                        workspace=run_workspace,
-                        timeout_s=task_config.timeout_seconds,
-                        phases=phases,
-                        repo=repo_config or git_repo,
-                        config=code_review_cfg,
-                    )
-                else:
-                    pipeline_results, summary, exit_code, changed_files = run_pipeline(
-                        backend=self.backend,
-                        resolver=resolver,
-                        task=task,
-                        workspace=run_workspace,
-                        timeout_s=task_config.timeout_seconds,
-                        phases=phases,
-                        repo=repo_config or git_repo,
-                        session=session,
-                    )
-            finally:
-                if session is not None:
-                    session.dispose()
-            phase_results.extend(pipeline_results)
-            agent_id: str | None = None
-            for phase in reversed(phase_results):
-                raw_id = phase.get("agent_id")
-                if raw_id:
-                    agent_id = str(raw_id)
-                    break
-
-            status, error = resolve_pipeline_outcome(phase_results, exit_code)
-
-            pr_number: int | None = None
-            pr_loop_status: str | None = None
-            repo_for_publish = repo_config or git_repo
-            if (
-                status == "completed"
-                and code_review_cfg
-                and code_review_cfg.auto_push
-                and task_workspace
-                and task_workspace.isolated
-                and task_workspace.branch_name
-                and repo_for_publish
-            ):
-                pr_number = publish_fleet_branch(
-                    worktree=run_workspace,
-                    branch=task_workspace.branch_name,
-                    repo=repo_for_publish,
-                    task_goal=task.goal,
+            except Exception as exc:
+                logger.exception("Fleet task %s failed", task_index)
+                if task_workspace is not None:
+                    task_workspace.teardown(keep=False)
+                fleet_log.emit("fleet.task.error", error=str(exc))
+                return FleetTaskResult(
+                    task_index=task_index,
                     persona=task.persona,
+                    goal=task.goal,
+                    status="error",
+                    summary=None,
+                    error=str(exc),
+                    duration_seconds=round(time.monotonic() - start, 2),
+                    stderr=str(exc),
                 )
-                if (
-                    pr_number
-                    and code_review_cfg.auto_pr_loop
-                    and repo_for_publish.pr_loop
-                    and repo_for_publish.pr_loop.enabled
-                ):
-                    from agent_fleet.pr_loop.lifecycle import run_pr_lifecycle
-
-                    loop_result = run_pr_lifecycle(
-                        pr_number=pr_number,
-                        branch=task_workspace.branch_name,
-                        repo=repo_for_publish,
-                        loop_config=repo_for_publish.pr_loop,
-                        fleet_config=task_config,
-                        worktree=run_workspace,
-                        skip_review_wait=False,
-                        persona=task.persona,
-                    )
-                    pr_loop_status = loop_result.status
-                    if loop_result.status == "merged":
-                        status = "merged"
-                        error = None
-
-            keep_worktree = status in {"completed", "merged"} or (
-                code_review_cfg is not None
-                and code_review_cfg.auto_push
-                and task_workspace is not None
-                and task_workspace.isolated
-            )
-
-            result = FleetTaskResult(
-                task_index=task_index,
-                persona=task.persona,
-                goal=task.goal,
-                status=status,
-                summary=summary or None,
-                error=error,
-                duration_seconds=round(time.monotonic() - start, 2),
-                agent_id=agent_id,
-                phases=_phase_map(phase_results),
-                changed_files=changed_files or None,
-                worktree=str(task_workspace.path) if task_workspace else None,
-                branch_name=task_workspace.branch_name if task_workspace else None,
-                pr_number=pr_number,
-                pr_loop_status=pr_loop_status,
-            )
-            self._emit(
-                "fleet.task.complete",
-                task_index=task_index,
-                persona=task.persona,
-                status=status,
-                duration_seconds=result.duration_seconds,
-            )
-            if task_workspace is not None:
-                task_workspace.teardown(keep=keep_worktree)
-            return result
-        except Exception as exc:
-            logger.exception("Fleet task %s failed", task_index)
-            if task_workspace is not None:
-                task_workspace.teardown(keep=False)
-            return FleetTaskResult(
-                task_index=task_index,
-                persona=task.persona,
-                goal=task.goal,
-                status="error",
-                summary=None,
-                error=str(exc),
-                duration_seconds=round(time.monotonic() - start, 2),
-            )
-        finally:
-            if token is not None:
-                with self._admission_lock:
-                    self._admission.release(token)
+            finally:
+                if token is not None:
+                    with self._admission_lock:
+                        self._admission.release(token)
 
     def dispatch(
         self,
@@ -515,7 +412,7 @@ class FleetDispatcher:
                     task,
                     dispatch=_run_with_handoff,
                     max_redispatches=self.config.max_redispatches,
-                    on_event=lambda evt, payload: self._emit(evt, **payload),
+                    on_event=self._emit_progress,
                 )
             ]
 
@@ -535,6 +432,18 @@ class FleetDispatcher:
                 idx = futures[future]
                 results[idx] = future.result()
         return [r for r in results if r is not None]
+
+    def _emit_progress(self, event: str, payload: dict[str, object]) -> None:
+        from agent_fleet.observability.context import get_run_log
+
+        run_log = get_run_log()
+        if run_log is not None:
+            run_log.emit(event, data=payload)
+        if self.progress_callback:
+            try:
+                self.progress_callback(event, **payload)
+            except Exception as exc:
+                logger.debug("Fleet progress callback failed: %s", exc)
 
 
 def dispatch_tasks(

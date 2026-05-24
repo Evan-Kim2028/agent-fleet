@@ -5,11 +5,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
 from agent_fleet.backends import make_backend
+from agent_fleet.cli_env import require_backend_env
 from agent_fleet.config import load_fleet_config
 from agent_fleet.dispatcher import FleetDispatcher
 from agent_fleet.personas import YamlPersonaResolver
@@ -22,13 +22,8 @@ def cmd_review(args: argparse.Namespace) -> int:
 
     workspace = Path(args.workspace or Path.cwd()).resolve()
     config = load_fleet_config(args.config) if args.config else load_fleet_config()
-    backend_name = config.default_backend.lower()
-    if backend_name == "cursor" and not os.environ.get("CURSOR_API_KEY"):
-        print("error: CURSOR_API_KEY is not set", file=sys.stderr)
-        return 1
-    if backend_name == "kimi" and not os.environ.get("KIMI_API_KEY"):
-        print("error: KIMI_API_KEY is not set (Kimi Code subscription)", file=sys.stderr)
-        return 1
+    if (code := require_backend_env(config)) is not None:
+        return code
 
     result = run_pr_review(
         workspace=workspace,
@@ -49,13 +44,8 @@ def cmd_scope(args: argparse.Namespace) -> int:
 
     workspace = Path(args.workspace or Path.cwd()).resolve()
     config = load_fleet_config(args.config) if args.config else load_fleet_config()
-    backend_name = config.default_backend.lower()
-    if backend_name == "cursor" and not os.environ.get("CURSOR_API_KEY"):
-        print("error: CURSOR_API_KEY is not set", file=sys.stderr)
-        return 1
-    if backend_name == "kimi" and not os.environ.get("KIMI_API_KEY"):
-        print("error: KIMI_API_KEY is not set", file=sys.stderr)
-        return 1
+    if (code := require_backend_env(config)) is not None:
+        return code
 
     result = run_scope(
         workspace=workspace,
@@ -72,13 +62,8 @@ def cmd_scout(args: argparse.Namespace) -> int:
 
     workspace = Path(args.workspace or Path.cwd()).resolve()
     config = load_fleet_config(args.config) if args.config else load_fleet_config()
-    backend_name = config.default_backend.lower()
-    if backend_name == "cursor" and not os.environ.get("CURSOR_API_KEY"):
-        print("error: CURSOR_API_KEY is not set", file=sys.stderr)
-        return 1
-    if backend_name == "kimi" and not os.environ.get("KIMI_API_KEY"):
-        print("error: KIMI_API_KEY is not set", file=sys.stderr)
-        return 1
+    if (code := require_backend_env(config)) is not None:
+        return code
 
     result = run_scout(
         workspace=workspace,
@@ -94,13 +79,8 @@ def cmd_scout(args: argparse.Namespace) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     config = load_fleet_config(args.config) if args.config else load_fleet_config()
-    backend_name = config.default_backend.lower()
-    if backend_name == "cursor" and not os.environ.get("CURSOR_API_KEY"):
-        print("error: CURSOR_API_KEY is not set", file=sys.stderr)
-        return 1
-    if backend_name == "kimi" and not os.environ.get("KIMI_API_KEY"):
-        print("error: KIMI_API_KEY is not set (Kimi Code subscription)", file=sys.stderr)
-        return 1
+    if (code := require_backend_env(config)) is not None:
+        return code
 
     workspace = Path(args.workspace or Path.cwd()).resolve()
     repo = find_repo_config(workspace)
@@ -153,15 +133,11 @@ def cmd_personas(args: argparse.Namespace) -> int:
 
 
 def cmd_loop(args: argparse.Namespace) -> int:
-    import logging
-
+    from agent_fleet.logging_config import configure_fleet_logging
     from agent_fleet.pr_loop.lifecycle import run_pr_lifecycle
     from agent_fleet.pr_loop.watcher import PrLoopWatcher, run_watcher_once
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    configure_fleet_logging()
 
     workspace = Path(args.workspace or Path.cwd()).resolve()
     if args.once:
@@ -175,13 +151,8 @@ def cmd_loop(args: argparse.Namespace) -> int:
         return 1
 
     config = load_fleet_config(args.config) if args.config else load_fleet_config()
-    backend_name = config.default_backend.lower()
-    if backend_name == "cursor" and not os.environ.get("CURSOR_API_KEY"):
-        print("error: CURSOR_API_KEY is not set", file=sys.stderr)
-        return 1
-    if backend_name == "kimi" and not os.environ.get("KIMI_API_KEY"):
-        print("error: KIMI_API_KEY is not set", file=sys.stderr)
-        return 1
+    if (code := require_backend_env(config)) is not None:
+        return code
 
     watcher = PrLoopWatcher(repo, repo.pr_loop, fleet_config=config)
     if args.pr_number:

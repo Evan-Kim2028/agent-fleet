@@ -4,32 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
-import subprocess
 from typing import TYPE_CHECKING, Any
+
+from agent_fleet.integrations.github_cli import gh as _gh
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 logger = logging.getLogger(__name__)
-
-
-def _gh(
-    *args: str,
-    cwd: Path | None = None,
-    check: bool = True,
-) -> subprocess.CompletedProcess[str]:
-    cmd = ["gh", *args]
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        cwd=str(cwd) if cwd else None,
-        check=False,
-        timeout=120,
-    )
-    if check and result.returncode != 0:
-        raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
-    return result
 
 
 def repo_full_name(*, cwd: Path | None = None) -> str:

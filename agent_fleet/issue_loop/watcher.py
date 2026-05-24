@@ -32,8 +32,7 @@ from agent_fleet.memory import (
     count_playwright_mcp_processes,
     memory_snapshot,
 )
-from agent_fleet.observability.events import FleetEvent
-from agent_fleet.observability.sinks import PythonLoggingSink
+from agent_fleet.observability.fleet_logger import get_watcher_logger
 from agent_fleet.repo import RepoConfig, find_repo_config
 
 if TYPE_CHECKING:
@@ -41,8 +40,6 @@ if TYPE_CHECKING:
     from agent_fleet.pr_loop.config import PrLoopConfig
 
 logger = logging.getLogger(__name__)
-
-_watcher_event_sink = PythonLoggingSink("agent_fleet.watcher")
 
 _shutdown_requested = False
 
@@ -83,18 +80,13 @@ def _cleanup_orphaned_playwright_mcp(state: dict[str, Any]) -> None:
         return
     logger.warning("Orphaned playwright MCP processes detected: count=%s", before)
     result = cleanup_playwright_mcp_processes(force_kill=True)
-    _watcher_event_sink.emit(
-        FleetEvent.now(
-            run_id="watcher",
-            event="mcp.orphan.cleanup",
-            level="warning" if result.after > 0 else "info",
-            data={
-                "before": result.before,
-                "after": result.after,
-                "force_killed": list(result.force_killed),
-                "cleaned": result.cleaned,
-            },
-        )
+    get_watcher_logger().emit(
+        "mcp.orphan.cleanup",
+        level="warning" if result.after > 0 else "info",
+        before=result.before,
+        after=result.after,
+        force_killed=list(result.force_killed),
+        cleaned=result.cleaned,
     )
     logger.info(
         "Orphan playwright MCP cleanup: before=%s after=%s force_killed=%s",
@@ -200,20 +192,15 @@ class IssueLoopWatcher:
             )
             if not admission.allowed:
                 retryable = admission.reason in RETRYABLE_ADMISSION_REASONS
-                _watcher_event_sink.emit(
-                    FleetEvent.now(
-                        run_id=f"issue-{issue_number}",
-                        event="admission.check",
-                        level="warning" if retryable else "info",
-                        issue_number=issue_number,
-                        persona=persona,
-                        data={
-                            "allowed": False,
-                            "reason": admission.reason,
-                            "retryable": retryable,
-                            "visual_audit": is_visual_audit,
-                        },
-                    )
+                get_watcher_logger().emit(
+                    "admission.check",
+                    level="warning" if retryable else "info",
+                    issue_number=issue_number,
+                    persona=persona,
+                    allowed=False,
+                    reason=admission.reason,
+                    retryable=retryable,
+                    visual_audit=is_visual_audit,
                 )
                 if not retryable:
                     state["seen"].append(comment_id)

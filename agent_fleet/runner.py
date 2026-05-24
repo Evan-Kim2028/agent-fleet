@@ -15,10 +15,17 @@ from agent_fleet.contracts.review import ReviewResult, ReviewVerdict
 from agent_fleet.contracts.task_spec import DecompositionDecision, TaskSpec
 from agent_fleet.contracts.tech_lead_review import TechLeadReview, TechLeadVerdict
 from agent_fleet.contracts.verify_result import VerifySeverity
-from agent_fleet.hooks import ResumableGitOps, SessionCapableBackend
+from agent_fleet.fleet_session import create_fleet_session
+from agent_fleet.hooks import ResumableGitOps
 from agent_fleet.implementer import implement
 from agent_fleet.observability.context import bind_run
 from agent_fleet.observability.log import RunLog
+from agent_fleet.phase_graph import (
+    PhaseGraph,
+    PhaseRunContext,
+    default_phase_graph,
+    should_run_phase,
+)
 from agent_fleet.phases import run_pipeline
 from agent_fleet.planner import plan
 from agent_fleet.repo import RepoConfig, find_repo_config
@@ -26,7 +33,7 @@ from agent_fleet.researcher import research_all
 from agent_fleet.reviewer import review
 from agent_fleet.spine_config import SpineConfig
 from agent_fleet.synthesizer import synthesize
-from agent_fleet.tech_lead import should_invoke_tech_lead, tech_lead_review
+from agent_fleet.tech_lead import tech_lead_review
 from agent_fleet.verify_core import get_changed_files
 
 if TYPE_CHECKING:
@@ -158,6 +165,13 @@ class LocalFleetRunner:
         self._forge = forge
         self._fleet_config = fleet_config
 
+    def _build_phase_graph(self) -> PhaseGraph:
+        return default_phase_graph(
+            max_verify_retries=self._config.max_verify_retries,
+            design_review_enabled=self._spine.design_review_enabled,
+            design_visual_surface_globs=tuple(self._spine.design_visual_surface_globs),
+        )
+
     def _pr_labels_for_issue(self, issue_number: int | None, base_labels: list[str]) -> list[str]:
         if self._forge is None or issue_number is None:
             return list(base_labels)
@@ -208,41 +222,51 @@ class LocalFleetRunner:
             persona=persona,
             visual_audit=require_mcp,
         )
+        phase_graph = self._build_phase_graph()
 
         with bind_run(run_log, run_log.context):
-            run_log.run_start(title=title, visual_audit=require_mcp)
+            run_log.run_start(
+                title=title,
+                visual_audit=require_mcp,
+                phase_order=[p.name for p in phase_graph],
+            )
+            run_log.emit(
+                "phase_graph.order",
+                data={"phases": [p.name for p in phase_graph]},
+            )
             if require_mcp:
                 logger.info("[%s] Playwright MCP required for this task", run_id)
                 run_log.emit("mcp.required", data={"servers": ["playwright"]})
 
             try:
-                session_backend: SessionCapableBackend | None = None
-                if self._fleet_config and isinstance(self._backend, SessionCapableBackend):
-                    session_backend = self._backend
+                session = create_fleet_session(
+                    self._backend,
+                    fleet_config=self._fleet_config,
+                    persona_resolver=self._persona_resolver,
+                    persona=persona,
+                    cwd=repo_root,
+                )
+                if session is not None and self._fleet_config:
                     persona_spec = self._persona_resolver.load(persona)
                     mcp_specs = {
                         name: self._fleet_config.mcp_servers[name]
                         for name in (getattr(persona_spec, "mcp_servers", []) or [])
                         if name in self._fleet_config.mcp_servers
                     }
-                    session = session_backend.create_session(
-                        persona_name=persona,
-                        cwd=repo_root,
-                        mcp_servers=mcp_specs,
-                        model=persona_spec.model,
-                        mode=persona_spec.mode,
-                    )
                     if mcp_specs:
-                        backend = session_backend
+                        from agent_fleet.hooks import SessionCapableBackend
 
-                        def browser_session_factory() -> LLMSession | None:
-                            return backend.create_session(
-                                persona_name=persona,
-                                cwd=repo_root,
-                                mcp_servers=mcp_specs,
-                                model=persona_spec.model,
-                                mode=persona_spec.mode,
-                            )
+                        backend = self._backend
+                        if isinstance(backend, SessionCapableBackend):
+
+                            def browser_session_factory() -> LLMSession | None:
+                                return create_fleet_session(
+                                    backend,
+                                    fleet_config=self._fleet_config,
+                                    persona_resolver=self._persona_resolver,
+                                    persona=persona,
+                                    cwd=repo_root,
+                                )
 
                 if self._config.resume and isinstance(self._git_ops, ResumableGitOps):
                     resumed = self._git_ops.find_resume_branch(
@@ -423,6 +447,21 @@ class LocalFleetRunner:
                 changed_files = get_changed_files(worktree)
                 diff = self._git_ops.diff_summary(worktree)
 
+                phase_ctx = PhaseRunContext(
+                    task_spec=task_spec,
+                    changed_files=changed_files,
+                )
+                if should_run_phase(phase_graph, "DESIGN_REVIEW", phase_ctx):
+                    with run_log.phase("DESIGN_REVIEW"):
+                        run_log.emit(
+                            "design_review.skipped",
+                            data={"reason": "handler not configured"},
+                        )
+                    phases["DESIGN_REVIEW"] = {
+                        "skipped": True,
+                        "reason": "handler not configured",
+                    }
+
                 commit_sha = None
                 if self._config.commit_changes:
                     commit_sha = self._git_ops.commit_changes(
@@ -513,8 +552,13 @@ class LocalFleetRunner:
                     )
                 phases["REVIEW"] = [r.to_dict() for r in review_results]
 
+                phase_ctx = PhaseRunContext(
+                    task_spec=task_spec,
+                    reviews=review_results,
+                    changed_files=changed_files,
+                )
                 tech_lead: TechLeadReview | None = None
-                if should_invoke_tech_lead(task_spec, review_results):
+                if should_run_phase(phase_graph, "TECH_LEAD", phase_ctx):
                     with run_log.phase("TECH_LEAD"):
                         logger.info("[%s] TECH_LEAD", run_id)
                         tech_lead = tech_lead_review(
@@ -616,21 +660,13 @@ class TaskRunner:
         pipeline_name = pipeline or self._fleet_config.default_pipeline
         phases = self._fleet_config.pipelines.get(pipeline_name, ["execute"])
 
-        session: LLMSession | None = None
-        if isinstance(self._backend, SessionCapableBackend):
-            persona = self._persona_resolver.load(self._task.persona)
-            mcp_specs = {
-                name: self._fleet_config.mcp_servers[name]
-                for name in (getattr(persona, "mcp_servers", []) or [])
-                if name in self._fleet_config.mcp_servers
-            }
-            session = self._backend.create_session(
-                persona_name=self._task.persona,
-                cwd=self._workspace,
-                mcp_servers=mcp_specs,
-                model=persona.model,
-                mode=persona.mode,
-            )
+        session = create_fleet_session(
+            self._backend,
+            fleet_config=self._fleet_config,
+            persona_resolver=self._persona_resolver,
+            persona=self._task.persona,
+            cwd=self._workspace,
+        )
 
         try:
             phase_results, summary, exit_code, changed_files = run_pipeline(

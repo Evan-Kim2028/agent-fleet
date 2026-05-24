@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+
+from agent_fleet.state_store import JsonStateStore
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -19,13 +20,14 @@ def now_iso() -> str:
 
 
 def load_state(path: Path, since_override: str | None = None) -> dict[str, Any]:
-    if path.exists():
-        try:
-            state = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError, OSError:
-            state = {}
-    else:
-        state = {}
+    store = JsonStateStore(path, atomic=True)
+    state = store.load(
+        {
+            "seen": [],
+            "in_flight": {},
+            "since": since_override or now_iso(),
+        }
+    )
     state.setdefault("seen", [])
     state.setdefault("in_flight", {})
     state.setdefault("since", since_override or now_iso())
@@ -35,7 +37,4 @@ def load_state(path: Path, since_override: str | None = None) -> dict[str, Any]:
 
 
 def save_state(path: Path, state: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    JsonStateStore(path, atomic=True).save(state)

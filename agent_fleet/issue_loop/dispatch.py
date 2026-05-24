@@ -44,10 +44,9 @@ def run_issue_dispatch(
     dispatch_config: IssueDispatchConfig | None = None,
 ) -> int:
     """Execute full pipeline for an issue trigger. Returns process exit code."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    from agent_fleet.logging_config import configure_fleet_logging
+
+    configure_fleet_logging()
 
     repo = find_repo_config(repo_root)
     if repo is None:

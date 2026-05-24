@@ -315,3 +315,13 @@ def default_phase_graph(
     ]
 
     return PhaseGraph(phases)
+
+
+def should_run_phase(graph: PhaseGraph, name: str, ctx: PhaseRunContext) -> bool:
+    """Return True when *name* is in the graph and its condition passes."""
+    spec = graph.get(name)
+    if spec is None:
+        return False
+    if spec.condition is None:
+        return True
+    return spec.condition(ctx)

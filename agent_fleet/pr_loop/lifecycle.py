@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from agent_fleet.agent_mode import parse_agent_mode
 from agent_fleet.backends import make_backend
 from agent_fleet.config import FleetConfig, load_fleet_config
+from agent_fleet.observability.fleet_logger import FleetLogger
 from agent_fleet.personas import YamlPersonaResolver
 from agent_fleet.pr_loop import github_ops
 from agent_fleet.pr_loop.review_parse import (
@@ -517,8 +518,56 @@ def run_pr_lifecycle(
 ) -> LifecycleResult:
     """Run address-review → CI wait/fix → merge for one PR."""
     fleet_config = fleet_config or load_fleet_config()
-    repo_root = repo.repo_root
     persona = persona or persona_from_branch(branch, repo.default_persona)
+    fleet_log = FleetLogger.for_background(
+        run_id=f"pr-loop-{pr_number}",
+        persona=persona,
+    )
+    with fleet_log.bind():
+        fleet_log.emit(
+            "pr_loop.start",
+            pr_number=pr_number,
+            branch=branch,
+            skip_review_wait=skip_review_wait,
+        )
+        try:
+            result = _run_pr_lifecycle_body(
+                pr_number=pr_number,
+                branch=branch,
+                repo=repo,
+                loop_config=loop_config,
+                fleet_config=fleet_config,
+                worktree=worktree,
+                skip_review_wait=skip_review_wait,
+                persona=persona,
+                fleet_log=fleet_log,
+            )
+        except Exception as exc:
+            fleet_log.emit("pr_loop.error", level="error", error=str(exc))
+            logger.exception("PR loop failed for #%s", pr_number)
+            raise
+        fleet_log.emit(
+            "pr_loop.end",
+            status=result.status,
+            detail=result.detail[:500] if result.detail else "",
+        )
+        return result
+
+
+def _run_pr_lifecycle_body(
+    *,
+    pr_number: int,
+    branch: str,
+    repo: RepoConfig,
+    loop_config: PrLoopConfig,
+    fleet_config: FleetConfig,
+    worktree: Path | None,
+    skip_review_wait: bool,
+    persona: str,
+    fleet_log: FleetLogger,
+) -> LifecycleResult:
+    """Inner PR lifecycle implementation (expects bound FleetLogger)."""
+    repo_root = repo.repo_root
     pr_config = repo.pr_review
     marker = pr_config.comment_title if pr_config else "Composer PR Analysis"
 
@@ -569,6 +618,7 @@ def run_pr_lifecycle(
             needs_fix = False
 
     if needs_fix and review_body:
+        fleet_log.emit("pr_loop.review_fix.start", pr_number=pr_number)
         wt = github_ops.checkout_branch(branch, wt, repo_root=repo_root)
         fix_attempts = 0
         while fix_attempts < loop_config.max_fix_attempts:
@@ -609,6 +659,14 @@ def run_pr_lifecycle(
                 )
                 return LifecycleResult("parked", address.detail)
             if address.status in {"scope_violation", "fix_failed"}:
+                fleet_log.emit(
+                    "pr_loop.review_fix.attempt",
+                    level="warning",
+                    attempt=fix_attempts,
+                    max_attempts=loop_config.max_fix_attempts,
+                    status=address.status,
+                    detail=address.detail[:500] if address.detail else "",
+                )
                 logger.warning(
                     "Review fix attempt %s/%s PR #%s: %s — %s",
                     fix_attempts,
@@ -664,16 +722,27 @@ def run_pr_lifecycle(
 
     ci_fix_attempts = 0
     while True:
+        fleet_log.emit("pr_loop.ci.wait", pr_number=pr_number, attempt=ci_fix_attempts + 1)
         ci = wait_for_ci_green(
             pr_number,
             repo_root=repo_root,
             loop_config=loop_config,
         )
         if ci.status == "ci_green":
+            fleet_log.emit("pr_loop.ci.green", pr_number=pr_number)
             break
         if ci.status != "ci_failed" or ci_fix_attempts >= loop_config.max_ci_fix_attempts:
+            fleet_log.emit(
+                "pr_loop.ci.end", status=ci.status, detail=ci.detail[:500] if ci.detail else ""
+            )
             return ci
         ci_fix_attempts += 1
+        fleet_log.emit(
+            "pr_loop.ci.fix",
+            pr_number=pr_number,
+            attempt=ci_fix_attempts,
+            max_attempts=loop_config.max_ci_fix_attempts,
+        )
         _all, _pending, failed = github_ops.pr_checks(
             pr_number,
             cwd=repo_root,
@@ -696,8 +765,10 @@ def run_pr_lifecycle(
         time.sleep(loop_config.post_fix_poll_s)
 
     if not loop_config.auto_merge:
+        fleet_log.emit("pr_loop.ready", auto_merge=False)
         return LifecycleResult("ready", "CI green; auto_merge disabled")
 
+    fleet_log.emit("pr_loop.merge.attempt", pr_number=pr_number)
     return try_merge(
         pr_number=pr_number,
         persona=persona,

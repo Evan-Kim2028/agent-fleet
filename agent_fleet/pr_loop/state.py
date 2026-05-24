@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import time
 from typing import TYPE_CHECKING, Any
+
+from agent_fleet.state_store import JsonStateStore
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -15,17 +16,11 @@ def state_path(repo_root: Path, filename: str) -> Path:
 
 
 def load_state(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except json.JSONDecodeError, OSError:
-        return {}
+    return JsonStateStore(path).load()
 
 
 def save_state(path: Path, state: dict[str, Any]) -> None:
-    path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    JsonStateStore(path).save(state)
 
 
 def merge_cooldown_remaining(state: dict[str, Any], cooldown_s: int) -> float:

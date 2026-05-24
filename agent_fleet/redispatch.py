@@ -27,7 +27,12 @@ def _is_hard_failure(result: _ResultLike) -> bool:
 def _extract_handoff(result: _ResultLike, *, previous: HandoffNote | None) -> HandoffNote:
     status = getattr(result, "status", "error")
     files = tuple(getattr(result, "files_modified", ()) or ())
-    stderr = str(getattr(result, "stderr", ""))
+    stderr = str(getattr(result, "stderr", "") or "")
+    if not stderr:
+        stderr = str(getattr(result, "error", "") or "")
+    changed = getattr(result, "changed_files", None)
+    if not files and changed:
+        files = tuple(str(p) for p in changed)
     attempt = (previous.attempt_number + 1) if previous else 1
     summary = (
         f"Previous attempt ended with status={status!r}. "

@@ -61,7 +61,9 @@ def test_dispatch_opens_session_and_forwards_mcp(
     dispatcher.config.personas["coder"].mcp_servers = ["playwright"]
 
     # Pretend the workspace is already a git repo so isolation logic short-circuits.
-    monkeypatch.setattr("agent_fleet.dispatcher.should_isolate_worktree", lambda *_a, **_k: False)
+    monkeypatch.setattr(
+        "agent_fleet.dispatcher_task.should_isolate_worktree", lambda *_a, **_k: False
+    )
 
     results = dispatcher.dispatch(
         goal="smoke test",
@@ -104,7 +106,9 @@ def test_dispatch_falls_back_to_backend_run_without_create_session(
     dispatcher = FleetDispatcher(config=fc)
     dispatcher.backend = legacy  # type: ignore[assignment]
 
-    monkeypatch.setattr("agent_fleet.dispatcher.should_isolate_worktree", lambda *_a, **_k: False)
+    monkeypatch.setattr(
+        "agent_fleet.dispatcher_task.should_isolate_worktree", lambda *_a, **_k: False
+    )
 
     results = dispatcher.dispatch(
         goal="legacy",
