@@ -8,8 +8,17 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from agent_fleet.agent_mode import AgentMode, coerce_agent_mode
+from agent_fleet.contracts.mcp import (
+    HttpMcpServerSpec,
+    McpServerSpec,
+    StdioMcpServerSpec,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 @dataclass(frozen=True)
@@ -19,6 +28,128 @@ class CursorLLMResult:
     exit_code: int
     duration_s: float
     agent_id: str | None = None
+
+
+def _sdk_mcp_config(spec: McpServerSpec, sdk):  # noqa: ANN001
+    if isinstance(spec, StdioMcpServerSpec):
+        return sdk.StdioMcpServerConfig(
+            command=spec.command,
+            args=list(spec.args),
+            env=dict(spec.env),
+            cwd=spec.cwd,
+        )
+    return sdk.HttpMcpServerConfig(
+        url=spec.url,
+        headers=dict(spec.headers),
+        # auth is optional; only pass if any field is set
+        auth=(
+            sdk.McpAuth(
+                client_id=spec.auth_client_id,
+                client_secret=spec.auth_client_secret,
+                scopes=list(spec.auth_scopes),
+            )
+            if spec.auth_client_id
+            else None
+        ),
+    )
+
+
+class CursorSession:
+    """Durable Cursor agent handle scoped to one task."""
+
+    def __init__(
+        self,
+        agent,  # noqa: ANN001 - SDK type
+        *,
+        default_timeout_s: int,
+    ) -> None:
+        self._agent = agent
+        self._default_timeout_s = default_timeout_s
+        self._disposed = False
+        self.agent_id: str | None = getattr(agent, "agent_id", None)
+
+    def send(
+        self,
+        prompt: str,
+        *,
+        max_tokens: int,
+        timeout_s: int,
+        allowed_tools: list[str] | None = None,
+    ) -> CursorLLMResult:
+        del max_tokens
+        scope_note = ""
+        if allowed_tools:
+            scoped = [t.removeprefix("path:") for t in allowed_tools if t.startswith("path:")]
+            if scoped:
+                scope_note = (
+                    "\n\nHard scope constraint: only modify files under: "
+                    + ", ".join(scoped)
+                )
+        body = f"{prompt}{scope_note}" if scope_note else prompt
+        t0 = time.monotonic()
+        try:
+            result = self._agent.send(body)
+            text = getattr(result, "result", None) or str(result)
+            status = getattr(result, "status", "finished")
+            agent_id = getattr(result, "agent_id", self.agent_id)
+            duration_s = time.monotonic() - t0
+            if status in {"error", "cancelled", "expired"}:
+                return CursorLLMResult(
+                    stdout=text or "",
+                    stderr=f"Cursor send status: {status}",
+                    exit_code=1,
+                    duration_s=duration_s,
+                    agent_id=agent_id,
+                )
+            return CursorLLMResult(
+                stdout=text or "",
+                stderr="",
+                exit_code=0,
+                duration_s=duration_s,
+                agent_id=agent_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return CursorLLMResult(
+                stdout="",
+                stderr=str(exc),
+                exit_code=1,
+                duration_s=time.monotonic() - t0,
+                agent_id=self.agent_id,
+            )
+
+    def dispose(self) -> None:
+        if self._disposed:
+            return
+        self._disposed = True
+        try:
+            self._agent.dispose()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+class _ErrorSession:
+    """Stub session that always fails — used when API key is missing."""
+
+    agent_id: str | None = None
+
+    def __init__(self, message: str) -> None:
+        self._message = message
+
+    def send(
+        self,
+        prompt: str,
+        *,
+        max_tokens: int,
+        timeout_s: int,
+        allowed_tools: list[str] | None = None,
+    ) -> CursorLLMResult:
+        del prompt, max_tokens, timeout_s, allowed_tools
+        return CursorLLMResult(
+            stdout="", stderr=self._message, exit_code=1, duration_s=0.0
+        )
+
+    def dispose(self) -> None:
+        return
 
 
 class CursorBackend:
@@ -34,6 +165,40 @@ class CursorBackend:
         self.default_model = default_model
         self.default_mode = default_mode
         self.api_key = api_key or os.environ.get("CURSOR_API_KEY", "")
+
+    def create_session(
+        self,
+        *,
+        persona_name: str,
+        cwd: Path,
+        mcp_servers: Mapping[str, McpServerSpec] | None = None,
+        model: str | None = None,
+        mode: AgentMode | None = None,
+    ) -> CursorSession | _ErrorSession:
+        if not self.api_key:
+            return _ErrorSession("CURSOR_API_KEY is not set")
+        try:
+            import cursor_sdk as sdk
+        except ImportError as exc:
+            return _ErrorSession(f"cursor-sdk not installed: {exc}")
+        selected_model = model or self.default_model
+        selected_mode = coerce_agent_mode(mode, default=self.default_mode)
+        mcp_dict = {
+            name: _sdk_mcp_config(spec, sdk)
+            for name, spec in (mcp_servers or {}).items()
+        }
+        try:
+            agent = sdk.Agent.create(
+                model=selected_model,
+                api_key=self.api_key,
+                local=sdk.LocalAgentOptions(cwd=str(cwd)),
+                mcp_servers=mcp_dict or None,
+                mode=selected_mode,
+                name=f"fleet:{persona_name}",
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _ErrorSession(f"Agent.create failed: {exc}")
+        return CursorSession(agent, default_timeout_s=900)
 
     def run(
         self,
