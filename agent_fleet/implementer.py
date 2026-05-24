@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
     from agent_fleet.contracts.implementation_brief import ImplementationBrief
     from agent_fleet.contracts.task_spec import TaskSpec
-    from agent_fleet.hooks import LLMBackend, LLMResult, PersonaResolver
+    from agent_fleet.hooks import LLMBackend, LLMResult, LLMSession, PersonaResolver
 
 _DEFAULT_PERSONA_PROMPT = "You are a helpful coding assistant."
 
@@ -36,6 +36,7 @@ def implement(
     timeout_s: int = 1800,
     memory_limit: str = "4G",
     prompt_suffix: str | None = None,
+    session: LLMSession | None = None,
 ) -> LLMResult:
     """Run the Implementer phase.
 
@@ -68,14 +69,22 @@ def implement(
         prompt_suffix=prompt_suffix,
     )
 
-    result = backend.run(
-        prompt,
-        max_tokens=max_tokens,
-        timeout_s=timeout_s,
-        memory_limit=memory_limit,
-        allowed_tools=allowed_tools,
-        cwd=worktree_path,
-    )
+    if session is not None:
+        result = session.send(
+            prompt,
+            max_tokens=max_tokens,
+            timeout_s=timeout_s,
+            allowed_tools=allowed_tools,
+        )
+    else:
+        result = backend.run(
+            prompt,
+            max_tokens=max_tokens,
+            timeout_s=timeout_s,
+            memory_limit=memory_limit,
+            allowed_tools=allowed_tools,
+            cwd=worktree_path,
+        )
 
     if result.exit_code != 0:
         raise RuntimeError(

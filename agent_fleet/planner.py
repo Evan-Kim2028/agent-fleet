@@ -21,7 +21,7 @@ from agent_fleet.contracts.task_spec import (
 from agent_fleet.spine_config import SpineConfig
 
 if TYPE_CHECKING:
-    from agent_fleet.hooks import LLMBackend, PersonaResolver
+    from agent_fleet.hooks import LLMBackend, LLMSession, PersonaResolver
 
 # JSON schema summary embedded in the prompt so the LLM knows what to produce.
 _SCHEMA_SUMMARY = """\
@@ -141,6 +141,7 @@ def plan(
     timeout_s: int = 720,
     memory_limit: str = "4G",
     max_retries: int = 2,
+    session: LLMSession | None = None,
 ) -> TaskSpec:
     """Run the Planner phase.
 
@@ -175,13 +176,21 @@ def plan(
             f"Your previous output failed validation:\n{last_error}\n"
             f"Respond again with ONLY the corrected JSON."
         )
-        result = backend.run(
-            prompt,
-            max_tokens=max_tokens,
-            timeout_s=timeout_s,
-            memory_limit=memory_limit,
-            allowed_tools=[],
-        )
+        if session is not None:
+            result = session.send(
+                prompt,
+                max_tokens=max_tokens,
+                timeout_s=timeout_s,
+                allowed_tools=[],
+            )
+        else:
+            result = backend.run(
+                prompt,
+                max_tokens=max_tokens,
+                timeout_s=timeout_s,
+                memory_limit=memory_limit,
+                allowed_tools=[],
+            )
 
         try:
             data = _extract_json(result.stdout)

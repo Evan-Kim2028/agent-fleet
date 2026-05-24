@@ -22,7 +22,7 @@ from agent_fleet.contracts.tech_lead_review import (
 
 if TYPE_CHECKING:
     from agent_fleet.contracts.review import ReviewResult
-    from agent_fleet.hooks import LLMBackend
+    from agent_fleet.hooks import LLMBackend, LLMSession
 
 # ---------------------------------------------------------------------------
 # Trigger guard
@@ -142,6 +142,7 @@ def tech_lead_review(
     max_tokens: int = 4096,
     timeout_s: int = 720,
     memory_limit: str = "4G",
+    session: LLMSession | None = None,
 ) -> TechLeadReview | None:
     """Run the Tech Lead phase (content-triggered).
 
@@ -162,13 +163,21 @@ def tech_lead_review(
         return None
 
     prompt = _build_prompt(task_spec, reviews, pr_number)
-    result = backend.run(
-        prompt,
-        max_tokens=max_tokens,
-        timeout_s=timeout_s,
-        memory_limit=memory_limit,
-        allowed_tools=[],
-    )
+    if session is not None:
+        result = session.send(
+            prompt,
+            max_tokens=max_tokens,
+            timeout_s=timeout_s,
+            allowed_tools=[],
+        )
+    else:
+        result = backend.run(
+            prompt,
+            max_tokens=max_tokens,
+            timeout_s=timeout_s,
+            memory_limit=memory_limit,
+            allowed_tools=[],
+        )
 
     data = _extract_json(result.stdout)
 

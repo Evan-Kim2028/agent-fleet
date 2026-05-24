@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
@@ -41,6 +41,29 @@ class LLMBackend(Protocol):
         model: str | None = None,
         mode: AgentMode | None = None,
     ) -> LLMResult: ...
+
+
+@runtime_checkable
+class LLMSession(Protocol):
+    """A durable agent handle scoped to a single task.
+
+    Multiple phases call send() on the same session so that MCP connections
+    and agent_id persist across plan → research → synthesize → implement →
+    verify → review.
+    """
+
+    agent_id: str | None
+
+    def send(
+        self,
+        prompt: str,
+        *,
+        max_tokens: int,
+        timeout_s: int,
+        allowed_tools: list[str] | None = None,
+    ) -> LLMResult: ...
+
+    def dispose(self) -> None: ...
 
 
 @runtime_checkable
@@ -105,6 +128,7 @@ class Persona:
     model: str = "composer-2.5"
     mode: str = "agent"
     extra_instructions: str = ""
+    mcp_servers: list[str] = field(default_factory=list)
 
 
 @runtime_checkable

@@ -21,7 +21,7 @@ from agent_fleet.contracts.implementation_brief import (
 if TYPE_CHECKING:
     from agent_fleet.contracts.research_note import ResearchNote
     from agent_fleet.contracts.task_spec import TaskSpec
-    from agent_fleet.hooks import LLMBackend
+    from agent_fleet.hooks import LLMBackend, LLMSession
 
 
 def _extract_json(text: str) -> dict[str, Any]:
@@ -153,6 +153,7 @@ def synthesize(
     timeout_s: int = 720,
     memory_limit: str = "2G",
     extra_context: str | None = None,
+    session: LLMSession | None = None,
 ) -> ImplementationBrief:
     """Run the Synthesizer phase.
 
@@ -198,6 +199,7 @@ def synthesize(
         max_tokens=max_tokens,
         timeout_s=timeout_s,
         memory_limit=memory_limit,
+        session=session,
     )
 
     try:
@@ -218,6 +220,7 @@ def _run_with_json_retry(
     max_tokens: int,
     timeout_s: int,
     memory_limit: str,
+    session: LLMSession | None = None,
 ) -> tuple[dict[str, Any], str]:
     """Invoke *backend* and parse JSON, retrying once if no JSON is found.
 
@@ -238,13 +241,21 @@ def _run_with_json_retry(
                 "fences, no commentary. The response MUST start with '{' and "
                 "end with '}'."
             )
-        result = backend.run(
-            current_prompt,
-            max_tokens=max_tokens,
-            timeout_s=timeout_s,
-            memory_limit=memory_limit,
-            allowed_tools=[],
-        )
+        if session is not None:
+            result = session.send(
+                current_prompt,
+                max_tokens=max_tokens,
+                timeout_s=timeout_s,
+                allowed_tools=[],
+            )
+        else:
+            result = backend.run(
+                current_prompt,
+                max_tokens=max_tokens,
+                timeout_s=timeout_s,
+                memory_limit=memory_limit,
+                allowed_tools=[],
+            )
         raw = result.stdout
         try:
             return _extract_json(raw), raw

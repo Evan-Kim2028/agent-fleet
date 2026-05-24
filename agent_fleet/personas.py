@@ -74,4 +74,5 @@ class YamlPersonaResolver:
             model=spec.model or self._config.default_model,
             mode=spec.mode or self._config.default_mode,
             extra_instructions=spec.extra_instructions,
+            mcp_servers=list(spec.mcp_servers),
         )
