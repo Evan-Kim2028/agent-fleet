@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from agent_fleet.contracts.handoff import HandoffNote
+    from agent_fleet.hooks import LLMSession
 
 logger = logging.getLogger(__name__)
 
@@ -323,27 +324,53 @@ class FleetDispatcher:
                 and code_review_cfg.auto_fix
             )
 
-            if use_auto_fix:
-                pipeline_results, summary, exit_code, changed_files = run_code_review_with_auto_fix(
-                    backend=self.backend,
-                    resolver=resolver,
-                    task=task,
-                    workspace=run_workspace,
-                    timeout_s=task_config.timeout_seconds,
-                    phases=phases,
-                    repo=repo_config or git_repo,
-                    config=code_review_cfg,
+            session: LLMSession | None = None
+            if hasattr(self.backend, "create_session") and not use_auto_fix:
+                persona_spec = resolver.load(task.persona)
+                mcp_specs = {
+                    name: task_config.mcp_servers[name]
+                    for name in (getattr(persona_spec, "mcp_servers", []) or [])
+                    if name in task_config.mcp_servers
+                }
+                session = self.backend.create_session(
+                    persona_name=task.persona,
+                    cwd=run_workspace,
+                    mcp_servers=mcp_specs,
+                    model=persona_spec.model,
+                    mode=persona_spec.mode,
                 )
-            else:
-                pipeline_results, summary, exit_code, changed_files = run_pipeline(
-                    backend=self.backend,
-                    resolver=resolver,
-                    task=task,
-                    workspace=run_workspace,
-                    timeout_s=task_config.timeout_seconds,
-                    phases=phases,
-                    repo=repo_config or git_repo,
-                )
+
+            try:
+                if use_auto_fix:
+                    (
+                        pipeline_results,
+                        summary,
+                        exit_code,
+                        changed_files,
+                    ) = run_code_review_with_auto_fix(
+                        backend=self.backend,
+                        resolver=resolver,
+                        task=task,
+                        workspace=run_workspace,
+                        timeout_s=task_config.timeout_seconds,
+                        phases=phases,
+                        repo=repo_config or git_repo,
+                        config=code_review_cfg,
+                    )
+                else:
+                    pipeline_results, summary, exit_code, changed_files = run_pipeline(
+                        backend=self.backend,
+                        resolver=resolver,
+                        task=task,
+                        workspace=run_workspace,
+                        timeout_s=task_config.timeout_seconds,
+                        phases=phases,
+                        repo=repo_config or git_repo,
+                        session=session,
+                    )
+            finally:
+                if session is not None:
+                    session.dispose()
             phase_results.extend(pipeline_results)
             agent_id: str | None = None
             for phase in reversed(phase_results):
