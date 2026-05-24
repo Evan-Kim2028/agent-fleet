@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import textwrap
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from agent_fleet.config import load_fleet_config
 from agent_fleet.contracts.mcp import HttpMcpServerSpec, StdioMcpServerSpec
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _write(tmp_path: Path, body: str) -> Path:
