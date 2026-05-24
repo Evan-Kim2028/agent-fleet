@@ -18,11 +18,13 @@ if TYPE_CHECKING:
 def fake_sdk(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     """Patch the cursor_sdk import inside CursorBackend to a fake module."""
     fake = MagicMock()
+    run = MagicMock()
+    run.wait.return_value = MagicMock(
+        result="ok output", agent_id="agent-xyz", status="finished",
+    )
     fake.Agent.create.return_value = MagicMock(
         agent_id="agent-xyz",
-        send=MagicMock(return_value=MagicMock(
-            result="ok output", agent_id="agent-xyz", status="finished",
-        )),
+        send=MagicMock(return_value=run),
         dispose=MagicMock(),
     )
     fake.StdioMcpServerConfig = lambda **kw: ("stdio", kw)
@@ -72,7 +74,7 @@ def test_session_send_returns_cursor_llm_result(
 def test_session_send_maps_error_status_to_nonzero_exit(
     fake_sdk: MagicMock, tmp_path: Path,
 ) -> None:
-    fake_sdk.Agent.create.return_value.send.return_value = MagicMock(
+    fake_sdk.Agent.create.return_value.send.return_value.wait.return_value = MagicMock(
         result="partial", agent_id="agent-xyz", status="expired",
     )
     backend = CursorBackend(api_key="x")

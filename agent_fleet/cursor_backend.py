@@ -85,10 +85,12 @@ class CursorSession:
         body = f"{prompt}{scope_note}" if scope_note else prompt
         t0 = time.monotonic()
         try:
-            result = self._agent.send(body)
+            run = self._agent.send(body)
+            # Agent.send() returns a Run; block for the terminal RunResult.
+            result = run.wait() if hasattr(run, "wait") else run
             text = getattr(result, "result", None) or str(result)
             status = getattr(result, "status", "finished")
-            agent_id = getattr(result, "agent_id", self.agent_id)
+            agent_id = getattr(result, "agent_id", None) or self.agent_id
             duration_s = time.monotonic() - t0
             if status in {"error", "cancelled", "expired"}:
                 return CursorLLMResult(
