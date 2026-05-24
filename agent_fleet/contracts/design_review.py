@@ -34,10 +34,10 @@ class DesignVerdict(enum.StrEnum):
 class DesignIssue:
     """One issue found by the design critic."""
 
-    severity: str            # "low" | "medium" | "high"
-    area: str                # design dimension / surface
+    severity: str  # "low" | "medium" | "high"
+    area: str  # design dimension / surface
     screenshot_ref: str | None  # CaptureArtifact.ref or None
-    fix: str                 # actionable recommendation
+    fix: str  # actionable recommendation
 
 
 @dataclass(frozen=True)

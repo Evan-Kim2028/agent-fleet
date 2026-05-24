@@ -12,7 +12,7 @@ _RISK_LEVEL_PATTERN = re.compile(
     r"\*\*Risk Level:\*\*[^\n]*\b(LOW|MEDIUM|HIGH|CRITICAL)\b",
     re.IGNORECASE,
 )
-_AGENT_FOOTER = "\U0001F916 Agent:"
+_AGENT_FOOTER = "\U0001f916 Agent:"
 _BLOCKING_RISK = {"MEDIUM", "HIGH", "CRITICAL"}
 _SEVERITY_ORDER = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
 

@@ -93,8 +93,6 @@ def _needs_rollback(files: list[str]) -> bool:
     return any(sig in path for path in files for sig in _ROLLBACK_SIGNALS)
 
 
-
-
 _SYSTEM_PROMPT = """\
 You are the Synthesizer in a multi-agent engineering fleet.
 
@@ -166,9 +164,7 @@ def synthesize(
     Raises ValueError on JSON parse failure or schema validation error.
     """
     task_spec_json = json.dumps(task_spec.to_dict(), indent=2)
-    research_notes_json = json.dumps(
-        [note.to_dict() for note in research_notes], indent=2
-    )
+    research_notes_json = json.dumps([note.to_dict() for note in research_notes], indent=2)
 
     # Collect all paths from the task_spec scope and research notes to detect
     # whether this PR touches rollback-signal paths.

@@ -108,8 +108,7 @@ def test_per_issue_visual_audit_limit() -> None:
 def test_fleet_at_capacity() -> None:
     state = {
         "in_flight": {
-            str(i): [{"pid": i, "persona": "backend", "visual_audit": False}]
-            for i in range(4)
+            str(i): [{"pid": i, "persona": "backend", "visual_audit": False}] for i in range(4)
         }
     }
     admission = _gate().try_admit(
@@ -130,7 +129,13 @@ def test_load_capacity_config_from_yaml_shape() -> None:
         {
             "capacity": {
                 "max_dispatches": 8,
-                "tiers": {"visual_audit": {"max_concurrent": 4, "ram_gb": 6, "min_free_ram_gb": 10}},
+                "tiers": {
+                    "visual_audit": {
+                        "max_concurrent": 4,
+                        "ram_gb": 6,
+                        "min_free_ram_gb": 10,
+                    },
+                },
                 "per_issue": {"default": 2, "visual_audit": 1},
                 "run": {"max_research_workers": 6},
             }

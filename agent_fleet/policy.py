@@ -64,8 +64,8 @@ class PolicyDecision:
 
     phase: str
     decision_type: str  # "merge" | "escalation" | "scope_violation" | "verify_action"
-    decision: str       # the enum value string
-    inputs_hash: str    # 8-char hex prefix of sha256(json(inputs))
+    decision: str  # the enum value string
+    inputs_hash: str  # 8-char hex prefix of sha256(json(inputs))
     rationale: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -101,7 +101,7 @@ class MergeContext:
     """All inputs the merge_decision() method needs."""
 
     ci_green: bool
-    kimi_risk: str | None                   # "LOW" | "MEDIUM" | "HIGH" | "CRITICAL" | None
+    kimi_risk: str | None  # "LOW" | "MEDIUM" | "HIGH" | "CRITICAL" | None
     out_of_scope_files: list[str]
     # Future-proofing: tiered gate on/off, cooldown, human-review paths
     tiered_gate_enabled: bool = False
@@ -376,9 +376,8 @@ class DefaultPolicy:
             )
             return EscalationTier.TECH_LEAD, rec
 
-        if (
-            task_spec.coordination_spec is not None
-            and task_spec.coordination_spec.get("merge_order")
+        if task_spec.coordination_spec is not None and task_spec.coordination_spec.get(
+            "merge_order"
         ):
             rec = PolicyDecision(
                 phase=phase,
@@ -433,8 +432,7 @@ class DefaultPolicy:
             return (), rec
 
         violating = tuple(
-            f for f in changed_files
-            if not any(f.startswith(prefix) for prefix in allowed)
+            f for f in changed_files if not any(f.startswith(prefix) for prefix in allowed)
         )
         if violating:
             rec = PolicyDecision(
@@ -510,10 +508,7 @@ class DefaultPolicy:
             )
         else:
             action = Action.OK
-            rationale = (
-                f"design verdict=pass, mean_score={mean_score:.1f} >= "
-                f"threshold={threshold}"
-            )
+            rationale = f"design verdict=pass, mean_score={mean_score:.1f} >= threshold={threshold}"
 
         rec = PolicyDecision(
             phase=phase,

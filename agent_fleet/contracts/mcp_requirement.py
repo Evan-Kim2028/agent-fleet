@@ -57,7 +57,8 @@ class McpRequirement:
 
         missing: list[str] = []
         for suffix in self.required_tool_suffixes:
-            if not any(label.endswith(f".{suffix}") or label.endswith(suffix) for label in mcp_tool_calls):
+            suffixes = (f".{suffix}", suffix)
+            if not any(label.endswith(suffixes) for label in mcp_tool_calls):
                 missing.append(suffix)
         if missing:
             return McpCheckResult(

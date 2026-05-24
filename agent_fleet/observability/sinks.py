@@ -5,10 +5,11 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from collections import deque
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from agent_fleet.observability.events import FleetEvent
 
 logger = logging.getLogger(__name__)

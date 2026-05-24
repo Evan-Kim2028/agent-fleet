@@ -36,9 +36,12 @@ def test_merge_analyses_keeps_highest_risk() -> None:
 
 
 def test_risk_to_verdict_maps_critical_to_block() -> None:
-    assert risk_to_verdict("critical", []) == __import__(
-        "agent_fleet.contracts.review", fromlist=["ReviewVerdict"]
-    ).ReviewVerdict.BLOCK
+    assert (
+        risk_to_verdict("critical", [])
+        == __import__(
+            "agent_fleet.contracts.review", fromlist=["ReviewVerdict"]
+        ).ReviewVerdict.BLOCK
+    )
 
 
 def test_analysis_to_review_result() -> None:

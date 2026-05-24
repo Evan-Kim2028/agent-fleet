@@ -28,10 +28,12 @@ def test_orphan_cleanup_force_kills_when_idle() -> None:
         force_killed=(10, 11, 12),
         cleaned=True,
     )
-    with patch("agent_fleet.issue_loop.watcher.count_playwright_mcp_processes", return_value=3):
-        with patch(
+    with (
+        patch("agent_fleet.issue_loop.watcher.count_playwright_mcp_processes", return_value=3),
+        patch(
             "agent_fleet.issue_loop.watcher.cleanup_playwright_mcp_processes",
             return_value=result,
-        ) as cleanup:
-            _cleanup_orphaned_playwright_mcp(state)
+        ) as cleanup,
+    ):
+        _cleanup_orphaned_playwright_mcp(state)
     cleanup.assert_called_once_with(force_kill=True)

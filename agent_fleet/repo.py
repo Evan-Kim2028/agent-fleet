@@ -89,11 +89,7 @@ def load_repo_config(path: Path | str) -> RepoConfig:
         verify_commands.append(typecheck_command)
 
     personas_dir_raw = raw.get("personas_dir")
-    personas_dir = (
-        (repo_root / personas_dir_raw).resolve()
-        if personas_dir_raw
-        else None
-    )
+    personas_dir = (repo_root / personas_dir_raw).resolve() if personas_dir_raw else None
 
     scope_map: dict[str, tuple[str, ...]] = {}
     for persona, paths in (raw.get("persona_scope_allowlist") or {}).items():
@@ -107,9 +103,7 @@ def load_repo_config(path: Path | str) -> RepoConfig:
 
     worktree_base_raw = raw.get("worktree_base")
     worktree_base = (
-        Path(str(worktree_base_raw)).expanduser().resolve()
-        if worktree_base_raw
-        else None
+        Path(str(worktree_base_raw)).expanduser().resolve() if worktree_base_raw else None
     )
 
     pr_loop_cfg = _load_pr_loop(repo_root, raw)

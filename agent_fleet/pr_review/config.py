@@ -95,9 +95,7 @@ def load_pr_review_config(repo_root: Path, raw: dict[str, Any] | None) -> PrRevi
         quality_enabled = False
     elif isinstance(quality_raw, dict):
         quality_enabled = bool(quality_raw.get("enabled", True))
-        quality_skill = str(
-            quality_raw.get("skill") or "thermo-nuclear-code-quality-review"
-        )
+        quality_skill = str(quality_raw.get("skill") or "thermo-nuclear-code-quality-review")
 
     return PrReviewConfig(
         enabled=bool(section.get("enabled", True)),
@@ -106,8 +104,7 @@ def load_pr_review_config(repo_root: Path, raw: dict[str, Any] | None) -> PrRevi
         reviewer_persona=str(section.get("reviewer_persona") or "pr-analyzer"),
         comment_title=str(section.get("comment_title") or "Composer PR Analysis"),
         backend_label=str(section.get("backend_label") or "Agent Fleet"),
-        trivial_patterns=_tuple_paths(section.get("trivial_patterns"))
-        or DEFAULT_TRIVIAL_PATTERNS,
+        trivial_patterns=_tuple_paths(section.get("trivial_patterns")) or DEFAULT_TRIVIAL_PATTERNS,
         oversized_threshold=int(section.get("oversized_threshold") or 50),
         area_prefixes=area_prefixes,
         passes=passes,

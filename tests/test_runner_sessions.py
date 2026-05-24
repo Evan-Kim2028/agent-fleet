@@ -22,6 +22,9 @@ class FakeBackend:
         self.create_session_calls.append(kwargs)
         return self.session
 
+    def run(self, *_args: object, **_kwargs: object) -> CursorLLMResult:
+        raise AssertionError("FakeBackend should route through session.send(), not run()")
+
 
 def test_runner_simple_pipeline_uses_one_session(
     fleet_config_with_session_backend,  # noqa: ANN001

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, TypeVar
 
 from agent_fleet.contracts.handoff import HandoffNote
 
@@ -13,12 +13,11 @@ _HARD_STATUSES = frozenset(
     {"error", "cancelled", "expired", "timeout", "scope_violation", "pipeline_nonzero"}
 )
 
+T = TypeVar("T", bound="_ResultLike")
+
 
 class _ResultLike(Protocol):
     status: str
-    files_modified: tuple[str, ...]
-    stderr: str
-    exit_code: int
 
 
 def _is_hard_failure(result: _ResultLike) -> bool:
@@ -51,12 +50,12 @@ def _extract_handoff(result: _ResultLike, *, previous: HandoffNote | None) -> Ha
 def dispatch_with_retry(
     task: object,
     *,
-    dispatch: Callable[..., _ResultLike],
+    dispatch: Callable[..., T],
     max_redispatches: int = 1,
     on_event: Callable[[str, dict[str, object]], None] | None = None,
-) -> _ResultLike:
+) -> T:
     handoff: HandoffNote | None = None
-    result: _ResultLike | None = None
+    result: T | None = None
     for attempt in range(max_redispatches + 1):
         if on_event is not None:
             on_event(

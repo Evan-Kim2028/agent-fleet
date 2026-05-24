@@ -42,9 +42,7 @@ def resolve_code_review_config(
         return None
 
     fix_persona = section.get("fix_persona") or (pr_loop.fix_persona if pr_loop else None)
-    max_fix = int(
-        section.get("max_fix_attempts") or (pr_loop.max_fix_attempts if pr_loop else 2)
-    )
+    max_fix = int(section.get("max_fix_attempts") or (pr_loop.max_fix_attempts if pr_loop else 2))
     return CodeReviewConfig(
         auto_fix=bool(section.get("auto_fix", inherited.auto_fix)),
         max_fix_attempts=max_fix,

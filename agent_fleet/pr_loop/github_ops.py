@@ -27,9 +27,7 @@ def _gh(
         timeout=120,
     )
     if check and result.returncode != 0:
-        raise subprocess.CalledProcessError(
-            result.returncode, cmd, result.stdout, result.stderr
-        )
+        raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
     return result
 
 
@@ -94,11 +92,7 @@ def pr_checks(
         return [], [], []
 
     ignored_set = {name.lower() for name in ignored}
-    filtered = [
-        check
-        for check in checks
-        if str(check.get("name", "")).lower() not in ignored_set
-    ]
+    filtered = [check for check in checks if str(check.get("name", "")).lower() not in ignored_set]
     pending = [c for c in filtered if c.get("bucket") == "pending"]
     failed = [c for c in filtered if c.get("bucket") == "fail"]
     return filtered, pending, failed
@@ -286,8 +280,7 @@ def checkout_branch(branch: str, worktree: Path, *, repo_root: Path) -> Path:
     if registered is not None:
         worktree = registered
     elif not (
-        worktree.exists()
-        and ((worktree / ".git").exists() or (worktree / ".git").is_file())
+        worktree.exists() and ((worktree / ".git").exists() or (worktree / ".git").is_file())
     ):
         worktree = resolve_worktree_path(
             branch,
@@ -296,9 +289,7 @@ def checkout_branch(branch: str, worktree: Path, *, repo_root: Path) -> Path:
         )
 
     worktree.parent.mkdir(parents=True, exist_ok=True)
-    if worktree.exists() and (
-        (worktree / ".git").exists() or (worktree / ".git").is_file()
-    ):
+    if worktree.exists() and ((worktree / ".git").exists() or (worktree / ".git").is_file()):
         subprocess.run(["git", "fetch", "origin", branch], cwd=worktree, check=True, timeout=120)
         subprocess.run(["git", "checkout", branch], cwd=worktree, check=False, timeout=60)
         subprocess.run(

@@ -94,7 +94,7 @@ class RunLog:
         return fleet_event
 
     @contextlib.contextmanager
-    def phase(self, name: str, **data: Any) -> Iterator[str]:
+    def phase(self, name: str, **data: object) -> Iterator[str]:
         with bind_phase(name):
             self.emit("phase.start", phase=name, data=data or None)
             try:
@@ -102,27 +102,27 @@ class RunLog:
             finally:
                 self.emit("phase.end", phase=name)
 
-    def run_start(self, **data: Any) -> None:
-        self.emit("run.start", data=data)
+    def run_start(self, **data: object) -> None:
+        self.emit("run.start", data=dict(data))
 
-    def run_end(self, *, outcome: str, **data: Any) -> None:
+    def run_end(self, *, outcome: str, **data: object) -> None:
         payload = {"outcome": outcome, **data}
         self.emit("run.end", data=payload)
 
-    def memory(self, **snapshot: Any) -> None:
+    def memory(self, **snapshot: object) -> None:
         self.emit("memory.snapshot", data=dict(snapshot))
 
-    def admission(self, *, allowed: bool, reason: str, **data: Any) -> None:
+    def admission(self, *, allowed: bool, reason: str, **data: object) -> None:
         self.emit(
             "admission.check",
             level="info" if allowed else "warning",
             data={"allowed": allowed, "reason": reason, **data},
         )
 
-    def mcp_tool(self, *, action: str, tool: str, **data: Any) -> None:
+    def mcp_tool(self, *, action: str, tool: str, **data: object) -> None:
         self.emit(f"mcp.tool.{action}", data={"tool": tool, **data})
 
-    def mcp_requirement(self, *, passed: bool, **data: Any) -> None:
+    def mcp_requirement(self, *, passed: bool, **data: object) -> None:
         self.emit(
             "mcp.requirement.check",
             level="info" if passed else "error",

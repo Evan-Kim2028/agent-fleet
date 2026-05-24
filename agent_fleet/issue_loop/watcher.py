@@ -12,14 +12,20 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.capacity import (
+    RETRYABLE_ADMISSION_REASONS,
     FleetCapacity,
     FleetCapacityGate,
-    RETRYABLE_ADMISSION_REASONS,
     count_visual_in_flight,
     is_visual_audit_dispatch,
 )
 from agent_fleet.issue_loop import github_ops
 from agent_fleet.issue_loop.state import load_state, now_iso, save_state, state_path
+from agent_fleet.issue_loop.triggers import (
+    extract_issue_number,
+    extract_persona,
+    is_stop_command,
+    is_watcher_comment,
+)
 from agent_fleet.memory import (
     available_ram_gb,
     cleanup_playwright_mcp_processes,
@@ -28,12 +34,6 @@ from agent_fleet.memory import (
 )
 from agent_fleet.observability.events import FleetEvent
 from agent_fleet.observability.sinks import PythonLoggingSink
-from agent_fleet.issue_loop.triggers import (
-    extract_issue_number,
-    extract_persona,
-    is_stop_command,
-    is_watcher_comment,
-)
 from agent_fleet.repo import RepoConfig, find_repo_config
 
 if TYPE_CHECKING:

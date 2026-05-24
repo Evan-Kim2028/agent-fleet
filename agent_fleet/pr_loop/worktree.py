@@ -84,9 +84,7 @@ def resolve_worktree_path(
     if registered is not None:
         return registered
     for candidate in worktree_candidates(branch, worktree_base):
-        if candidate.exists() and (
-            (candidate / ".git").exists() or (candidate / ".git").is_file()
-        ):
+        if candidate.exists() and ((candidate / ".git").exists() or (candidate / ".git").is_file()):
             return candidate
     meta = parse_agent_branch(branch)
     if meta:

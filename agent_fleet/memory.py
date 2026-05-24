@@ -63,7 +63,8 @@ def iter_playwright_mcp_pids() -> list[int]:
             continue
         cmdline_path = entry / "cmdline"
         try:
-            cmdline = cmdline_path.read_bytes().replace(b"\0", b" ").decode("utf-8", errors="ignore")
+            raw = cmdline_path.read_bytes().replace(b"\0", b" ")
+            cmdline = raw.decode("utf-8", errors="ignore")
         except OSError:
             continue
         if _is_playwright_mcp_cmdline(cmdline):

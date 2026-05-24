@@ -36,9 +36,7 @@ class FakeResult:
         ("success", 0, False),
     ],
 )
-def test_is_hard_failure_table(
-    status: str, exit_code: int, expected: bool
-) -> None:
+def test_is_hard_failure_table(status: str, exit_code: int, expected: bool) -> None:
     r = FakeResult(status=status, exit_code=exit_code)
     assert _is_hard_failure(r) is expected
 
@@ -57,12 +55,8 @@ def test_extract_handoff_captures_failure_context() -> None:
 
 
 def test_extract_handoff_chains_attempts() -> None:
-    first = _extract_handoff(
-        FakeResult(status="error", stderr="x"), previous=None
-    )
-    second = _extract_handoff(
-        FakeResult(status="error", stderr="y"), previous=first
-    )
+    first = _extract_handoff(FakeResult(status="error", stderr="x"), previous=None)
+    second = _extract_handoff(FakeResult(status="error", stderr="y"), previous=first)
     assert second.attempt_number == 2
 
 

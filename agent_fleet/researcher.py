@@ -7,10 +7,9 @@ research_all() runs them concurrently using a ThreadPoolExecutor.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
-import contextlib
-from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
@@ -18,6 +17,7 @@ from agent_fleet.contracts.mcp_requirement import browser_prompt_block
 from agent_fleet.contracts.research_note import Confidence, ResearchNote, validate_research_note
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from agent_fleet.hooks import LLMBackend, LLMSession
@@ -301,9 +301,7 @@ def research_all(
 
     if code_items:
         with ThreadPoolExecutor(max_workers=min(max_workers, len(code_items))) as executor:
-            futures = {
-                executor.submit(_run_item, item, session): item for item in code_items
-            }
+            futures = {executor.submit(_run_item, item, session): item for item in code_items}
             for future in futures:
                 item = futures[future]
                 notes_by_id[item["id"]] = future.result()
@@ -320,4 +318,3 @@ def research_all(
                     browser_session.dispose()
 
     return [notes_by_id[item["id"]] for item in research_plan]
-

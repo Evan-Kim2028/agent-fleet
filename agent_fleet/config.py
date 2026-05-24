@@ -71,11 +71,13 @@ _ENV_VAR_RE = re.compile(r"\$\{([A-Z0-9_]+)\}")
 def _expand_env(value: Any) -> Any:  # noqa: ANN401
     """Recursively expand ${VAR} occurrences in strings inside dicts/lists."""
     if isinstance(value, str):
+
         def _sub(match: re.Match[str]) -> str:
             var = match.group(1)
             if var not in os.environ:
                 raise ValueError(f"environment variable {var!r} required but not set")
             return os.environ[var]
+
         return _ENV_VAR_RE.sub(_sub, value)
     if isinstance(value, dict):
         return {k: _expand_env(v) for k, v in value.items()}
@@ -150,9 +152,7 @@ def load_fleet_config(
     personas_path = Path(str(personas_dir_raw))
     if not personas_path.is_absolute():
         base = (
-            config_path.parent
-            if config_path.exists()
-            else Path(__file__).resolve().parent.parent
+            config_path.parent if config_path.exists() else Path(__file__).resolve().parent.parent
         )
         personas_dir_resolved = (base / personas_path).resolve()
     else:
@@ -169,9 +169,7 @@ def load_fleet_config(
 
     return FleetConfig(
         default_model=str(default_model or data.get("default_model") or "composer-2.5"),
-        default_mode=coerce_agent_mode(
-            str(default_mode or data.get("default_mode") or "agent")
-        ),
+        default_mode=coerce_agent_mode(str(default_mode or data.get("default_mode") or "agent")),
         default_backend=str(default_backend or data.get("default_backend") or "cursor"),
         kimi_bin=kimi_bin or data.get("kimi_bin"),
         max_parallel=int(max_parallel or data.get("max_parallel") or 3),
@@ -181,9 +179,7 @@ def load_fleet_config(
         skill_dirs=skill_dirs_resolved,
         personas=_parse_persona_specs(data.get("personas") or {}, mcp_catalog),
         pipelines={**_DEFAULT_PIPELINES, **dict(data.get("pipelines") or {})},
-        default_pipeline=str(
-            default_pipeline or data.get("default_pipeline") or "simple"
-        ),
+        default_pipeline=str(default_pipeline or data.get("default_pipeline") or "simple"),
         default_persona=str(default_persona or data.get("default_persona") or "coder"),
         default_workspace=default_workspace or data.get("default_workspace"),
         mcp_servers=mcp_catalog,

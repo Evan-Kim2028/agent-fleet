@@ -85,35 +85,24 @@ class SpineConfig:
         return cls(
             # From fleet/runner.py: _WORKTREE_BASE = Path("/tmp/agent-worktrees")
             worktree_base=Path("/tmp/agent-fleet-worktrees"),
-
             # From fleet/runner.py: labels=["fleet-draft"] (draft PR on verify exhaustion)
             pr_draft_label="fleet-draft",
-
             # From fleet/runner.py: labels=["fleet-auto"] (ready PR)
             pr_ready_label="fleet-auto",
-
             # From fleet/runner.py: f"fleet/{persona_name}/..."
             branch_prefix="fleet",
-
             # From fleet/runner.py: f"agent-coop/{persona}" used in _maybe_dispatch_coop
             coop_label_prefix="agent-coop",
-
             # From fleet/runner.py: f"agent-coop-parent/{issue_number}" + checks for
             # lbl.startswith("agent-coop-parent/")
             coop_parent_label_prefix="agent-coop-parent",
-
             # From agents/agents/constants.py: PERSONA_SCOPE_ALLOWLIST
             persona_scope_allowlist={},
-
             cross_cutting_groups=(
                 frozenset({"frontend/", "backend/"}),
                 frozenset({"frontend/", "api/"}),
             ),
-
-            fleet_critical_prefixes=(
-                ".github/workflows/",
-            ),
-
+            fleet_critical_prefixes=(".github/workflows/",),
             # Design review: DISABLED by default — all safe sentinel values.
             design_review_enabled=False,
             design_visual_surface_globs=("frontend/**",),
@@ -275,8 +264,10 @@ class SpineConfig:
         Use :func:`clear_spine_config_cache` in tests that monkeypatch the TOML
         file so the next ``from_toml()`` call picks up the new contents.
         """
-        resolved = config_path if config_path is not None else (
-            Path(__file__).parent.parent / "fleet_config.toml"
+        resolved = (
+            config_path
+            if config_path is not None
+            else (Path(__file__).parent.parent / "fleet_config.toml")
         )
         return _cached_from_toml(resolved)
 
@@ -284,6 +275,7 @@ class SpineConfig:
 # ---------------------------------------------------------------------------
 # Module-level cache (keyed by resolved Path)
 # ---------------------------------------------------------------------------
+
 
 @functools.lru_cache(maxsize=8)
 def _cached_from_toml(resolved: Path) -> SpineConfig:

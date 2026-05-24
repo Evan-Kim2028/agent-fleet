@@ -19,7 +19,12 @@ def fake_sdk(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     """Patch the cursor_sdk import inside CursorBackend to a fake module."""
     fake = MagicMock()
 
-    def _make_run(*, result: str = "ok output", status: str = "finished", agent_id: str = "agent-xyz"):  # noqa: ANN202
+    def _make_run(
+        *,
+        result: str = "ok output",
+        status: str = "finished",
+        agent_id: str = "agent-xyz",
+    ) -> MagicMock:
         terminal = MagicMock(result=result, agent_id=agent_id, status=status)
         run = MagicMock()
         run.events.return_value = iter([])
@@ -41,7 +46,8 @@ def fake_sdk(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
 
 
 def test_create_session_forwards_mcp_servers(
-    fake_sdk: MagicMock, tmp_path: Path,
+    fake_sdk: MagicMock,
+    tmp_path: Path,
 ) -> None:
     backend = CursorBackend(api_key="x")
     sess = backend.create_session(
@@ -79,17 +85,16 @@ def test_session_send_returns_cursor_llm_result(
 
 def test_consume_run_events_logs_mcp_tool_calls(
     fake_sdk: MagicMock,  # noqa: ARG001
-    tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     from agent_fleet.cursor_backend import _consume_run_events
 
     class FakeMsg:
-        def __init__(self, **kwargs):  # noqa: ANN003
+        def __init__(self, **kwargs: object) -> None:
             self.__dict__.update(kwargs)
 
     class FakeEvent:
-        def __init__(self, msg):  # noqa: ANN001
+        def __init__(self, msg: FakeMsg) -> None:
             self.sdk_message = msg
 
     class FakeRun:
@@ -141,8 +146,10 @@ def test_consume_run_events_logs_mcp_tool_calls(
         )
 
     assert labels == ("playwright.browser_navigate",)
-    assert any("MCP tool call started: playwright.browser_navigate" in r.message for r in caplog.records)
-    assert any("MCP tool call completed: playwright.browser_navigate" in r.message for r in caplog.records)
+    started = "MCP tool call started: playwright.browser_navigate"
+    completed = "MCP tool call completed: playwright.browser_navigate"
+    assert any(started in r.message for r in caplog.records)
+    assert any(completed in r.message for r in caplog.records)
 
 
 def test_consume_run_events_warns_when_no_mcp_tools_used(
@@ -171,7 +178,8 @@ def test_consume_run_events_warns_when_no_mcp_tools_used(
 
 
 def test_session_send_hard_fails_when_mcp_required_but_unused(
-    fake_sdk: MagicMock, tmp_path: Path,
+    fake_sdk: MagicMock,  # noqa: ARG001
+    tmp_path: Path,
 ) -> None:
     backend = CursorBackend(api_key="x")
     sess = backend.create_session(
@@ -191,7 +199,8 @@ def test_session_send_hard_fails_when_mcp_required_but_unused(
 
 
 def test_session_send_maps_error_status_to_nonzero_exit(
-    fake_sdk: MagicMock, tmp_path: Path,
+    fake_sdk: MagicMock,
+    tmp_path: Path,
 ) -> None:
     terminal = MagicMock(result="partial", agent_id="agent-xyz", status="expired")
     run = MagicMock()
@@ -208,7 +217,8 @@ def test_session_send_maps_error_status_to_nonzero_exit(
 
 
 def test_session_dispose_calls_sdk_dispose(
-    fake_sdk: MagicMock, tmp_path: Path,
+    fake_sdk: MagicMock,
+    tmp_path: Path,
 ) -> None:
     backend = CursorBackend(api_key="x")
     sess = backend.create_session(persona_name="coder", cwd=tmp_path)
@@ -218,16 +228,16 @@ def test_session_dispose_calls_sdk_dispose(
 
 
 def test_session_dispose_force_kills_playwright_when_last_session(
-    fake_sdk: MagicMock,
+    fake_sdk: MagicMock,  # noqa: ARG001
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from agent_fleet.memory import McpCleanupResult, PlaywrightSessionRegistry
 
-    PlaywrightSessionRegistry._active = 0  # noqa: SLF001
+    PlaywrightSessionRegistry._active = 0
     cleanup_calls: list[dict[str, object]] = []
 
-    def _cleanup(**kwargs):  # noqa: ANN003
+    def _cleanup(**kwargs: object) -> McpCleanupResult:
         cleanup_calls.append(kwargs)
         return McpCleanupResult(
             before=2,

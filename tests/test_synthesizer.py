@@ -37,13 +37,13 @@ class _ScriptedBackend:
         self,
         prompt: str,
         *,
-        max_tokens: int,
-        timeout_s: int,
-        memory_limit: str = "4G",
-        allowed_tools: list[str] | None = None,
-        cwd: object | None = None,
-        model: str | None = None,
-        mode: object | None = None,
+        max_tokens: int,  # noqa: ARG002
+        timeout_s: int,  # noqa: ARG002
+        memory_limit: str = "4G",  # noqa: ARG002
+        allowed_tools: list[str] | None = None,  # noqa: ARG002
+        cwd: object | None = None,  # noqa: ARG002
+        model: str | None = None,  # noqa: ARG002
+        mode: object | None = None,  # noqa: ARG002
     ) -> _FakeResult:
         self.prompts.append(prompt)
         return _FakeResult(stdout=self._outputs.pop(0))

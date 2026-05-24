@@ -71,7 +71,7 @@ def test_commit_changes_retries_after_pre_commit_autofix(tmp_path: Path) -> None
         "#!/usr/bin/env bash\n"
         f"n=$(cat {counter} 2>/dev/null || echo 0)\n"
         f"echo $((n+1)) > {counter}\n"
-        "if [ \"$n\" -eq 0 ]; then\n"
+        'if [ "$n" -eq 0 ]; then\n'
         "  printf 'rewritten\\n' > rewritten.txt\n"
         "  exit 1\n"
         "fi\n"

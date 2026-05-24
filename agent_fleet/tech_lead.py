@@ -45,8 +45,7 @@ def _should_trigger(task_spec: TaskSpec, _reviews: list[ReviewResult]) -> bool:
         return True
 
     return bool(
-        task_spec.coordination_spec is not None
-        and task_spec.coordination_spec.get("merge_order")
+        task_spec.coordination_spec is not None and task_spec.coordination_spec.get("merge_order")
     )
 
 

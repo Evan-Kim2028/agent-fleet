@@ -91,10 +91,14 @@ def load_capacity_config(raw: dict[str, Any] | None) -> FleetCapacity:
         logger.warning("capacity must be a mapping; using defaults")
         return defaults
 
-    tiers = section.get("tiers") if isinstance(section.get("tiers"), dict) else {}
-    visual_raw = tiers.get("visual_audit") if isinstance(tiers.get("visual_audit"), dict) else {}
-    per_issue_raw = section.get("per_issue") if isinstance(section.get("per_issue"), dict) else {}
-    run_raw = section.get("run") if isinstance(section.get("run"), dict) else {}
+    tiers_raw = section.get("tiers")
+    tiers: dict[str, Any] = tiers_raw if isinstance(tiers_raw, dict) else {}
+    visual_audit_raw = tiers.get("visual_audit")
+    visual_raw: dict[str, Any] = visual_audit_raw if isinstance(visual_audit_raw, dict) else {}
+    per_issue_raw_obj = section.get("per_issue")
+    per_issue_raw: dict[str, Any] = per_issue_raw_obj if isinstance(per_issue_raw_obj, dict) else {}
+    run_raw_obj = section.get("run")
+    run_raw: dict[str, Any] = run_raw_obj if isinstance(run_raw_obj, dict) else {}
 
     visual_audit = _tier(visual_raw, defaults=defaults.visual_audit)
     per_issue = PerIssueLimits(

@@ -78,9 +78,7 @@ def test_files_outside_pr_scope() -> None:
         "src/tests/test_agent_fleet_smoke.py",
     ]
     assert _files_outside_pr_scope(pr_files, [".agent-fleet.yaml"]) == ()
-    assert _files_outside_pr_scope(
-        pr_files, ["src/tests/test_new.py"]
-    ) == ()
+    assert _files_outside_pr_scope(pr_files, ["src/tests/test_new.py"]) == ()
     assert _files_outside_pr_scope(pr_files, ["README.md"]) == ("README.md",)
 
 
@@ -93,9 +91,7 @@ def test_tiered_merge_allowed_with_and_without_risk() -> None:
     assert blocked is False
     assert "MEDIUM" in reason
 
-    allowed, reason = tiered_merge_allowed(
-        ci_green=True, risk=None, out_of_scope=[], parked=False
-    )
+    allowed, reason = tiered_merge_allowed(ci_green=True, risk=None, out_of_scope=[], parked=False)
     assert allowed is True
     assert reason == ""
 
@@ -114,14 +110,14 @@ def test_pr_loop_config_loads() -> None:
 def test_prioritize_fleet_prs_newest_ready_first() -> None:
     from agent_fleet.pr_loop.watcher import prioritize_fleet_prs
 
-    prs = [
+    prs: list[dict[str, object]] = [
         {"number": 1601, "labels": [], "isDraft": False},
         {"number": 1625, "labels": [{"name": "fleet-ready"}], "isDraft": False},
         {"number": 1624, "labels": [{"name": "fleet-ready"}], "isDraft": True},
     ]
-    state = {"pr:1601": {"parked": True}}
+    state: dict[str, object] = {"pr:1601": {"parked": True}}
     ordered = prioritize_fleet_prs(prs, state, fleet_ready_label="fleet-ready")
-    assert [int(p["number"]) for p in ordered] == [1625, 1624, 1601]
+    assert [p["number"] for p in ordered] == [1625, 1624, 1601]
 
 
 def test_worktree_candidates_legacy_kimi() -> None:
@@ -172,15 +168,18 @@ def _init_repo_with_remote(tmp_path: Path) -> tuple[Path, Path]:
     remote = tmp_path / "remote.git"
     subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
     local = tmp_path / "local"
-    subprocess.run(
-        ["git", "clone", str(remote), str(local)], check=True, capture_output=True
-    )
+    subprocess.run(["git", "clone", str(remote), str(local)], check=True, capture_output=True)
     subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=local, check=True)
     subprocess.run(["git", "config", "user.name", "T"], cwd=local, check=True)
     (local / "seed.txt").write_text("seed\n", encoding="utf-8")
     subprocess.run(["git", "add", "seed.txt"], cwd=local, check=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=local, check=True)
-    subprocess.run(["git", "push", "origin", "HEAD:main"], cwd=local, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "push", "origin", "HEAD:main"],
+        cwd=local,
+        check=True,
+        capture_output=True,
+    )
     return remote, local
 
 

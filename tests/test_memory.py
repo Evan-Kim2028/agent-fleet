@@ -27,7 +27,7 @@ def test_memory_snapshot_keys() -> None:
 
 
 def test_playwright_session_registry_tracks_active_sessions() -> None:
-    PlaywrightSessionRegistry._active = 0  # noqa: SLF001
+    PlaywrightSessionRegistry._active = 0
     PlaywrightSessionRegistry.register()
     PlaywrightSessionRegistry.register()
     assert PlaywrightSessionRegistry.active_count() == 2
@@ -42,9 +42,11 @@ def test_wait_for_playwright_mcp_cleanup_detects_drop() -> None:
     def _count() -> int:
         return next(counts, 1)
 
-    with patch("agent_fleet.memory.count_playwright_mcp_processes", side_effect=_count):
-        with patch("agent_fleet.memory.time.sleep"):
-            result = wait_for_playwright_mcp_cleanup(baseline=3, wait_s=1.0, poll_interval_s=0.1)
+    with (
+        patch("agent_fleet.memory.count_playwright_mcp_processes", side_effect=_count),
+        patch("agent_fleet.memory.time.sleep"),
+    ):
+        result = wait_for_playwright_mcp_cleanup(baseline=3, wait_s=1.0, poll_interval_s=0.1)
 
     assert result.before == 3
     assert result.after == 1
@@ -59,14 +61,16 @@ def test_cleanup_playwright_mcp_processes_force_kills_when_stuck() -> None:
         force_killed=(),
         cleaned=False,
     )
-    with patch("agent_fleet.memory.wait_for_playwright_mcp_cleanup", return_value=wait_result):
-        with patch("agent_fleet.memory.iter_playwright_mcp_pids", return_value=[111, 222]):
-            with patch("agent_fleet.memory._terminate_pids", return_value=(111, 222)) as kill:
-                with patch("agent_fleet.memory.count_playwright_mcp_processes", return_value=0):
-                    result = cleanup_playwright_mcp_processes(
-                        baseline=2,
-                        force_kill=True,
-                    )
+    with (
+        patch("agent_fleet.memory.wait_for_playwright_mcp_cleanup", return_value=wait_result),
+        patch("agent_fleet.memory.iter_playwright_mcp_pids", return_value=[111, 222]),
+        patch("agent_fleet.memory._terminate_pids", return_value=(111, 222)) as kill,
+        patch("agent_fleet.memory.count_playwright_mcp_processes", return_value=0),
+    ):
+        result = cleanup_playwright_mcp_processes(
+            baseline=2,
+            force_kill=True,
+        )
 
     kill.assert_called_once_with([111, 222])
     assert result.force_killed == (111, 222)
@@ -82,11 +86,13 @@ def test_cleanup_orphan_force_kills_remaining_after_partial_graceful_exit() -> N
         force_killed=(),
         cleaned=True,
     )
-    with patch("agent_fleet.memory.wait_for_playwright_mcp_cleanup", return_value=wait_result):
-        with patch("agent_fleet.memory.iter_playwright_mcp_pids", return_value=[999]):
-            with patch("agent_fleet.memory._terminate_pids", return_value=(999,)) as kill:
-                with patch("agent_fleet.memory.count_playwright_mcp_processes", return_value=0):
-                    result = cleanup_playwright_mcp_processes(force_kill=True)
+    with (
+        patch("agent_fleet.memory.wait_for_playwright_mcp_cleanup", return_value=wait_result),
+        patch("agent_fleet.memory.iter_playwright_mcp_pids", return_value=[999]),
+        patch("agent_fleet.memory._terminate_pids", return_value=(999,)) as kill,
+        patch("agent_fleet.memory.count_playwright_mcp_processes", return_value=0),
+    ):
+        result = cleanup_playwright_mcp_processes(force_kill=True)
 
     kill.assert_called_once_with([999])
     assert result.after == 0

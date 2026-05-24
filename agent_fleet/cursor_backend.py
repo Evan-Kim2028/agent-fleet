@@ -8,12 +8,12 @@ import logging
 import os
 import threading
 import time
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from collections.abc import Mapping
 
 from agent_fleet.agent_mode import AgentMode, coerce_agent_mode
 from agent_fleet.contracts.mcp import McpServerSpec, StdioMcpServerSpec
@@ -128,7 +128,7 @@ def _consume_run_events(
     elif labels:
         mcp_logger.info(
             "MCP tool summary: %s",
-            ", ".join(f"{name}×{labels.count(name)}" for name in dict.fromkeys(labels)),
+            ", ".join(f"{name}x{labels.count(name)}" for name in dict.fromkeys(labels)),
         )
 
     return tuple(labels)
@@ -202,9 +202,8 @@ class CursorSession:
         if allowed_tools:
             scoped = [t.removeprefix("path:") for t in allowed_tools if t.startswith("path:")]
             if scoped:
-                scope_note = (
-                    "\n\nHard scope constraint: only modify files under: "
-                    + ", ".join(scoped)
+                scope_note = "\n\nHard scope constraint: only modify files under: " + ", ".join(
+                    scoped
                 )
         body = f"{prompt}{scope_note}" if scope_note else prompt
         t0 = time.monotonic()
@@ -376,11 +375,11 @@ class _ErrorSession:
         max_tokens: int,
         timeout_s: int,
         allowed_tools: list[str] | None = None,
+        expect_mcp_tools: bool = False,
+        mcp_requirement: McpRequirement | None = None,
     ) -> CursorLLMResult:
-        del prompt, max_tokens, timeout_s, allowed_tools
-        return CursorLLMResult(
-            stdout="", stderr=self._message, exit_code=1, duration_s=0.0
-        )
+        del prompt, max_tokens, timeout_s, allowed_tools, expect_mcp_tools, mcp_requirement
+        return CursorLLMResult(stdout="", stderr=self._message, exit_code=1, duration_s=0.0)
 
     def dispose(self) -> None:
         return
@@ -422,10 +421,7 @@ class CursorBackend:
             return _ErrorSession(f"cursor-sdk not installed: {exc}")
         selected_model = model or self.default_model
         selected_mode = coerce_agent_mode(mode, default=self.default_mode)
-        mcp_dict = {
-            name: _sdk_mcp_config(spec, sdk)
-            for name, spec in (mcp_servers or {}).items()
-        }
+        mcp_dict = {name: _sdk_mcp_config(spec, sdk) for name, spec in (mcp_servers or {}).items()}
         try:
             agent = sdk.Agent.create(
                 sdk.AgentOptions(
@@ -483,9 +479,7 @@ class CursorBackend:
         scope_note = ""
         if allowed_tools:
             scoped = [
-                tool.removeprefix("path:")
-                for tool in allowed_tools
-                if tool.startswith("path:")
+                tool.removeprefix("path:") for tool in allowed_tools if tool.startswith("path:")
             ]
             if scoped:
                 scope_note = (
@@ -523,7 +517,10 @@ class CursorBackend:
                 if not text or not text.strip():
                     return CursorLLMResult(
                         stdout="",
-                        stderr="Cursor returned empty result (likely backend timeout or resource exhaustion)",
+                        stderr=(
+                            "Cursor returned empty result "
+                            "(likely backend timeout or resource exhaustion)"
+                        ),
                         exit_code=1,
                         duration_s=duration_s,
                         agent_id=agent_id,

@@ -72,10 +72,7 @@ def _is_cross_cutting(
     function is pure and repo-neutral.
     """
     for group in cross_cutting_groups:
-        prefixes_hit = sum(
-            any(p.startswith(prefix) for p in allowed_paths)
-            for prefix in group
-        )
+        prefixes_hit = sum(any(p.startswith(prefix) for p in allowed_paths) for prefix in group)
         if prefixes_hit >= 2:
             return True
     return False
@@ -170,11 +167,15 @@ def plan(
     data: dict[str, Any] | None = None
 
     for attempt in range(max_retries + 1):
-        prompt = base_prompt if last_error is None else (
-            f"{base_prompt}\n\n"
-            f"---\n"
-            f"Your previous output failed validation:\n{last_error}\n"
-            f"Respond again with ONLY the corrected JSON."
+        prompt = (
+            base_prompt
+            if last_error is None
+            else (
+                f"{base_prompt}\n\n"
+                f"---\n"
+                f"Your previous output failed validation:\n{last_error}\n"
+                f"Respond again with ONLY the corrected JSON."
+            )
         )
         if session is not None:
             result = session.send(

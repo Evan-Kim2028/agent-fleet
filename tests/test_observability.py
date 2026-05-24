@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from agent_fleet.observability.context import bind_run, get_run_log
 from agent_fleet.observability.events import FleetEvent, RunContext
 from agent_fleet.observability.log import RunLog
 from agent_fleet.observability.sinks import JsonlFileSink, MemoryRingSink
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_fleet_event_roundtrip() -> None:

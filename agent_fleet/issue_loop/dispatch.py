@@ -8,8 +8,8 @@ import os
 import sys
 from pathlib import Path
 
-from agent_fleet.capacity import FleetCapacity, is_visual_audit_dispatch
 from agent_fleet.backends import make_backend
+from agent_fleet.capacity import FleetCapacity, is_visual_audit_dispatch
 from agent_fleet.config import load_fleet_config
 from agent_fleet.integrations.command_verifier import CommandVerifier
 from agent_fleet.integrations.github_forge import GitHubForge
@@ -17,9 +17,9 @@ from agent_fleet.integrations.local_git import LocalGitOps
 from agent_fleet.issue_loop import github_ops
 from agent_fleet.issue_loop.config import IssueDispatchConfig
 from agent_fleet.issue_loop.triggers import extract_persona
+from agent_fleet.memory import memory_snapshot
 from agent_fleet.personas import YamlPersonaResolver
 from agent_fleet.repo import find_repo_config
-from agent_fleet.memory import memory_snapshot
 from agent_fleet.runner import FleetRunConfig, LocalFleetRunner, _spine_from_repo
 
 logger = logging.getLogger(__name__)

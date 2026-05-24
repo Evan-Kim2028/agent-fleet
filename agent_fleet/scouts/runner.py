@@ -319,10 +319,7 @@ def run_tech_scout(
 
     large_files = _large_source_files(repo.repo_root)
     if repo.cross_cutting_groups:
-        groups = [
-            [sorted(a)[0], sorted(b)[0]]
-            for a, b in repo.cross_cutting_groups[:6]
-        ]
+        groups = [[sorted(a)[0], sorted(b)[0]] for a, b in repo.cross_cutting_groups[:6]]
     else:
         groups = []
 

@@ -15,6 +15,7 @@ from agent_fleet.contracts.review import ReviewResult, ReviewVerdict
 from agent_fleet.contracts.task_spec import DecompositionDecision, TaskSpec
 from agent_fleet.contracts.tech_lead_review import TechLeadReview, TechLeadVerdict
 from agent_fleet.contracts.verify_result import VerifySeverity
+from agent_fleet.hooks import ResumableGitOps, SessionCapableBackend
 from agent_fleet.implementer import implement
 from agent_fleet.observability.context import bind_run
 from agent_fleet.observability.log import RunLog
@@ -215,14 +216,16 @@ class LocalFleetRunner:
                 run_log.emit("mcp.required", data={"servers": ["playwright"]})
 
             try:
-                if self._fleet_config and hasattr(self._backend, "create_session"):
+                session_backend: SessionCapableBackend | None = None
+                if self._fleet_config and isinstance(self._backend, SessionCapableBackend):
+                    session_backend = self._backend
                     persona_spec = self._persona_resolver.load(persona)
                     mcp_specs = {
                         name: self._fleet_config.mcp_servers[name]
                         for name in (getattr(persona_spec, "mcp_servers", []) or [])
                         if name in self._fleet_config.mcp_servers
                     }
-                    session = self._backend.create_session(
+                    session = session_backend.create_session(
                         persona_name=persona,
                         cwd=repo_root,
                         mcp_servers=mcp_specs,
@@ -230,9 +233,10 @@ class LocalFleetRunner:
                         mode=persona_spec.mode,
                     )
                     if mcp_specs:
+                        backend = session_backend
 
                         def browser_session_factory() -> LLMSession | None:
-                            return self._backend.create_session(
+                            return backend.create_session(
                                 persona_name=persona,
                                 cwd=repo_root,
                                 mcp_servers=mcp_specs,
@@ -240,7 +244,7 @@ class LocalFleetRunner:
                                 mode=persona_spec.mode,
                             )
 
-                if self._config.resume and hasattr(self._git_ops, "find_resume_branch"):
+                if self._config.resume and isinstance(self._git_ops, ResumableGitOps):
                     resumed = self._git_ops.find_resume_branch(
                         task_id,
                         persona,
@@ -281,7 +285,7 @@ class LocalFleetRunner:
                         duration_seconds=round(time.monotonic() - start, 2),
                     )
                     run_log.run_end(outcome=result.outcome)
-                    return result  # noqa: RET504
+                    return result
 
                 if task_spec.decomposition_decision == DecompositionDecision.DECOMPOSE:
                     result = FleetRunResult(
@@ -296,11 +300,15 @@ class LocalFleetRunner:
                         duration_seconds=round(time.monotonic() - start, 2),
                     )
                     run_log.run_end(outcome=result.outcome)
-                    return result  # noqa: RET504
+                    return result
 
                 if not resume_mode:
                     with run_log.phase("RESEARCH", items=len(task_spec.research_plan)):
-                        logger.info("[%s] RESEARCH (%d items)", run_id, len(task_spec.research_plan))
+                        logger.info(
+                            "[%s] RESEARCH (%d items)",
+                            run_id,
+                            len(task_spec.research_plan),
+                        )
                         notes = research_all(
                             task_spec.research_plan,
                             backend=self._backend,
@@ -379,7 +387,9 @@ class LocalFleetRunner:
                         task_spec,
                         notes,
                         backend=self._backend,
-                        extra_context=f"Verification failed: {verify_result.message}. Fix and retry.",
+                        extra_context=(
+                            f"Verification failed: {verify_result.message}. Fix and retry."
+                        ),
                         session=session,
                     )
                     implement(
@@ -408,7 +418,7 @@ class LocalFleetRunner:
                         duration_seconds=round(time.monotonic() - start, 2),
                     )
                     run_log.run_end(outcome=result.outcome, error=result.error)
-                    return result  # noqa: RET504
+                    return result
 
                 changed_files = get_changed_files(worktree)
                 diff = self._git_ops.diff_summary(worktree)
@@ -455,7 +465,7 @@ class LocalFleetRunner:
                         duration_seconds=round(time.monotonic() - start, 2),
                     )
                     run_log.run_end(outcome=result.outcome)
-                    return result  # noqa: RET504
+                    return result
 
                 pr_number: int | None = None
                 if self._forge is not None:
@@ -517,7 +527,7 @@ class LocalFleetRunner:
                     if tech_lead:
                         phases["TECH_LEAD"] = tech_lead.to_dict()
 
-                summary_parts = [brief.summary]
+                summary_parts = [brief.summary if brief else ""]
                 if review_results:
                     summary_parts.append(review_results[0].summary)
                 summary = "\n\n".join(p for p in summary_parts if p)
@@ -545,7 +555,7 @@ class LocalFleetRunner:
                     pr_number=pr_number,
                     jsonl=str(run_log.jsonl_path) if run_log.jsonl_path else None,
                 )
-                return result  # noqa: RET504
+                return result
             except Exception as exc:
                 logger.exception("[%s] fleet run failed", run_id)
                 result = FleetRunResult(
@@ -559,7 +569,7 @@ class LocalFleetRunner:
                     duration_seconds=round(time.monotonic() - start, 2),
                 )
                 run_log.run_end(outcome="error", error=str(exc))
-                return result  # noqa: RET504
+                return result
             finally:
                 if session is not None:
                     with contextlib.suppress(Exception):
@@ -607,7 +617,7 @@ class TaskRunner:
         phases = self._fleet_config.pipelines.get(pipeline_name, ["execute"])
 
         session: LLMSession | None = None
-        if hasattr(self._backend, "create_session"):
+        if isinstance(self._backend, SessionCapableBackend):
             persona = self._persona_resolver.load(self._task.persona)
             mcp_specs = {
                 name: self._fleet_config.mcp_servers[name]
@@ -625,7 +635,7 @@ class TaskRunner:
         try:
             phase_results, summary, exit_code, changed_files = run_pipeline(
                 backend=self._backend,
-                resolver=self._persona_resolver,  # type: ignore[arg-type]
+                resolver=self._persona_resolver,
                 task=self._task,
                 workspace=self._workspace,
                 timeout_s=self._fleet_config.timeout_seconds,

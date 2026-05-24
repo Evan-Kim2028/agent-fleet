@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     import pytest
 
     from agent_fleet.dispatcher import FleetDispatcher
+    from agent_fleet.hooks import FleetTaskResult
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -31,7 +32,7 @@ def _make_dispatcher_for_test(*, max_redispatches: int) -> FleetDispatcher:
     return FleetDispatcher(config=fc)
 
 
-def _dispatch_one(dispatcher: FleetDispatcher) -> FakeRunResult:
+def _dispatch_one(dispatcher: FleetDispatcher) -> FleetTaskResult:
     results = dispatcher.dispatch(
         goal="test task",
         context="",
@@ -40,17 +41,19 @@ def _dispatch_one(dispatcher: FleetDispatcher) -> FakeRunResult:
         pipeline="simple",
     )
     assert len(results) == 1
-    return results[0]  # type: ignore[return-value]
+    return results[0]
 
 
 def test_dispatch_retries_once_on_hard_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     from agent_fleet.dispatcher import FleetDispatcher
 
     calls: list[object] = []
-    statuses = iter([
-        FakeRunResult(status="expired", exit_code=1, stderr="Cursor expired"),
-        FakeRunResult(status="success", exit_code=0),
-    ])
+    statuses = iter(
+        [
+            FakeRunResult(status="expired", exit_code=1, stderr="Cursor expired"),
+            FakeRunResult(status="success", exit_code=0),
+        ]
+    )
 
     def fake_run_one(self, task, *, handoff=None):  # noqa: ANN001, ANN202, ARG001
         calls.append(handoff)

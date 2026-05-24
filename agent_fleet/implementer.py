@@ -94,9 +94,7 @@ def implement(
         )
 
     if result.exit_code != 0:
-        raise RuntimeError(
-            f"implementer LLM exited {result.exit_code}: {result.stderr[:200]}"
-        )
+        raise RuntimeError(f"implementer LLM exited {result.exit_code}: {result.stderr[:200]}")
 
     return result
 
@@ -129,9 +127,7 @@ def _build_prompt(
         "\n".join(f"- {p}" for p in forbidden_paths) if forbidden_paths else "(none)",
         "",
         "## Acceptance Criteria",
-        "\n".join(f"- {c}" for c in acceptance_criteria)
-        if acceptance_criteria
-        else "(none)",
+        "\n".join(f"- {c}" for c in acceptance_criteria) if acceptance_criteria else "(none)",
         "",
         "## Worktree",
         str(worktree_path),

@@ -94,9 +94,7 @@ def get_working_tree_diff(*, cwd: Path, base_branch: str = "main") -> tuple[str,
 def diff_for_files(full_diff: str, files: list[str]) -> str:
     if not files:
         return ""
-    pattern = re.compile(
-        r"^diff --git a/(?:" + "|".join(re.escape(f) for f in files) + r")"
-    )
+    pattern = re.compile(r"^diff --git a/(?:" + "|".join(re.escape(f) for f in files) + r")")
     lines = full_diff.splitlines(keepends=True)
     result: list[str] = []
     in_hunk = False

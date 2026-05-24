@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_AGENT_FOOTER = "\U0001F916 Agent:"
+_AGENT_FOOTER = "\U0001f916 Agent:"
 _PARK_MARKER = "<!-- agent-fleet:pr-loop:parked -->"
 
 
@@ -213,7 +213,7 @@ def _file_scope_violation_followup(
 
         **Original review findings:**
 
-        {review_body or '_(no review body captured)_'}
+        {review_body or "_(no review body captured)_"}
 
         ---
         Filed by agent-fleet PR-loop. Triage and dispatch as a normal issue when ready.
@@ -263,9 +263,7 @@ def address_review_findings(
 
     pr_files = github_ops.pr_changed_files(pr_number, cwd=repo.repo_root)
     branch_persona = persona_from_branch(branch, repo.default_persona)
-    fix_persona_name = _review_fix_persona(
-        loop_config, branch_persona, repo, pr_files
-    )
+    fix_persona_name = _review_fix_persona(loop_config, branch_persona, repo, pr_files)
     config = merge_repo_into_fleet_config(fleet_config, repo)
     resolver = YamlPersonaResolver(config)
     persona_obj = resolver.load(fix_persona_name)
@@ -413,12 +411,9 @@ def attempt_ci_fix(
     if result.exit_code != 0:
         return False
     message = (
-        f"fix(fleet): CI failures on PR #{pr_number}\n\n"
-        f"{_AGENT_FOOTER} persona={fix_persona_name}"
+        f"fix(fleet): CI failures on PR #{pr_number}\n\n{_AGENT_FOOTER} persona={fix_persona_name}"
     )
-    return github_ops.commit_and_push(
-        worktree, message, branch, exclude=(loop_config.state_file,)
-    )
+    return github_ops.commit_and_push(worktree, message, branch, exclude=(loop_config.state_file,))
 
 
 def tiered_merge_allowed(
@@ -542,9 +537,7 @@ def run_pr_lifecycle(
             from agent_fleet.pr_loop.worktree import resolve_worktree_path
 
             base = repo.worktree_base or Path("/tmp/agent-fleet-loop")
-            wt = resolve_worktree_path(
-                branch, repo_root=repo_root, worktree_base=base
-            )
+            wt = resolve_worktree_path(branch, repo_root=repo_root, worktree_base=base)
             logger.info("Resolved worktree for %s → %s", branch, wt)
 
     review_body: str | None = find_reviewer_comment(
@@ -564,9 +557,7 @@ def run_pr_lifecycle(
         review_body
         and has_blocking_findings(
             review_body,
-            deletion_only=_diff_is_deletion_only(
-                github_ops.pr_diff(pr_number, cwd=repo_root)
-            ),
+            deletion_only=_diff_is_deletion_only(github_ops.pr_diff(pr_number, cwd=repo_root)),
         )
     )
     if needs_fix:
@@ -634,11 +625,11 @@ def run_pr_lifecycle(
                     review_body=review_body,
                     repo=repo,
                 )
+                followup_ref = f"#{followup}" if followup else "(filing failed; see watcher log)"
                 github_ops.post_pr_comment(
                     (
                         "Review-fix path detected findings that belong outside this PR's "
-                        f"scope. Continuing to CI fix; follow-up issue: "
-                        f"{'#' + str(followup) if followup else '(filing failed; see watcher log)'}.\n\n"
+                        f"scope. Continuing to CI fix; follow-up issue: {followup_ref}.\n\n"
                         f"Out-of-scope detail: `{address.detail}`"
                     ),
                     pr_number,
@@ -660,13 +651,16 @@ def run_pr_lifecycle(
                     )
                     return LifecycleResult("parked", address.detail)
                 return address
-            review_body = poll_for_review_comment(
-                pr_number,
-                repo_root=repo_root,
-                marker=marker,
-                timeout_s=loop_config.review_poll_timeout_s,
-                poll_s=loop_config.review_poll_s,
-            ) or review_body
+            review_body = (
+                poll_for_review_comment(
+                    pr_number,
+                    repo_root=repo_root,
+                    marker=marker,
+                    timeout_s=loop_config.review_poll_timeout_s,
+                    poll_s=loop_config.review_poll_s,
+                )
+                or review_body
+            )
 
     ci_fix_attempts = 0
     while True:

@@ -156,10 +156,7 @@ def get_working_tree_diff(workspace: Path, *, max_chars: int = 120_000) -> str:
     diff = "\n".join(parts).strip()
     if len(diff) <= max_chars:
         return diff
-    return (
-        diff[:max_chars]
-        + f"\n\n... diff truncated at {max_chars} characters ..."
-    )
+    return diff[:max_chars] + f"\n\n... diff truncated at {max_chars} characters ..."
 
 
 def run_shell_verify(workspace: Path, command: str, *, timeout_s: int = 600) -> dict[str, object]:
@@ -239,11 +236,7 @@ def run_checks(
             any_retry = True
 
     final_severity = VerifySeverity.RETRY if any_retry else VerifySeverity.OK
-    violating = [
-        path
-        for r in completed
-        for path in r.violating_paths
-    ]
+    violating = [path for r in completed for path in r.violating_paths]
     message = "all checks passed" if not any_retry else "one or more checks failed"
 
     return VerifyResult(
@@ -346,11 +339,7 @@ def check_tests_for_modified_code(
     Generic version: silphco-specific search roots are passed via the
     test_search_roots kwarg.  Returns severity=RETRY on miss.
     """
-    src_files = [
-        f
-        for f in files
-        if f.endswith((".py", ".ts", ".tsx")) and "test" not in f.lower()
-    ]
+    src_files = [f for f in files if f.endswith((".py", ".ts", ".tsx")) and "test" not in f.lower()]
     test_files = [f for f in files if "test" in f.lower()]
 
     missing: list[str] = []
@@ -373,11 +362,7 @@ def check_tests_for_modified_code(
         # through their public consumer's test file. `__init__.py` is excluded
         # since it's a package marker, not a private module.
         basename = src.rsplit("/", 1)[-1]
-        if (
-            basename.startswith("_")
-            and not basename.startswith("__")
-            and basename.endswith(".py")
-        ):
+        if basename.startswith("_") and not basename.startswith("__") and basename.endswith(".py"):
             continue
 
         base = src.rsplit(".", 1)[0]
@@ -539,10 +524,7 @@ def _has_ruff_config(path: Path) -> bool:
 
 
 def _has_tsconfig(path: Path) -> bool:
-    return (
-        (path / "tsconfig.json").exists()
-        or next(path.rglob("tsconfig.json"), None) is not None
-    )
+    return (path / "tsconfig.json").exists() or next(path.rglob("tsconfig.json"), None) is not None
 
 
 def check_type_checking_ran(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from agent_fleet.config import load_fleet_config
 from agent_fleet.pr_loop import github_ops
@@ -29,6 +29,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _pr_number(pr: dict[str, object]) -> int:
+    number = pr["number"]
+    if isinstance(number, int):
+        return number
+    if isinstance(number, str):
+        return int(number)
+    raise TypeError(f"PR number must be int or str, got {type(number)!r}")
+
+
 def prioritize_fleet_prs(
     prs: list[dict[str, object]],
     state: dict[str, object],
@@ -38,19 +47,20 @@ def prioritize_fleet_prs(
     """Sort open fleet PRs: ready + newest first; deprioritize parked/merged entries."""
 
     def score(pr: dict[str, object]) -> int:
-        pr_number = int(pr["number"])
+        pr_number = _pr_number(pr)
         entry = get_pr_state(state, pr_number)
         if entry.get("merged"):
             return -10_000
         if entry.get("parked"):
             return -5_000
         value = pr_number
-        labels = pr.get("labels") or []
-        label_names = {
-            str(item.get("name", ""))
-            for item in labels
-            if isinstance(item, dict)
-        }
+        labels_raw = pr.get("labels")
+        label_names: set[str] = set()
+        if isinstance(labels_raw, list):
+            for item in labels_raw:
+                if isinstance(item, dict):
+                    name = cast("dict[str, object]", item).get("name")
+                    label_names.add(str(name or ""))
         if fleet_ready_label in label_names:
             value += 10_000
         if pr.get("isDraft"):
@@ -91,9 +101,7 @@ class PrLoopWatcher:
         if not prs:
             return results
 
-        ready_label = str(
-            self.repo.spine_overrides.get("pr_ready_label") or "fleet-ready"
-        )
+        ready_label = str(self.repo.spine_overrides.get("pr_ready_label") or "fleet-ready")
         prs = prioritize_fleet_prs(
             prs,
             state,
@@ -101,13 +109,11 @@ class PrLoopWatcher:
         )
 
         marker = (
-            self.repo.pr_review.comment_title
-            if self.repo.pr_review
-            else "Composer PR Analysis"
+            self.repo.pr_review.comment_title if self.repo.pr_review else "Composer PR Analysis"
         )
 
         for pr in prs:
-            pr_number = int(pr["number"])
+            pr_number = _pr_number(pr)
             branch = str(pr.get("headRefName") or "")
             entry = get_pr_state(state, pr_number)
 

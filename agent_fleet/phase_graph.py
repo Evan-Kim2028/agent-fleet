@@ -58,7 +58,7 @@ class PhaseRunContext:
     should only read fields that were set by earlier phases.
     """
 
-    task_spec: Any = None           # fleet.contracts.task_spec.TaskSpec | None
+    task_spec: Any = None  # fleet.contracts.task_spec.TaskSpec | None
     reviews: list[Any] = field(default_factory=list)
     changed_files: list[str] = field(default_factory=list)
     # Additional fields may be added in future phases without breaking
@@ -120,9 +120,7 @@ class PhaseGraph:
         seen: set[str] = set()
         for spec in phases:
             if spec.name in seen:
-                raise ValueError(
-                    f"PhaseGraph: duplicate phase name {spec.name!r}"
-                )
+                raise ValueError(f"PhaseGraph: duplicate phase name {spec.name!r}")
             for dep in spec.depends_on:
                 if dep not in seen:
                     raise ValueError(

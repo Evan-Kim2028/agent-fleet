@@ -13,7 +13,7 @@ from agent_fleet.admission import AdmissionController, ResourceTier
 from agent_fleet.backends import make_backend
 from agent_fleet.code_review import publish_fleet_branch, run_code_review_with_auto_fix
 from agent_fleet.config import FleetConfig, load_fleet_config
-from agent_fleet.hooks import FleetTask, FleetTaskResult
+from agent_fleet.hooks import FleetTask, FleetTaskResult, SessionCapableBackend
 from agent_fleet.personas import YamlPersonaResolver
 from agent_fleet.phases import resolve_pipeline_outcome, run_pipeline
 from agent_fleet.redispatch import dispatch_with_retry
@@ -325,7 +325,7 @@ class FleetDispatcher:
             )
 
             session: LLMSession | None = None
-            if hasattr(self.backend, "create_session") and not use_auto_fix:
+            if isinstance(self.backend, SessionCapableBackend) and not use_auto_fix:
                 persona_spec = resolver.load(task.persona)
                 mcp_specs = {
                     name: task_config.mcp_servers[name]
@@ -494,8 +494,7 @@ class FleetDispatcher:
         )
         if len(normalized) > self.config.max_parallel:
             raise ValueError(
-                f"Too many tasks ({len(normalized)}). "
-                f"max_parallel={self.config.max_parallel}"
+                f"Too many tasks ({len(normalized)}). max_parallel={self.config.max_parallel}"
             )
 
         batch_size = len(normalized)

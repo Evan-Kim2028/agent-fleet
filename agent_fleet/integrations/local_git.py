@@ -66,11 +66,17 @@ class LocalGitOps:
                 timeout=effective_timeout,
             )
         except subprocess.TimeoutExpired as exc:
-            stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-            stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
-            logger.error(
-                "git %s timed out after %ss in %s", " ".join(args), effective_timeout, cwd
+            stdout = (
+                exc.stdout.decode(errors="replace")
+                if isinstance(exc.stdout, bytes)
+                else (exc.stdout or "")
             )
+            stderr = (
+                exc.stderr.decode(errors="replace")
+                if isinstance(exc.stderr, bytes)
+                else (exc.stderr or "")
+            )
+            logger.error("git %s timed out after %ss in %s", " ".join(args), effective_timeout, cwd)
             raise RuntimeError(
                 f"git {' '.join(args)} timed out after {effective_timeout}s "
                 f"(likely a hung pre-commit hook). stdout={stdout!r} stderr={stderr!r}"
@@ -100,7 +106,7 @@ class LocalGitOps:
     def attach_worktree(
         self,
         branch_name: str,
-        run_id: str,
+        _run_id: str,
         *,
         create: bool = True,
     ) -> Path | None:

@@ -7,6 +7,39 @@ on:
     branches: [main]
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --frozen --group dev
+
+      - name: Ruff format
+        run: uv run ruff format --check agent_fleet tests integrations
+
+      - name: Ruff lint
+        run: uv run ruff check agent_fleet tests integrations
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --frozen --group dev
+
+      - name: Ty
+        run: uv run ty check agent_fleet tests integrations
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -17,13 +50,18 @@ jobs:
           enable-cache: true
 
       - name: Install
-        run: uv sync --group dev
-
-      - name: Ruff
-        run: uv run ruff check agent_fleet tests integrations
-
-      - name: Ty
-        run: uv run ty check agent_fleet tests integrations
+        run: uv sync --frozen --group dev
 
       - name: Pytest
         run: uv run pytest -q
+
+  ci-gate:
+    runs-on: ubuntu-latest
+    needs: [lint, typecheck, test]
+    if: always()
+    steps:
+      - name: Require all CI jobs
+        run: |
+          test "${{ needs.lint.result }}" = "success"
+          test "${{ needs.typecheck.result }}" = "success"
+          test "${{ needs.test.result }}" = "success"

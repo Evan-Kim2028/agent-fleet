@@ -19,8 +19,7 @@ from agent_fleet.verify_core import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from agent_fleet.hooks import FleetTask, LLMBackend, LLMSession, Persona
-    from agent_fleet.personas import YamlPersonaResolver
+    from agent_fleet.hooks import FleetTask, LLMBackend, LLMSession, Persona, PersonaResolver
     from agent_fleet.repo import RepoConfig
 
 
@@ -53,7 +52,7 @@ def _build_execute_prompt(persona: Persona, task: FleetTask) -> str:
 def run_execute_phase(
     *,
     backend: LLMBackend,
-    resolver: YamlPersonaResolver,
+    resolver: PersonaResolver,
     task: FleetTask,
     workspace: Path,
     timeout_s: int,
@@ -127,7 +126,7 @@ def run_verify_phases(
 def run_pr_analyzer_review_phase(
     *,
     backend: LLMBackend,
-    resolver: YamlPersonaResolver,
+    resolver: PersonaResolver,
     task: FleetTask,
     workspace: Path,
     timeout_s: int,
@@ -206,7 +205,7 @@ def run_analyze_phase(
 def run_structured_review_phase(
     *,
     backend: LLMBackend,
-    resolver: YamlPersonaResolver,
+    resolver: PersonaResolver,
     task: FleetTask,
     workspace: Path,
     timeout_s: int,
@@ -318,7 +317,7 @@ def collect_changed_files(workspace: Path) -> list[str]:
 def run_pipeline(
     *,
     backend: LLMBackend,
-    resolver: YamlPersonaResolver,
+    resolver: PersonaResolver,
     task: FleetTask,
     workspace: Path,
     timeout_s: int,
@@ -431,7 +430,7 @@ def run_pipeline(
 def _legacy_review_phase(
     *,
     backend: LLMBackend,
-    resolver: YamlPersonaResolver,
+    resolver: PersonaResolver,
     task: FleetTask,
     workspace: Path,
     timeout_s: int,

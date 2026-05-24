@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from agent_fleet.capacity.config import FleetCapacity
+if TYPE_CHECKING:
+    from agent_fleet.capacity.config import FleetCapacity
 
 
 @dataclass(frozen=True)

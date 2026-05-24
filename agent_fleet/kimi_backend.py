@@ -106,9 +106,7 @@ def call_kimi(
             check=False,
         )
         if result.returncode != 0:
-            raise RuntimeError(
-                f"kimi-cli failed (exit {result.returncode}): {result.stderr[:500]}"
-            )
+            raise RuntimeError(f"kimi-cli failed (exit {result.returncode}): {result.stderr[:500]}")
 
         return re.sub(
             r"\nTo resume this session:.*$", "", result.stdout, flags=re.MULTILINE
@@ -165,9 +163,7 @@ class KimiBackend:
         scope_note = ""
         if allowed_tools:
             scoped = [
-                tool.removeprefix("path:")
-                for tool in allowed_tools
-                if tool.startswith("path:")
+                tool.removeprefix("path:") for tool in allowed_tools if tool.startswith("path:")
             ]
             if scoped:
                 scope_note = (

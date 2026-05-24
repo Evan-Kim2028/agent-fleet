@@ -6,10 +6,7 @@ import importlib.util
 from pathlib import Path
 
 _PATH = (
-    Path(__file__).resolve().parent.parent
-    / "agent_fleet"
-    / "integrations"
-    / "command_verifier.py"
+    Path(__file__).resolve().parent.parent / "agent_fleet" / "integrations" / "command_verifier.py"
 )
 _SPEC = importlib.util.spec_from_file_location("_agent_fleet_command_verifier", _PATH)
 assert _SPEC and _SPEC.loader

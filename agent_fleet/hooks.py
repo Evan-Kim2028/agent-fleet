@@ -6,10 +6,12 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
     from agent_fleet.agent_mode import AgentMode
+    from agent_fleet.contracts.mcp import McpServerSpec
+    from agent_fleet.contracts.mcp_requirement import McpRequirement
     from agent_fleet.contracts.verify_result import VerifyResult
 
 
@@ -61,6 +63,8 @@ class LLMSession(Protocol):
         max_tokens: int,
         timeout_s: int,
         allowed_tools: list[str] | None = None,
+        expect_mcp_tools: bool = False,
+        mcp_requirement: McpRequirement | None = None,
     ) -> LLMResult: ...
 
     def dispose(self) -> None: ...
@@ -116,6 +120,41 @@ class GitOps(Protocol):
     def push_branch(self, worktree: Path, branch_name: str) -> None: ...
     def changed_files(self, worktree: Path) -> list[Path]: ...
     def diff_summary(self, worktree: Path) -> str: ...
+
+
+@runtime_checkable
+class SessionCapableBackend(LLMBackend, Protocol):
+    """Backends that expose durable MCP-aware sessions (e.g. Cursor SDK)."""
+
+    def create_session(
+        self,
+        *,
+        persona_name: str,
+        cwd: Path,
+        mcp_servers: Mapping[str, McpServerSpec] | None = None,
+        model: str | None = None,
+        mode: AgentMode | str | None = None,
+    ) -> LLMSession: ...
+
+
+@runtime_checkable
+class ResumableGitOps(GitOps, Protocol):
+    """GitOps extensions used when resuming interrupted fleet runs."""
+
+    def find_resume_branch(
+        self,
+        task_id: int,
+        persona: str,
+        branch_prefix: str,
+    ) -> tuple[str, str] | None: ...
+
+    def attach_worktree(
+        self,
+        branch_name: str,
+        run_id: str,
+        *,
+        create: bool = True,
+    ) -> Path | None: ...
 
 
 @dataclass(frozen=True)
