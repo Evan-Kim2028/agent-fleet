@@ -9,6 +9,12 @@ from agent_fleet.contracts.improvement_proposal import (
     ImprovementProposal,
     PersonaChange,
 )
+from agent_fleet.contracts.mcp import (
+    HttpMcpServerSpec,
+    McpServerSpec,
+    StdioMcpServerSpec,
+    parse_mcp_server_spec,
+)
 from agent_fleet.contracts.repo_context import RepoContext, validate_repo_context
 from agent_fleet.contracts.research_note import (
     Confidence,
@@ -38,8 +44,10 @@ __all__ = [
     "Confidence",
     "ConfigChange",
     "DecompositionDecision",
+    "HttpMcpServerSpec",
     "ImplementationBrief",
     "ImprovementProposal",
+    "McpServerSpec",
     "PersonaChange",
     "RepoContext",
     "ResearchNote",
@@ -47,11 +55,13 @@ __all__ = [
     "ReviewVerdict",
     "RiskTier",
     "Scope",
+    "StdioMcpServerSpec",
     "TaskSpec",
     "TechLeadReview",
     "TechLeadVerdict",
     "VerifyResult",
     "VerifySeverity",
+    "parse_mcp_server_spec",
     "validate_implementation_brief",
     "validate_repo_context",
     "validate_research_note",
