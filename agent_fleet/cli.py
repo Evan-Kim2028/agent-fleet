@@ -11,7 +11,7 @@ from pathlib import Path
 
 from agent_fleet.backends import make_backend
 from agent_fleet.config import load_fleet_config
-from agent_fleet.dispatcher import dispatch_tasks
+from agent_fleet.dispatcher import FleetDispatcher
 from agent_fleet.personas import YamlPersonaResolver
 from agent_fleet.repo import find_repo_config
 from agent_fleet.runner import run_full_pipeline
@@ -122,13 +122,15 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(json.dumps(result.__dict__, indent=2, default=str))
         return 0 if result.outcome == "completed" else 1
 
-    results = dispatch_tasks(
+    if args.max_redispatches is not None:
+        config.max_redispatches = args.max_redispatches
+    dispatcher = FleetDispatcher(config=config)
+    results = dispatcher.dispatch(
         goal=args.goal,
         context=args.context,
         persona=args.persona,
         workspace=str(workspace),
         pipeline=args.pipeline,
-        config_path=args.config,
     )
     print(json.dumps([r.__dict__ for r in results], indent=2, default=str))
     return 0 if results and results[0].status in {"completed", "merged"} else 1
@@ -245,6 +247,12 @@ def main(argv: list[str] | None = None) -> int:
         "--pipeline",
         default="simple",
         help="simple | code_review | pr_review | full",
+    )
+    run_p.add_argument(
+        "--max-redispatches",
+        type=int,
+        default=None,
+        help="Override fleet config max_redispatches for this run.",
     )
     run_p.set_defaults(func=cmd_run)
 

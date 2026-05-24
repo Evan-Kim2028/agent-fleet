@@ -58,6 +58,7 @@ class FleetConfig:
     default_workspace: str | None = None
     repo_config: RepoConfig | None = None
     mcp_servers: dict[str, McpServerSpec] = field(default_factory=dict)
+    max_redispatches: int = 1
 
 
 def _expand_path(value: str) -> Path:
@@ -186,4 +187,5 @@ def load_fleet_config(
         default_persona=str(default_persona or data.get("default_persona") or "coder"),
         default_workspace=default_workspace or data.get("default_workspace"),
         mcp_servers=mcp_catalog,
+        max_redispatches=int(data.get("max_redispatches") or 1),
     )

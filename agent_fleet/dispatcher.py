@@ -16,12 +16,15 @@ from agent_fleet.config import FleetConfig, load_fleet_config
 from agent_fleet.hooks import FleetTask, FleetTaskResult
 from agent_fleet.personas import YamlPersonaResolver
 from agent_fleet.phases import resolve_pipeline_outcome, run_pipeline
+from agent_fleet.redispatch import dispatch_with_retry
 from agent_fleet.repo import RepoConfig, find_repo_config, merge_repo_into_fleet_config
 from agent_fleet.runner import run_full_pipeline
 from agent_fleet.worktree import TaskWorkspace, prepare_task_workspace, should_isolate_worktree
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from agent_fleet.contracts.handoff import HandoffNote
 
 logger = logging.getLogger(__name__)
 
@@ -176,13 +179,31 @@ class FleetDispatcher:
             changed_files=result.changed_files,
         )
 
-    def _run_one(
+    def _run_one(self, task: FleetTask, *, handoff: HandoffNote | None = None) -> FleetTaskResult:
+        """Thin retry-aware wrapper called by dispatch_with_retry.
+
+        ``handoff`` carries context from a previous failed attempt.  It is
+        forwarded to ``_execute_task`` where it will be consumed once the
+        runner grows handoff support (Task 5).  For now it is accepted and
+        logged but otherwise unused downstream.
+        """
+        if handoff is not None:
+            logger.debug(
+                "Redispatch attempt #%s for task %r (failure_mode=%r)",
+                handoff.attempt_number,
+                task.goal[:60],
+                handoff.failure_mode,
+            )
+        return self._execute_task(0, task, batch_size=1, same_workspace_tasks=1, handoff=handoff)
+
+    def _execute_task(
         self,
         task_index: int,
         task: FleetTask,
         *,
         batch_size: int = 1,
         same_workspace_tasks: int = 1,
+        handoff: HandoffNote | None = None,  # noqa: ARG002 — wired by Task 5
     ) -> FleetTaskResult:
         start = time.monotonic()
         self._emit(
@@ -455,12 +476,20 @@ class FleetDispatcher:
 
         if batch_size == 1:
             task = normalized[0]
+
+            def _run_with_handoff(
+                t: FleetTask,
+                *,
+                handoff: HandoffNote | None = None,
+            ) -> FleetTaskResult:
+                return self._run_one(t, handoff=handoff)
+
             return [
-                self._run_one(
-                    0,
+                dispatch_with_retry(
                     task,
-                    batch_size=1,
-                    same_workspace_tasks=workspace_counts[self._workspace_key(task)],
+                    dispatch=_run_with_handoff,
+                    max_redispatches=self.config.max_redispatches,
+                    on_event=lambda evt, payload: self._emit(evt, **payload),
                 )
             ]
 
@@ -468,7 +497,7 @@ class FleetDispatcher:
         with ThreadPoolExecutor(max_workers=batch_size) as pool:
             futures = {
                 pool.submit(
-                    self._run_one,
+                    self._execute_task,
                     idx,
                     task,
                     batch_size=batch_size,
