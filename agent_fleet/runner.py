@@ -14,6 +14,7 @@ from agent_fleet.contracts.task_spec import DecompositionDecision, TaskSpec
 from agent_fleet.contracts.tech_lead_review import TechLeadReview, TechLeadVerdict
 from agent_fleet.contracts.verify_result import VerifySeverity
 from agent_fleet.implementer import implement
+from agent_fleet.phases import run_pipeline
 from agent_fleet.planner import plan
 from agent_fleet.repo import RepoConfig, find_repo_config
 from agent_fleet.researcher import research_all
@@ -26,7 +27,16 @@ from agent_fleet.verify_core import get_changed_files
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from agent_fleet.hooks import GitForge, GitOps, LLMBackend, PersonaResolver, Verifier
+    from agent_fleet.config import FleetConfig
+    from agent_fleet.hooks import (
+        FleetTask,
+        GitForge,
+        GitOps,
+        LLMBackend,
+        LLMSession,
+        PersonaResolver,
+        Verifier,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +216,7 @@ class LocalFleetRunner:
                     phases=phases,
                     duration_seconds=round(time.monotonic() - start, 2),
                 )
-                return result
+                return result  # noqa: RET504
 
             if task_spec.decomposition_decision == DecompositionDecision.DECOMPOSE:
                 result = FleetRunResult(
@@ -220,7 +230,7 @@ class LocalFleetRunner:
                     error="Task requires decomposition — dispatch child tasks separately",
                     duration_seconds=round(time.monotonic() - start, 2),
                 )
-                return result
+                return result  # noqa: RET504
 
             if not resume_mode:
                 logger.info("[%s] RESEARCH (%d items)", run_id, len(task_spec.research_plan))
@@ -318,7 +328,7 @@ class LocalFleetRunner:
                     error=verify_result.message if verify_result else "verify failed",
                     duration_seconds=round(time.monotonic() - start, 2),
                 )
-                return result
+                return result  # noqa: RET504
 
             changed_files = get_changed_files(worktree)
             diff = self._git_ops.diff_summary(worktree)
@@ -364,7 +374,7 @@ class LocalFleetRunner:
                     phases=phases,
                     duration_seconds=round(time.monotonic() - start, 2),
                 )
-                return result
+                return result  # noqa: RET504
 
             pr_number: int | None = None
             if self._forge is not None:
@@ -440,7 +450,7 @@ class LocalFleetRunner:
                 phases=phases,
                 duration_seconds=round(time.monotonic() - start, 2),
             )
-            return result
+            return result  # noqa: RET504
         except Exception as exc:
             logger.exception("[%s] fleet run failed", run_id)
             result = FleetRunResult(
@@ -453,7 +463,7 @@ class LocalFleetRunner:
                 error=str(exc),
                 duration_seconds=round(time.monotonic() - start, 2),
             )
-            return result
+            return result  # noqa: RET504
         finally:
             if worktree is not None:
                 forensic = self._config.preserve_worktree_on_failure and (
@@ -462,6 +472,78 @@ class LocalFleetRunner:
                     in ("verify_failed", "error", "review_blocked", "tech_lead_blocked")
                 )
                 self._git_ops.teardown_workspace(worktree, forensic=forensic)
+
+
+class TaskRunner:
+    """Thin session-aware runner for a single FleetTask.
+
+    Opens one AgentSession per call to run() when the backend supports
+    create_session(), threads it through every pipeline phase, and disposes
+    it in a finally block.  Falls back to backend.run() for backends that
+    do not expose create_session().
+    """
+
+    def __init__(
+        self,
+        *,
+        backend: LLMBackend,
+        fleet_config: FleetConfig,
+        persona_resolver: PersonaResolver,
+        task: FleetTask,
+        workspace: Path,
+    ) -> None:
+        self._backend = backend
+        self._fleet_config = fleet_config
+        self._persona_resolver = persona_resolver
+        self._task = task
+        self._workspace = workspace
+
+    def run(self, *, task_id: int, pipeline: str | None = None) -> dict[str, Any]:
+        """Run the task through the named pipeline, returning phase results.
+
+        Opens a session via backend.create_session() when available, threads
+        it into every phase call, and disposes the session in a finally block.
+        """
+        pipeline_name = pipeline or self._fleet_config.default_pipeline
+        phases = self._fleet_config.pipelines.get(pipeline_name, ["execute"])
+
+        session: LLMSession | None = None
+        if hasattr(self._backend, "create_session"):
+            persona = self._persona_resolver.load(self._task.persona)
+            mcp_specs = {
+                name: self._fleet_config.mcp_servers[name]
+                for name in (getattr(persona, "mcp_servers", []) or [])
+                if name in self._fleet_config.mcp_servers
+            }
+            session = self._backend.create_session(
+                persona_name=self._task.persona,
+                cwd=self._workspace,
+                mcp_servers=mcp_specs,
+                model=persona.model,
+                mode=persona.mode,
+            )
+
+        try:
+            phase_results, summary, exit_code, changed_files = run_pipeline(
+                backend=self._backend,
+                resolver=self._persona_resolver,  # type: ignore[arg-type]
+                task=self._task,
+                workspace=self._workspace,
+                timeout_s=self._fleet_config.timeout_seconds,
+                phases=phases,
+                session=session,
+            )
+            return {
+                "task_id": task_id,
+                "pipeline": pipeline_name,
+                "summary": summary,
+                "exit_code": exit_code,
+                "changed_files": changed_files,
+                "phases": phase_results,
+            }
+        finally:
+            if session is not None:
+                session.dispose()
 
 
 def run_full_pipeline(

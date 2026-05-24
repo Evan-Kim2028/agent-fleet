@@ -16,7 +16,7 @@ from agent_fleet.contracts.review import ReviewResult, ReviewVerdict, validate_r
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from agent_fleet.hooks import LLMBackend
+    from agent_fleet.hooks import LLMBackend, LLMSession
 
 # Files-changed threshold above which reviewer shards into multiple LLM calls.
 DEFAULT_FANOUT_THRESHOLD = 20
@@ -120,6 +120,7 @@ def _call_backend(
     implementation_summary: str = "",
     model: str | None = None,
     allowed_tools: list[str] | None = None,
+    session: LLMSession | None = None,
 ) -> ReviewResult:
     """Issue one LLM call and parse the result into a ReviewResult."""
     prompt = _build_prompt(
@@ -131,16 +132,24 @@ def _call_backend(
         task_context=task_context,
         implementation_summary=implementation_summary,
     )
-    result = backend.run(
-        prompt,
-        max_tokens=max_tokens,
-        timeout_s=timeout_s,
-        memory_limit=memory_limit,
-        allowed_tools=allowed_tools or [],
-        cwd=cwd,
-        model=model,
-        mode="plan",
-    )
+    if session is not None:
+        result = session.send(
+            prompt,
+            max_tokens=max_tokens,
+            timeout_s=timeout_s,
+            allowed_tools=allowed_tools,
+        )
+    else:
+        result = backend.run(
+            prompt,
+            max_tokens=max_tokens,
+            timeout_s=timeout_s,
+            memory_limit=memory_limit,
+            allowed_tools=allowed_tools or [],
+            cwd=cwd,
+            model=model,
+            mode="plan",
+        )
     raw = _extract_json(result.stdout)
     # Enforce shard_id matches what we requested.
     raw["shard_id"] = shard_id
@@ -183,6 +192,7 @@ def review(
     implementation_summary: str = "",
     model: str | None = None,
     allowed_tools: list[str] | None = None,
+    session: LLMSession | None = None,
 ) -> list[ReviewResult]:
     """Run the Reviewer phase.
 
@@ -218,6 +228,7 @@ def review(
                 implementation_summary=implementation_summary,
                 model=model,
                 allowed_tools=allowed_tools,
+                session=session,
             )
         ]
 
@@ -240,6 +251,7 @@ def review(
                 implementation_summary=implementation_summary,
                 model=model,
                 allowed_tools=allowed_tools,
+                session=session,
             )
         )
     return results

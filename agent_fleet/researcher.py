@@ -17,7 +17,7 @@ from agent_fleet.contracts.research_note import Confidence, ResearchNote, valida
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from agent_fleet.hooks import LLMBackend
+    from agent_fleet.hooks import LLMBackend, LLMSession
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -63,6 +63,7 @@ def research(
     timeout_s: int = 720,
     memory_limit: str = "2G",
     cwd: Path | None = None,
+    session: LLMSession | None = None,
 ) -> ResearchNote:
     """Run one Researcher sub-phase for a single research question.
 
@@ -104,14 +105,22 @@ Scope paths:
 Return ONLY the JSON object — no prose before or after it.
 """
 
-    result = backend.run(
-        prompt,
-        max_tokens=max_tokens,
-        timeout_s=timeout_s,
-        memory_limit=memory_limit,
-        allowed_tools=allowed_tools,
-        cwd=cwd,
-    )
+    if session is not None:
+        result = session.send(
+            prompt,
+            max_tokens=max_tokens,
+            timeout_s=timeout_s,
+            allowed_tools=allowed_tools,
+        )
+    else:
+        result = backend.run(
+            prompt,
+            max_tokens=max_tokens,
+            timeout_s=timeout_s,
+            memory_limit=memory_limit,
+            allowed_tools=allowed_tools,
+            cwd=cwd,
+        )
 
     raw = _extract_json(result.stdout)
 
@@ -144,6 +153,7 @@ def _research_with_duration(
     max_tokens: int = 2048,
     timeout_s: int = 720,
     cwd: Path | None = None,
+    session: LLMSession | None = None,
 ) -> tuple[ResearchNote, float]:
     """Run one research item and return (note, duration_s)."""
     allowed_tools: list[str] = ["read_file"]
@@ -188,14 +198,22 @@ Return ONLY the JSON object — no prose before or after it.
                 "fences, no commentary. The response MUST start with '{' and "
                 "end with '}'."
             )
-        result = backend.run(
-            current_prompt,
-            max_tokens=max_tokens,
-            timeout_s=timeout_s,
-            memory_limit=memory_limit,
-            allowed_tools=allowed_tools,
-            cwd=cwd,
-        )
+        if session is not None:
+            result = session.send(
+                current_prompt,
+                max_tokens=max_tokens,
+                timeout_s=timeout_s,
+                allowed_tools=allowed_tools,
+            )
+        else:
+            result = backend.run(
+                current_prompt,
+                max_tokens=max_tokens,
+                timeout_s=timeout_s,
+                memory_limit=memory_limit,
+                allowed_tools=allowed_tools,
+                cwd=cwd,
+            )
         raw_text = result.stdout
         duration_total += result.duration_s
         try:
@@ -234,6 +252,7 @@ def research_all(
     memory_limit: str = "2G",
     max_workers: int = 4,
     cwd: Path | None = None,
+    session: LLMSession | None = None,
 ) -> list[ResearchNote]:
     """Run all research items in *research_plan* concurrently, return all notes.
 
@@ -253,6 +272,7 @@ def research_all(
             needs_browser=item.get("needs_browser", False),
             memory_limit=memory_limit,
             cwd=cwd,
+            session=session,
         )
         return note
 

@@ -19,7 +19,7 @@ from agent_fleet.verify_core import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from agent_fleet.hooks import FleetTask, LLMBackend, Persona
+    from agent_fleet.hooks import FleetTask, LLMBackend, LLMSession, Persona
     from agent_fleet.personas import YamlPersonaResolver
     from agent_fleet.repo import RepoConfig
 
@@ -57,18 +57,27 @@ def run_execute_phase(
     task: FleetTask,
     workspace: Path,
     timeout_s: int,
+    session: LLMSession | None = None,
 ) -> dict[str, Any]:
     persona = resolver.load(task.persona)
     prompt = _build_execute_prompt(persona, task)
-    result = backend.run(
-        prompt,
-        max_tokens=0,
-        timeout_s=timeout_s,
-        cwd=workspace,
-        model=persona.model,
-        mode=parse_agent_mode(persona.mode),
-        allowed_tools=list(persona.allowed_tools),
-    )
+    if session is not None:
+        result = session.send(
+            prompt,
+            max_tokens=0,
+            timeout_s=timeout_s,
+            allowed_tools=list(persona.allowed_tools),
+        )
+    else:
+        result = backend.run(
+            prompt,
+            max_tokens=0,
+            timeout_s=timeout_s,
+            cwd=workspace,
+            model=persona.model,
+            mode=parse_agent_mode(persona.mode),
+            allowed_tools=list(persona.allowed_tools),
+        )
     return {
         "phase": "execute",
         "persona": persona.name,
@@ -316,6 +325,7 @@ def run_pipeline(
     phases: list[str],
     reviewer_persona: str = "reviewer",
     repo: RepoConfig | None = None,
+    session: LLMSession | None = None,
 ) -> tuple[list[dict[str, Any]], str, int, list[str]]:
     """Run ordered phases.
 
@@ -336,6 +346,7 @@ def run_pipeline(
                 task=task,
                 workspace=workspace,
                 timeout_s=timeout_s,
+                session=session,
             )
             results.append(phase_result)
             summary = phase_result["stdout"]
@@ -401,6 +412,7 @@ def run_pipeline(
                     timeout_s=timeout_s,
                     implementation_summary=summary,
                     reviewer_persona=reviewer_persona,
+                    session=session,
                 )
             results.append(phase_result)
             summary = phase_result.get("summary") or phase_result.get("stdout") or summary
@@ -425,6 +437,7 @@ def _legacy_review_phase(
     timeout_s: int,
     implementation_summary: str,
     reviewer_persona: str,
+    session: LLMSession | None = None,
 ) -> dict[str, Any]:
     persona = resolver.load(reviewer_persona)
     body = _read_persona_prompt(persona)
@@ -443,15 +456,23 @@ def _legacy_review_phase(
             "note missing tests, and give a clear verdict: APPROVE or REQUEST_CHANGES.",
         ]
     )
-    result = backend.run(
-        prompt,
-        max_tokens=0,
-        timeout_s=timeout_s,
-        cwd=workspace,
-        model=persona.model,
-        mode=parse_agent_mode(persona.mode),
-        allowed_tools=list(persona.allowed_tools),
-    )
+    if session is not None:
+        result = session.send(
+            prompt,
+            max_tokens=0,
+            timeout_s=timeout_s,
+            allowed_tools=list(persona.allowed_tools),
+        )
+    else:
+        result = backend.run(
+            prompt,
+            max_tokens=0,
+            timeout_s=timeout_s,
+            cwd=workspace,
+            model=persona.model,
+            mode=parse_agent_mode(persona.mode),
+            allowed_tools=list(persona.allowed_tools),
+        )
     return {
         "phase": "review",
         "persona": persona.name,
