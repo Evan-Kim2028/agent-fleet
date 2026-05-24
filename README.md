@@ -1,246 +1,157 @@
 # Agent Fleet
 
-A multi-agent coding orchestrator: scoped personas, review pipelines, and parallel dispatch — powered by **Cursor Composer** or **Kimi Code CLI**, from CLI, Python, or Hermes.
+**Run a local swarm of scoped coding agents on your git repos** — in parallel, with review gates, and optional long-running watchers that babysit PRs while you work elsewhere.
 
-**Default backend:** Cursor SDK (`composer-2.5`). **Optional:** Kimi Code CLI subscription (`kimi-for-coding`) — same personas, pipelines, and repo scope.
+Built on the **[Cursor SDK](https://github.com/cursor/cursor-sdk)** (`cursor-sdk`): each fleet agent is a **Cursor Composer** session with scoped paths, MCP tools, and durable multi-phase conversations. Dispatch from the **CLI**, **Python**, or **GitHub issue comments**.
 
-**Docs:** [Quickstart](docs/QUICKSTART.md) · [New repo setup](docs/NEW-REPO.md) · [Release tags](docs/RELEASE.md) · [Fleet Scouts](docs/SCOUTS.md) · [Personas](docs/PERSONAS.md) · [Kimi backend](docs/KIMI.md) (optional)
+| Docs | |
+|------|---|
+| [Quickstart](docs/QUICKSTART.md) | First run in ~15 minutes |
+| [New repo setup](docs/NEW-REPO.md) | `.agent-fleet.yaml`, GHA, PR loop |
+| [Personas](docs/PERSONAS.md) | Fleet cookbook |
+| [Release tags](docs/RELEASE.md) | How we cut versions |
 
-## What Agent Fleet does
+---
 
-Define a **fleet** of personas (coder, reviewer, domain specialists), pick a **pipeline**, and dispatch against a git workspace. The orchestrator handles routing; fleet agents implement, verify, and review in scope.
+## Who this is for
 
-| Capability | What you get |
-|------------|--------------|
-| **Scoped personas** | Path allowlists per persona so agents stay in `packages/foo/` instead of wandering the monorepo |
-| **Review pipelines** | `code_review`: implement → **scope check** → **repo verify commands** → structured diff review with typed verdict |
-| **Parallel dispatch** | Independent tasks (different files/packages) run concurrently up to `max_parallel` |
-| **Repo factory config** | `.agent-fleet.yaml` per repo: verify commands, default persona, cross-cutting boundaries |
-| **Orchestrator integration** | Hermes (or your app) plans and routes; fleet agents execute in the repo |
-| **Full pipeline** | Larger tasks: plan → research → implement → **run your tests** → review (optional tech lead) |
+You want **several non-interactive Cursor agents working locally** on real code — not a single chat session:
 
-Each dispatch is a non-interactive run (~30–120s). Best for focused, automatable tasks with clear goals and file-level context.
+- **Parallel fixes** — backend + frontend + tests in different packages at once (`max_parallel`, git worktree per task).
+- **Reviewed changes** — implement → scope check → your test commands → structured reviewer verdict before merge.
+- **Background babysitting** — a watcher on your machine polls fleet PRs or issue comments and dispatches fix agents until CI is green (optional auto-merge).
+- **Scripted dispatch** — your CI, cron jobs, or Python scripts call `agent-fleet run` / `dispatch_tasks()` with scoped personas.
 
-## Getting started
+Runs on **your laptop, dev box, or CI runner**. Requires a [Cursor API key](https://cursor.com/dashboard/integrations), Python 3.14, and a git workspace. Each agent run is typically **~30–120 seconds** of focused work.
+
+---
+
+## How it works
+
+```
+You (CLI / Python / watcher)
+        │
+        ▼
+  FleetDispatcher ── admission (max_parallel) ── worktree isolation
+        │
+        ├── persona: coder    ──► Cursor SDK session (Composer, scoped paths, MCPs)
+        ├── persona: reviewer ──► diff review, typed verdict
+        └── …
+        │
+        ▼
+  JSON result + git branch/PR + structured logs (~/.hermes/fleet/runs/*.jsonl)
+```
+
+**Personas** are markdown prompts with optional path allowlists. **Pipelines** define phase order (`simple`, `code_review`, `full`). **Repo config** (`.agent-fleet.yaml`) adds verify commands, scope rules, and PR-loop behavior.
+
+Default model: **`composer-2.5`** (override per persona in `fleet.yaml`).
+
+---
+
+## Quick start
 
 **Prerequisites:** Python 3.14, [Cursor API key](https://cursor.com/dashboard/integrations), a git repo to target.
 
-The default execution backend is Cursor SDK with `composer-2.5` in `fleet.example.yaml`. Override per-persona only when you need a different model.
-
 ```bash
-# 1. Install
 git clone https://github.com/Evan-Kim2028/agent-fleet.git
 cd agent-fleet
-pip install -e ".[dev]"
+pip install -e ".[dev]"    # or: uv sync --frozen --group dev
 
-# 2. API key + fleet config (sets composer-2.5 default)
 export CURSOR_API_KEY=your_key_here
 mkdir -p ~/.hermes/coding_fleet
-cp fleet.example.yaml ~/.hermes/coding_fleet/fleet.yaml
+cp fleet.example.yaml ~/.hermes/coding_fleet/fleet.yaml   # default_backend: cursor, default_model: composer-2.5
+```
 
-# 3. First run — coder implements, reviewer checks
+First run (coder implements, reviewer checks):
+
+```bash
 agent-fleet run "Add a one-line project description to README" \
   --workspace /absolute/path/to/your/repo \
   --pipeline code_review
 ```
 
-You should see JSON output with `phases.execute` (coder) and `phases.review` (reviewer). Expect ~30–120 seconds.
+Expect JSON with `phases.execute` and `phases.review`, `status: completed` or a typed failure (`scope_violation`, `verify_failed`, `review_changes_requested`). Verify personas: `agent-fleet personas`.
 
-Verify setup:
+Optional repo scaffold: `agent-fleet init /path/to/your/repo` — see [docs/NEW-REPO.md](docs/NEW-REPO.md).
 
-```bash
-agent-fleet personas   # coder, reviewer, explorer
-```
+---
 
-## Optional: Kimi Code CLI backend
+## Running agents in the background
 
-Agent Fleet supports a second execution backend via `kimi-cli` and the [Kimi Code API](https://platform.kimi.ai). Personas, pipelines, repo scope, and Hermes dispatch are unchanged — set `default_backend` in `fleet.yaml`.
+These modes all run **locally** on your machine, each backed by Cursor SDK sessions.
 
-**Requires:** `kimi-cli` on PATH, `KIMI_API_KEY` (typically `sk-kimi-...`).
+| Mode | Command / API | What happens |
+|------|----------------|--------------|
+| **One-shot task** | `agent-fleet run "…" --workspace …` | Single agent job, exits with JSON |
+| **Parallel batch** | `dispatch_tasks(...)` with multiple goals | Up to `max_parallel` concurrent Composer agents; same-repo tasks auto-isolate in git worktrees |
+| **PR loop watcher** | `agent-fleet loop --workspace …` or `agent-fleet-pr-loop` | Polls open `fleet/*` PRs → fix review findings → wait for CI → optional squash merge ([systemd example](examples/agent-fleet-pr-loop.service)) |
+| **Issue comment trigger** | `agent-fleet-watch` | Polls GitHub issues for `/agent --persona …` and dispatches the full pipeline |
 
-```bash
-# Install kimi-cli (see Kimi Code docs), then:
-export KIMI_API_KEY=your_kimi_code_key
-
-# Point fleet config at the Kimi backend
-cat >> ~/.hermes/coding_fleet/fleet.yaml <<'EOF'
-default_backend: kimi
-default_model: kimi-for-coding
-EOF
-
-# Same CLI — backend comes from fleet.yaml
-agent-fleet run "Add a one-line project description to README" \
-  --workspace /absolute/path/to/your/repo \
-  --pipeline code_review
-```
-
-Change backends by editing `default_backend` and the matching API key in your environment.
-
-| Setting | Cursor SDK (default) | Kimi Code CLI |
-|---------|----------------------|---------------|
-| **Key** | `CURSOR_API_KEY` | `KIMI_API_KEY` |
-| **Runtime** | `cursor-sdk` (pip) | `kimi-cli` |
-| **Default model** | `composer-2.5` | `kimi-for-coding` |
-| **Config** | `default_backend: cursor` | `default_backend: kimi` |
-
-Both backends implement the same `LLMBackend` protocol — personas, pipelines, and `.agent-fleet.yaml` scope work the same way.
-
-Full Kimi setup guide: **[docs/KIMI.md](docs/KIMI.md)**
-
-Optional — scaffold repo integration:
-
-```bash
-agent-fleet init /absolute/path/to/your/repo
-```
-
-## Using it effectively
-
-Think **dev factory**, not one mega-agent:
-
-1. **One persona per domain** — e.g. `backend`, `frontend`, `infra`. Give each a markdown prompt with verify commands and anti-patterns.
-2. **Scope every persona** — `persona_scope_allowlist` in `.agent-fleet.yaml` (or `allowed_paths` in `fleet.yaml`). This is the highest-leverage setting.
-3. **Default to `code_review`** for anything merge-bound. Use `simple` only for trivial, low-risk edits.
-4. **Small, file-specific goals** — pass paths and verify commands in `context`:
-
-   ```bash
-   agent-fleet run "Fix validation for nested structs" \
-     --workspace /path/to/repo \
-     --persona backend \
-     --pipeline code_review \
-     --context "File: src/models/user.py. Verify: pytest -q tests/test_user.py"
-   ```
-
-5. **Parallelize independent work** — batch via Python/Hermes when tasks touch different files (source + tests in different packages, or two packages). Parallel batch dispatch **auto-isolates** same-repo tasks in git worktrees (one branch per task). Set `use_worktree: true` in `.agent-fleet.yaml` to isolate single-task runs too.
-6. **Orchestrator + fleet** — use Hermes (or scripts) for recon and routing; dispatch fleet agents for the actual edits. Don't make implementers re-discover the repo every time — put discovery in `context`.
-7. **Bind skills to personas** — `skill: my-skill` in `fleet.yaml` injects `SKILL.md` conventions at dispatch (I/O rules, test commands, architecture).
-8. **Use `full` pipeline sparingly** — for multi-step features where you want plan/research/verify loops and branch creation. Day-to-day fixes: `code_review` is enough.
-
-**Anti-patterns:** one unrestricted `coder` on a monorepo; vague goals without file hints; parallel tasks editing the same file; skipping review on production paths.
-
-## Install (reference)
-
-```bash
-git clone https://github.com/Evan-Kim2028/agent-fleet.git
-cd agent-fleet
-pip install -e ".[dev]"
-export CURSOR_API_KEY=...   # https://cursor.com/dashboard/integrations
-```
-
-Copy the example fleet config (includes `default_model: composer-2.5`):
-
-```bash
-mkdir -p ~/.hermes/coding_fleet
-cp fleet.example.yaml ~/.hermes/coding_fleet/fleet.yaml
-```
-
-## Quick start (reference)
-
-```bash
-agent-fleet run "Add a health check" \
-  --workspace /path/to/repo \
-  --pipeline code_review
-```
-
-```bash
-# List personas
-agent-fleet personas
-
-# Scaffold repo integration
-agent-fleet init /path/to/your/repo
-```
-
-## Integrate any repo
-
-See **[docs/NEW-REPO.md](docs/NEW-REPO.md)** for the full checklist (local dispatch → GitHub PR analyzer → PR loop).
-
-Drop `.agent-fleet.yaml` in your repo root (see `examples/repo.agent-fleet.yaml`):
-
-| Field | Purpose |
-|-------|---------|
-| `default_persona` | Default agent when `--persona` omitted |
-| `test_command` / `lint_command` | Post-implement verification (full pipeline) |
-| `persona_scope_allowlist` | Path prefixes per persona (simple + full pipelines) |
-| `cross_cutting_groups` | Planner decomposition boundaries |
-| `critical_path_prefixes` | Protected paths (verify FATAL) |
-| `use_worktree` | Isolated git worktree per run (also auto-enabled for parallel batch on the same repo) |
-
-## Personas
-
-Global registry: `~/.hermes/coding_fleet/fleet.yaml` (override with `--config`).
-
-Persona bodies come from:
-
-- Bundled `agent_fleet/personas/*.md` (ships with the package)
-- Repo-local `personas/` via `.agent-fleet.yaml` → `personas_dir`
-- Hermes skills via `skill:` key in `fleet.yaml`
-- Absolute paths to any markdown file
-
-Example custom persona in `fleet.yaml`:
+Configure concurrency in `~/.hermes/coding_fleet/fleet.yaml`:
 
 ```yaml
-personas:
-  backend:
-    prompt: backend.md
-    model: composer-2.5
-    allowed_paths: ["api/", "src/"]
-    extra_instructions: "Run pytest before finishing."
+default_backend: cursor
+default_model: composer-2.5
+max_parallel: 3            # concurrent local Cursor agents
+max_redispatches: 1        # retry once on hard failure with handoff context
+timeout_seconds: 900
 ```
 
-Repo scope (overrides `allowed_paths` when workspace has `.agent-fleet.yaml`):
+Structured run logs: `~/.hermes/fleet/runs/<run-id>.jsonl` (dispatch, PR loop, watcher events).
 
-```yaml
-persona_scope_allowlist:
-  backend:
-    - api/
-    - src/
-```
+Persistent sessions and MCP (Playwright, etc.): [docs/SESSIONS.md](docs/SESSIONS.md) · [docs/MCP.md](docs/MCP.md).
+
+---
 
 ## Pipelines
 
-| Pipeline | Phases |
-|----------|--------|
-| `simple` | execute |
-| `code_review` | execute → scope → verify (if configured) → review → **auto-fix?** |
-| `full` | PLAN → RESEARCH → SYNTHESIZE → IMPLEMENT → VERIFY → REVIEW → TECH_LEAD? |
+| Pipeline | Phases | Typical use |
+|----------|--------|-------------|
+| `simple` | execute | Trivial, low-risk edits |
+| `code_review` | execute → scope → verify → review (+ optional auto-fix) | Default for merge-bound work |
+| `full` | PLAN → RESEARCH → … → VERIFY → REVIEW → TECH_LEAD? | Larger features, branch + PR creation |
 
-`code_review` runs mechanical scope checks on changed files, optional verify commands from `.agent-fleet.yaml`, then a diff-based reviewer that returns a typed verdict (`approve`, `request_changes`, `block`).
+`code_review` with `pr_loop.enabled` and `auto_push` can open/update PRs and run the merge lifecycle automatically. Outcomes: `completed`, `scope_violation`, `verify_failed`, `review_changes_requested`, `review_blocked`, `error`.
 
-When `pr_loop.enabled: true` (or explicit `code_review.auto_fix: true`), the dispatcher **automatically re-dispatches a fix persona** on `request_changes` or `verify_failed`, then re-runs scope/verify/review. With `auto_push` + `auto_pr_loop`, it opens/updates the PR and runs the merge lifecycle.
+Details: [docs/QUICKSTART.md](docs/QUICKSTART.md).
 
-| Outcome | Meaning |
-|---------|---------|
-| `completed` | All phases passed; reviewer approved |
-| `scope_violation` | Implementer touched paths outside persona allowlist |
-| `verify_failed` | Repo test/lint command failed |
-| `review_changes_requested` | Reviewer returned `request_changes` |
-| `review_blocked` | Reviewer returned `block` |
-| `error` | Implementer or infrastructure failure |
+---
 
-`pipeline=full` is a special CLI/dispatch mode that runs the full orchestrator; other pipelines use the phase lists above.
+## Repo integration (`.agent-fleet.yaml`)
 
-## Hermes integration (optional)
+| Field | Purpose |
+|-------|---------|
+| `default_persona` | Default when `--persona` omitted |
+| `test_command` / `lint_command` | Verification after implement (full pipeline) |
+| `persona_scope_allowlist` | Path prefixes per persona — **highest-leverage guardrail** |
+| `use_worktree` | Isolated worktree per run |
+| `pr_loop` | Local watcher: review fix → CI fix → merge |
+| `code_review.auto_fix` | Re-dispatch on reviewer `request_changes` |
 
-Plugin source lives in this repo at `integrations/hermes/`. One command to pull, install, link, and restart:
+Examples: [`examples/repo.agent-fleet.yaml`](examples/repo.agent-fleet.yaml) · [`examples/repo-full.agent-fleet.yaml`](examples/repo-full.agent-fleet.yaml).
 
-```bash
-./scripts/deploy-hermes.sh
-```
+---
 
-Manual setup (first time only):
+## Personas
 
-```bash
-ln -sf "$(pwd)/integrations/hermes" ~/.hermes/plugins/cursor-fleet
-```
+Registry: `~/.hermes/coding_fleet/fleet.yaml` (override with `--config`).
+
+Prompts ship in `agent_fleet/personas/*.md`; override with repo `personas/` or absolute paths. Repo `.agent-fleet.yaml` scope wins over global `allowed_paths` when both apply.
 
 ```yaml
-# ~/.hermes/config.yaml
-plugins:
-  enabled: [cursor-fleet]
-toolsets:
-  - coding_fleet
+# fleet.yaml excerpt
+default_backend: cursor
+default_model: composer-2.5
+personas:
+  backend:
+    prompt: coder.md
+    model: composer-2.5
+    allowed_paths: ["api/", "src/"]
 ```
 
-Set `CURSOR_API_KEY` in `~/.hermes/.env`.
+Cookbook: [docs/PERSONAS.md](docs/PERSONAS.md).
+
+---
 
 ## Python API
 
@@ -248,67 +159,82 @@ Set `CURSOR_API_KEY` in `~/.hermes/.env`.
 from agent_fleet import dispatch_tasks
 
 results = dispatch_tasks(
-    goal="Fix login bug",
+    goal="Fix login validation",
     workspace="/path/to/repo",
     pipeline="code_review",
 )
+# Batch: pass multiple tasks via FleetDispatcher for parallel local agents
 ```
 
-- [docs/QUICKSTART.md](docs/QUICKSTART.md) — 15-minute setup
-- [docs/NEW-REPO.md](docs/NEW-REPO.md) — integrate any repo (scope, GHA, PR loop)
-- [docs/PERSONAS.md](docs/PERSONAS.md) — persona fleet cookbook
-- [docs/KIMI.md](docs/KIMI.md) — Kimi Code CLI backend (optional)
+---
 
-## PR loop (review → fix → CI → merge)
+## PR loop (local watcher)
 
-For repos with open `fleet/*` PRs, enable automated babysitting:
+For repos with open fleet PRs:
 
 ```yaml
 # .agent-fleet.yaml
 pr_loop:
   enabled: true
   branch_prefixes: [fleet/]
-  poll_interval_s: 10          # watcher outer loop (default 10s)
-  review_poll_s: 10            # wait for GHA review comment
-  ci_poll_s: 10                # wait for CI checks to finish
-  ci_register_poll_s: 5        # wait for checks to appear after push
-  post_fix_poll_s: 15          # pause after fix push before re-checking CI
-  fix_persona: coder          # review findings (workflows, config, code)
-  ci_fix_persona: coder       # CI failures — use a persona scoped to fix CI/config paths
+  fix_persona: coder
   auto_merge: true
   max_fix_attempts: 2
-  max_ci_fix_attempts: 2
 ```
 
-1. **GitHub Action** posts PR analysis (`agent-fleet-pr-analyzer` / `pr-analyzer.yml`)
-2. **Local watcher** polls open fleet PRs, dispatches the fix persona for blocking findings, waits for CI, squash-merges to `main`
+1. GitHub Action posts PR analysis (`examples/github/pr-analyzer.yml`)
+2. **Local watcher** (`agent-fleet loop` or `agent-fleet-pr-loop`) dispatches Cursor fix agents, waits for CI, merges
 
-```bash
-# One-shot poll (dry run friendly)
-agent-fleet loop --workspace /path/to/repo --once
+Requires `gh` auth and `CURSOR_API_KEY`.
 
-# Long-running watcher (systemd example: examples/agent-fleet-pr-loop.service)
-agent-fleet-pr-loop --workspace /path/to/repo
-```
+---
 
-Requires `gh` authenticated, `CURSOR_API_KEY` or `KIMI_API_KEY`, and `pr_review` configured.
+## Effective use (short)
 
-## v0.5.0 highlights
+1. **One persona per domain** — backend, frontend, infra; scope each with `persona_scope_allowlist`.
+2. **Default to `code_review`** for anything merge-bound.
+3. **Small, file-specific goals** — pass paths and verify commands in `--context`.
+4. **Parallelize independent work** — different packages/files; avoid two agents on the same file.
+5. **Use `full` sparingly** — day-to-day fixes: `code_review` is enough.
 
-Four new capabilities shipped in v0.5.0:
+**Anti-patterns:** one unrestricted `coder` on a monorepo; vague goals; parallel edits to the same file; skipping review on production paths.
 
-| Feature | Summary | Docs |
-|---------|---------|------|
-| **MCP catalog** | Declare Playwright, Chrome DevTools, Context7, and Serena in `fleet.yaml`; grant them per-persona via a named allowlist | [docs/MCP.md](docs/MCP.md) |
-| **Persistent sessions** | All phases of a task share one Cursor agent ID and one MCP tool state instead of spawning a fresh agent per phase | [docs/SESSIONS.md](docs/SESSIONS.md) |
-| **Hard-failure redispatch** | On `error`/`expired`/`timeout`/`scope_violation`, the dispatcher retries once with a fresh agent and a curated handoff note | [docs/REDISPATCH.md](docs/REDISPATCH.md) |
-| **First-class MCP contracts** | `StdioMcpServerSpec` and `HttpMcpServerSpec` dataclasses mirror the Cursor SDK types and are validated at config-load time | [docs/MCP.md](docs/MCP.md) |
+---
 
-Design spec: [docs/superpowers/specs/2026-05-23-mcp-sessions-redispatch-design.md](docs/superpowers/specs/2026-05-23-mcp-sessions-redispatch-design.md)
+## Optional: other backends and orchestrators
+
+Agent Fleet is **Cursor-first**. These alternatives use the same personas, pipelines, and repo config — swap `default_backend` or add a plugin when you need them.
+
+| Integration | When to use | Setup |
+|-------------|-------------|-------|
+| **[Kimi Code CLI](docs/KIMI.md)** | You prefer Kimi instead of Cursor for execution | `default_backend: kimi`, `KIMI_API_KEY`, `kimi-cli` on PATH |
+| **[Hermes](integrations/hermes/)** | You already use Hermes as a chat orchestrator | `./scripts/deploy-hermes.sh` · enable `coding_fleet` toolset |
+
+Neither is required for CLI, Python, watcher, or issue-dispatch workflows.
+
+---
+
+## v0.6.0 highlights
+
+| Area | Summary |
+|------|---------|
+| **Python 3.14** | Required runtime; CI gates ruff, ty, pytest on `main` |
+| **Unified logging** | `FleetLogger` + JSONL for dispatch, PR loop, and watchers |
+| **Handoff redispatch** | Hard failures retry with curated context injected into the next attempt |
+| **DRY helpers** | Shared `github_cli`, `create_fleet_session`, `require_backend_env` |
+| **Phase graph** | `TECH_LEAD` / `DESIGN_REVIEW` gates wired in `LocalFleetRunner` |
+
+Prior: MCP catalog, persistent sessions — [docs/MCP.md](docs/MCP.md) · [docs/SESSIONS.md](docs/SESSIONS.md) · [docs/REDISPATCH.md](docs/REDISPATCH.md).
+
+---
 
 ## Development
 
 ```bash
-pytest -q
-ruff check agent_fleet tests
+uv sync --frozen --group dev
+uv run pytest -q
+uv run ruff check agent_fleet tests integrations
+uv run ty check agent_fleet tests integrations
 ```
+
+Release process: [docs/RELEASE.md](docs/RELEASE.md).
