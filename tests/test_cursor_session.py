@@ -1,25 +1,27 @@
-# tests/test_cursor_session.py
 """Tests for CursorSession lifecycle and MCP forwarding (fake SDK)."""
 
 from __future__ import annotations
 
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import pytest
 
 from agent_fleet.contracts.mcp import HttpMcpServerSpec, StdioMcpServerSpec
 from agent_fleet.cursor_backend import CursorBackend, CursorLLMResult
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
 
 @pytest.fixture
-def fake_sdk(monkeypatch: pytest.MonkeyPatch):
+def fake_sdk(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     """Patch the cursor_sdk import inside CursorBackend to a fake module."""
     fake = MagicMock()
     fake.Agent.create.return_value = MagicMock(
         agent_id="agent-xyz",
         send=MagicMock(return_value=MagicMock(
-            result="ok output", agent_id="agent-xyz", status="finished"
+            result="ok output", agent_id="agent-xyz", status="finished",
         )),
         dispose=MagicMock(),
     )
@@ -30,7 +32,9 @@ def fake_sdk(monkeypatch: pytest.MonkeyPatch):
     return fake
 
 
-def test_create_session_forwards_mcp_servers(fake_sdk, tmp_path: Path) -> None:
+def test_create_session_forwards_mcp_servers(
+    fake_sdk: MagicMock, tmp_path: Path,
+) -> None:
     backend = CursorBackend(api_key="x")
     sess = backend.create_session(
         persona_name="coder",
@@ -41,12 +45,15 @@ def test_create_session_forwards_mcp_servers(fake_sdk, tmp_path: Path) -> None:
         },
     )
     assert sess.agent_id == "agent-xyz"
-    args, kwargs = fake_sdk.Agent.create.call_args
+    _args, kwargs = fake_sdk.Agent.create.call_args
     assert "mcp_servers" in kwargs
     assert set(kwargs["mcp_servers"]) == {"playwright", "context7"}
 
 
-def test_session_send_returns_cursor_llm_result(fake_sdk, tmp_path: Path) -> None:
+def test_session_send_returns_cursor_llm_result(
+    fake_sdk: MagicMock,  # noqa: ARG001  # fixture monkeypatches cursor_sdk
+    tmp_path: Path,
+) -> None:
     backend = CursorBackend(api_key="x")
     sess = backend.create_session(persona_name="coder", cwd=tmp_path)
     result = sess.send("do work", max_tokens=1000, timeout_s=60)
@@ -57,10 +64,10 @@ def test_session_send_returns_cursor_llm_result(fake_sdk, tmp_path: Path) -> Non
 
 
 def test_session_send_maps_error_status_to_nonzero_exit(
-    fake_sdk, tmp_path: Path
+    fake_sdk: MagicMock, tmp_path: Path,
 ) -> None:
     fake_sdk.Agent.create.return_value.send.return_value = MagicMock(
-        result="partial", agent_id="agent-xyz", status="expired"
+        result="partial", agent_id="agent-xyz", status="expired",
     )
     backend = CursorBackend(api_key="x")
     sess = backend.create_session(persona_name="coder", cwd=tmp_path)
@@ -69,7 +76,9 @@ def test_session_send_maps_error_status_to_nonzero_exit(
     assert "expired" in result.stderr
 
 
-def test_session_dispose_calls_sdk_dispose(fake_sdk, tmp_path: Path) -> None:
+def test_session_dispose_calls_sdk_dispose(
+    fake_sdk: MagicMock, tmp_path: Path,
+) -> None:
     backend = CursorBackend(api_key="x")
     sess = backend.create_session(persona_name="coder", cwd=tmp_path)
     sess.dispose()
@@ -77,7 +86,9 @@ def test_session_dispose_calls_sdk_dispose(fake_sdk, tmp_path: Path) -> None:
     fake_sdk.Agent.create.return_value.dispose.assert_called_once()
 
 
-def test_create_session_returns_error_session_without_api_key(tmp_path: Path) -> None:
+def test_create_session_returns_error_session_without_api_key(
+    tmp_path: Path,
+) -> None:
     backend = CursorBackend(api_key="")
     sess = backend.create_session(persona_name="coder", cwd=tmp_path)
     result = sess.send("x", max_tokens=1, timeout_s=1)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -11,11 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from agent_fleet.agent_mode import AgentMode, coerce_agent_mode
-from agent_fleet.contracts.mcp import (
-    HttpMcpServerSpec,
-    McpServerSpec,
-    StdioMcpServerSpec,
-)
+from agent_fleet.contracts.mcp import McpServerSpec, StdioMcpServerSpec
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -30,7 +27,7 @@ class CursorLLMResult:
     agent_id: str | None = None
 
 
-def _sdk_mcp_config(spec: McpServerSpec, sdk):  # noqa: ANN001
+def _sdk_mcp_config(spec: McpServerSpec, sdk):  # noqa: ANN001, ANN202
     if isinstance(spec, StdioMcpServerSpec):
         return sdk.StdioMcpServerConfig(
             command=spec.command,
@@ -76,7 +73,7 @@ class CursorSession:
         timeout_s: int,
         allowed_tools: list[str] | None = None,
     ) -> CursorLLMResult:
-        del max_tokens
+        del max_tokens, timeout_s
         scope_note = ""
         if allowed_tools:
             scoped = [t.removeprefix("path:") for t in allowed_tools if t.startswith("path:")]
@@ -108,7 +105,7 @@ class CursorSession:
                 duration_s=duration_s,
                 agent_id=agent_id,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return CursorLLMResult(
                 stdout="",
                 stderr=str(exc),
@@ -121,10 +118,8 @@ class CursorSession:
         if self._disposed:
             return
         self._disposed = True
-        try:
+        with contextlib.suppress(Exception):
             self._agent.dispose()
-        except Exception:  # noqa: BLE001
-            pass
 
 
 class _ErrorSession:
@@ -196,7 +191,7 @@ class CursorBackend:
                 mode=selected_mode,
                 name=f"fleet:{persona_name}",
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return _ErrorSession(f"Agent.create failed: {exc}")
         return CursorSession(agent, default_timeout_s=900)
 
