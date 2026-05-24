@@ -62,6 +62,10 @@ CLI / Python / watcher
 
 ## Quick start
 
+Use **absolute paths** to your target repo. You do not clone agent-fleet into that repo — fleet is a global CLI that points at any git workspace.
+
+### 1. Install fleet (once per machine)
+
 ```bash
 git clone https://github.com/Evan-Kim2028/agent-fleet.git
 cd agent-fleet
@@ -70,24 +74,48 @@ pip install -e ".[dev]"    # or: uv sync --frozen --group dev
 export CURSOR_API_KEY=your_key_here
 mkdir -p ~/.hermes/coding_fleet
 cp fleet.example.yaml ~/.hermes/coding_fleet/fleet.yaml
+# ~/.hermes/coding_fleet/ = global fleet config (personas, max_parallel), not your repo
 # edit fleet.yaml: default_model: composer-2.5-fast
 ```
 
-**Implement + review:**
+### 2. Verify install
+
+```bash
+agent-fleet personas    # should list coder, reviewer, pr-analyzer, …
+```
+
+### 3. Add your repo (recommended before real work)
+
+**Fast path:** skip to step 4 — any git repo works as `--workspace` for a smoke test.
+
+**Proper path:** scaffold per-repo config (scope, verify commands, optional PR loop):
+
+```bash
+export REPO=/absolute/path/to/your/repo   # must be a git checkout
+
+agent-fleet init "$REPO"
+# creates $REPO/.agent-fleet.yaml — edit persona_scope_allowlist, test_command, lint_command
+```
+
+Details: [docs/NEW-REPO.md](docs/NEW-REPO.md).
+
+### 4. First task
+
+**Implement + review** (~30–120s on `composer-2.5-fast`):
 
 ```bash
 agent-fleet run "Add a one-line project description to README" \
-  --workspace /absolute/path/to/your/repo \
+  --workspace "$REPO" \
   --pipeline code_review
 ```
 
 **PR review only** (working tree vs `main`):
 
 ```bash
-agent-fleet review --workspace /path/to/repo --format json
+agent-fleet review --workspace "$REPO" --format json
 ```
 
-Repo scaffold: `agent-fleet init /path/to/repo` — [docs/NEW-REPO.md](docs/NEW-REPO.md).
+Expect JSON with `status: completed` or a typed failure (`scope_violation`, `verify_failed`, `review_changes_requested`). Commit or stash local changes in the target repo before dispatch if you want a clean diff.
 
 ---
 
