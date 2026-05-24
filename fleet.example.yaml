@@ -10,6 +10,13 @@ max_parallel: 3
 timeout_seconds: 900
 default_pipeline: simple
 
+# --- Hard-failure redispatch (v0.5.0) ---
+# Number of automatic retries when a task ends in a hard failure (error/expired/timeout/
+# scope_violation/pipeline_nonzero). 1 = one retry, two total attempts. 0 disables.
+# Override per-run with: agent-fleet run ... --max-redispatches N
+# Recommended: 0 in CI (fail fast), 1-2 in interactive use.
+max_redispatches: 1
+
 # --- Optional: Kimi Code CLI execution backend ---
 # Requires: pip install not needed; install kimi-cli from Kimi Code
 # export KIMI_API_KEY=sk-kimi-...   # https://platform.kimi.ai
@@ -21,11 +28,44 @@ default_pipeline: simple
 # Override only for repo-local or custom persona directories:
 # personas_dir: /path/to/my/personas
 
+# --- MCP server catalog (v0.5.0) ---
+# Named MCP servers that personas can opt into via mcp_servers: [name, ...].
+# ${VAR} syntax is expanded from the environment at config-load time.
+# Missing env vars cause a startup error with the variable name in the message.
+#
+# Uncomment the servers you want to use and set the required env vars:
+#   export CONTEXT7_KEY=your_context7_api_key
+#
+# mcp_servers:
+#   playwright:
+#     type: stdio
+#     command: npx
+#     args: ["-y", "@playwright/mcp@latest"]
+#
+#   chrome_devtools:
+#     type: stdio
+#     command: npx
+#     args: ["-y", "@modelcontextprotocol/server-chrome-devtools@latest"]
+#     # TODO: confirm exact npm package name for Chrome DevTools MCP
+#
+#   context7:
+#     type: http
+#     url: https://mcp.context7.com/mcp
+#     headers:
+#       Authorization: "Bearer ${CONTEXT7_KEY}"
+#
+#   serena:
+#     type: stdio
+#     command: uvx
+#     args: ["--from", "git+https://github.com/oraios/serena", "serena-mcp-server"]
+
 personas:
   coder:
     prompt: coder.md
+    # mcp_servers: [playwright, context7]   # uncomment after enabling mcp_servers above
   reviewer:
     prompt: reviewer.md
+    # mcp_servers: [context7]               # uncomment after enabling mcp_servers above
   pr-analyzer:
     prompt: pr-analyzer.md
     model: composer-2.5

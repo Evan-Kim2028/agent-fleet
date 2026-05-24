@@ -293,6 +293,19 @@ agent-fleet-pr-loop --workspace /path/to/repo
 
 Requires `gh` authenticated, `CURSOR_API_KEY` or `KIMI_API_KEY`, and `pr_review` configured.
 
+## v0.5.0 highlights
+
+Four new capabilities shipped in v0.5.0:
+
+| Feature | Summary | Docs |
+|---------|---------|------|
+| **MCP catalog** | Declare Playwright, Chrome DevTools, Context7, and Serena in `fleet.yaml`; grant them per-persona via a named allowlist | [docs/MCP.md](docs/MCP.md) |
+| **Persistent sessions** | All phases of a task share one Cursor agent ID and one MCP tool state instead of spawning a fresh agent per phase | [docs/SESSIONS.md](docs/SESSIONS.md) |
+| **Hard-failure redispatch** | On `error`/`expired`/`timeout`/`scope_violation`, the dispatcher retries once with a fresh agent and a curated handoff note | [docs/REDISPATCH.md](docs/REDISPATCH.md) |
+| **First-class MCP contracts** | `StdioMcpServerSpec` and `HttpMcpServerSpec` dataclasses mirror the Cursor SDK types and are validated at config-load time | [docs/MCP.md](docs/MCP.md) |
+
+Design spec: [docs/superpowers/specs/2026-05-23-mcp-sessions-redispatch-design.md](docs/superpowers/specs/2026-05-23-mcp-sessions-redispatch-design.md)
+
 ## Development
 
 ```bash
