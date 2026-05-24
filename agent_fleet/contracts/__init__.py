@@ -1,5 +1,6 @@
 """Fleet contracts — re-exports from per-contract modules."""
 
+from agent_fleet.contracts.handoff import HandoffNote
 from agent_fleet.contracts.implementation_brief import (
     ImplementationBrief,
     validate_implementation_brief,
@@ -44,6 +45,7 @@ __all__ = [
     "Confidence",
     "ConfigChange",
     "DecompositionDecision",
+    "HandoffNote",
     "HttpMcpServerSpec",
     "ImplementationBrief",
     "ImprovementProposal",
