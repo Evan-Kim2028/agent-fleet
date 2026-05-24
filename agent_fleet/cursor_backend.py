@@ -184,12 +184,14 @@ class CursorBackend:
         }
         try:
             agent = sdk.Agent.create(
-                model=selected_model,
-                api_key=self.api_key,
-                local=sdk.LocalAgentOptions(cwd=str(cwd)),
-                mcp_servers=mcp_dict or None,
-                mode=selected_mode,
-                name=f"fleet:{persona_name}",
+                sdk.AgentOptions(
+                    model=selected_model,
+                    api_key=self.api_key,
+                    local=sdk.LocalAgentOptions(cwd=str(cwd)),
+                    mcp_servers=mcp_dict or None,
+                    mode=selected_mode,
+                    name=f"fleet:{persona_name}",
+                ),
             )
         except Exception as exc:
             return _ErrorSession(f"Agent.create failed: {exc}")

@@ -28,6 +28,7 @@ def fake_sdk(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     fake.StdioMcpServerConfig = lambda **kw: ("stdio", kw)
     fake.HttpMcpServerConfig = lambda **kw: ("http", kw)
     fake.LocalAgentOptions = lambda **kw: ("local", kw)
+    fake.AgentOptions = lambda **kw: ("agentopts", kw)
     monkeypatch.setitem(__import__("sys").modules, "cursor_sdk", fake)
     return fake
 
@@ -45,9 +46,14 @@ def test_create_session_forwards_mcp_servers(
         },
     )
     assert sess.agent_id == "agent-xyz"
-    _args, kwargs = fake_sdk.Agent.create.call_args
-    assert "mcp_servers" in kwargs
-    assert set(kwargs["mcp_servers"]) == {"playwright", "context7"}
+    args, _kwargs = fake_sdk.Agent.create.call_args
+    # Agent.create receives AgentOptions(...) positionally; our fake records
+    # them as a ("agentopts", kw) tuple.
+    assert len(args) == 1
+    tag, opts = args[0]
+    assert tag == "agentopts"
+    assert "mcp_servers" in opts
+    assert set(opts["mcp_servers"]) == {"playwright", "context7"}
 
 
 def test_session_send_returns_cursor_llm_result(
