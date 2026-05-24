@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -14,6 +15,8 @@ from agent_fleet.contracts.task_spec import DecompositionDecision, TaskSpec
 from agent_fleet.contracts.tech_lead_review import TechLeadReview, TechLeadVerdict
 from agent_fleet.contracts.verify_result import VerifySeverity
 from agent_fleet.implementer import implement
+from agent_fleet.observability.context import bind_run
+from agent_fleet.observability.log import RunLog
 from agent_fleet.phases import run_pipeline
 from agent_fleet.planner import plan
 from agent_fleet.repo import RepoConfig, find_repo_config
@@ -39,6 +42,25 @@ if TYPE_CHECKING:
     )
 
 logger = logging.getLogger(__name__)
+
+
+def _requires_playwright_mcp(
+    *,
+    issue_labels: list[str] | None,
+    title: str,
+    body: str,
+) -> bool:
+    if issue_labels and "visual-audit" in issue_labels:
+        return True
+    combined = f"{title}\n{body}".lower()
+    return "playwright mcp" in combined or "[visual]" in title.lower()
+
+
+def _task_spec_with_browser_research(task_spec: TaskSpec) -> TaskSpec:
+    if not task_spec.research_plan:
+        return task_spec
+    updated = [{**item, "needs_browser": True} for item in task_spec.research_plan]
+    return replace(task_spec, research_plan=updated)
 
 
 def _run_outcome(
@@ -135,6 +157,7 @@ class LocalFleetRunner:
         spine: SpineConfig | None = None,
         config: FleetRunConfig | None = None,
         forge: GitForge | None = None,
+        fleet_config: FleetConfig | None = None,
     ) -> None:
         self._backend = backend
         self._persona_resolver = persona_resolver
@@ -143,6 +166,7 @@ class LocalFleetRunner:
         self._spine = spine or SpineConfig.defaults()
         self._config = config or FleetRunConfig()
         self._forge = forge
+        self._fleet_config = fleet_config
 
     def _pr_labels_for_issue(self, issue_number: int | None, base_labels: list[str]) -> list[str]:
         if self._forge is None or issue_number is None:
@@ -168,6 +192,7 @@ class LocalFleetRunner:
         pr_body_builder: Callable[[str, str | None], str] | None = None,
         pr_labels: list[str] | None = None,
         issue_number: int | None = None,
+        issue_labels: list[str] | None = None,
     ) -> FleetRunResult:
         start = time.monotonic()
         run_id = str(uuid.uuid4())[:8]
@@ -179,299 +204,384 @@ class LocalFleetRunner:
         brief = None
         resume_mode = False
         result: FleetRunResult | None = None
+        session: LLMSession | None = None
+        browser_session_factory: Callable[[], LLMSession | None] | None = None
+        require_mcp = _requires_playwright_mcp(
+            issue_labels=issue_labels,
+            title=title,
+            body=body,
+        )
+        run_log = RunLog.create(
+            run_id=run_id,
+            issue_number=issue_number or task_id,
+            task_id=task_id,
+            persona=persona,
+            visual_audit=require_mcp,
+        )
 
-        try:
-            if self._config.resume and hasattr(self._git_ops, "find_resume_branch"):
-                resumed = self._git_ops.find_resume_branch(
-                    task_id,
-                    persona,
-                    self._spine.branch_prefix,
-                )
-                if resumed is not None:
-                    branch_name, run_id = resumed
-                    worktree = self._git_ops.attach_worktree(branch_name, run_id)
-                    resume_mode = True
-                    logger.info("[%s] RESUME on %s", run_id, branch_name)
-                    phases["RESUME"] = {"branch": branch_name, "worktree": str(worktree)}
+        with bind_run(run_log, run_log.context):
+            run_log.run_start(title=title, visual_audit=require_mcp)
+            if require_mcp:
+                logger.info("[%s] Playwright MCP required for this task", run_id)
+                run_log.emit("mcp.required", data={"servers": ["playwright"]})
 
-            logger.info("[%s] PLAN", run_id)
-            task_spec = plan(
-                task_id,
-                title,
-                body,
-                backend=self._backend,
-                persona_resolver=self._persona_resolver,
-                spine_config=self._spine,
-            )
-            phases["PLAN"] = task_spec.to_dict()
-
-            if task_spec.decomposition_decision == DecompositionDecision.REJECTED:
-                result = FleetRunResult(
-                    run_id=run_id,
-                    task_id=task_id,
-                    persona=persona,
-                    outcome="rejected",
-                    task_spec=task_spec.to_dict(),
-                    summary=task_spec.decomposition_reason,
-                    phases=phases,
-                    duration_seconds=round(time.monotonic() - start, 2),
-                )
-                return result  # noqa: RET504
-
-            if task_spec.decomposition_decision == DecompositionDecision.DECOMPOSE:
-                result = FleetRunResult(
-                    run_id=run_id,
-                    task_id=task_id,
-                    persona=persona,
-                    outcome="decompose",
-                    task_spec=task_spec.to_dict(),
-                    summary=task_spec.decomposition_reason,
-                    phases=phases,
-                    error="Task requires decomposition — dispatch child tasks separately",
-                    duration_seconds=round(time.monotonic() - start, 2),
-                )
-                return result  # noqa: RET504
-
-            if not resume_mode:
-                logger.info("[%s] RESEARCH (%d items)", run_id, len(task_spec.research_plan))
-                notes = research_all(
-                    task_spec.research_plan,
-                    backend=self._backend,
-                    memory_limit=self._config.memory_limit_research,
-                    max_workers=self._config.max_research_workers,
-                    cwd=repo_root,
-                )
-                phases["RESEARCH"] = [n.to_dict() for n in notes]
-
-                logger.info("[%s] SYNTHESIZE", run_id)
-                brief = synthesize(task_spec, notes, backend=self._backend)
-                phases["SYNTHESIZE"] = brief.to_dict()
-
-                logger.info("[%s] IMPLEMENT", run_id)
-                worktree = self._git_ops.setup_workspace(
-                    repo_root,
-                    run_id,
-                    base_branch,
-                    branch_name=branch_name if self._config.create_branch else None,
-                )
-                if self._config.create_branch and not getattr(self._git_ops, "use_worktree", False):
-                    self._git_ops.create_branch(worktree, branch_name)
-
-                implement(
-                    brief,
-                    task_spec,
-                    worktree,
-                    branch_name,
-                    backend=self._backend,
-                    persona_resolver=self._persona_resolver,
-                    persona_name=persona,
-                    memory_limit=self._config.memory_limit_parent,
-                )
-                phases["IMPLEMENT"] = {"branch": branch_name, "worktree": str(worktree)}
-
-            assert worktree is not None
-            verify_attempts = 0
-            verify_result = None
-            while verify_attempts <= self._config.max_verify_retries:
-                logger.info("[%s] VERIFY (attempt %d)", run_id, verify_attempts + 1)
-                changed = self._git_ops.changed_files(worktree)
-                verify_result = self._verifier.check(
-                    worktree,
-                    persona=persona,
-                    changed_files=changed,
-                    task_id=task_id,
-                )
-                phases[f"VERIFY_{verify_attempts}"] = verify_result.to_dict()
-                if verify_result.severity == VerifySeverity.OK:
-                    break
-                if verify_result.severity == VerifySeverity.FATAL:
-                    break
-                verify_attempts += 1
-                if verify_attempts > self._config.max_verify_retries:
-                    break
-                if notes is None:
-                    logger.info("[%s] RESEARCH (resume retry)", run_id)
-                    notes = research_all(
-                        task_spec.research_plan,
-                        backend=self._backend,
-                        memory_limit=self._config.memory_limit_research,
-                        max_workers=self._config.max_research_workers,
+            try:
+                if self._fleet_config and hasattr(self._backend, "create_session"):
+                    persona_spec = self._persona_resolver.load(persona)
+                    mcp_specs = {
+                        name: self._fleet_config.mcp_servers[name]
+                        for name in (getattr(persona_spec, "mcp_servers", []) or [])
+                        if name in self._fleet_config.mcp_servers
+                    }
+                    session = self._backend.create_session(
+                        persona_name=persona,
                         cwd=repo_root,
+                        mcp_servers=mcp_specs,
+                        model=persona_spec.model,
+                        mode=persona_spec.mode,
                     )
-                    phases.setdefault("RESEARCH", [n.to_dict() for n in notes])
-                brief = synthesize(
-                    task_spec,
-                    notes,
-                    backend=self._backend,
-                    extra_context=f"Verification failed: {verify_result.message}. Fix and retry.",
-                )
-                implement(
-                    brief,
-                    task_spec,
-                    worktree,
-                    branch_name,
-                    backend=self._backend,
-                    persona_resolver=self._persona_resolver,
-                    persona_name=persona,
-                    prompt_suffix=f"Previous verify failure: {verify_result.message}",
-                )
+                    if mcp_specs:
 
-            if verify_result is None or verify_result.severity != VerifySeverity.OK:
-                result = FleetRunResult(
-                    run_id=run_id,
-                    task_id=task_id,
-                    persona=persona,
-                    outcome="verify_failed",
-                    task_spec=task_spec.to_dict(),
-                    changed_files=get_changed_files(worktree),
-                    phases=phases,
-                    error=verify_result.message if verify_result else "verify failed",
-                    duration_seconds=round(time.monotonic() - start, 2),
-                )
-                return result  # noqa: RET504
+                        def browser_session_factory() -> LLMSession | None:
+                            return self._backend.create_session(
+                                persona_name=persona,
+                                cwd=repo_root,
+                                mcp_servers=mcp_specs,
+                                model=persona_spec.model,
+                                mode=persona_spec.mode,
+                            )
 
-            changed_files = get_changed_files(worktree)
-            diff = self._git_ops.diff_summary(worktree)
+                if self._config.resume and hasattr(self._git_ops, "find_resume_branch"):
+                    resumed = self._git_ops.find_resume_branch(
+                        task_id,
+                        persona,
+                        self._spine.branch_prefix,
+                    )
+                    if resumed is not None:
+                        branch_name, run_id = resumed
+                        worktree = self._git_ops.attach_worktree(branch_name, run_id)
+                        resume_mode = True
+                        logger.info("[%s] RESUME on %s", run_id, branch_name)
+                        phases["RESUME"] = {"branch": branch_name, "worktree": str(worktree)}
+                        run_log.emit("run.resume", data=phases["RESUME"])
 
-            commit_sha = None
-            if self._config.commit_changes:
-                commit_sha = self._git_ops.commit_changes(
-                    worktree,
-                    f"fleet({persona}): {title[:72]}",
-                )
+                with run_log.phase("PLAN"):
+                    logger.info("[%s] PLAN", run_id)
+                    task_spec = plan(
+                        task_id,
+                        title,
+                        body,
+                        backend=self._backend,
+                        persona_resolver=self._persona_resolver,
+                        spine_config=self._spine,
+                        session=session,
+                    )
+                if require_mcp and task_spec.research_plan:
+                    task_spec = _task_spec_with_browser_research(task_spec)
+                phases["PLAN"] = task_spec.to_dict()
 
-            if self._config.commit_changes and commit_sha is None and not changed_files:
-                logger.info(
-                    "[%s] NOOP: implementer produced no changes; skipping OPEN_PR/REVIEW",
-                    run_id,
-                )
-                phases["NOOP"] = {
-                    "reason": "implementer determined no code changes were required",
-                }
-                if self._forge is not None and (issue_number or task_id):
-                    try:
-                        self._forge.comment(
-                            issue_number or task_id,
-                            (
-                                f"Fleet run `{run_id}` completed with no code changes — "
-                                "the implementer determined the requested work was already "
-                                "satisfied by existing code. No PR was opened."
-                            ),
-                        )
-                    except Exception:
-                        logger.exception("[%s] NOOP comment failed", run_id)
-                result = FleetRunResult(
-                    run_id=run_id,
-                    task_id=task_id,
-                    persona=persona,
-                    outcome="completed_noop",
-                    task_spec=task_spec.to_dict(),
-                    summary=brief.summary if brief else "",
-                    changed_files=changed_files,
-                    commit_sha=None,
-                    branch_name=branch_name,
-                    pr_number=None,
-                    phases=phases,
-                    duration_seconds=round(time.monotonic() - start, 2),
-                )
-                return result  # noqa: RET504
+                if task_spec.decomposition_decision == DecompositionDecision.REJECTED:
+                    result = FleetRunResult(
+                        run_id=run_id,
+                        task_id=task_id,
+                        persona=persona,
+                        outcome="rejected",
+                        task_spec=task_spec.to_dict(),
+                        summary=task_spec.decomposition_reason,
+                        phases=phases,
+                        duration_seconds=round(time.monotonic() - start, 2),
+                    )
+                    run_log.run_end(outcome=result.outcome)
+                    return result  # noqa: RET504
 
-            pr_number: int | None = None
-            if self._forge is not None:
-                if brief is None:
-                    if notes is None:
+                if task_spec.decomposition_decision == DecompositionDecision.DECOMPOSE:
+                    result = FleetRunResult(
+                        run_id=run_id,
+                        task_id=task_id,
+                        persona=persona,
+                        outcome="decompose",
+                        task_spec=task_spec.to_dict(),
+                        summary=task_spec.decomposition_reason,
+                        phases=phases,
+                        error="Task requires decomposition — dispatch child tasks separately",
+                        duration_seconds=round(time.monotonic() - start, 2),
+                    )
+                    run_log.run_end(outcome=result.outcome)
+                    return result  # noqa: RET504
+
+                if not resume_mode:
+                    with run_log.phase("RESEARCH", items=len(task_spec.research_plan)):
+                        logger.info("[%s] RESEARCH (%d items)", run_id, len(task_spec.research_plan))
                         notes = research_all(
                             task_spec.research_plan,
                             backend=self._backend,
                             memory_limit=self._config.memory_limit_research,
                             max_workers=self._config.max_research_workers,
                             cwd=repo_root,
+                            browser_session_factory=browser_session_factory,
                         )
-                    brief = synthesize(task_spec, notes, backend=self._backend)
-                logger.info("[%s] OPEN_PR", run_id)
-                self._git_ops.push_branch(worktree, branch_name)
-                pr_body = (
-                    pr_body_builder(run_id, brief.summary)
-                    if pr_body_builder
-                    else f"Automated fleet PR. Run: {run_id}\n\nCloses #{task_id}"
-                )
-                labels = self._pr_labels_for_issue(
-                    issue_number or task_id,
-                    pr_labels or [self._spine.pr_ready_label],
-                )
-                pr_number = self._forge.open_pr(
-                    title=pr_title or f"{branch_name}",
-                    body=pr_body,
-                    branch=branch_name,
-                    base=base_branch,
-                    draft=False,
-                    labels=labels,
-                )
-                phases["OPEN_PR"] = {"pr_number": pr_number, "branch": branch_name}
+                    phases["RESEARCH"] = [n.to_dict() for n in notes]
 
-            logger.info("[%s] REVIEW", run_id)
-            review_results = review(
-                pr_number or task_id,
-                diff,
-                changed_files,
-                backend=self._backend,
-            )
-            phases["REVIEW"] = [r.to_dict() for r in review_results]
+                    with run_log.phase("SYNTHESIZE"):
+                        logger.info("[%s] SYNTHESIZE", run_id)
+                        brief = synthesize(task_spec, notes, backend=self._backend, session=session)
+                    phases["SYNTHESIZE"] = brief.to_dict()
 
-            tech_lead: TechLeadReview | None = None
-            if should_invoke_tech_lead(task_spec, review_results):
-                logger.info("[%s] TECH_LEAD", run_id)
-                tech_lead = tech_lead_review(
-                    task_spec, review_results, pr_number or task_id, backend=self._backend
+                    with run_log.phase("IMPLEMENT"):
+                        logger.info("[%s] IMPLEMENT", run_id)
+                        worktree = self._git_ops.setup_workspace(
+                            repo_root,
+                            run_id,
+                            base_branch,
+                            branch_name=branch_name if self._config.create_branch else None,
+                        )
+                        if self._config.create_branch and not getattr(
+                            self._git_ops, "use_worktree", False
+                        ):
+                            self._git_ops.create_branch(worktree, branch_name)
+
+                        implement(
+                            brief,
+                            task_spec,
+                            worktree,
+                            branch_name,
+                            backend=self._backend,
+                            persona_resolver=self._persona_resolver,
+                            persona_name=persona,
+                            memory_limit=self._config.memory_limit_parent,
+                            session=session,
+                            require_mcp_tools=require_mcp,
+                        )
+                    phases["IMPLEMENT"] = {"branch": branch_name, "worktree": str(worktree)}
+
+                assert worktree is not None
+                verify_attempts = 0
+                verify_result = None
+                while verify_attempts <= self._config.max_verify_retries:
+                    with run_log.phase("VERIFY", attempt=verify_attempts + 1):
+                        logger.info("[%s] VERIFY (attempt %d)", run_id, verify_attempts + 1)
+                        changed = self._git_ops.changed_files(worktree)
+                        verify_result = self._verifier.check(
+                            worktree,
+                            persona=persona,
+                            changed_files=changed,
+                            task_id=task_id,
+                        )
+                    phases[f"VERIFY_{verify_attempts}"] = verify_result.to_dict()
+                    if verify_result.severity == VerifySeverity.OK:
+                        break
+                    if verify_result.severity == VerifySeverity.FATAL:
+                        break
+                    verify_attempts += 1
+                    if verify_attempts > self._config.max_verify_retries:
+                        break
+                    if notes is None:
+                        logger.info("[%s] RESEARCH (resume retry)", run_id)
+                        notes = research_all(
+                            task_spec.research_plan,
+                            backend=self._backend,
+                            memory_limit=self._config.memory_limit_research,
+                            max_workers=self._config.max_research_workers,
+                            cwd=repo_root,
+                            browser_session_factory=browser_session_factory,
+                        )
+                        phases.setdefault("RESEARCH", [n.to_dict() for n in notes])
+                    brief = synthesize(
+                        task_spec,
+                        notes,
+                        backend=self._backend,
+                        extra_context=f"Verification failed: {verify_result.message}. Fix and retry.",
+                        session=session,
+                    )
+                    implement(
+                        brief,
+                        task_spec,
+                        worktree,
+                        branch_name,
+                        backend=self._backend,
+                        persona_resolver=self._persona_resolver,
+                        persona_name=persona,
+                        prompt_suffix=f"Previous verify failure: {verify_result.message}",
+                        session=session,
+                        require_mcp_tools=require_mcp,
+                    )
+
+                if verify_result is None or verify_result.severity != VerifySeverity.OK:
+                    result = FleetRunResult(
+                        run_id=run_id,
+                        task_id=task_id,
+                        persona=persona,
+                        outcome="verify_failed",
+                        task_spec=task_spec.to_dict(),
+                        changed_files=get_changed_files(worktree),
+                        phases=phases,
+                        error=verify_result.message if verify_result else "verify failed",
+                        duration_seconds=round(time.monotonic() - start, 2),
+                    )
+                    run_log.run_end(outcome=result.outcome, error=result.error)
+                    return result  # noqa: RET504
+
+                changed_files = get_changed_files(worktree)
+                diff = self._git_ops.diff_summary(worktree)
+
+                commit_sha = None
+                if self._config.commit_changes:
+                    commit_sha = self._git_ops.commit_changes(
+                        worktree,
+                        f"fleet({persona}): {title[:72]}",
+                    )
+
+                if self._config.commit_changes and commit_sha is None and not changed_files:
+                    logger.info(
+                        "[%s] NOOP: implementer produced no changes; skipping OPEN_PR/REVIEW",
+                        run_id,
+                    )
+                    phases["NOOP"] = {
+                        "reason": "implementer determined no code changes were required",
+                    }
+                    if self._forge is not None and (issue_number or task_id):
+                        try:
+                            self._forge.comment(
+                                issue_number or task_id,
+                                (
+                                    f"Fleet run `{run_id}` completed with no code changes — "
+                                    "the implementer determined the requested work was already "
+                                    "satisfied by existing code. No PR was opened."
+                                ),
+                            )
+                        except Exception:
+                            logger.exception("[%s] NOOP comment failed", run_id)
+                    result = FleetRunResult(
+                        run_id=run_id,
+                        task_id=task_id,
+                        persona=persona,
+                        outcome="completed_noop",
+                        task_spec=task_spec.to_dict(),
+                        summary=brief.summary if brief else "",
+                        changed_files=changed_files,
+                        commit_sha=None,
+                        branch_name=branch_name,
+                        pr_number=None,
+                        phases=phases,
+                        duration_seconds=round(time.monotonic() - start, 2),
+                    )
+                    run_log.run_end(outcome=result.outcome)
+                    return result  # noqa: RET504
+
+                pr_number: int | None = None
+                if self._forge is not None:
+                    if brief is None:
+                        if notes is None:
+                            notes = research_all(
+                                task_spec.research_plan,
+                                backend=self._backend,
+                                memory_limit=self._config.memory_limit_research,
+                                max_workers=self._config.max_research_workers,
+                                cwd=repo_root,
+                                browser_session_factory=browser_session_factory,
+                            )
+                        brief = synthesize(task_spec, notes, backend=self._backend, session=session)
+                    with run_log.phase("OPEN_PR"):
+                        logger.info("[%s] OPEN_PR", run_id)
+                        self._git_ops.push_branch(worktree, branch_name)
+                        pr_body = (
+                            pr_body_builder(run_id, brief.summary)
+                            if pr_body_builder
+                            else f"Automated fleet PR. Run: {run_id}\n\nCloses #{task_id}"
+                        )
+                        labels = self._pr_labels_for_issue(
+                            issue_number or task_id,
+                            pr_labels or [self._spine.pr_ready_label],
+                        )
+                        pr_number = self._forge.open_pr(
+                            title=pr_title or f"{branch_name}",
+                            body=pr_body,
+                            branch=branch_name,
+                            base=base_branch,
+                            draft=False,
+                            labels=labels,
+                        )
+                    phases["OPEN_PR"] = {"pr_number": pr_number, "branch": branch_name}
+
+                with run_log.phase("REVIEW"):
+                    logger.info("[%s] REVIEW", run_id)
+                    review_results = review(
+                        pr_number or task_id,
+                        diff,
+                        changed_files,
+                        backend=self._backend,
+                        session=session,
+                    )
+                phases["REVIEW"] = [r.to_dict() for r in review_results]
+
+                tech_lead: TechLeadReview | None = None
+                if should_invoke_tech_lead(task_spec, review_results):
+                    with run_log.phase("TECH_LEAD"):
+                        logger.info("[%s] TECH_LEAD", run_id)
+                        tech_lead = tech_lead_review(
+                            task_spec,
+                            review_results,
+                            pr_number or task_id,
+                            backend=self._backend,
+                            session=session,
+                        )
+                    if tech_lead:
+                        phases["TECH_LEAD"] = tech_lead.to_dict()
+
+                summary_parts = [brief.summary]
+                if review_results:
+                    summary_parts.append(review_results[0].summary)
+                summary = "\n\n".join(p for p in summary_parts if p)
+
+                outcome = _run_outcome(review_results, tech_lead)
+
+                result = FleetRunResult(
+                    run_id=run_id,
+                    task_id=task_id,
+                    persona=persona,
+                    outcome=outcome,
+                    task_spec=task_spec.to_dict(),
+                    summary=summary,
+                    changed_files=changed_files,
+                    reviews=[r.to_dict() for r in review_results],
+                    tech_lead=tech_lead.to_dict() if tech_lead else None,
+                    commit_sha=commit_sha,
+                    branch_name=branch_name,
+                    pr_number=pr_number,
+                    phases=phases,
+                    duration_seconds=round(time.monotonic() - start, 2),
                 )
-                if tech_lead:
-                    phases["TECH_LEAD"] = tech_lead.to_dict()
-
-            summary_parts = [brief.summary]
-            if review_results:
-                summary_parts.append(review_results[0].summary)
-            summary = "\n\n".join(p for p in summary_parts if p)
-
-            outcome = _run_outcome(review_results, tech_lead)
-
-            result = FleetRunResult(
-                run_id=run_id,
-                task_id=task_id,
-                persona=persona,
-                outcome=outcome,
-                task_spec=task_spec.to_dict(),
-                summary=summary,
-                changed_files=changed_files,
-                reviews=[r.to_dict() for r in review_results],
-                tech_lead=tech_lead.to_dict() if tech_lead else None,
-                commit_sha=commit_sha,
-                branch_name=branch_name,
-                pr_number=pr_number,
-                phases=phases,
-                duration_seconds=round(time.monotonic() - start, 2),
-            )
-            return result  # noqa: RET504
-        except Exception as exc:
-            logger.exception("[%s] fleet run failed", run_id)
-            result = FleetRunResult(
-                run_id=run_id,
-                task_id=task_id,
-                persona=persona,
-                outcome="error",
-                task_spec=task_spec.to_dict() if task_spec else None,
-                phases=phases,
-                error=str(exc),
-                duration_seconds=round(time.monotonic() - start, 2),
-            )
-            return result  # noqa: RET504
-        finally:
-            if worktree is not None:
-                forensic = self._config.preserve_worktree_on_failure and (
-                    result is None
-                    or result.outcome
-                    in ("verify_failed", "error", "review_blocked", "tech_lead_blocked")
+                run_log.run_end(
+                    outcome=result.outcome,
+                    pr_number=pr_number,
+                    jsonl=str(run_log.jsonl_path) if run_log.jsonl_path else None,
                 )
-                self._git_ops.teardown_workspace(worktree, forensic=forensic)
+                return result  # noqa: RET504
+            except Exception as exc:
+                logger.exception("[%s] fleet run failed", run_id)
+                result = FleetRunResult(
+                    run_id=run_id,
+                    task_id=task_id,
+                    persona=persona,
+                    outcome="error",
+                    task_spec=task_spec.to_dict() if task_spec else None,
+                    phases=phases,
+                    error=str(exc),
+                    duration_seconds=round(time.monotonic() - start, 2),
+                )
+                run_log.run_end(outcome="error", error=str(exc))
+                return result  # noqa: RET504
+            finally:
+                if session is not None:
+                    with contextlib.suppress(Exception):
+                        session.dispose()
+                if worktree is not None:
+                    forensic = self._config.preserve_worktree_on_failure and (
+                        result is None
+                        or result.outcome
+                        in ("verify_failed", "error", "review_blocked", "tech_lead_blocked")
+                    )
+                    self._git_ops.teardown_workspace(worktree, forensic=forensic)
 
 
 class TaskRunner:

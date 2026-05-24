@@ -18,6 +18,7 @@ from agent_fleet.issue_loop.config import IssueDispatchConfig
 from agent_fleet.issue_loop.triggers import extract_persona
 from agent_fleet.personas import YamlPersonaResolver
 from agent_fleet.repo import find_repo_config
+from agent_fleet.memory import memory_snapshot
 from agent_fleet.runner import FleetRunConfig, LocalFleetRunner, _spine_from_repo
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,12 @@ def run_issue_dispatch(
     issue = github_ops.issue_view(issue_number, cwd=repo.repo_root)
     title = str(issue.get("title") or f"Issue #{issue_number}")
     body = str(issue.get("body") or "")
+    issue_labels = github_ops.issue_labels(issue_number, cwd=repo.repo_root)
+    is_visual_audit = "visual-audit" in issue_labels or "[Visual]" in title
+    if is_visual_audit:
+        memory_snapshot(label=f"dispatch start issue #{issue_number}")
+    if comment_body.strip():
+        body = f"{body}\n\n---\nDispatch trigger:\n{comment_body}"
 
     status_comment = (
         f"Fleet dispatch started for `{resolved_persona}` (issue #{issue_number}).\n\n"
@@ -99,6 +106,7 @@ def run_issue_dispatch(
         spine=spine,
         config=FleetRunConfig(create_branch=True, commit_changes=True, resume=True),
         forge=GitHubForge(cwd=repo.repo_root),
+        fleet_config=fleet_config,
     )
 
     result = runner.run(
@@ -116,6 +124,7 @@ def run_issue_dispatch(
         ),
         pr_labels=[spine.pr_ready_label],
         issue_number=issue_number,
+        issue_labels=issue_labels,
     )
 
     if result.pr_number:
@@ -136,6 +145,8 @@ def run_issue_dispatch(
     except Exception as exc:
         logger.warning("Failed to post completion comment: %s", exc)
     finally:
+        if is_visual_audit:
+            memory_snapshot(label=f"dispatch end issue #{issue_number}")
         for label in (mutex_label, running_label):
             with contextlib.suppress(Exception):
                 github_ops.remove_label(issue_number, label, cwd=repo.repo_root)

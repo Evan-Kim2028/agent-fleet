@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import json
 import re
+import contextlib
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
+from agent_fleet.contracts.mcp_requirement import browser_prompt_block
 from agent_fleet.contracts.research_note import Confidence, ResearchNote, validate_research_note
 
 if TYPE_CHECKING:
@@ -83,6 +86,9 @@ def research(
 
     scope_list = "\n".join(f"  - {p}" for p in scope_paths)
     browser_hint = " (browser tools are available)" if needs_browser else ""
+    browser_requirement = ""
+    if needs_browser:
+        browser_requirement = browser_prompt_block()
 
     prompt = f"""\
 You are a researcher agent{browser_hint}. Investigate the following question and
@@ -101,6 +107,7 @@ Research ID: {research_id}
 Question: {question}
 Scope paths:
 {scope_list}
+{browser_requirement}
 
 Return ONLY the JSON object — no prose before or after it.
 """
@@ -111,6 +118,7 @@ Return ONLY the JSON object — no prose before or after it.
             max_tokens=max_tokens,
             timeout_s=timeout_s,
             allowed_tools=allowed_tools,
+            expect_mcp_tools=needs_browser,
         )
     else:
         result = backend.run(
@@ -162,6 +170,9 @@ def _research_with_duration(
 
     scope_list = "\n".join(f"  - {p}" for p in scope_paths)
     browser_hint = " (browser tools are available)" if needs_browser else ""
+    browser_requirement = ""
+    if needs_browser:
+        browser_requirement = browser_prompt_block()
 
     prompt = f"""\
 You are a researcher agent{browser_hint}. Investigate the following question and
@@ -180,6 +191,7 @@ Research ID: {research_id}
 Question: {question}
 Scope paths:
 {scope_list}
+{browser_requirement}
 
 Return ONLY the JSON object — no prose before or after it.
 """
@@ -204,6 +216,7 @@ Return ONLY the JSON object — no prose before or after it.
                 max_tokens=max_tokens,
                 timeout_s=timeout_s,
                 allowed_tools=allowed_tools,
+                expect_mcp_tools=needs_browser,
             )
         else:
             result = backend.run(
@@ -259,18 +272,22 @@ def research_all(
     max_workers: int = 4,
     cwd: Path | None = None,
     session: LLMSession | None = None,
+    browser_session_factory: Callable[[], LLMSession | None] | None = None,
 ) -> list[ResearchNote]:
-    """Run all research items in *research_plan* concurrently, return all notes.
+    """Run all research items in *research_plan* and return notes in plan order.
 
-    Each plan item must have: id, question, scope_paths, needs_browser.
-    Uses a ThreadPoolExecutor with *max_workers* to run research items in
-    parallel, bounded by the light-subagent concurrency cap.
+    Code-only items run concurrently. ``needs_browser`` items run sequentially,
+    each with a dedicated MCP session from *browser_session_factory*.
     """
     if not research_plan:
         return []
 
-    def _capture_duration(item: dict[str, Any]) -> ResearchNote:
-        note, _dur = _research_with_duration(
+    browser_items = [item for item in research_plan if item.get("needs_browser")]
+    code_items = [item for item in research_plan if not item.get("needs_browser")]
+    notes_by_id: dict[str, ResearchNote] = {}
+
+    def _run_item(item: dict[str, Any], item_session: LLMSession | None) -> ResearchNote:
+        note, _ = _research_with_duration(
             item["id"],
             item["question"],
             item["scope_paths"],
@@ -278,12 +295,29 @@ def research_all(
             needs_browser=item.get("needs_browser", False),
             memory_limit=memory_limit,
             cwd=cwd,
-            session=session,
+            session=item_session,
         )
         return note
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # executor.map preserves plan order: results are yielded in the same order
-        # as the input research_plan, while still running items concurrently.
-        return list(executor.map(_capture_duration, research_plan))
+    if code_items:
+        with ThreadPoolExecutor(max_workers=min(max_workers, len(code_items))) as executor:
+            futures = {
+                executor.submit(_run_item, item, session): item for item in code_items
+            }
+            for future in futures:
+                item = futures[future]
+                notes_by_id[item["id"]] = future.result()
+
+    for item in browser_items:
+        browser_session: LLMSession | None = None
+        if browser_session_factory is not None:
+            browser_session = browser_session_factory()
+        try:
+            notes_by_id[item["id"]] = _run_item(item, browser_session)
+        finally:
+            if browser_session is not None:
+                with contextlib.suppress(Exception):
+                    browser_session.dispose()
+
+    return [notes_by_id[item["id"]] for item in research_plan]
 

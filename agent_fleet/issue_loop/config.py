@@ -21,6 +21,11 @@ class IssueDispatchConfig:
     mutex_label_prefix: str = "agent-running"
     running_label_prefix: str = "fleet-running"
     max_in_flight_per_issue: int = 3
+    max_in_flight_visual_audit: int = 1
+    max_concurrent_dispatches: int = 4
+    max_concurrent_visual_audit: int = 2
+    min_available_ram_gb: float = 8.0
+    visual_audit_ram_gb: float = 6.0
     comment_marker: str = "<!-- agent-fleet-watcher -->"
 
 
@@ -42,5 +47,10 @@ def load_issue_dispatch_config(
         mutex_label_prefix=str(section.get("mutex_label_prefix", "agent-running")),
         running_label_prefix=str(section.get("running_label_prefix", "fleet-running")),
         max_in_flight_per_issue=int(section.get("max_in_flight_per_issue", 3)),
+        max_in_flight_visual_audit=int(section.get("max_in_flight_visual_audit", 1)),
+        max_concurrent_dispatches=int(section.get("max_concurrent_dispatches", 4)),
+        max_concurrent_visual_audit=int(section.get("max_concurrent_visual_audit", 2)),
+        min_available_ram_gb=float(section.get("min_available_ram_gb", 8.0)),
+        visual_audit_ram_gb=float(section.get("visual_audit_ram_gb", 6.0)),
         comment_marker=str(section.get("comment_marker", "<!-- agent-fleet-watcher -->")),
     )

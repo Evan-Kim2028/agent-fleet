@@ -396,6 +396,14 @@ def check_tests_for_modified_code(
             possible_tests.append(base.replace("/", "/tests/") + ".py")
             dir_part, file_part = base.rsplit("/", 1)
             possible_tests.append(f"{dir_part}/tests/test_{file_part}.py")
+            # Colocated sibling __tests__/ (e.g. pages/card-detail/__tests__/Foo.test.tsx)
+            possible_tests.append(f"{dir_part}/__tests__/{file_part}.test.ts")
+            possible_tests.append(f"{dir_part}/__tests__/{file_part}.test.tsx")
+            # Parent __tests__/ with submodule prefix (e.g. chartOptions.foo.test.ts)
+            if "/" in dir_part:
+                parent_dir, subdir_name = dir_part.rsplit("/", 1)
+                possible_tests.append(f"{parent_dir}/__tests__/{subdir_name}.{file_part}.test.ts")
+                possible_tests.append(f"{parent_dir}/__tests__/{subdir_name}.{file_part}.test.tsx")
 
         has_test = any(t in test_files for t in possible_tests)
         if not has_test:

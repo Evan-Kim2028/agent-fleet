@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from agent_fleet.contracts.mcp_requirement import browser_prompt_block
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -37,6 +39,7 @@ def implement(
     memory_limit: str = "4G",
     prompt_suffix: str | None = None,
     session: LLMSession | None = None,
+    require_mcp_tools: bool = False,
 ) -> LLMResult:
     """Run the Implementer phase.
 
@@ -69,12 +72,16 @@ def implement(
         prompt_suffix=prompt_suffix,
     )
 
+    if require_mcp_tools:
+        prompt += browser_prompt_block()
+
     if session is not None:
         result = session.send(
             prompt,
             max_tokens=max_tokens,
             timeout_s=timeout_s,
             allowed_tools=allowed_tools,
+            expect_mcp_tools=require_mcp_tools,
         )
     else:
         result = backend.run(

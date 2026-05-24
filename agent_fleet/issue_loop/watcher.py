@@ -12,7 +12,17 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.issue_loop import github_ops
+from agent_fleet.issue_loop.admission import check_dispatch_admission
 from agent_fleet.issue_loop.state import load_state, now_iso, save_state, state_path
+from agent_fleet.memory import (
+    available_ram_gb,
+    cleanup_playwright_mcp_processes,
+    count_playwright_mcp_processes,
+    memory_snapshot,
+)
+from agent_fleet.observability.events import FleetEvent
+from agent_fleet.observability.sinks import PythonLoggingSink
+from agent_fleet.runner import _requires_playwright_mcp
 from agent_fleet.issue_loop.triggers import (
     extract_issue_number,
     extract_persona,
@@ -26,6 +36,8 @@ if TYPE_CHECKING:
     from agent_fleet.pr_loop.config import PrLoopConfig
 
 logger = logging.getLogger(__name__)
+
+_watcher_event_sink = PythonLoggingSink("agent_fleet.watcher")
 
 _shutdown_requested = False
 
@@ -55,6 +67,45 @@ def _reap_in_flight(state: dict[str, Any]) -> None:
             in_flight[issue_key] = alive
         else:
             in_flight.pop(issue_key, None)
+
+
+def _count_in_flight_visual_audits(state: dict[str, Any]) -> int:
+    return sum(
+        1
+        for runs in state.get("in_flight", {}).values()
+        for run in runs
+        if run.get("visual_audit")
+    )
+
+
+def _cleanup_orphaned_playwright_mcp(state: dict[str, Any]) -> None:
+    """Force-kill lingering Playwright MCP processes when no visual audits are active."""
+    if _count_in_flight_visual_audits(state) > 0:
+        return
+    before = count_playwright_mcp_processes()
+    if before == 0:
+        return
+    logger.warning("Orphaned playwright MCP processes detected: count=%s", before)
+    result = cleanup_playwright_mcp_processes(force_kill=True)
+    _watcher_event_sink.emit(
+        FleetEvent.now(
+            run_id="watcher",
+            event="mcp.orphan.cleanup",
+            level="warning" if result.after > 0 else "info",
+            data={
+                "before": result.before,
+                "after": result.after,
+                "force_killed": list(result.force_killed),
+                "cleaned": result.cleaned,
+            },
+        )
+    )
+    logger.info(
+        "Orphan playwright MCP cleanup: before=%s after=%s force_killed=%s",
+        result.before,
+        result.after,
+        list(result.force_killed),
+    )
 
 
 def _spawn_dispatch(
@@ -90,6 +141,7 @@ class IssueLoopWatcher:
         if state is None:
             state = load_state(self.state_file)
         _reap_in_flight(state)
+        _cleanup_orphaned_playwright_mcp(state)
         results: list[dict[str, str]] = []
 
         repo_name = github_ops.repo_full_name(cwd=self.repo.repo_root)
@@ -121,17 +173,81 @@ class IssueLoopWatcher:
             if not persona or not issue_number:
                 continue
 
-            in_flight = state.setdefault("in_flight", {}).setdefault(str(issue_number), [])
-            if any(run.get("persona") == persona for run in in_flight):
-                state["seen"].append(comment_id)
-                results.append({"issue": str(issue_number), "status": "already_in_flight"})
-                continue
-            if len(in_flight) >= self.config.max_in_flight_per_issue:
-                state["seen"].append(comment_id)
-                results.append({"issue": str(issue_number), "status": "issue_at_capacity"})
+            issue_labels: list[str] = []
+            issue_title = ""
+            issue_body = ""
+            try:
+                issue = github_ops.issue_view(issue_number, cwd=self.repo.repo_root)
+                issue_title = str(issue.get("title") or "")
+                issue_body = str(issue.get("body") or "")
+                issue_labels = github_ops.issue_labels(issue_number, cwd=self.repo.repo_root)
+            except Exception as exc:
+                logger.warning(
+                    "Could not load issue #%s metadata for admission: %s",
+                    issue_number,
+                    exc,
+                )
+
+            is_visual_audit = _requires_playwright_mcp(
+                issue_labels=issue_labels,
+                title=issue_title,
+                body=issue_body,
+            )
+            admission = check_dispatch_admission(
+                self.config,
+                state,
+                issue_number=issue_number,
+                persona=persona,
+                is_visual_audit=is_visual_audit,
+                available_ram_gb=available_ram_gb(),
+            )
+            if not admission.allowed:
+                retryable = admission.reason in {
+                    "fleet_at_capacity",
+                    "visual_audit_at_capacity",
+                    "insufficient_ram",
+                    "visual_audit_ram_reserved",
+                }
+                _watcher_event_sink.emit(
+                    FleetEvent.now(
+                        run_id=f"issue-{issue_number}",
+                        event="admission.check",
+                        level="warning" if retryable else "info",
+                        issue_number=issue_number,
+                        persona=persona,
+                        data={
+                            "allowed": False,
+                            "reason": admission.reason,
+                            "retryable": retryable,
+                            "visual_audit": is_visual_audit,
+                        },
+                    )
+                )
+                if not retryable:
+                    state["seen"].append(comment_id)
+                results.append(
+                    {
+                        "issue": str(issue_number),
+                        "status": admission.reason,
+                    }
+                )
+                logger.info(
+                    "Dispatch deferred: issue #%s persona=%s reason=%s retryable=%s",
+                    issue_number,
+                    persona,
+                    admission.reason,
+                    retryable,
+                )
                 continue
 
-            logger.info("Trigger: issue #%s persona=%s", issue_number, persona)
+            logger.info(
+                "Trigger: issue #%s persona=%s visual_audit=%s",
+                issue_number,
+                persona,
+                is_visual_audit,
+            )
+            if is_visual_audit:
+                memory_snapshot(label=f"pre-dispatch issue #{issue_number}")
             state["seen"].append(comment_id)
             pid = _spawn_dispatch(
                 issue_number=issue_number,
@@ -140,7 +256,14 @@ class IssueLoopWatcher:
                 repo_root=self.repo.repo_root,
             )
             if pid is not None:
-                in_flight.append({"pid": pid, "persona": persona})
+                in_flight = state.setdefault("in_flight", {}).setdefault(str(issue_number), [])
+                in_flight.append(
+                    {
+                        "pid": pid,
+                        "persona": persona,
+                        "visual_audit": is_visual_audit,
+                    }
+                )
                 results.append(
                     {
                         "issue": str(issue_number),
