@@ -17,7 +17,7 @@ Personas, `code_review`, `.agent-fleet.yaml`, and batch dispatch work the same a
 
 ## Prerequisites
 
-1. **Python 3.11+** and agent-fleet installed:
+1. **Python 3.14** and agent-fleet installed:
 
    ```bash
    git clone https://github.com/Evan-Kim2028/agent-fleet.git

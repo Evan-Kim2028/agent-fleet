@@ -4,7 +4,7 @@ A multi-agent coding orchestrator: scoped personas, review pipelines, and parall
 
 **Default backend:** Cursor SDK (`composer-2.5`). **Optional:** Kimi Code CLI subscription (`kimi-for-coding`) — same personas, pipelines, and repo scope.
 
-**Docs:** [Quickstart](docs/QUICKSTART.md) · [New repo setup](docs/NEW-REPO.md) · [Fleet Scouts](docs/SCOUTS.md) · [Personas](docs/PERSONAS.md) · [Kimi backend](docs/KIMI.md) (optional)
+**Docs:** [Quickstart](docs/QUICKSTART.md) · [New repo setup](docs/NEW-REPO.md) · [Release tags](docs/RELEASE.md) · [Fleet Scouts](docs/SCOUTS.md) · [Personas](docs/PERSONAS.md) · [Kimi backend](docs/KIMI.md) (optional)
 
 ## What Agent Fleet does
 
@@ -23,7 +23,7 @@ Each dispatch is a non-interactive run (~30–120s). Best for focused, automatab
 
 ## Getting started
 
-**Prerequisites:** Python 3.11+, [Cursor API key](https://cursor.com/dashboard/integrations), a git repo to target.
+**Prerequisites:** Python 3.14, [Cursor API key](https://cursor.com/dashboard/integrations), a git repo to target.
 
 The default execution backend is Cursor SDK with `composer-2.5` in `fleet.example.yaml`. Override per-persona only when you need a different model.
 

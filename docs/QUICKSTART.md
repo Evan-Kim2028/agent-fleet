@@ -17,7 +17,7 @@ cd agent-fleet
 pip install -e ".[dev]"
 ```
 
-Requires Python 3.11+.
+Requires Python 3.14.
 
 ## 2. Global fleet config
 

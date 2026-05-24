@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, TypeVar
+from typing import TYPE_CHECKING, Protocol
 
 from agent_fleet.contracts.handoff import HandoffNote
 
@@ -12,8 +12,6 @@ if TYPE_CHECKING:
 _HARD_STATUSES = frozenset(
     {"error", "cancelled", "expired", "timeout", "scope_violation", "pipeline_nonzero"}
 )
-
-T = TypeVar("T", bound="_ResultLike")
 
 
 class _ResultLike(Protocol):
@@ -47,7 +45,7 @@ def _extract_handoff(result: _ResultLike, *, previous: HandoffNote | None) -> Ha
     )
 
 
-def dispatch_with_retry(
+def dispatch_with_retry[T: _ResultLike](
     task: object,
     *,
     dispatch: Callable[..., T],

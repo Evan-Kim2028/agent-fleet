@@ -22,7 +22,7 @@ def load_state(path: Path, since_override: str | None = None) -> dict[str, Any]:
     if path.exists():
         try:
             state = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+        except json.JSONDecodeError, OSError:
             state = {}
     else:
         state = {}

@@ -60,7 +60,7 @@ def _pid_is_dispatch(pid: int) -> bool:
     try:
         with Path(f"/proc/{pid}/cmdline").open("rb") as handle:
             return b"agent_fleet.issue_loop.dispatch" in handle.read()
-    except (FileNotFoundError, ProcessLookupError, PermissionError):
+    except FileNotFoundError, ProcessLookupError, PermissionError:
         return False
 
 

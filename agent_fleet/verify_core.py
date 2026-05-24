@@ -254,7 +254,7 @@ def run_checks(
 def _read_file(worktree_path: Path, rel_path: str) -> str:
     try:
         return (worktree_path / rel_path).read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+    except OSError, UnicodeDecodeError:
         return ""
 
 
@@ -315,7 +315,7 @@ def _test_file_exists(
                 continue
             try:
                 content = test_file.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
+            except OSError, UnicodeDecodeError:
                 continue
             if any(mp in content for mp in module_paths):
                 return True
@@ -506,7 +506,7 @@ def _has_pyright_config(path: Path) -> bool:
             text = toml.read_text(encoding="utf-8")
             if "[tool.pyright" in text or "[tool.mypy" in text:
                 return True
-        except (OSError, UnicodeDecodeError):
+        except OSError, UnicodeDecodeError:
             pass
     return False
 
@@ -518,7 +518,7 @@ def _has_ruff_config(path: Path) -> bool:
             text = toml.read_text(encoding="utf-8")
             if "[tool.ruff" in text:
                 return True
-        except (OSError, UnicodeDecodeError):
+        except OSError, UnicodeDecodeError:
             pass
     return False
 

@@ -4,7 +4,7 @@ Repo-specific context injected into Composer PR analysis. Tune for your stack.
 
 ## Stack
 
-- Language/runtime: (e.g. Python 3.12, Node 20)
+- Language/runtime: (e.g. Python 3.14, Node 20)
 - Package manager: (e.g. pip, uv, pnpm)
 - Test command: `pytest -q` (or your CI equivalent)
 - Lint command: `ruff check .`

@@ -59,7 +59,7 @@ def implement(
     # Load persona prompt text; fall back to default if path doesn't exist on disk.
     try:
         persona_prompt = persona.prompt_path.read_text()
-    except (FileNotFoundError, OSError):
+    except FileNotFoundError, OSError:
         persona_prompt = _DEFAULT_PERSONA_PROMPT
 
     allowed_tools = persona.allowed_tools

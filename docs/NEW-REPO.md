@@ -18,7 +18,7 @@ Start with [QUICKSTART.md](QUICKSTART.md) for level 1, then return here for repo
 
 ## Prerequisites
 
-- Python 3.11+
+- Python 3.14
 - [Cursor API key](https://cursor.com/dashboard/integrations) (`CURSOR_API_KEY`)
 - A git repository (local path or clone)
 - For GitHub automation: repo admin access to add secrets and workflows
@@ -111,14 +111,17 @@ Full reference config: `examples/repo-full.agent-fleet.yaml`.
 
 Copy `examples/github/pr-analyzer.yml` → `.github/workflows/pr-analyzer.yml`.
 
-**Pin the install** to a release tag or commit SHA (do not use floating `@main` in production):
+**Pin the install** to a release tag or commit SHA (do not use floating `@main` in production). See [RELEASE.md](RELEASE.md) for tag format.
 
 ```yaml
+- uses: astral-sh/setup-uv@v6
+  with:
+    python-version: "3.14"
 - name: Install agent-fleet
-  run: pip install "git+https://github.com/Evan-Kim2028/agent-fleet.git@v0.2.0"
+  run: uv pip install "git+https://github.com/Evan-Kim2028/agent-fleet.git@v0.6.0"
 ```
 
-Replace `@v0.2.0` with the version you tested, or `@<40-char-commit-sha>`.
+Replace `@v0.6.0` with the version you tested, or `@<40-char-commit-sha>`.
 
 ### 3. GitHub secret
 

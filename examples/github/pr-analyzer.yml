@@ -3,7 +3,8 @@
 # Copy to .github/workflows/pr-analyzer.yml
 # Secrets: CURSOR_API_KEY (or KIMI_API_KEY with AGENT_FLEET_BACKEND=kimi)
 #
-# Pin agent-fleet to a release tag or commit SHA — replace v0.2.0 before deploying.
+# Pin agent-fleet to a release tag or commit SHA — replace v0.6.0 before deploying.
+# Tag format and release process: docs/RELEASE.md in the agent-fleet repo.
 
 name: pr-analyzer
 
@@ -30,12 +31,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v6
         with:
-          python-version: "3.12"
+          enable-cache: true
+          python-version: "3.14"
 
       - name: Install agent-fleet
-        run: pip install "git+https://github.com/Evan-Kim2028/agent-fleet.git@v0.2.0"
+        run: uv pip install "git+https://github.com/Evan-Kim2028/agent-fleet.git@v0.6.0"
 
       - name: Analyze PR
         env:
