@@ -260,5 +260,6 @@ Batch (parallel, up to `max_parallel`):
 | `review_changes_requested` | Reviewer returned `request_changes` |
 | `tech_lead_blocked` | Tech lead escalated/blocked |
 | `verify_failed` | Tests/lint failed after retries |
-| `decompose` | Task too cross-cutting — split and re-dispatch |
+| `decompose` | Task too cross-cutting — **auto-dispatches** child tasks (v0.6.4+) |
+| `decompose_partial` | Some child tasks failed — see `DECOMPOSE_DISPATCH` in phases |
 | `rejected` | Planner rejected the task |

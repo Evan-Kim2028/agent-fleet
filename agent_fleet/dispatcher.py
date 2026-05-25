@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 import time
@@ -32,6 +33,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from agent_fleet.contracts.handoff import HandoffNote
+    from agent_fleet.orchestration.config import OrchestrationConfig
+    from agent_fleet.spine_config import SpineConfig
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +140,132 @@ class FleetDispatcher:
             )
         return list(phases)
 
+    def _resolve_orchestration(self, repo: RepoConfig | None) -> OrchestrationConfig:
+        from agent_fleet.orchestration.config import resolve_orchestration_config
+
+        if repo is not None and repo.orchestration is not None:
+            return repo.orchestration
+        return resolve_orchestration_config(None)
+
+    def _spine_from_repo(self, repo: RepoConfig | None) -> SpineConfig:
+        from agent_fleet.runner import _spine_from_repo
+
+        return _spine_from_repo(repo)
+
+    def _maybe_preflight_and_dispatch(
+        self,
+        *,
+        task_index: int,
+        task: FleetTask,
+        workspace: Path,
+        repo_config: RepoConfig | None,
+        git_repo: RepoConfig | None,
+        task_config: FleetConfig,
+        resolver: YamlPersonaResolver,
+        start: float,
+        fleet_log: FleetLogger,
+        handoff: HandoffNote | None,
+    ) -> tuple[FleetTaskResult | None, FleetTask]:
+        """Run plan preflight; return (early_result, task_to_run)."""
+        from agent_fleet.fleet_session import create_fleet_session
+        from agent_fleet.orchestration.decompose import (
+            dispatch_task_spec_children,
+            enrich_task_from_task_spec,
+            handle_preflight_decision,
+            preflight_plan,
+        )
+
+        repo = repo_config or git_repo
+        orchestration = self._resolve_orchestration(repo)
+        if not orchestration.enabled or not orchestration.preflight_on_code_review:
+            return None, task
+        if handoff is not None:
+            return None, task
+
+        pipeline_name = task.pipeline or task_config.default_pipeline
+        if pipeline_name in {"full", "pr_review"}:
+            return None, task
+
+        spine = self._spine_from_repo(repo)
+        session = create_fleet_session(
+            self.backend,
+            fleet_config=task_config,
+            persona_resolver=resolver,
+            persona=task.persona,
+            cwd=workspace,
+        )
+        task_id = int(time.time()) % 100000
+        try:
+            task_spec = preflight_plan(
+                task=task,
+                task_id=task_id,
+                backend=self.backend,
+                persona_resolver=resolver,
+                spine_config=spine,
+                session=session,
+            )
+        except Exception as exc:
+            logger.warning("Plan preflight failed; continuing without plan: %s", exc)
+            return None, task
+        finally:
+            if session is not None:
+                with contextlib.suppress(Exception):
+                    session.dispose()
+
+        if (
+            task_spec.decomposition_decision.value == "decompose"
+            and orchestration.auto_dispatch_children
+        ):
+            child_results, status, error, summary = dispatch_task_spec_children(
+                task_spec=task_spec,
+                parent_task=task,
+                dispatcher=self,
+                child_pipeline=orchestration.default_child_pipeline,
+                persona_resolver=resolver,
+                fallback_persona=task.persona or task_config.default_persona,
+            )
+            fleet_log.emit(
+                "orchestration.decompose",
+                child_count=len(child_results),
+                status=status,
+            )
+            return (
+                FleetTaskResult(
+                    task_index=task_index,
+                    persona=task.persona,
+                    goal=task.goal,
+                    status=status,
+                    summary=summary,
+                    error=error,
+                    duration_seconds=round(time.monotonic() - start, 2),
+                    phases={
+                        "plan": task_spec.to_dict(),
+                        "decompose_dispatch": [r.__dict__ for r in child_results],
+                    },
+                    task_spec=task_spec.to_dict(),
+                ),
+                task,
+            )
+
+        preflight_status, preflight_error = handle_preflight_decision(task_spec)
+        if preflight_status in {"rejected", "decompose"}:
+            return (
+                FleetTaskResult(
+                    task_index=task_index,
+                    persona=task.persona,
+                    goal=task.goal,
+                    status=preflight_status,
+                    summary=task_spec.decomposition_reason,
+                    error=preflight_error,
+                    duration_seconds=round(time.monotonic() - start, 2),
+                    phases={"plan": task_spec.to_dict()},
+                    task_spec=task_spec.to_dict(),
+                ),
+                task,
+            )
+
+        return None, enrich_task_from_task_spec(task, task_spec)
+
     def _run_full_pipeline(
         self,
         task_index: int,
@@ -158,8 +287,17 @@ class FleetDispatcher:
             workspace=workspace,
             backend=self.backend,
             persona_resolver=self.resolver,
+            fleet_config=config,
         )
-        status = "completed" if result.outcome == "completed" else "error"
+        ok_outcomes = {
+            "completed",
+            "completed_noop",
+            "review_changes_requested",
+            "decompose_partial",
+        }
+        status = "completed" if result.outcome in ok_outcomes else "error"
+        if result.outcome in {"decompose_failed", "rejected", "decompose"}:
+            status = result.outcome
         fleet_log.emit(
             "fleet.task.complete",
             task_index=task_index,
@@ -280,6 +418,21 @@ class FleetDispatcher:
                     repo_config or git_repo,
                 )
                 resolver = YamlPersonaResolver(task_config)
+
+                preflight_result, task = self._maybe_preflight_and_dispatch(
+                    task_index=task_index,
+                    task=task,
+                    workspace=workspace,
+                    repo_config=repo_config,
+                    git_repo=git_repo,
+                    task_config=task_config,
+                    resolver=resolver,
+                    start=start,
+                    fleet_log=fleet_log,
+                    handoff=handoff,
+                )
+                if preflight_result is not None:
+                    return preflight_result
 
                 phase_results: list[dict[str, object]] = []
                 if task_workspace is not None and task_workspace.isolated:

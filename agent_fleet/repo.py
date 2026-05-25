@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from agent_fleet.code_review.config import CodeReviewConfig
     from agent_fleet.config import FleetConfig
     from agent_fleet.issue_loop.config import IssueDispatchConfig
+    from agent_fleet.orchestration.config import OrchestrationConfig
     from agent_fleet.pr_loop.config import PrLoopConfig
 
 REPO_CONFIG_NAMES = (
@@ -49,6 +50,7 @@ class RepoConfig:
     code_review: CodeReviewConfig | None = None
     issue_dispatch: IssueDispatchConfig | None = None
     capacity: FleetCapacity | None = None
+    orchestration: OrchestrationConfig | None = None
 
     @property
     def display_name(self) -> str:
@@ -108,6 +110,8 @@ def load_repo_config(path: Path | str) -> RepoConfig:
 
     pr_loop_cfg = _load_pr_loop(repo_root, raw)
     capacity_cfg = _load_capacity(raw)
+    from agent_fleet.orchestration.config import resolve_orchestration_config
+
     return RepoConfig(
         repo_root=repo_root,
         name=str(raw.get("name") or ""),
@@ -129,6 +133,7 @@ def load_repo_config(path: Path | str) -> RepoConfig:
         code_review=_load_code_review(raw, pr_loop_cfg),
         issue_dispatch=_load_issue_dispatch(repo_root, raw),
         capacity=capacity_cfg,
+        orchestration=resolve_orchestration_config(raw),
     )
 
 

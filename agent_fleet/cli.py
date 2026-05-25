@@ -100,7 +100,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             persona_resolver=resolver,
         )
         print(json.dumps(result.__dict__, indent=2, default=str))
-        return 0 if result.outcome == "completed" else 1
+        ok = {"completed", "completed_noop", "review_changes_requested", "decompose_partial"}
+        return 0 if result.outcome in ok else 1
 
     if args.max_redispatches is not None:
         config.max_redispatches = args.max_redispatches
@@ -113,7 +114,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         pipeline=args.pipeline,
     )
     print(json.dumps([r.__dict__ for r in results], indent=2, default=str))
-    return 0 if results and results[0].status in {"completed", "merged"} else 1
+    ok = {"completed", "merged", "decompose_partial"}
+    return 0 if results and results[0].status in ok else 1
 
 
 def cmd_personas(args: argparse.Namespace) -> int:

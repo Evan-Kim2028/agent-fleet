@@ -52,9 +52,9 @@ def main(argv: list[str] | None = None) -> int:
         ):
             print(json.dumps({"enabled": False}, indent=2))
             return 0
-        from agent_fleet.issue_loop.state import load_state, state_path
+        from agent_fleet.state import load_state, state_path
 
-        state_file = state_path(repo.repo_root, repo.issue_dispatch.state_file)
+        state_file = state_path(repo.repo_root)
         state = load_state(state_file)
         print(
             json.dumps(

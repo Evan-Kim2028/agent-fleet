@@ -16,7 +16,7 @@ from agent_fleet.contracts.task_spec import DecompositionDecision, TaskSpec
 from agent_fleet.contracts.tech_lead_review import TechLeadReview, TechLeadVerdict
 from agent_fleet.contracts.verify_result import VerifySeverity
 from agent_fleet.fleet_session import create_fleet_session
-from agent_fleet.hooks import ResumableGitOps
+from agent_fleet.hooks import FleetTask, ResumableGitOps
 from agent_fleet.implementer import implement
 from agent_fleet.observability.context import bind_run
 from agent_fleet.observability.log import RunLog
@@ -41,7 +41,6 @@ if TYPE_CHECKING:
 
     from agent_fleet.config import FleetConfig
     from agent_fleet.hooks import (
-        FleetTask,
         GitForge,
         GitOps,
         LLMBackend,
@@ -49,6 +48,7 @@ if TYPE_CHECKING:
         PersonaResolver,
         Verifier,
     )
+    from agent_fleet.orchestration.config import OrchestrationConfig
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +170,77 @@ class LocalFleetRunner:
             max_verify_retries=self._config.max_verify_retries,
             design_review_enabled=self._spine.design_review_enabled,
             design_visual_surface_globs=tuple(self._spine.design_visual_surface_globs),
+        )
+
+    def _resolve_orchestration(self, repo: RepoConfig | None) -> OrchestrationConfig:
+        from agent_fleet.orchestration.config import resolve_orchestration_config
+
+        if repo is not None and repo.orchestration is not None:
+            return repo.orchestration
+        return resolve_orchestration_config(None)
+
+    def _dispatch_decomposed_children(
+        self,
+        *,
+        task_spec: TaskSpec,
+        task_id: int,
+        title: str,
+        body: str,
+        persona: str,
+        repo_root: Path,
+        repo: RepoConfig | None,
+        run_id: str,
+        phases: dict[str, Any],
+        start: float,
+        orchestration: OrchestrationConfig,
+    ) -> FleetRunResult:
+        from agent_fleet.config import load_fleet_config
+        from agent_fleet.dispatcher import FleetDispatcher
+        from agent_fleet.orchestration.decompose import dispatch_task_spec_children
+        from agent_fleet.repo import merge_repo_into_fleet_config
+
+        parent_task = FleetTask(
+            goal=title,
+            context=body,
+            persona=persona,
+            workspace=str(repo_root),
+            pipeline=orchestration.default_child_pipeline,
+            title=title,
+        )
+        fleet_config = merge_repo_into_fleet_config(
+            self._fleet_config or load_fleet_config(),
+            repo,
+        )
+        dispatcher = FleetDispatcher(config=fleet_config)
+        child_results, status, error, summary = dispatch_task_spec_children(
+            task_spec=task_spec,
+            parent_task=parent_task,
+            dispatcher=dispatcher,
+            child_pipeline=orchestration.default_child_pipeline,
+            persona_resolver=self._persona_resolver,
+            fallback_persona=persona,
+        )
+        phases["DECOMPOSE_DISPATCH"] = {
+            "child_count": len(child_results),
+            "child_pipeline": orchestration.default_child_pipeline,
+            "children": [r.__dict__ for r in child_results],
+        }
+        changed_files: list[str] = []
+        for child in child_results:
+            if child.changed_files:
+                changed_files.extend(child.changed_files)
+        outcome = status if status != "completed" else "completed"
+        return FleetRunResult(
+            run_id=run_id,
+            task_id=task_id,
+            persona=persona,
+            outcome=outcome,
+            task_spec=task_spec.to_dict(),
+            summary=summary,
+            changed_files=sorted(set(changed_files)),
+            phases=phases,
+            error=error,
+            duration_seconds=round(time.monotonic() - start, 2),
         )
 
     def _pr_labels_for_issue(self, issue_number: int | None, base_labels: list[str]) -> list[str]:
@@ -312,6 +383,28 @@ class LocalFleetRunner:
                     return result
 
                 if task_spec.decomposition_decision == DecompositionDecision.DECOMPOSE:
+                    repo = find_repo_config(repo_root)
+                    orchestration = self._resolve_orchestration(repo)
+                    if orchestration.enabled and orchestration.auto_dispatch_children:
+                        if session is not None:
+                            with contextlib.suppress(Exception):
+                                session.dispose()
+                            session = None
+                        result = self._dispatch_decomposed_children(
+                            task_spec=task_spec,
+                            task_id=task_id,
+                            title=title,
+                            body=body,
+                            persona=persona,
+                            repo_root=repo_root,
+                            repo=repo,
+                            run_id=run_id,
+                            phases=phases,
+                            start=start,
+                            orchestration=orchestration,
+                        )
+                        run_log.run_end(outcome=result.outcome, error=result.error)
+                        return result
                     result = FleetRunResult(
                         run_id=run_id,
                         task_id=task_id,
@@ -701,8 +794,10 @@ def run_full_pipeline(
     task_id: int | None = None,
     backend: LLMBackend,
     persona_resolver: PersonaResolver,
+    fleet_config: FleetConfig | None = None,
 ) -> FleetRunResult:
     """Convenience entry: discover repo config and run full pipeline."""
+    from agent_fleet.config import load_fleet_config
     from agent_fleet.integrations.command_verifier import CommandVerifier
     from agent_fleet.integrations.local_git import git_ops_from_repo
 
@@ -710,12 +805,14 @@ def run_full_pipeline(
     repo = find_repo_config(ws) or RepoConfig(repo_root=ws)
     if workspace:
         repo.repo_root = ws
+    resolved_config = fleet_config or load_fleet_config()
     runner = LocalFleetRunner(
         backend=backend,
         persona_resolver=persona_resolver,
         git_ops=git_ops_from_repo(repo),
         verifier=CommandVerifier(repo),
         spine=_spine_from_repo(repo),
+        fleet_config=resolved_config,
     )
     body = goal if not context else f"{goal}\n\n## Context\n{context}"
     return runner.run(

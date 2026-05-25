@@ -23,6 +23,15 @@ from agent_fleet.pr_loop.review_parse import (
 )
 from agent_fleet.repo import RepoConfig, merge_repo_into_fleet_config
 from agent_fleet.scope import files_outside_allowed_paths
+from agent_fleet.state import (
+    STATE_FILENAME,
+    get_pr_state,
+    load_state,
+    merge_cooldown_remaining,
+    save_state,
+    set_pr_state,
+    state_path,
+)
 
 if TYPE_CHECKING:
     from agent_fleet.pr_loop.config import PrLoopConfig
@@ -316,7 +325,7 @@ def address_review_findings(
         logger.warning("Review fix failed PR #%s: %s", pr_number, detail[:500])
         return LifecycleResult("fix_failed", detail)
 
-    changed = _git_changed_files(worktree, exclude=(loop_config.state_file,))
+    changed = _git_changed_files(worktree, exclude=(STATE_FILENAME,))
     violating = _files_outside_pr_scope(pr_files, changed)
     if violating:
         logger.warning(
@@ -331,7 +340,7 @@ def address_review_findings(
         f"{_AGENT_FOOTER} persona={fix_persona_name} | PR #{pr_number}"
     )
     pushed = github_ops.commit_and_push(
-        worktree, message, branch, exclude=(loop_config.state_file,)
+        worktree, message, branch, exclude=(STATE_FILENAME,)
     )
     if not pushed:
         return LifecycleResult("ignored", "Review had findings but no fix commit was pushed")
@@ -414,7 +423,7 @@ def attempt_ci_fix(
     message = (
         f"fix(fleet): CI failures on PR #{pr_number}\n\n{_AGENT_FOOTER} persona={fix_persona_name}"
     )
-    return github_ops.commit_and_push(worktree, message, branch, exclude=(loop_config.state_file,))
+    return github_ops.commit_and_push(worktree, message, branch, exclude=(STATE_FILENAME,))
 
 
 def tiered_merge_allowed(
@@ -446,9 +455,7 @@ def try_merge(
     loop_config: PrLoopConfig,
 ) -> LifecycleResult:
     repo_root = repo.repo_root
-    from agent_fleet.pr_loop.state import load_state, merge_cooldown_remaining
-
-    state = load_state(repo_root / loop_config.state_file)
+    state = load_state(state_path(repo_root))
     remaining = merge_cooldown_remaining(state, loop_config.merge_cooldown_s)
     if remaining > 0:
         return LifecycleResult(
@@ -473,10 +480,8 @@ def try_merge(
 
     if loop_config.tiered_merge_gate:
         comments = github_ops.pr_comments(pr_number, cwd=repo_root)
-        from agent_fleet.pr_loop.state import get_pr_state, load_state
-
         pr_state = get_pr_state(
-            load_state(repo_root / loop_config.state_file),
+            load_state(state_path(repo_root)),
             pr_number,
         )
         review_addressed = bool(pr_state.get("review_addressed"))
@@ -610,10 +615,7 @@ def _run_pr_lifecycle_body(
         )
     )
     if needs_fix:
-        pr_state_file = repo_root / loop_config.state_file
-        from agent_fleet.pr_loop.state import get_pr_state, load_state
-
-        prior = get_pr_state(load_state(pr_state_file), pr_number)
+        prior = get_pr_state(load_state(state_path(repo_root)), pr_number)
         if prior.get("review_addressed"):
             needs_fix = False
 
@@ -633,14 +635,7 @@ def _run_pr_lifecycle_body(
                 worktree=wt,
             )
             if address.status in {"no_findings", "addressed"}:
-                from agent_fleet.pr_loop.state import (
-                    get_pr_state,
-                    load_state,
-                    save_state,
-                    set_pr_state,
-                )
-
-                state_file = repo_root / loop_config.state_file
+                state_file = state_path(repo_root)
                 state = load_state(state_file)
                 entry = get_pr_state(state, pr_number)
                 set_pr_state(

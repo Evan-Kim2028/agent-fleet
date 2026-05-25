@@ -175,7 +175,12 @@ def run_issue_dispatch(
             with contextlib.suppress(Exception):
                 github_ops.remove_label(issue_number, label, cwd=repo.repo_root)
 
-    return 0 if result.outcome in {"completed", "review_changes_requested"} else 1
+    return 0 if result.outcome in {
+        "completed",
+        "completed_noop",
+        "review_changes_requested",
+        "decompose_partial",
+    } else 1
 
 
 def main() -> None:

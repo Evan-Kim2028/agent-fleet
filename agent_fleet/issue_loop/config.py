@@ -34,7 +34,6 @@ class IssueDispatchConfig:
     poll_interval_s: int = 30
     trigger_pattern: str = r"/agent\s+--persona\s+(\S+)"
     stop_pattern: str = r"/agent\s+stop\b"
-    state_file: str = ".agent-fleet-issue-state.json"
     mutex_label_prefix: str = "agent-running"
     running_label_prefix: str = "fleet-running"
     comment_marker: str = "<!-- agent-fleet-watcher -->"
@@ -66,7 +65,6 @@ def load_issue_dispatch_config(
         poll_interval_s=int(section.get("poll_interval_s", 30)),
         trigger_pattern=str(section.get("trigger_pattern", r"/agent\s+--persona\s+(\S+)")),
         stop_pattern=str(section.get("stop_pattern", r"/agent\s+stop\b")),
-        state_file=str(section.get("state_file", ".agent-fleet-issue-state.json")),
         mutex_label_prefix=str(section.get("mutex_label_prefix", "agent-running")),
         running_label_prefix=str(section.get("running_label_prefix", "fleet-running")),
         comment_marker=str(section.get("comment_marker", "<!-- agent-fleet-watcher -->")),

@@ -35,10 +35,7 @@
         "properties": {
           "title": {"type": "string"},
           "body": {"type": "string"},
-          "persona": {
-            "type": "string",
-            "enum": ["backend", "frontend", "data", "pokemon_analyst", "security_qa"]
-          },
+          "persona": {"type": "string"},
           "allowed_paths": {
             "type": "array",
             "items": {"type": "string"}

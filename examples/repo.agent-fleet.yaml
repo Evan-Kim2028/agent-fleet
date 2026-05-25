@@ -34,6 +34,14 @@ cross_cutting_groups:
   - [frontend/, backend/]
   - [frontend/, api/]
 
+# Automatic decomposition: planner fans out child tasks instead of stopping
+orchestration:
+  enabled: true
+  auto_dispatch_children: true
+  preflight_on_code_review: true
+  default_child_pipeline: code_review
+  max_decomposition_depth: 1
+
 # Protected paths agents must not modify
 critical_path_prefixes:
   - .github/workflows/

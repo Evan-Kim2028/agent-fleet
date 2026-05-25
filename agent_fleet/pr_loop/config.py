@@ -34,7 +34,6 @@ class PrLoopConfig:
         default_factory=lambda: ("composer pr analysis", "kimi pr analysis")
     )
     needs_human_review_label: str = "needs-human-review"
-    state_file: str = ".agent-fleet-loop-state.json"
     worktree_reaper_max_age_s: int = 86400
 
 
@@ -70,6 +69,5 @@ def load_pr_loop_config(_repo_root: Path, raw: dict[str, Any] | None) -> PrLoopC
         ci_fix_persona=(str(section["ci_fix_persona"]) if section.get("ci_fix_persona") else None),
         ignored_ci_checks=tuple(str(c).lower() for c in ignored),
         needs_human_review_label=str(section.get("needs_human_review_label", "needs-human-review")),
-        state_file=str(section.get("state_file", ".agent-fleet-loop-state.json")),
         worktree_reaper_max_age_s=int(section.get("worktree_reaper_max_age_s", 86400)),
     )

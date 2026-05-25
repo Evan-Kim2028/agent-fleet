@@ -232,12 +232,10 @@ def test_poll_once_parks_after_max_ci_timeout_attempts(tmp_path: Path) -> None:
     from agent_fleet.pr_loop.watcher import PrLoopWatcher
     from agent_fleet.repo import RepoConfig
 
-    state_file = tmp_path / "loop-state.json"
     repo = RepoConfig(repo_root=tmp_path, default_branch="main")
     loop_config = PrLoopConfig(
         enabled=True,
         max_ci_timeout_attempts=3,
-        state_file=str(state_file),
     )
     watcher = PrLoopWatcher(repo, loop_config, fleet_config=MagicMock())
 
@@ -277,7 +275,7 @@ def test_poll_once_parks_after_max_ci_timeout_attempts(tmp_path: Path) -> None:
             results = watcher.poll_once()
             assert results[0]["status"] == "ci_timeout"
             # Reload state to confirm not yet parked.
-            from agent_fleet.pr_loop.state import get_pr_state, load_state
+            from agent_fleet.state import get_pr_state, load_state
 
             st = load_state(watcher.state_file)
             entry = get_pr_state(st, 99)
@@ -286,7 +284,7 @@ def test_poll_once_parks_after_max_ci_timeout_attempts(tmp_path: Path) -> None:
         # Final poll — should now be parked.
         results = watcher.poll_once()
         assert results[0]["status"] == "ci_timeout"
-        from agent_fleet.pr_loop.state import get_pr_state, load_state
+        from agent_fleet.state import get_pr_state, load_state
 
         st = load_state(watcher.state_file)
         entry = get_pr_state(st, 99)

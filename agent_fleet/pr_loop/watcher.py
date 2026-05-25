@@ -10,7 +10,7 @@ from agent_fleet.config import load_fleet_config
 from agent_fleet.pr_loop import github_ops
 from agent_fleet.pr_loop.lifecycle import run_pr_lifecycle
 from agent_fleet.pr_loop.review_parse import find_reviewer_comment
-from agent_fleet.pr_loop.state import (
+from agent_fleet.state import (
     get_pr_state,
     load_state,
     merge_cooldown_remaining,
@@ -83,7 +83,7 @@ class PrLoopWatcher:
         self.repo = repo
         self.loop_config = loop_config
         self.fleet_config = fleet_config or load_fleet_config()
-        self.state_file = state_path(repo.repo_root, loop_config.state_file)
+        self.state_file = state_path(repo.repo_root)
 
     def poll_once(self) -> list[dict[str, str]]:
         state = load_state(self.state_file)

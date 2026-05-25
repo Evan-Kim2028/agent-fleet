@@ -20,7 +20,13 @@ from agent_fleet.capacity import (
 from agent_fleet.in_flight import reap_in_flight
 from agent_fleet.issue_loop import github_ops
 from agent_fleet.issue_loop import queue as issue_queue
-from agent_fleet.issue_loop.state import load_state, now_iso, save_state, state_path
+from agent_fleet.state import (
+    apply_issue_defaults,
+    load_state,
+    now_iso,
+    save_state,
+    state_path,
+)
 from agent_fleet.issue_loop.triggers import (
     extract_issue_number,
     extract_persona,
@@ -108,13 +114,14 @@ class IssueLoopWatcher:
     def __init__(self, repo: RepoConfig, dispatch_config: IssueDispatchConfig) -> None:
         self.repo = repo
         self.config = dispatch_config
-        self.state_file = state_path(repo.repo_root, dispatch_config.state_file)
+        self.state_file = state_path(repo.repo_root)
         capacity = repo.capacity or FleetCapacity.defaults()
         self.capacity_gate = FleetCapacityGate(capacity)
 
     def poll_once(self, state: dict[str, Any] | None = None) -> list[dict[str, str]]:
         if state is None:
             state = load_state(self.state_file)
+        apply_issue_defaults(state)
         reap_in_flight(state)
         _cleanup_orphaned_playwright_mcp(state)
         results: list[dict[str, str]] = []
