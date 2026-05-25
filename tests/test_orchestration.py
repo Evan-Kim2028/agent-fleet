@@ -165,7 +165,7 @@ def test_aggregate_child_results_partial() -> None:
             duration_seconds=2.0,
         ),
     ]
-    status, error, summary = aggregate_child_results(results)
+    status, error, _summary = aggregate_child_results(results)
     assert status == "decompose_partial"
     assert error is not None
 
