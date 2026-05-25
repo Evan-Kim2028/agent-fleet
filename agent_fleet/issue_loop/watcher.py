@@ -20,13 +20,6 @@ from agent_fleet.capacity import (
 from agent_fleet.in_flight import reap_in_flight
 from agent_fleet.issue_loop import github_ops
 from agent_fleet.issue_loop import queue as issue_queue
-from agent_fleet.state import (
-    apply_issue_defaults,
-    load_state,
-    now_iso,
-    save_state,
-    state_path,
-)
 from agent_fleet.issue_loop.triggers import (
     extract_issue_number,
     extract_persona,
@@ -41,6 +34,13 @@ from agent_fleet.memory import (
 )
 from agent_fleet.observability.fleet_logger import get_watcher_logger
 from agent_fleet.repo import RepoConfig, find_repo_config
+from agent_fleet.state import (
+    apply_issue_defaults,
+    load_state,
+    now_iso,
+    save_state,
+    state_path,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
