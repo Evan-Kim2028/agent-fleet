@@ -60,7 +60,7 @@ def load_issue_dispatch_config(
         queue_cfg = IssueQueueConfig(
             enabled=True,
             file=str(queue_raw.get("file", ".agent-fleet-queue.yaml")),
-            advance=advance,  # type: ignore[arg-type]
+            advance=advance,  # type: ignore[arg-type,invalid-argument-type]
         )
     return IssueDispatchConfig(
         enabled=bool(section.get("enabled", False)),
