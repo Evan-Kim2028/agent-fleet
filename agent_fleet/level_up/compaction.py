@@ -81,7 +81,11 @@ def compact_persona(repo_key: str, persona: str) -> list[str]:
         if touch_ts is None and rule.provenance:
             touch_ts = _parse_ts(str(rule.provenance[0].get("ts") or ""))
 
-        if touch_ts is not None and touch_ts >= cutoff:
+        if touch_ts is None:
+            kept.append(rule)
+            continue
+
+        if touch_ts >= cutoff:
             kept.append(rule)
             continue
 

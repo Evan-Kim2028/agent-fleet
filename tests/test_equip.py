@@ -78,6 +78,7 @@ def test_verify_failed_adds_systematic_debugging(tmp_path: Path, monkeypatch: py
     equip = resolve_dispatch_equip(task, fleet_config, repo)
 
     assert SYSTEMATIC_DEBUGGING_SKILL in equip.skill_slots_execute
+    assert "Systematic Debugging" in equip.compose_body
 
 
 def test_verify_failed_skips_missing_base_kit_skill(

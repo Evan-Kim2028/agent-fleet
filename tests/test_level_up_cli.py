@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_fleet.cli import cmd_level_up_journal, cmd_level_up_status
+from agent_fleet.cli import cmd_level_up_journal, cmd_level_up_status, cmd_level_up_train
 from agent_fleet.level_up import paths as level_up_paths
 
 
@@ -110,3 +110,23 @@ def test_load_repo_config_parses_level_up(tmp_path: Path) -> None:
     assert repo.level_up.train is False
     assert repo.level_up.contribute_to_fleet is False
     assert repo.level_up.journal_task_summaries is True
+
+
+def test_level_up_train_skips_when_train_disabled(
+    tmp_path: Path,
+    level_up_root: Path,
+    capsys,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    _write_repo_config(repo_root, name="demo-repo")
+    config_path = repo_root / ".agent-fleet.yaml"
+    config_path.write_text(
+        "name: demo-repo\nlevel_up:\n  train: false\n",
+        encoding="utf-8",
+    )
+
+    args = argparse.Namespace(repo=str(repo_root), persona="coder", dry_run=False)
+    assert cmd_level_up_train(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["skipped"] is True

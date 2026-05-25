@@ -200,21 +200,27 @@ def _record_task_experience(
         repo_root=repo.repo_root if repo else None,
     )
     source, pr_loop_round = _experience_source_context(task)
-    weight = compute_experience_weight(source, pr_loop_round)
+    weight = compute_experience_weight(source, pr_loop_round, status=status)
     equip_snapshot = _equip_snapshot(task)
     review_verdict = _review_verdict_from_phases(phase_results)
+    journal_summaries = (
+        level_up_cfg.journal_task_summaries if level_up_cfg is not None else True
+    )
+
+    run_complete_data: dict[str, Any] = {
+        "task_index": task_index,
+        "status": status,
+        "equip_snapshot": equip_snapshot,
+    }
+    if journal_summaries:
+        run_complete_data["goal"] = task.goal
 
     append_journal(
         "run.complete",
         repo_key_value,
         task.persona,
         run_id=fleet_log.run_id,
-        data={
-            "task_index": task_index,
-            "status": status,
-            "goal": task.goal,
-            "equip_snapshot": equip_snapshot,
-        },
+        data=run_complete_data,
     )
 
     append_experience(
@@ -224,7 +230,7 @@ def _record_task_experience(
         weight=weight,
         pr_loop_round=pr_loop_round,
         status=status,
-        goal=task.goal,
+        goal=task.goal if journal_summaries else None,
         review_verdict=review_verdict,
         equip_snapshot=equip_snapshot,
         changed_files=changed_files,

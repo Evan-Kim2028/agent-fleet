@@ -10,14 +10,27 @@ from agent_fleet.level_up.models import ExperienceEntry
 from agent_fleet.level_up.paths import (
     WEIGHT_DEFAULT,
     WEIGHT_PR_LOOP_ROUND2,
+    WEIGHT_REVIEW_FIX_SUCCESS,
     persona_dir,
 )
 
 
-def compute_experience_weight(source: str, pr_loop_round: int | None = None) -> float:
+def compute_experience_weight(
+    source: str,
+    pr_loop_round: int | None = None,
+    *,
+    status: str | None = None,
+) -> float:
     """Return training weight for an experience row."""
     if source == "pr_loop" and pr_loop_round is not None and pr_loop_round >= 2:
         return WEIGHT_PR_LOOP_ROUND2
+    if (
+        source == "pr_loop"
+        and status == "completed"
+        and pr_loop_round is not None
+        and pr_loop_round >= 1
+    ):
+        return WEIGHT_REVIEW_FIX_SUCCESS
     return WEIGHT_DEFAULT
 
 

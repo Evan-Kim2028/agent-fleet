@@ -91,7 +91,13 @@ def test_train_queues_domain_candidate(level_up_root: Path) -> None:  # noqa: AR
         gate={"kind": "domain_data", "needs_tech_lead": True},
     )
 
-    verdict = approve_candidate("demo-repo", "coder", rule.id, contribute_to_fleet=False)
+    verdict = approve_candidate(
+        "demo-repo",
+        "coder",
+        rule.id,
+        contribute_to_fleet=False,
+        force=True,
+    )
     assert verdict == "approve"
     overlay = load_overlay("demo-repo", "coder")
     assert any(r.id == rule.id for r in overlay.rules)
@@ -103,8 +109,22 @@ def test_skill_promotion_review_heuristic() -> None:
         kind="methodology",
         text="Keep changes scoped to the task goal; avoid unrelated edits.",
     )
-    review = skill_promotion_review(rule, kind="methodology")
+    review = skill_promotion_review(rule, kind="methodology", force=True)
     assert review.verdict == "approve"
+
+
+def test_compaction_keeps_rules_without_touch_or_provenance(level_up_root: Path) -> None:  # noqa: ARG001
+    rule = LevelUpRule(
+        id="manual-rule",
+        kind="methodology",
+        text="Run lint before pushing changes to remote branches.",
+    )
+    save_overlay("demo-repo", "coder", [rule], generation=1)
+
+    retired = compact_persona("demo-repo", "coder")
+    assert retired == []
+    overlay = load_overlay("demo-repo", "coder")
+    assert len(overlay.rules) == 1
 
 
 def test_compaction_retires_idle_rules(level_up_root: Path) -> None:  # noqa: ARG001
@@ -132,6 +152,31 @@ def test_touch_overlay_rules_updates_meta(level_up_root: Path) -> None:
     meta_path = level_up_root / "demo-repo" / "coder" / "meta.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     assert "verify-before-done" in meta["rule_touch"]
+
+
+def test_approve_requires_force_without_backend() -> None:
+    rule = LevelUpRule(
+        id="iceberg-partition",
+        kind="domain_data",
+        text="When writing Iceberg tables, validate partition spec before publish.",
+    )
+    review = skill_promotion_review(rule, kind="domain_data", force=False)
+    assert review.verdict == "reject"
+    assert "LLM backend" in review.summary
+
+
+def test_provenance_redacts_when_journal_task_summaries_false() -> None:
+    from agent_fleet.level_up.train import _provenance_from_row
+
+    row = {
+        "goal": "Secret goal text",
+        "status": "verify_failed",
+        "changed_files": ["agent_fleet/foo.py"],
+    }
+    prov = _provenance_from_row("demo-repo", row, journal_task_summaries=False)
+    assert prov["task_summary"] == ""
+    assert "Secret goal" not in prov["note"]
+    assert "agent_fleet/" in prov["note"]
 
 
 def test_find_overlay_overlap(level_up_root: Path) -> None:  # noqa: ARG001

@@ -179,3 +179,15 @@ def test_compose_overlay_prompt(level_up_root: Path) -> None:
 
 def test_compose_overlay_prompt_empty_rules() -> None:
     assert compose_overlay_prompt(()) == ""
+
+
+def test_compute_experience_weight_review_fix_success() -> None:
+    from agent_fleet.level_up.experience import compute_experience_weight
+    from agent_fleet.level_up.paths import WEIGHT_REVIEW_FIX_SUCCESS
+
+    weight = compute_experience_weight(
+        "pr_loop",
+        1,
+        status="completed",
+    )
+    assert weight == WEIGHT_REVIEW_FIX_SUCCESS

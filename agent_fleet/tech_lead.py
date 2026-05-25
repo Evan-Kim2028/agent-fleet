@@ -227,12 +227,18 @@ def skill_promotion_review(
     kind: str,
     backend: LLMBackend | None = None,
     session: LLMSession | None = None,
+    force: bool = False,
     max_tokens: int = 1024,
     timeout_s: int = 120,
     memory_limit: str = "2G",
 ) -> SkillPromotionReview:
     """Review a queued level-up candidate for promotion."""
     if backend is None and session is None:
+        if not force:
+            return SkillPromotionReview(
+                verdict="reject",
+                summary="Tech-lead skill review requires an LLM backend or --force.",
+            )
         if len(rule.text.strip()) < 20:
             return SkillPromotionReview(
                 verdict="reject",

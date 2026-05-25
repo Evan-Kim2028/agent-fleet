@@ -9,7 +9,7 @@ from agent_fleet.level_up.compaction import touch_overlay_rules
 from agent_fleet.level_up.journal import append_journal
 from agent_fleet.level_up.models import DispatchEquip
 from agent_fleet.level_up.overlay import compose_overlay_text, load_overlay
-from agent_fleet.level_up.paths import repo_key
+from agent_fleet.level_up.paths import FLEET_TIER, repo_key
 from agent_fleet.skills_lib import (
     SYSTEMATIC_DEBUGGING_SKILL,
     compose_persona_body,
@@ -47,20 +47,23 @@ def resolve_dispatch_equip(
     repo_overlay_text = compose_overlay_text(repo_overlay.rules)
     generation = max(fleet_overlay.generation, repo_overlay.generation)
 
-    active_rule_ids = [rule.id for rule in fleet_overlay.rules] + [
-        rule.id for rule in repo_overlay.rules
-    ]
-    if active_rule_ids:
-        touch_overlay_rules(repo_key_value, persona, active_rule_ids)
+    fleet_rule_ids = [rule.id for rule in fleet_overlay.rules]
+    repo_rule_ids = [rule.id for rule in repo_overlay.rules]
+    if fleet_rule_ids:
+        touch_overlay_rules(FLEET_TIER, persona, fleet_rule_ids)
+    if repo_rule_ids:
+        touch_overlay_rules(repo_key_value, persona, repo_rule_ids)
 
-    skill_slots_execute = loadout_execute_skill_ids(loadout)
+    loadout_execute = loadout_execute_skill_ids(loadout)
+    extra_execute: list[str] = []
     if (
         last_experience_shows_verify_failed(repo_key_value, persona)
         and skill_exists_in_base_kit(SYSTEMATIC_DEBUGGING_SKILL)
-        and SYSTEMATIC_DEBUGGING_SKILL not in skill_slots_execute
+        and SYSTEMATIC_DEBUGGING_SKILL not in loadout_execute
     ):
-        skill_slots_execute.append(SYSTEMATIC_DEBUGGING_SKILL)
+        extra_execute.append(SYSTEMATIC_DEBUGGING_SKILL)
 
+    skill_slots_execute = [*loadout_execute, *extra_execute]
     skill_slots_review = loadout_review_skill_ids(loadout)
     parent_run_id = task.equip.parent_run_id if task.equip else None
 
@@ -68,6 +71,7 @@ def resolve_dispatch_equip(
         loadout,
         fleet_overlay=fleet_overlay_text,
         repo_overlay=repo_overlay_text,
+        extra_skills=extra_execute or None,
         level_up_generation=generation,
     )
 

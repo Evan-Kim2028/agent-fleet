@@ -267,14 +267,31 @@ def cmd_level_up_train(args: argparse.Namespace) -> int:
         return 1
 
     key = repo_key(name=repo.name, repo_root=repo.repo_root)
+    if repo.level_up is not None and not repo.level_up.train:
+        print(
+            json.dumps(
+                {
+                    "repo_key": key,
+                    "persona": args.persona,
+                    "skipped": True,
+                    "reason": "level_up.train is false",
+                },
+                indent=2,
+            )
+        )
+        return 0
+
     contribute = True
+    journal_summaries = True
     if repo.level_up is not None:
         contribute = repo.level_up.contribute_to_fleet
+        journal_summaries = repo.level_up.journal_task_summaries
 
     result = train_persona(
         key,
         args.persona,
         contribute_to_fleet=contribute,
+        journal_task_summaries=journal_summaries,
         dry_run=args.dry_run,
     )
     print(
@@ -313,6 +330,7 @@ def cmd_level_up_approve(args: argparse.Namespace) -> int:
         args.persona,
         args.candidate,
         contribute_to_fleet=contribute,
+        force=args.force,
     )
     print(
         json.dumps(
@@ -503,6 +521,11 @@ def main(argv: list[str] | None = None) -> int:
     level_up_approve_p.add_argument("--repo", required=True, help="Repo path or .agent-fleet.yaml")
     level_up_approve_p.add_argument("--persona", required=True, help="Persona name")
     level_up_approve_p.add_argument("--candidate", required=True, help="Candidate id")
+    level_up_approve_p.add_argument(
+        "--force",
+        action="store_true",
+        help="Approve without LLM tech-lead review (heuristic only)",
+    )
     level_up_approve_p.set_defaults(func=cmd_level_up_approve)
 
     level_up_compact_p = level_up_sub.add_parser(

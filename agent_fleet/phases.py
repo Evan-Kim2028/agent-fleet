@@ -39,7 +39,10 @@ def _review_skill_prompt_append(task: FleetTask) -> str:
 
 
 def _build_execute_prompt(persona: Persona, task: FleetTask) -> str:
-    body = read_persona_body(persona)
+    if task.equip is not None and task.equip.compose_body.strip():
+        body = task.equip.compose_body.strip()
+    else:
+        body = read_persona_body(persona)
     parts = [
         "# Persona",
         body.strip(),

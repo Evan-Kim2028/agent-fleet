@@ -58,16 +58,29 @@ def _area_from_files(changed_files: list[str]) -> str:
     return ""
 
 
-def _provenance_from_row(repo_key: str, row: dict[str, Any]) -> dict[str, Any]:
-    goal = str(row.get("goal") or "dispatch task")
-    if len(goal) > 120:
-        goal = goal[:117] + "..."
+def _provenance_from_row(
+    repo_key: str,
+    row: dict[str, Any],
+    *,
+    journal_task_summaries: bool = True,
+) -> dict[str, Any]:
     status = str(row.get("status") or row.get("review_verdict") or "experience")
+    area = _area_from_files(list(row.get("changed_files") or ()))
+    if journal_task_summaries:
+        goal = str(row.get("goal") or "dispatch task")
+        if len(goal) > 120:
+            goal = goal[:117] + "..."
+        task_summary = goal
+        note = f"Learned from {repo_key} doing: {status}"
+    else:
+        task_summary = ""
+        area_note = f" ({area})" if area else ""
+        note = f"Learned from {repo_key}{area_note} doing: {status}"
     return {
         "repo_key": repo_key,
-        "area": _area_from_files(list(row.get("changed_files") or ())),
-        "task_summary": goal,
-        "note": f"Learned from {repo_key} doing: {status}",
+        "area": area,
+        "task_summary": task_summary,
+        "note": note,
         "ts": row.get("ts"),
     }
 
@@ -102,6 +115,8 @@ def _rule_text_for_row(row: dict[str, Any]) -> tuple[str, str] | None:
 def _aggregate_candidates(
     repo_key: str,
     rows: list[dict[str, Any]],
+    *,
+    journal_task_summaries: bool = True,
 ) -> dict[str, tuple[LevelUpRule, int, float]]:
     grouped: dict[str, tuple[LevelUpRule, int, float]] = {}
 
@@ -113,7 +128,11 @@ def _aggregate_candidates(
         kind, text = proposed
         rule_id = _rule_id(text)
         weight = float(row.get("weight") or 1.0)
-        provenance = _provenance_from_row(repo_key, row)
+        provenance = _provenance_from_row(
+            repo_key,
+            row,
+            journal_task_summaries=journal_task_summaries,
+        )
 
         if rule_id in grouped:
             rule, count, total = grouped[rule_id]
@@ -151,6 +170,7 @@ def propose_train_candidates(
     persona: str,
     *,
     limit: int = 200,
+    journal_task_summaries: bool = True,
 ) -> list[TrainCandidate]:
     rows = read_experience_rows(repo_key, persona, limit=limit)
     overlay = load_overlay(repo_key, persona)
@@ -158,7 +178,12 @@ def propose_train_candidates(
     existing_text = {rule.text.strip().lower() for rule in overlay.rules}
 
     candidates: list[TrainCandidate] = []
-    for rule, evidence_count, weighted_evidence in _aggregate_candidates(repo_key, rows).values():
+    grouped = _aggregate_candidates(
+        repo_key,
+        rows,
+        journal_task_summaries=journal_task_summaries,
+    )
+    for rule, evidence_count, weighted_evidence in grouped.values():
         if rule.id in existing_ids or rule.text.strip().lower() in existing_text:
             continue
 
@@ -191,11 +216,16 @@ def train_persona(
     persona: str,
     *,
     contribute_to_fleet: bool = True,
+    journal_task_summaries: bool = True,
     dry_run: bool = False,
 ) -> TrainResult:
     """Mine experience, gate candidates, auto-promote or queue for tech lead."""
     result = TrainResult()
-    candidates = propose_train_candidates(repo_key, persona)
+    candidates = propose_train_candidates(
+        repo_key,
+        persona,
+        journal_task_summaries=journal_task_summaries,
+    )
 
     for item in candidates:
         gate_payload = {
@@ -276,12 +306,13 @@ def approve_candidate(
     candidate_id: str,
     *,
     contribute_to_fleet: bool = True,
+    force: bool = False,
 ) -> str:
     """Run tech-lead skill review on a queued candidate and promote if approved."""
     rule, gate_meta = load_candidate(repo_key, persona, candidate_id)
     kind = str(gate_meta.get("kind") or rule.kind or infer_kind(rule.text))
 
-    review = skill_promotion_review(rule, kind=kind)
+    review = skill_promotion_review(rule, kind=kind, force=force)
     append_journal(
         "level_up.gate.tech_lead",
         repo_key,
@@ -315,7 +346,7 @@ def approve_candidate(
         data={"rule_id": rule.id, "kind": kind, "tier": "repo", "via": "approve"},
     )
 
-    if contribute_to_fleet:
+    if contribute_to_fleet and kind in {"methodology", "stack"}:
         promote_rule(FLEET_TIER, persona, rule)
         append_journal(
             "level_up.train.promoted",
