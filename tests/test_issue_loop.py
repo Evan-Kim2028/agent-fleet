@@ -87,3 +87,46 @@ def test_issue_numbers_in_branch() -> None:
     assert issue_numbers_in_branch("fleet/backend/1939-4408fc17") == {1939}
     assert issue_numbers_in_branch("fleet/frontend/#1933") == {1933}
     assert issue_numbers_in_branch("fleet/backend/#1939-extra") == {1939}
+
+
+def test_run_issue_dispatch_skips_closed_issue(tmp_path: Path) -> None:
+    """run_issue_dispatch returns 0 and does not invoke LocalFleetRunner when issue is closed."""
+    from unittest.mock import MagicMock, patch
+
+    from agent_fleet.issue_loop.config import IssueDispatchConfig
+    from agent_fleet.issue_loop.dispatch import run_issue_dispatch
+    from agent_fleet.repo import RepoConfig
+
+    fake_repo = RepoConfig(repo_root=tmp_path, default_branch="main")
+
+    with (
+        patch("agent_fleet.issue_loop.dispatch.find_repo_config", return_value=fake_repo),
+        patch(
+            "agent_fleet.issue_loop.dispatch.github_ops.issue_view",
+            return_value={"state": "CLOSED", "title": "x", "body": "y", "labels": [], "number": 42},
+        ),
+        patch(
+            "agent_fleet.issue_loop.dispatch.github_ops.post_issue_comment",
+        ) as mock_comment,
+        patch(
+            "agent_fleet.issue_loop.dispatch.github_ops.remove_label",
+        ),
+        patch(
+            "agent_fleet.issue_loop.dispatch.github_ops.add_label",
+        ),
+        patch("agent_fleet.issue_loop.dispatch.load_fleet_config", return_value=MagicMock()),
+        patch("agent_fleet.issue_loop.dispatch.LocalFleetRunner") as mock_runner,
+    ):
+        result = run_issue_dispatch(
+            issue_number=42,
+            comment_body="/agent --persona backend",
+            repo_root=tmp_path,
+            dispatch_config=IssueDispatchConfig(),
+        )
+
+    assert result == 0
+    mock_runner.assert_not_called()
+    # A skip comment should have been posted.
+    assert mock_comment.call_count >= 1
+    posted_body = mock_comment.call_args[0][1]
+    assert "already closed" in posted_body

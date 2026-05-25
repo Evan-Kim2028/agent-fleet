@@ -73,6 +73,20 @@ def run_issue_dispatch(
         logger.warning("Failed to add mutex labels: %s", exc)
 
     issue = github_ops.issue_view(issue_number, cwd=repo.repo_root)
+
+    if str(issue.get("state") or "").upper() == "CLOSED":
+        logger.info("Issue #%s is already closed — skipping fleet dispatch.", issue_number)
+        skip_comment = (
+            f"Skipping fleet dispatch — issue is already closed.\n\n{dispatch.comment_marker}"
+        )
+        with contextlib.suppress(Exception):
+            github_ops.post_issue_comment(issue_number, skip_comment, cwd=repo.repo_root)
+        with contextlib.suppress(Exception):
+            github_ops.remove_label(issue_number, mutex_label, cwd=repo.repo_root)
+        with contextlib.suppress(Exception):
+            github_ops.remove_label(issue_number, running_label, cwd=repo.repo_root)
+        return 0
+
     title = str(issue.get("title") or f"Issue #{issue_number}")
     body = str(issue.get("body") or "")
     issue_labels = github_ops.issue_labels(issue_number, cwd=repo.repo_root)
