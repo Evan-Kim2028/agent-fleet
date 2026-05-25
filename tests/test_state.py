@@ -67,7 +67,7 @@ def test_migration_skipped_when_unified_file_exists(tmp_path: Path) -> None:
     assert (tmp_path / LEGACY_ISSUE_FILENAME).exists()
 
 
-def test_apply_issue_defaults(tmp_path: Path) -> None:
+def test_apply_issue_defaults() -> None:
     state: dict = {}
     apply_issue_defaults(state)
     assert state["seen"] == []
@@ -75,7 +75,7 @@ def test_apply_issue_defaults(tmp_path: Path) -> None:
     assert "since" in state
 
 
-def test_apply_issue_defaults_respects_override(tmp_path: Path) -> None:
+def test_apply_issue_defaults_respects_override() -> None:
     state: dict = {"since": "old"}
     apply_issue_defaults(state, since_override="new")
     assert state["since"] == "new"
