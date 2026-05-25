@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from agent_fleet.capacity.config import warn_deprecated_issue_dispatch_capacity
 
@@ -60,7 +60,7 @@ def load_issue_dispatch_config(
         queue_cfg = IssueQueueConfig(
             enabled=True,
             file=str(queue_raw.get("file", ".agent-fleet-queue.yaml")),
-            advance=advance,  # type: ignore[arg-type,invalid-argument-type]
+            advance=cast(Literal["dispatch", "complete"], advance),
         )
     return IssueDispatchConfig(
         enabled=bool(section.get("enabled", False)),
