@@ -139,6 +139,7 @@ class PrLoopWatcher:
             comments = github_ops.pr_comments(pr_number, cwd=self.repo.repo_root)
             review_body = find_reviewer_comment(comments, marker=marker)
             fix_attempts = int(entry.get("fix_attempts") or 0)
+            ci_timeout_attempts = int(entry.get("ci_timeout_attempts") or 0)
 
             needs_fix = False
             if review_body and not entry.get("review_addressed"):
@@ -174,17 +175,30 @@ class PrLoopWatcher:
                 skip_review_wait=True,
             )
 
+            new_ci_timeout_attempts = (
+                ci_timeout_attempts + 1 if outcome.status == "ci_timeout" else 0
+            )
             new_entry = {
                 **entry,
                 "last_status": outcome.status,
                 "last_detail": outcome.detail,
                 "fix_attempts": fix_attempts + (1 if outcome.status == "addressed" else 0),
+                "ci_timeout_attempts": new_ci_timeout_attempts,
             }
             if outcome.status == "merged":
                 new_entry["merged"] = True
                 state["last_merge_ts"] = time.time()
             if outcome.status == "parked":
                 new_entry["parked"] = True
+            if (
+                outcome.status == "ci_timeout"
+                and new_ci_timeout_attempts >= self.loop_config.max_ci_timeout_attempts
+            ):
+                new_entry["parked"] = True
+                new_entry["last_detail"] = (
+                    f"Parked after {self.loop_config.max_ci_timeout_attempts} "
+                    "consecutive ci_timeout outcomes"
+                )
             set_pr_state(state, pr_number, new_entry)
             save_state(self.state_file, state)
 

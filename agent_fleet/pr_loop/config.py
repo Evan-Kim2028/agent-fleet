@@ -24,6 +24,7 @@ class PrLoopConfig:
     ci_poll_timeout_s: int = 1800
     max_fix_attempts: int = 2
     max_ci_fix_attempts: int = 2
+    max_ci_timeout_attempts: int = 3
     merge_cooldown_s: int = 300
     tiered_merge_gate: bool = False
     auto_merge: bool = True
@@ -60,6 +61,7 @@ def load_pr_loop_config(_repo_root: Path, raw: dict[str, Any] | None) -> PrLoopC
         ci_poll_timeout_s=int(section.get("ci_poll_timeout_s", 1800)),
         max_fix_attempts=int(section.get("max_fix_attempts", 2)),
         max_ci_fix_attempts=int(section.get("max_ci_fix_attempts", 2)),
+        max_ci_timeout_attempts=int(section.get("max_ci_timeout_attempts", 3)),
         merge_cooldown_s=int(section.get("merge_cooldown_s", 300)),
         tiered_merge_gate=bool(section.get("tiered_merge_gate", False)),
         auto_merge=bool(section.get("auto_merge", True)),

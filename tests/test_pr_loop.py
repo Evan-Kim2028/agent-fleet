@@ -221,3 +221,76 @@ def test_commit_and_push_returns_false_when_hook_keeps_failing(tmp_path: Path) -
     (local / "feature.txt").write_text("feature\n", encoding="utf-8")
 
     assert commit_and_push(local, "test: real fail", "feature-branch") is False
+
+
+def test_poll_once_parks_after_max_ci_timeout_attempts(tmp_path: Path) -> None:
+    """PrLoopWatcher marks a PR parked=True after max_ci_timeout_attempts ci_timeout outcomes."""
+    from unittest.mock import MagicMock, patch
+
+    from agent_fleet.pr_loop.config import PrLoopConfig
+    from agent_fleet.pr_loop.lifecycle import LifecycleResult
+    from agent_fleet.pr_loop.watcher import PrLoopWatcher
+    from agent_fleet.repo import RepoConfig
+
+    state_file = tmp_path / "loop-state.json"
+    repo = RepoConfig(repo_root=tmp_path, default_branch="main")
+    loop_config = PrLoopConfig(
+        enabled=True,
+        max_ci_timeout_attempts=3,
+        state_file=str(state_file),
+    )
+    watcher = PrLoopWatcher(repo, loop_config, fleet_config=MagicMock())
+
+    fake_pr: dict[str, object] = {
+        "number": 99,
+        "headRefName": "fleet/coder/99-abc12345",
+        "labels": [],
+        "isDraft": False,
+    }
+    ci_timeout_result = LifecycleResult(
+        status="ci_timeout", detail="CI did not pass within timeout"
+    )
+
+    with (
+        patch(
+            "agent_fleet.pr_loop.watcher.github_ops.list_open_fleet_prs",
+            return_value=[fake_pr],
+        ),
+        patch("agent_fleet.pr_loop.watcher.github_ops.pr_has_label", return_value=False),
+        # One failed check with fix_attempts < max forces lifecycle to run.
+        patch(
+            "agent_fleet.pr_loop.watcher.github_ops.pr_checks",
+            return_value=(
+                [{"name": "ci"}],
+                [],
+                [{"name": "ci"}],
+            ),
+        ),
+        patch("agent_fleet.pr_loop.watcher.github_ops.pr_comments", return_value=[]),
+        patch(
+            "agent_fleet.pr_loop.watcher.run_pr_lifecycle",
+            return_value=ci_timeout_result,
+        ) as mock_lifecycle,
+    ):
+        # Poll max_ci_timeout_attempts times; PR should not be parked until the last one.
+        for i in range(loop_config.max_ci_timeout_attempts - 1):
+            results = watcher.poll_once()
+            assert results[0]["status"] == "ci_timeout"
+            # Reload state to confirm not yet parked.
+            from agent_fleet.pr_loop.state import get_pr_state, load_state
+
+            st = load_state(watcher.state_file)
+            entry = get_pr_state(st, 99)
+            assert not entry.get("parked"), f"should not be parked after {i + 1} poll(s)"
+
+        # Final poll — should now be parked.
+        results = watcher.poll_once()
+        assert results[0]["status"] == "ci_timeout"
+        from agent_fleet.pr_loop.state import get_pr_state, load_state
+
+        st = load_state(watcher.state_file)
+        entry = get_pr_state(st, 99)
+        assert entry.get("parked") is True, "should be parked after max_ci_timeout_attempts polls"
+        assert str(loop_config.max_ci_timeout_attempts) in str(entry.get("last_detail", ""))
+
+    assert mock_lifecycle.call_count == loop_config.max_ci_timeout_attempts
