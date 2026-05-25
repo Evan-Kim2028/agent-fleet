@@ -13,7 +13,7 @@ from agent_fleet.cli_env import require_backend_env
 from agent_fleet.config import load_fleet_config
 from agent_fleet.dispatcher import FleetDispatcher
 from agent_fleet.personas import YamlPersonaResolver
-from agent_fleet.repo import find_repo_config
+from agent_fleet.repo import RepoConfig, find_repo_config
 from agent_fleet.runner import run_full_pipeline
 
 
@@ -202,6 +202,200 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_repo_from_path(repo_path: Path) -> RepoConfig:
+    from agent_fleet.repo import find_repo_config, load_repo_config
+
+    repo_path = repo_path.resolve()
+    if repo_path.is_file():
+        return load_repo_config(repo_path)
+    repo = find_repo_config(repo_path)
+    if repo is None:
+        raise ValueError(f"No .agent-fleet.yaml found under {repo_path}")
+    return repo
+
+
+def cmd_level_up_status(args: argparse.Namespace) -> int:
+    from agent_fleet.level_up.overlay import load_overlay
+    from agent_fleet.level_up.paths import repo_key
+
+    try:
+        repo = _resolve_repo_from_path(Path(args.repo))
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    key = repo_key(name=repo.name, repo_root=repo.repo_root)
+    overlay = load_overlay(key, args.persona)
+    print(
+        json.dumps(
+            {
+                "repo_key": key,
+                "persona": args.persona,
+                "generation": overlay.generation,
+                "rule_count": len(overlay.rules),
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def cmd_level_up_journal(args: argparse.Namespace) -> int:
+    from agent_fleet.level_up.journal import tail_journal
+    from agent_fleet.level_up.paths import repo_key
+
+    try:
+        repo = _resolve_repo_from_path(Path(args.repo))
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    key = repo_key(name=repo.name, repo_root=repo.repo_root)
+    entries = tail_journal(key, args.persona, tail=args.tail)
+    print(json.dumps(entries, indent=2, default=str))
+    return 0
+
+
+def cmd_level_up_train(args: argparse.Namespace) -> int:
+    from agent_fleet.level_up.paths import repo_key
+    from agent_fleet.level_up.train import train_persona
+
+    try:
+        repo = _resolve_repo_from_path(Path(args.repo))
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    key = repo_key(name=repo.name, repo_root=repo.repo_root)
+    if repo.level_up is not None and not repo.level_up.train:
+        print(
+            json.dumps(
+                {
+                    "repo_key": key,
+                    "persona": args.persona,
+                    "skipped": True,
+                    "reason": "level_up.train is false",
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    contribute = True
+    journal_summaries = True
+    if repo.level_up is not None:
+        contribute = repo.level_up.contribute_to_fleet
+        journal_summaries = repo.level_up.journal_task_summaries
+
+    result = train_persona(
+        key,
+        args.persona,
+        contribute_to_fleet=contribute,
+        journal_task_summaries=journal_summaries,
+        dry_run=args.dry_run,
+    )
+    print(
+        json.dumps(
+            {
+                "repo_key": key,
+                "persona": args.persona,
+                "promoted": result.promoted,
+                "queued": result.queued,
+                "rejected": result.rejected,
+                "dry_run": args.dry_run,
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def cmd_level_up_approve(args: argparse.Namespace) -> int:
+    from agent_fleet.level_up.paths import repo_key
+    from agent_fleet.level_up.train import approve_candidate
+
+    try:
+        repo = _resolve_repo_from_path(Path(args.repo))
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    key = repo_key(name=repo.name, repo_root=repo.repo_root)
+    contribute = True
+    if repo.level_up is not None:
+        contribute = repo.level_up.contribute_to_fleet
+
+    verdict = approve_candidate(
+        key,
+        args.persona,
+        args.candidate,
+        contribute_to_fleet=contribute,
+        force=args.force,
+    )
+    print(
+        json.dumps(
+            {
+                "repo_key": key,
+                "persona": args.persona,
+                "candidate": args.candidate,
+                "verdict": verdict,
+            },
+            indent=2,
+        )
+    )
+    return 0 if verdict == "approve" else 1
+
+
+def cmd_level_up_compact(args: argparse.Namespace) -> int:
+    from agent_fleet.level_up.compaction import compact_persona
+    from agent_fleet.level_up.paths import repo_key
+
+    try:
+        repo = _resolve_repo_from_path(Path(args.repo))
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    key = repo_key(name=repo.name, repo_root=repo.repo_root)
+    retired = compact_persona(key, args.persona)
+    print(
+        json.dumps(
+            {
+                "repo_key": key,
+                "persona": args.persona,
+                "retired": retired,
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def cmd_level_up_overlap(args: argparse.Namespace) -> int:
+    from agent_fleet.level_up.paths import repo_key
+    from agent_fleet.level_up.train import find_overlay_overlap
+
+    try:
+        repo = _resolve_repo_from_path(Path(args.repo))
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    key = repo_key(name=repo.name, repo_root=repo.repo_root)
+    overlaps = find_overlay_overlap(key, args.persona)
+    print(
+        json.dumps(
+            {
+                "repo_key": key,
+                "persona": args.persona,
+                "overlaps": overlaps,
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agent-fleet", description="Agentic coding fleet CLI")
     parser.add_argument(
@@ -286,6 +480,69 @@ def main(argv: list[str] | None = None) -> int:
     init_p.add_argument("path", nargs="?", help="Repo path")
     init_p.add_argument("--force", action="store_true")
     init_p.set_defaults(func=cmd_init)
+
+    level_up_p = sub.add_parser("level-up", help="Persona level-up status and journal")
+    level_up_sub = level_up_p.add_subparsers(dest="level_up_command", required=True)
+
+    level_up_status_p = level_up_sub.add_parser(
+        "status",
+        help="Show overlay generation and rule count for a persona",
+    )
+    level_up_status_p.add_argument("--repo", required=True, help="Repo path or .agent-fleet.yaml")
+    level_up_status_p.add_argument("--persona", required=True, help="Persona name")
+    level_up_status_p.set_defaults(func=cmd_level_up_status)
+
+    level_up_journal_p = level_up_sub.add_parser(
+        "journal",
+        help="Tail persona level-up journal events",
+    )
+    level_up_journal_p.add_argument("--repo", required=True, help="Repo path or .agent-fleet.yaml")
+    level_up_journal_p.add_argument("--persona", required=True, help="Persona name")
+    level_up_journal_p.add_argument("--tail", type=int, default=20, help="Number of events")
+    level_up_journal_p.set_defaults(func=cmd_level_up_journal)
+
+    level_up_train_p = level_up_sub.add_parser(
+        "train",
+        help="Mine experience and promote gated overlay rules",
+    )
+    level_up_train_p.add_argument("--repo", required=True, help="Repo path or .agent-fleet.yaml")
+    level_up_train_p.add_argument("--persona", required=True, help="Persona name")
+    level_up_train_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Propose promotions without writing overlay",
+    )
+    level_up_train_p.set_defaults(func=cmd_level_up_train)
+
+    level_up_approve_p = level_up_sub.add_parser(
+        "approve",
+        help="Tech-lead approve a queued skill candidate",
+    )
+    level_up_approve_p.add_argument("--repo", required=True, help="Repo path or .agent-fleet.yaml")
+    level_up_approve_p.add_argument("--persona", required=True, help="Persona name")
+    level_up_approve_p.add_argument("--candidate", required=True, help="Candidate id")
+    level_up_approve_p.add_argument(
+        "--force",
+        action="store_true",
+        help="Approve without LLM tech-lead review (heuristic only)",
+    )
+    level_up_approve_p.set_defaults(func=cmd_level_up_approve)
+
+    level_up_compact_p = level_up_sub.add_parser(
+        "compact",
+        help="Retire idle overlay rules (7-day default)",
+    )
+    level_up_compact_p.add_argument("--repo", required=True, help="Repo path or .agent-fleet.yaml")
+    level_up_compact_p.add_argument("--persona", required=True, help="Persona name")
+    level_up_compact_p.set_defaults(func=cmd_level_up_compact)
+
+    level_up_overlap_p = level_up_sub.add_parser(
+        "overlap",
+        help="List rule ids present in repo and fleet overlays",
+    )
+    level_up_overlap_p.add_argument("--repo", required=True, help="Repo path or .agent-fleet.yaml")
+    level_up_overlap_p.add_argument("--persona", required=True, help="Persona name")
+    level_up_overlap_p.set_defaults(func=cmd_level_up_overlap)
 
     args = parser.parse_args(argv)
     return args.func(args)

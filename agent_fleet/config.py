@@ -20,6 +20,17 @@ if TYPE_CHECKING:
 
 _DEFAULT_CONFIG_PATH = Path.home() / ".hermes" / "coding_fleet" / "fleet.yaml"
 _PACKAGE_PERSONAS = Path(__file__).resolve().parent / "personas"
+_NEW_DEFAULT_RUNS_DIR = Path.home() / ".agent-fleet" / "fleet" / "runs"
+# Keep writing to ~/.hermes/fleet/runs when that directory already exists.
+_LEGACY_RUNS_DIR = Path.home() / ".hermes" / "fleet" / "runs"
+
+
+def default_runs_dir() -> Path:
+    """Default JSONL run log directory for fleet dispatches."""
+    if _LEGACY_RUNS_DIR.exists():
+        return _LEGACY_RUNS_DIR
+    return _NEW_DEFAULT_RUNS_DIR
+
 
 _DEFAULT_PIPELINES: dict[str, list[str]] = {
     "simple": ["execute"],

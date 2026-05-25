@@ -6,10 +6,12 @@ from typing import TYPE_CHECKING, Any
 
 from agent_fleet.agent_mode import parse_agent_mode
 from agent_fleet.contracts.review import ReviewVerdict
+from agent_fleet.personas import read_persona_body
 from agent_fleet.pr_review.runner import run_pr_review
 from agent_fleet.reviewer import aggregate_verdict
 from agent_fleet.reviewer import review as structured_review
 from agent_fleet.scope import files_outside_allowed_paths
+from agent_fleet.skills_lib import base_kit_skill_dirs, resolve_skill_path
 from agent_fleet.verify_core import (
     get_working_tree_changes,
     get_working_tree_diff,
@@ -23,12 +25,24 @@ if TYPE_CHECKING:
     from agent_fleet.repo import RepoConfig
 
 
-def _read_persona_prompt(persona: Persona) -> str:
-    return persona.prompt_path.read_text(encoding="utf-8")
+def _review_skill_prompt_append(task: FleetTask) -> str:
+    if task.equip is None or not task.equip.skill_slots_review:
+        return ""
+    blocks: list[str] = []
+    for skill_id in task.equip.skill_slots_review:
+        path = resolve_skill_path(skill_id, base_kit_skill_dirs())
+        if path is not None:
+            blocks.append(path.read_text(encoding="utf-8").strip())
+    if not blocks:
+        return ""
+    return "\n\n".join(["# Review Skills", *blocks])
 
 
 def _build_execute_prompt(persona: Persona, task: FleetTask) -> str:
-    body = _read_persona_prompt(persona)
+    if task.equip is not None and task.equip.compose_body.strip():
+        body = task.equip.compose_body.strip()
+    else:
+        body = read_persona_body(persona)
     parts = [
         "# Persona",
         body.strip(),
@@ -230,6 +244,14 @@ def run_structured_review_phase(
 
     reviewer = resolver.load(reviewer_persona)
     pr_diff = get_working_tree_diff(workspace)
+    review_context = task.context
+    skill_append = _review_skill_prompt_append(task)
+    if skill_append:
+        review_context = (
+            f"{skill_append}\n\n{review_context}".strip()
+            if review_context.strip()
+            else skill_append
+        )
     try:
         reviews = structured_review(
             1,
@@ -239,7 +261,7 @@ def run_structured_review_phase(
             timeout_s=timeout_s,
             cwd=workspace,
             task_goal=task.goal,
-            task_context=task.context,
+            task_context=review_context,
             implementation_summary=implementation_summary,
             model=reviewer.model,
             allowed_tools=list(reviewer.allowed_tools),
@@ -439,11 +461,16 @@ def _legacy_review_phase(
     session: LLMSession | None = None,
 ) -> dict[str, Any]:
     persona = resolver.load(reviewer_persona)
-    body = _read_persona_prompt(persona)
-    prompt = "\n".join(
+    body = read_persona_body(persona)
+    prompt_parts = [
+        "# Persona",
+        body.strip(),
+    ]
+    skill_append = _review_skill_prompt_append(task)
+    if skill_append:
+        prompt_parts.extend(["", skill_append])
+    prompt_parts.extend(
         [
-            "# Persona",
-            body.strip(),
             "",
             "# Original Task",
             task.goal.strip(),
@@ -455,6 +482,7 @@ def _legacy_review_phase(
             "note missing tests, and give a clear verdict: APPROVE or REQUEST_CHANGES.",
         ]
     )
+    prompt = "\n".join(prompt_parts)
     if session is not None:
         result = session.send(
             prompt,

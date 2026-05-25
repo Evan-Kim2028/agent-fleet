@@ -1,0 +1,62 @@
+"""Tests for persona loadouts and base-kit skill composition."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from agent_fleet.personas import load_loadout
+from agent_fleet.skills_lib import (
+    base_kit_skill_dirs,
+    compose_persona_body,
+    load_skill_text,
+    resolve_skill_path,
+)
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def test_deslop_loads_from_base_kit() -> None:
+    dirs = base_kit_skill_dirs()
+    assert dirs
+    path = resolve_skill_path("cursor-team-kit/deslop", dirs)
+    assert path is not None
+    assert path.name == "SKILL.md"
+    text = load_skill_text("cursor-team-kit/deslop", dirs)
+    assert "Remove AI code slop" in text
+
+
+def test_reviewer_loadout_lists_deslop_for_review() -> None:
+    loadout = load_loadout("reviewer")
+    assert loadout is not None
+    review_skills = loadout["pipeline_skills"]["code_review"]["review"]
+    assert review_skills == ["cursor-team-kit/deslop"]
+
+
+def test_compose_persona_body_includes_sections() -> None:
+    loadout = load_loadout("coder")
+    assert loadout is not None
+    stub = (ROOT / "agent_fleet" / "personas" / "coder.md").read_text(encoding="utf-8")
+    body = compose_persona_body(
+        loadout,
+        fleet_overlay="- Prefer ruff before finishing.",
+        repo_overlay="- Run pytest -q before claiming done.",
+        stub_text=stub,
+        skill_dirs=base_kit_skill_dirs(),
+        level_up_generation=2,
+    )
+    assert "General-purpose coding agent" in body
+    assert "# Fleet learned" in body
+    assert "ruff before finishing" in body
+    assert "# Repo learned (generation 2)" in body
+    assert "pytest -q" in body
+
+
+def test_coder_loadout_references_base_kit_skill_files() -> None:
+    loadout = load_loadout("coder")
+    assert loadout is not None
+    dirs = base_kit_skill_dirs()
+    execute_ids = loadout["skills"]["execute"]
+    for skill_id in execute_ids:
+        path = resolve_skill_path(skill_id, dirs)
+        assert path is not None, skill_id
+        assert path.name == "SKILL.md"

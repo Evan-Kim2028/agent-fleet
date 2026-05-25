@@ -30,6 +30,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _entry_int(entry: dict[str, object], key: str) -> int:
+    value = entry.get(key)
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return 0
+
+
 def maybe_unpark_pr_entry(
     entry: dict[str, object],
     *,
@@ -177,8 +188,8 @@ class PrLoopWatcher:
 
             comments = github_ops.pr_comments(pr_number, cwd=self.repo.repo_root)
             review_body = find_reviewer_comment(comments, marker=marker)
-            fix_attempts = int(entry.get("fix_attempts") or 0)
-            ci_timeout_attempts = int(entry.get("ci_timeout_attempts") or 0)
+            fix_attempts = _entry_int(entry, "fix_attempts")
+            ci_timeout_attempts = _entry_int(entry, "ci_timeout_attempts")
 
             needs_fix = False
             if review_body and not entry.get("review_addressed"):

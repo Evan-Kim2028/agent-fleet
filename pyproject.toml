@@ -39,7 +39,7 @@ where = ["."]
 include = ["agent_fleet*"]
 
 [tool.setuptools.package-data]
-agent_fleet = ["personas/*.md", "schemas/*.json"]
+agent_fleet = ["personas/*.md", "personas/*.loadout.yaml", "base-kit/**/*", "schemas/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

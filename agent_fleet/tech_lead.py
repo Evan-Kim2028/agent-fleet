@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.contracts.task_spec import RiskTier, TaskSpec
@@ -23,6 +24,7 @@ from agent_fleet.contracts.tech_lead_review import (
 if TYPE_CHECKING:
     from agent_fleet.contracts.review import ReviewResult
     from agent_fleet.hooks import LLMBackend, LLMSession
+    from agent_fleet.level_up.models import LevelUpRule
 
 # ---------------------------------------------------------------------------
 # Trigger guard
@@ -193,3 +195,88 @@ def tech_lead_review(
         disagreement_with_planner=data["disagreement_with_planner"],
         cross_pr_concerns=list(data["cross_pr_concerns"]),
     )
+
+
+# ---------------------------------------------------------------------------
+# Skill promotion review (level-up)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SkillPromotionReview:
+    verdict: str
+    summary: str
+
+
+def _skill_promotion_prompt(rule: LevelUpRule, kind: str) -> str:
+    return (
+        "You are the Tech Lead reviewing a proposed persona overlay skill rule.\n"
+        "Reject episodic trivia (issue numbers, branch names, one-off paths).\n"
+        "Approve reusable playbook rules for coding agents.\n\n"
+        f"Kind: {kind}\n"
+        f"Rule id: {rule.id}\n"
+        f"Text: {rule.text}\n\n"
+        "Respond with ONLY JSON:\n"
+        '{"verdict":"approve"|"reject","summary":"<short reason>"}\n'
+    )
+
+
+def skill_promotion_review(
+    rule: LevelUpRule,
+    *,
+    kind: str,
+    backend: LLMBackend | None = None,
+    session: LLMSession | None = None,
+    force: bool = False,
+    max_tokens: int = 1024,
+    timeout_s: int = 120,
+    memory_limit: str = "2G",
+) -> SkillPromotionReview:
+    """Review a queued level-up candidate for promotion."""
+    if backend is None and session is None:
+        if not force:
+            return SkillPromotionReview(
+                verdict="reject",
+                summary="Tech-lead skill review requires an LLM backend or --force.",
+            )
+        if len(rule.text.strip()) < 20:
+            return SkillPromotionReview(
+                verdict="reject",
+                summary="Rule text too short for reusable skill.",
+            )
+        if kind.startswith("domain"):
+            return SkillPromotionReview(
+                verdict="approve",
+                summary="Heuristic approve for gated domain rule (no LLM backend).",
+            )
+        return SkillPromotionReview(
+            verdict="approve",
+            summary="Heuristic approve for playbook-shaped rule (no LLM backend).",
+        )
+
+    prompt = _skill_promotion_prompt(rule, kind)
+    if session is not None:
+        result = session.send(
+            prompt,
+            max_tokens=max_tokens,
+            timeout_s=timeout_s,
+            allowed_tools=[],
+        )
+        stdout = result.stdout
+    else:
+        assert backend is not None
+        result = backend.run(
+            prompt,
+            max_tokens=max_tokens,
+            timeout_s=timeout_s,
+            memory_limit=memory_limit,
+            allowed_tools=[],
+        )
+        stdout = result.stdout
+
+    data = _extract_json(stdout)
+    verdict = str(data.get("verdict") or "reject").strip().lower()
+    if verdict not in {"approve", "reject"}:
+        verdict = "reject"
+    summary = str(data.get("summary") or "")
+    return SkillPromotionReview(verdict=verdict, summary=summary)

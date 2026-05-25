@@ -1,0 +1,12 @@
+schema_version: 1
+stub: reviewer.md
+skills:
+  execute:
+    - superpowers/receiving-code-review
+    - superpowers/requesting-code-review
+    - pstack/interrogate
+    - pstack/reflect
+pipeline_skills:
+  code_review:
+    review:
+      - cursor-team-kit/deslop

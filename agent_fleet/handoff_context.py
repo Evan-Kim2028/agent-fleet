@@ -22,6 +22,7 @@ def apply_handoff_to_task(task: FleetTask, handoff: HandoffNote | None) -> Fleet
         workspace=task.workspace,
         pipeline=task.pipeline,
         title=task.title,
+        equip=task.equip,
     )
 
 

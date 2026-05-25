@@ -13,3 +13,4 @@ venv/
 .DS_Store
 .coverage
 htmlcov/
+.worktrees/

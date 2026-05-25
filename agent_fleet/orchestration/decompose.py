@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.contracts.task_spec import DecompositionDecision, TaskSpec
 from agent_fleet.hooks import FleetTask, FleetTaskResult
+from agent_fleet.level_up.models import DispatchEquip
 from agent_fleet.planner import plan
 
 if TYPE_CHECKING:
@@ -96,6 +98,7 @@ def enrich_task_from_task_spec(task: FleetTask, task_spec: TaskSpec) -> FleetTas
         workspace=task.workspace,
         pipeline=task.pipeline,
         title=task.title,
+        equip=task.equip,
     )
 
 
@@ -141,6 +144,7 @@ def child_tasks_from_task_spec(
     child_pipeline: str,
     persona_resolver: PersonaResolver,
     fallback_persona: str,
+    parent_run_id: str | None = None,
 ) -> list[FleetTask]:
     """Build FleetTask list from planner child_issues_proposed."""
     known = set(persona_resolver.list_personas())
@@ -161,6 +165,18 @@ def child_tasks_from_task_spec(
             persona = fallback_persona
         goal = title if body == title else f"{title}\n\n{body}"
         context = _child_context(child, task_spec, parent_context=parent_context)
+        child_equip = (
+            DispatchEquip(
+                persona=persona,
+                base_loadout=persona,
+                skill_slots_execute=(),
+                skill_slots_review=(),
+                level_up_generation=0,
+                parent_run_id=parent_run_id,
+            )
+            if parent_run_id
+            else None
+        )
         children.append(
             FleetTask(
                 goal=goal,
@@ -169,6 +185,7 @@ def child_tasks_from_task_spec(
                 workspace=workspace,
                 pipeline=child_pipeline,
                 title=title,
+                equip=child_equip,
             )
         )
     return children
@@ -213,6 +230,7 @@ def dispatch_task_spec_children(
     persona_resolver: PersonaResolver,
     fallback_persona: str,
     max_parallel: int | None = None,
+    parent_run_id: str | None = None,
 ) -> tuple[list[FleetTaskResult], str, str | None, str]:
     """Fan out child tasks through the fleet dispatcher.
 
@@ -234,6 +252,7 @@ def dispatch_task_spec_children(
         child_pipeline=child_pipeline,
         persona_resolver=persona_resolver,
         fallback_persona=fallback_persona,
+        parent_run_id=parent_run_id,
     )
 
     limit = max_parallel or dispatcher.config.max_parallel
@@ -247,19 +266,27 @@ def dispatch_task_spec_children(
     all_results: list[FleetTaskResult] = []
     for offset in range(0, len(children), limit):
         wave = children[offset : offset + limit]
-        wave_results = dispatcher.dispatch(
-            tasks=[
-                {
-                    "goal": t.goal,
-                    "context": t.context,
-                    "persona": t.persona,
-                    "workspace": t.workspace,
-                    "pipeline": t.pipeline,
-                }
-                for t in wave
-            ],
-        )
-        all_results.extend(wave_results)
+        if len(wave) == 1:
+            all_results.append(
+                dispatcher._execute_task(0, wave[0], batch_size=1, same_workspace_tasks=1)
+            )
+            continue
+        wave_results: list[FleetTaskResult | None] = [None] * len(wave)
+        with ThreadPoolExecutor(max_workers=len(wave)) as pool:
+            futures = {
+                pool.submit(
+                    dispatcher._execute_task,
+                    idx,
+                    child,
+                    batch_size=len(wave),
+                    same_workspace_tasks=1,
+                ): idx
+                for idx, child in enumerate(wave)
+            }
+            for future in as_completed(futures):
+                idx = futures[future]
+                wave_results[idx] = future.result()
+        all_results.extend(r for r in wave_results if r is not None)
 
     status, error, summary = aggregate_child_results(all_results)
     return all_results, status, error, summary

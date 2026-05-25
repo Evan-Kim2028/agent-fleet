@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from agent_fleet.contracts.mcp import McpServerSpec
     from agent_fleet.contracts.mcp_requirement import McpRequirement
     from agent_fleet.contracts.verify_result import VerifyResult
+    from agent_fleet.level_up.models import DispatchEquip
 
 
 @runtime_checkable
@@ -163,6 +164,10 @@ class Persona:
     prompt_path: Path
     allowed_tools: list[str]
     capabilities: dict[str, bool]
+    body: str | None = None
+    skill_slots_execute: tuple[str, ...] = ()
+    skill_slots_review: tuple[str, ...] = ()
+    level_up_generation: int = 0
     allowed_paths: tuple[str, ...] = ()
     model: str = "composer-2.5"
     mode: str = "agent"
@@ -240,6 +245,7 @@ class FleetTask:
     workspace: str | None = None
     pipeline: str | None = None
     title: str | None = None
+    equip: DispatchEquip | None = None
 
 
 @dataclass(frozen=True)

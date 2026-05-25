@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import time
-from typing import TYPE_CHECKING
+from dataclasses import asdict
+from typing import TYPE_CHECKING, Any
 
 from agent_fleet.code_review import publish_fleet_branch, run_code_review_with_auto_fix
 from agent_fleet.fleet_session import create_fleet_session
@@ -134,6 +136,114 @@ def run_configured_pipeline(
             session.dispose()
 
 
+def _equip_snapshot(task: FleetTask) -> dict[str, Any]:
+    if task.equip is None:
+        return {}
+    snapshot = asdict(task.equip)
+    snapshot["skill_slots_execute"] = list(task.equip.skill_slots_execute)
+    snapshot["skill_slots_review"] = list(task.equip.skill_slots_review)
+    return snapshot
+
+
+def _experience_source_context(task: FleetTask) -> tuple[str, int | None]:
+    source = "cli"
+    pr_loop_round: int | None = None
+    ctx = task.context.strip()
+    if not ctx:
+        return source, pr_loop_round
+    try:
+        parsed = json.loads(ctx)
+    except json.JSONDecodeError:
+        return source, pr_loop_round
+    if not isinstance(parsed, dict):
+        return source, pr_loop_round
+    if parsed.get("source") is not None:
+        source = str(parsed["source"])
+    round_value = parsed.get("pr_loop_round")
+    if round_value is not None:
+        pr_loop_round = int(round_value)
+    return source, pr_loop_round
+
+
+def _review_verdict_from_phases(phase_results: list[dict[str, object]]) -> str | None:
+    for item in reversed(phase_results):
+        if item.get("phase") != "review":
+            continue
+        verdict = item.get("verdict")
+        if verdict:
+            return str(verdict)
+    return None
+
+
+def _record_task_experience(
+    *,
+    task_index: int,
+    task: FleetTask,
+    status: str,
+    phase_results: list[dict[str, object]],
+    changed_files: list[str] | None,
+    workspace: Path | None,
+    fleet_log: FleetLogger,
+) -> None:
+    from agent_fleet.level_up.experience import append_experience, compute_experience_weight
+    from agent_fleet.level_up.journal import append_journal
+    from agent_fleet.level_up.paths import repo_key as level_up_repo_key
+    from agent_fleet.repo import find_repo_config
+
+    repo = find_repo_config(workspace) if workspace is not None else None
+    level_up_cfg = repo.level_up if repo is not None else None
+    if level_up_cfg is not None and not level_up_cfg.train:
+        return
+
+    repo_key_value = level_up_repo_key(
+        name=repo.name if repo else None,
+        repo_root=repo.repo_root if repo else None,
+    )
+    source, pr_loop_round = _experience_source_context(task)
+    weight = compute_experience_weight(source, pr_loop_round, status=status)
+    equip_snapshot = _equip_snapshot(task)
+    review_verdict = _review_verdict_from_phases(phase_results)
+    journal_summaries = level_up_cfg.journal_task_summaries if level_up_cfg is not None else True
+
+    run_complete_data: dict[str, Any] = {
+        "task_index": task_index,
+        "status": status,
+        "equip_snapshot": equip_snapshot,
+    }
+    if journal_summaries:
+        run_complete_data["goal"] = task.goal
+
+    append_journal(
+        "run.complete",
+        repo_key_value,
+        task.persona,
+        run_id=fleet_log.run_id,
+        data=run_complete_data,
+    )
+
+    append_experience(
+        repo_key=repo_key_value,
+        persona=task.persona,
+        source=source,
+        weight=weight,
+        pr_loop_round=pr_loop_round,
+        status=status,
+        goal=task.goal if journal_summaries else None,
+        review_verdict=review_verdict,
+        equip_snapshot=equip_snapshot,
+        changed_files=changed_files,
+        run_id=fleet_log.run_id,
+    )
+
+    append_journal(
+        "experience.appended",
+        repo_key_value,
+        task.persona,
+        run_id=fleet_log.run_id,
+        data={"source": source, "weight": weight},
+    )
+
+
 def build_task_result(
     *,
     task_index: int,
@@ -145,6 +255,7 @@ def build_task_result(
     changed_files: list[str] | None,
     task_workspace: TaskWorkspace | None,
     fleet_log: FleetLogger,
+    workspace: Path | None = None,
 ) -> FleetTaskResult:
     from agent_fleet.hooks import FleetTaskResult
 
@@ -181,6 +292,15 @@ def build_task_result(
         persona=task.persona,
         status=status,
         duration_seconds=result.duration_seconds,
+    )
+    _record_task_experience(
+        task_index=task_index,
+        task=task,
+        status=status,
+        phase_results=phase_results,
+        changed_files=changed_files,
+        workspace=workspace,
+        fleet_log=fleet_log,
     )
     return result
 

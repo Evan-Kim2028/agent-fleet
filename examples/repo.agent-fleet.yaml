@@ -76,6 +76,12 @@ critical_path_prefixes:
 #     max_research_workers: 4
 #     max_verify_retries: 3
 
+# Privacy / persona evolution (see docs/PERSONA-EVOLUTION.md)
+# level_up:
+#   train: true
+#   contribute_to_fleet: true
+#   journal_task_summaries: true
+
 # Automated PR lifecycle (requires pr-analyzer workflow + local watcher)
 # Full example: examples/repo-full.agent-fleet.yaml — see docs/NEW-REPO.md
 # pr_loop:
