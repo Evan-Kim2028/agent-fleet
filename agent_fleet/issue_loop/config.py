@@ -54,13 +54,12 @@ def load_issue_dispatch_config(
     queue_raw = section.get("queue")
     queue_cfg: IssueQueueConfig | None = None
     if isinstance(queue_raw, dict) and queue_raw.get("enabled"):
-        advance = str(queue_raw.get("advance", "dispatch"))
-        if advance not in ("dispatch", "complete"):
-            advance = "dispatch"
+        advance_raw = str(queue_raw.get("advance", "dispatch"))
+        advance: QueueAdvance = "complete" if advance_raw == "complete" else "dispatch"
         queue_cfg = IssueQueueConfig(
             enabled=True,
             file=str(queue_raw.get("file", ".agent-fleet-queue.yaml")),
-            advance=advance,  # type: ignore[arg-type]
+            advance=advance,
         )
     return IssueDispatchConfig(
         enabled=bool(section.get("enabled", False)),

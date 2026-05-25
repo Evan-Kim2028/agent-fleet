@@ -8,7 +8,6 @@ import signal
 import subprocess
 import sys
 import time
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.capacity import (
@@ -38,6 +37,8 @@ from agent_fleet.observability.fleet_logger import get_watcher_logger
 from agent_fleet.repo import RepoConfig, find_repo_config
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from agent_fleet.issue_loop.config import IssueDispatchConfig
     from agent_fleet.pr_loop.config import PrLoopConfig
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
@@ -23,6 +22,7 @@ from agent_fleet.issue_loop.queue import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
 ISSUE_VIEW = {"title": "t", "body": ""}

@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from unittest.mock import patch
-
-from collections.abc import Iterator
 
 import pytest
 
@@ -14,6 +13,9 @@ from agent_fleet.capacity import (
     count_in_flight,
 )
 from agent_fleet.capacity.config import CapacityTier, PerIssueLimits
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 @pytest.fixture(autouse=True)

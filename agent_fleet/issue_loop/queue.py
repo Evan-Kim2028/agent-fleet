@@ -143,7 +143,7 @@ def poll_queue(
     state: dict[str, Any],
     capacity_gate: FleetCapacityGate,
     spawn_dispatch: SpawnDispatchFn,
-    available_ram_gb: float,
+    available_ram_gb: float | None,
 ) -> tuple[list[dict[str, str]], bool]:
     """Drain the FIFO queue. Returns (results, retryable_deferred)."""
     reap_in_flight(state)
