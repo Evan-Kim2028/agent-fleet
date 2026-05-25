@@ -373,7 +373,9 @@ class LocalFleetRunner:
                     phases["DECOMPOSE_FALLBACK"] = {
                         "reason": "empty child_issues_proposed",
                     }
-                    run_log.emit("orchestration.decompose_fallback", data=phases["DECOMPOSE_FALLBACK"])
+                    run_log.emit(
+                        "orchestration.decompose_fallback", data=phases["DECOMPOSE_FALLBACK"]
+                    )
 
                 if task_spec.decomposition_decision == DecompositionDecision.REJECTED:
                     result = FleetRunResult(

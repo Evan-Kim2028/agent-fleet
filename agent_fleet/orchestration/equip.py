@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from agent_fleet.level_up.experience import last_experience_shows_verify_failed
 from agent_fleet.level_up.compaction import touch_overlay_rules
+from agent_fleet.level_up.experience import last_experience_shows_verify_failed
 from agent_fleet.level_up.journal import append_journal
 from agent_fleet.level_up.models import DispatchEquip
 from agent_fleet.level_up.overlay import compose_overlay_text, load_overlay

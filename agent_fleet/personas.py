@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -10,35 +9,15 @@ import yaml
 
 from agent_fleet.config import FleetConfig, PersonaSpec
 from agent_fleet.hooks import Persona
+from agent_fleet.level_up.models import LevelUpOverlay
+from agent_fleet.level_up.overlay import compose_overlay_text, load_overlay
+from agent_fleet.level_up.paths import repo_key as level_up_repo_key
 from agent_fleet.skills_lib import (
     base_kit_skill_dirs,
     compose_persona_body,
     find_skill_path,
     merge_skill_dirs,
 )
-
-try:
-    from agent_fleet.level_up.overlay import PersonaOverlay, compose_overlay_text, load_overlay
-    from agent_fleet.level_up.paths import repo_key as level_up_repo_key
-except ImportError:
-
-    @dataclass(frozen=True)
-    class PersonaOverlay:
-        rules: tuple[dict[str, Any], ...] = ()
-        generation: int = 0
-
-    def load_overlay(repo_key: str, persona: str) -> PersonaOverlay:
-        del repo_key, persona
-        return PersonaOverlay()
-
-    def compose_overlay_text(rules: tuple[dict[str, Any], ...] | list[dict[str, Any]]) -> str:
-        del rules
-        return ""
-
-    def level_up_repo_key(name: str | None = None, repo_root: Path | str | None = None) -> str:
-        del name, repo_root
-        return "_unknown"
-
 
 _DEFAULT_ALLOWED_TOOLS = ["read_file", "write_file", "run_command"]
 _PACKAGE_PERSONAS = Path(__file__).resolve().parent / "personas"
@@ -82,7 +61,7 @@ def _repo_key(cfg: FleetConfig) -> str | None:
 def _level_up_overlay_texts(repo_key: str | None, persona: str) -> tuple[str, str, int]:
     fleet_overlay = load_overlay("_fleet", persona)
     repo_overlay = (
-        load_overlay(repo_key, persona) if repo_key else PersonaOverlay(rules=(), generation=0)
+        load_overlay(repo_key, persona) if repo_key else LevelUpOverlay(schema_version=1, rules=(), generation=0)
     )
     fleet_text = compose_overlay_text(fleet_overlay.rules)
     repo_text = compose_overlay_text(repo_overlay.rules)
@@ -184,8 +163,10 @@ class YamlPersonaResolver:
                 prompt_path = stub_path
             elif spec.skill:
                 skill_path = find_skill_path(spec.skill, skill_dirs)
-                prompt_path = skill_path if skill_path is not None else _resolve_prompt_path(
-                    spec, self._config
+                prompt_path = (
+                    skill_path
+                    if skill_path is not None
+                    else _resolve_prompt_path(spec, self._config)
                 )
             else:
                 prompt_path = _resolve_prompt_path(spec, self._config)

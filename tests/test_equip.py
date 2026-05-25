@@ -1,3 +1,4 @@
+# ruff: noqa: TC002
 """Tests for orchestration equip resolution and dispatcher integration."""
 
 from __future__ import annotations
@@ -55,11 +56,15 @@ def test_resolve_dispatch_equip_baseline(tmp_path: Path, monkeypatch: pytest.Mon
 
     journal_path = persona_dir("equip-demo", "coder") / "journal.jsonl"
     assert journal_path.is_file()
-    events = [json.loads(line)["event"] for line in journal_path.read_text(encoding="utf-8").splitlines()]
+    events = [
+        json.loads(line)["event"] for line in journal_path.read_text(encoding="utf-8").splitlines()
+    ]
     assert events == ["equip.loadout", "equip.compose"]
 
 
-def test_verify_failed_adds_systematic_debugging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_verify_failed_adds_systematic_debugging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     level_up_root = tmp_path / "level_up"
     _patch_level_up_root(monkeypatch, level_up_root)
 
@@ -85,7 +90,9 @@ def test_verify_failed_skips_missing_base_kit_skill(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _patch_level_up_root(monkeypatch, tmp_path / "level_up")
-    monkeypatch.setattr("agent_fleet.orchestration.equip.skill_exists_in_base_kit", lambda _skill_id: False)
+    monkeypatch.setattr(
+        "agent_fleet.orchestration.equip.skill_exists_in_base_kit", lambda _skill_id: False
+    )
 
     repo_yaml = tmp_path / ".agent-fleet.yaml"
     repo_yaml.write_text("name: no-skill\n", encoding="utf-8")
@@ -135,7 +142,9 @@ def test_child_tasks_carry_parent_run_id() -> None:
     assert children[0].equip.parent_run_id == "parent-run-42"
 
 
-def test_resolve_preserves_parent_run_id_from_task_equip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_preserves_parent_run_id_from_task_equip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _patch_level_up_root(monkeypatch, tmp_path / "level_up")
 
     repo_yaml = tmp_path / ".agent-fleet.yaml"

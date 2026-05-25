@@ -1,5 +1,7 @@
 """Structured run logging for fleet dispatches."""
 
+# ruff: noqa: TC003
+
 from __future__ import annotations
 
 import contextlib

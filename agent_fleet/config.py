@@ -31,6 +31,7 @@ def default_runs_dir() -> Path:
         return _LEGACY_RUNS_DIR
     return _NEW_DEFAULT_RUNS_DIR
 
+
 _DEFAULT_PIPELINES: dict[str, list[str]] = {
     "simple": ["execute"],
     "code_review": ["execute", "review"],

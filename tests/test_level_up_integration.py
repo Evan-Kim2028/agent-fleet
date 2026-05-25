@@ -1,3 +1,4 @@
+# ruff: noqa: ARG001
 """Integration: equip → compose → experience recording."""
 
 from __future__ import annotations

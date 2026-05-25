@@ -84,9 +84,7 @@ def run_commit_preflight(
             timeout=600,
         )
         if result.returncode != 0:
-            combined = "\n".join(
-                part for part in (result.stdout, result.stderr) if part
-            ).strip()
+            combined = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
             errors.append(f"$ {command}\n{combined[:2000]}")
 
     if errors:

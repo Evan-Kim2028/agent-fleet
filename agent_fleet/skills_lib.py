@@ -69,6 +69,20 @@ def merge_skill_dirs(*extra: list[Path]) -> list[Path]:
     return merged
 
 
+def repo_skill_dirs(repo: object) -> list[Path]:
+    """Return conventional repo-local skill directories when present."""
+    from agent_fleet.repo import RepoConfig
+
+    if not isinstance(repo, RepoConfig):
+        return []
+    dirs: list[Path] = []
+    for name in (".cursor/skills", "skills", ".agents/skills"):
+        candidate = (repo.repo_root / name).resolve()
+        if candidate.is_dir():
+            dirs.append(candidate)
+    return dirs
+
+
 def _loadout_execute_skill_ids(loadout: dict[str, Any]) -> list[str]:
     skill_slots = loadout.get("skill_slots")
     if isinstance(skill_slots, dict):

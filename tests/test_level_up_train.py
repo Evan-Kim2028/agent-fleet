@@ -1,3 +1,4 @@
+# ruff: noqa: TC003, ARG001
 """Tests for level-up train, gate, compaction, and tech-lead promotion."""
 
 from __future__ import annotations
@@ -59,7 +60,7 @@ def test_gate_queues_domain_for_tech_lead() -> None:
     assert result.needs_tech_lead is True
 
 
-def test_train_promotes_from_verify_failed_experience(level_up_root: Path) -> None:  # noqa: ARG001
+def test_train_promotes_from_verify_failed_experience(level_up_root: Path) -> None:
     append_experience(
         repo_key="demo-repo",
         persona="coder",
@@ -77,7 +78,7 @@ def test_train_promotes_from_verify_failed_experience(level_up_root: Path) -> No
     assert "verify_commands" in overlay.rules[0].text
 
 
-def test_train_queues_domain_candidate(level_up_root: Path) -> None:  # noqa: ARG001
+def test_train_queues_domain_candidate(level_up_root: Path) -> None:
     rule = LevelUpRule(
         id="iceberg-partition",
         kind="domain_data",
@@ -113,7 +114,7 @@ def test_skill_promotion_review_heuristic() -> None:
     assert review.verdict == "approve"
 
 
-def test_compaction_keeps_rules_without_touch_or_provenance(level_up_root: Path) -> None:  # noqa: ARG001
+def test_compaction_keeps_rules_without_touch_or_provenance(level_up_root: Path) -> None:
     rule = LevelUpRule(
         id="manual-rule",
         kind="methodology",
@@ -127,7 +128,7 @@ def test_compaction_keeps_rules_without_touch_or_provenance(level_up_root: Path)
     assert len(overlay.rules) == 1
 
 
-def test_compaction_retires_idle_rules(level_up_root: Path) -> None:  # noqa: ARG001
+def test_compaction_retires_idle_rules(level_up_root: Path) -> None:
     rule = LevelUpRule(
         id="old-rule",
         kind="methodology",
@@ -179,7 +180,7 @@ def test_provenance_redacts_when_journal_task_summaries_false() -> None:
     assert "agent_fleet/" in prov["note"]
 
 
-def test_find_overlay_overlap(level_up_root: Path) -> None:  # noqa: ARG001
+def test_find_overlay_overlap(level_up_root: Path) -> None:
     shared = LevelUpRule(
         id="verify-before-done",
         kind="methodology",

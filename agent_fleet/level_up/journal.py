@@ -1,3 +1,4 @@
+# ruff: noqa: TC003
 """Structured journaling for persona level-up events."""
 
 from __future__ import annotations

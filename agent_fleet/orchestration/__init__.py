@@ -16,6 +16,7 @@ __all__ = [
     "OrchestrationConfig",
     "aggregate_child_results",
     "child_tasks_from_task_spec",
+    "coerce_empty_decompose",
     "dispatch_task_spec_children",
     "enrich_task_from_task_spec",
     "handle_preflight_decision",

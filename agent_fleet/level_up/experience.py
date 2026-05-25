@@ -69,6 +69,7 @@ def read_last_experience(repo_key_value: str, persona: str) -> dict[str, Any] | 
     rows = read_experience_rows(repo_key_value, persona, limit=1)
     return rows[-1] if rows else None
 
+
 def last_experience_shows_verify_failed(repo_key_value: str, persona: str) -> bool:
     last = read_last_experience(repo_key_value, persona)
     if last is None:

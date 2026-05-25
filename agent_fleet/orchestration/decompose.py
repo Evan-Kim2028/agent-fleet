@@ -4,11 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
-<<<<<<< HEAD
 from concurrent.futures import ThreadPoolExecutor, as_completed
-=======
 from dataclasses import replace
->>>>>>> origin/main
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.contracts.task_spec import DecompositionDecision, TaskSpec
@@ -270,7 +267,9 @@ def dispatch_task_spec_children(
     for offset in range(0, len(children), limit):
         wave = children[offset : offset + limit]
         if len(wave) == 1:
-            all_results.append(dispatcher._execute_task(0, wave[0], batch_size=1, same_workspace_tasks=1))
+            all_results.append(
+                dispatcher._execute_task(0, wave[0], batch_size=1, same_workspace_tasks=1)
+            )
             continue
         wave_results: list[FleetTaskResult | None] = [None] * len(wave)
         with ThreadPoolExecutor(max_workers=len(wave)) as pool:

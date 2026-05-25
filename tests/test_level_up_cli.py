@@ -1,3 +1,4 @@
+# ruff: noqa: TC003, ANN001, ARG001
 """Tests for level-up CLI commands."""
 
 from __future__ import annotations

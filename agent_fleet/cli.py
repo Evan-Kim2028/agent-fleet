@@ -13,7 +13,7 @@ from agent_fleet.cli_env import require_backend_env
 from agent_fleet.config import load_fleet_config
 from agent_fleet.dispatcher import FleetDispatcher
 from agent_fleet.personas import YamlPersonaResolver
-from agent_fleet.repo import find_repo_config
+from agent_fleet.repo import RepoConfig, find_repo_config
 from agent_fleet.runner import run_full_pipeline
 
 
@@ -202,7 +202,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
-def _resolve_repo_from_path(repo_path: Path):
+def _resolve_repo_from_path(repo_path: Path) -> RepoConfig:
     from agent_fleet.repo import find_repo_config, load_repo_config
 
     repo_path = repo_path.resolve()

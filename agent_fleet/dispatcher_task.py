@@ -203,9 +203,7 @@ def _record_task_experience(
     weight = compute_experience_weight(source, pr_loop_round, status=status)
     equip_snapshot = _equip_snapshot(task)
     review_verdict = _review_verdict_from_phases(phase_results)
-    journal_summaries = (
-        level_up_cfg.journal_task_summaries if level_up_cfg is not None else True
-    )
+    journal_summaries = level_up_cfg.journal_task_summaries if level_up_cfg is not None else True
 
     run_complete_data: dict[str, Any] = {
         "task_index": task_index,

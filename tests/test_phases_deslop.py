@@ -1,3 +1,4 @@
+# ruff: noqa: TC002
 """Review phase injects deslop skill text from dispatch equip."""
 
 from __future__ import annotations

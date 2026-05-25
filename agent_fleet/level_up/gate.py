@@ -1,3 +1,4 @@
+# ruff: noqa: TC001
 """Skill vs memory gatekeeping for level-up promotion."""
 
 from __future__ import annotations

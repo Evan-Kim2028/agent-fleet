@@ -1,3 +1,4 @@
+# ruff: noqa: ARG001
 """Tests for agent_fleet.level_up core package."""
 
 from __future__ import annotations
