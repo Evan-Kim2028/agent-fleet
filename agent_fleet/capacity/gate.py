@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from agent_fleet.in_flight import reap_in_flight
+
 if TYPE_CHECKING:
     from agent_fleet.capacity.config import FleetCapacity
 
@@ -16,6 +18,7 @@ class AdmissionResult:
 
 
 def iter_in_flight_runs(state: dict[str, Any]) -> list[dict[str, Any]]:
+    reap_in_flight(state)
     runs: list[dict[str, Any]] = []
     for issue_key, issue_runs in (state.get("in_flight") or {}).items():
         if not isinstance(issue_runs, list):
@@ -66,6 +69,7 @@ class FleetCapacityGate:
         is_visual_audit: bool,
         available_ram_gb: float | None,
     ) -> AdmissionResult:
+        reap_in_flight(state)
         in_flight = state.setdefault("in_flight", {}).setdefault(str(issue_number), [])
         if any(run.get("persona") == persona for run in in_flight):
             return AdmissionResult(False, "already_in_flight")

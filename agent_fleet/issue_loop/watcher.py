@@ -18,6 +18,7 @@ from agent_fleet.capacity import (
     count_visual_in_flight,
     is_visual_audit_dispatch,
 )
+from agent_fleet.in_flight import reap_in_flight
 from agent_fleet.issue_loop import github_ops
 from agent_fleet.issue_loop import queue as issue_queue
 from agent_fleet.issue_loop.state import load_state, now_iso, save_state, state_path
@@ -52,24 +53,6 @@ def _on_sigterm(_signum: int, _frame: object) -> None:
 
 def _dispatch_executable() -> list[str]:
     return [sys.executable, "-m", "agent_fleet.issue_loop.dispatch"]
-
-
-def _pid_is_dispatch(pid: int) -> bool:
-    try:
-        with Path(f"/proc/{pid}/cmdline").open("rb") as handle:
-            return b"agent_fleet.issue_loop.dispatch" in handle.read()
-    except FileNotFoundError, ProcessLookupError, PermissionError:
-        return False
-
-
-def _reap_in_flight(state: dict[str, Any]) -> None:
-    in_flight = state.setdefault("in_flight", {})
-    for issue_key, runs in list(in_flight.items()):
-        alive = [run for run in runs if _pid_is_dispatch(int(run["pid"]))]
-        if alive:
-            in_flight[issue_key] = alive
-        else:
-            in_flight.pop(issue_key, None)
 
 
 def _cleanup_orphaned_playwright_mcp(state: dict[str, Any]) -> None:
@@ -131,7 +114,7 @@ class IssueLoopWatcher:
     def poll_once(self, state: dict[str, Any] | None = None) -> list[dict[str, str]]:
         if state is None:
             state = load_state(self.state_file)
-        _reap_in_flight(state)
+        reap_in_flight(state)
         _cleanup_orphaned_playwright_mcp(state)
         results: list[dict[str, str]] = []
 

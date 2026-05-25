@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.integrations.github_cli import gh as _gh
@@ -141,3 +142,50 @@ def issue_labels(issue_number: int, *, cwd: Path | None = None) -> list[str]:
         else:
             names.append(str(label))
     return [name for name in names if name]
+
+
+def issue_numbers_in_branch(head_ref: str) -> set[int]:
+    """Extract issue numbers referenced in a fleet branch name."""
+    found: set[int] = set()
+    for match in re.finditer(r"#(\d+)", head_ref):
+        found.add(int(match.group(1)))
+    tail = head_ref.rsplit("/", 1)[-1]
+    lead = re.match(r"^(\d+)", tail)
+    if lead:
+        found.add(int(lead.group(1)))
+    return found
+
+
+def open_fleet_pr_issue_numbers(
+    *,
+    branch_prefixes: tuple[str, ...] = ("fleet/",),
+    cwd: Path | None = None,
+) -> set[int]:
+    """Return issue numbers that already have an open fleet PR."""
+    result = _gh(
+        "pr",
+        "list",
+        "--state",
+        "open",
+        "--json",
+        "headRefName",
+        "--limit",
+        "100",
+        cwd=cwd,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return set()
+    try:
+        prs = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return set()
+    issues: set[int] = set()
+    for pr in prs:
+        if not isinstance(pr, dict):
+            continue
+        head_ref = str(pr.get("headRefName") or "")
+        if not any(head_ref.startswith(prefix) for prefix in branch_prefixes):
+            continue
+        issues.update(issue_numbers_in_branch(head_ref))
+    return issues

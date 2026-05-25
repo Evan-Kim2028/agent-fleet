@@ -2,12 +2,24 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
+from collections.abc import Iterator
+
+import pytest
+
 from agent_fleet.capacity import (
     FleetCapacity,
     FleetCapacityGate,
     count_in_flight,
 )
 from agent_fleet.capacity.config import CapacityTier, PerIssueLimits
+
+
+@pytest.fixture(autouse=True)
+def _alive_dispatch_pids() -> Iterator[None]:
+    with patch("agent_fleet.in_flight.pid_is_dispatch", return_value=True):
+        yield
 
 
 def _gate(**overrides: object) -> FleetCapacityGate:

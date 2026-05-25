@@ -370,9 +370,21 @@ def commit_and_push(
             timeout=30,
         )
         if not post_status.stdout.strip() or attempt == max_hook_retries:
-            logger.warning("commit failed: %s", commit.stderr[:300])
+            logger.warning(
+                "commit failed on branch %s (attempt %d/%d): %s",
+                branch,
+                attempt + 1,
+                max_hook_retries + 1,
+                (commit.stderr or commit.stdout or "")[:300].strip(),
+            )
             return False
-        logger.info("commit attempt %d failed (hook autofix?), retrying", attempt + 1)
+        logger.info(
+            "commit attempt %d/%d failed on branch %s (hook autofix?), retrying: %s",
+            attempt + 1,
+            max_hook_retries + 1,
+            branch,
+            (commit.stderr or commit.stdout or "")[:200].strip(),
+        )
     push = subprocess.run(
         ["git", "push", "origin", f"HEAD:{branch}"],
         cwd=worktree,

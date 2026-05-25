@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import yaml
 
 from agent_fleet.capacity import RETRYABLE_ADMISSION_REASONS
+from agent_fleet.in_flight import reap_in_flight
 from agent_fleet.issue_loop import github_ops
 
 if TYPE_CHECKING:
@@ -35,11 +36,18 @@ def queue_path(repo_root: Path, config: IssueQueueConfig) -> Path:
     return (repo_root / config.file).resolve()
 
 
-def file_fingerprint(path: Path) -> str:
-    if not path.exists():
-        return ""
-    stat = path.stat()
-    return f"{stat.st_mtime_ns}:{stat.st_size}"
+def queue_content_fingerprint(items: list[QueueItem]) -> str:
+    return "|".join(f"{item.issue}:{item.persona}" for item in items)
+
+
+def sync_queue_fingerprint(state: dict[str, Any], items: list[QueueItem]) -> None:
+    """Reset head only when ordered queue items change (not on note-only edits)."""
+    qs = queue_state(state)
+    fingerprint = queue_content_fingerprint(items)
+    if qs.get("fingerprint") != fingerprint:
+        qs["fingerprint"] = fingerprint
+        qs["head"] = 0
+        qs.pop("waiting_index", None)
 
 
 def load_queue_items(repo_root: Path, config: IssueQueueConfig) -> list[QueueItem]:
@@ -75,15 +83,6 @@ def queue_state(state: dict[str, Any]) -> dict[str, Any]:
     qs.setdefault("head", 0)
     qs.setdefault("fingerprint", "")
     return qs
-
-
-def sync_queue_fingerprint(state: dict[str, Any], path: Path) -> None:
-    qs = queue_state(state)
-    fingerprint = file_fingerprint(path)
-    if qs.get("fingerprint") != fingerprint:
-        qs["fingerprint"] = fingerprint
-        qs["head"] = 0
-        qs.pop("waiting_index", None)
 
 
 def build_queue_comment(item: QueueItem, dispatch_config: IssueDispatchConfig) -> str:
@@ -147,12 +146,13 @@ def poll_queue(
     available_ram_gb: float,
 ) -> tuple[list[dict[str, str]], bool]:
     """Drain the FIFO queue. Returns (results, retryable_deferred)."""
-    path = queue_path(repo_root, queue_config)
+    reap_in_flight(state)
     items = load_queue_items(repo_root, queue_config)
     if not items:
         return [], False
 
-    sync_queue_fingerprint(state, path)
+    sync_queue_fingerprint(state, items)
+    open_fleet_issues = github_ops.open_fleet_pr_issue_numbers(cwd=repo_root)
     qs = queue_state(state)
     results: list[dict[str, str]] = []
     retryable_deferred = False
@@ -177,6 +177,17 @@ def poll_queue(
             qs["head"] = head + 1
             head += 1
             results.append({"issue": str(item.issue), "status": "queue_skipped_closed"})
+            continue
+
+        if item.issue in open_fleet_issues:
+            logger.info(
+                "Queue skip issue #%s at index %s: open fleet PR already exists",
+                item.issue,
+                head,
+            )
+            qs["head"] = head + 1
+            head += 1
+            results.append({"issue": str(item.issue), "status": "queue_skipped_has_pr"})
             continue
 
         if _issue_in_flight(state, item.issue):
