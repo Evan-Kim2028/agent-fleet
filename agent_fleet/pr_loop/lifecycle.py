@@ -754,9 +754,14 @@ def _run_pr_lifecycle_body(
         return LifecycleResult("ready", "CI green; auto_merge disabled")
 
     fleet_log.emit("pr_loop.merge.attempt", pr_number=pr_number)
-    return try_merge(
+    merge_result = try_merge(
         pr_number=pr_number,
         persona=persona,
         repo=repo,
         loop_config=loop_config,
     )
+    if merge_result.status == "merged" and wt is not None and wt != repo_root:
+        from agent_fleet.pr_loop.worktree import remove_worktree
+
+        remove_worktree(repo_root, wt)
+    return merge_result

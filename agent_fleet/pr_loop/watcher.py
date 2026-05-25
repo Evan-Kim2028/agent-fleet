@@ -10,6 +10,7 @@ from agent_fleet.config import load_fleet_config
 from agent_fleet.pr_loop import github_ops
 from agent_fleet.pr_loop.lifecycle import run_pr_lifecycle
 from agent_fleet.pr_loop.review_parse import find_reviewer_comment
+from agent_fleet.pr_loop.worktree import sweep_orphan_worktrees
 from agent_fleet.state import (
     get_pr_state,
     load_state,
@@ -18,7 +19,6 @@ from agent_fleet.state import (
     set_pr_state,
     state_path,
 )
-from agent_fleet.worktree_reaper import reap_stale_worktrees
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -100,7 +100,7 @@ class PrLoopWatcher:
             cwd=self.repo.repo_root,
         )
 
-        # Reap stale worktrees once per poll, before processing PRs.
+        # Sweep orphan worktrees (no matching open PR) once per poll.
         active_branches = {str(pr.get("headRefName") or "") for pr in prs}
         try:
             from pathlib import Path as _Path
@@ -114,14 +114,9 @@ class PrLoopWatcher:
                     _wt_base = _Path(str(_raw)).expanduser()
             if _wt_base is None:
                 _wt_base = _SpineConfig.defaults().worktree_base
-            reap_stale_worktrees(
-                self.repo.repo_root,
-                _wt_base,
-                self.loop_config.worktree_reaper_max_age_s,
-                active_branches,
-            )
+            sweep_orphan_worktrees(self.repo.repo_root, _wt_base, active_branches)
         except Exception:
-            logger.debug("Worktree reaper failed", exc_info=True)
+            logger.debug("Worktree sweep failed", exc_info=True)
 
         if not prs:
             return results
