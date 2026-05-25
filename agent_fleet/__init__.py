@@ -18,4 +18,4 @@ __all__ = [
     "run_full_pipeline",
 ]
 
-__version__ = "0.6.3"
+__version__ = "0.6.4"

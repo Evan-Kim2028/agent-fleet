@@ -339,9 +339,7 @@ def address_review_findings(
         f"fix(fleet): address PR review feedback\n\n"
         f"{_AGENT_FOOTER} persona={fix_persona_name} | PR #{pr_number}"
     )
-    pushed = github_ops.commit_and_push(
-        worktree, message, branch, exclude=(STATE_FILENAME,)
-    )
+    pushed = github_ops.commit_and_push(worktree, message, branch, exclude=(STATE_FILENAME,))
     if not pushed:
         return LifecycleResult("ignored", "Review had findings but no fix commit was pushed")
     return LifecycleResult("addressed", "Fix pushed for review findings")

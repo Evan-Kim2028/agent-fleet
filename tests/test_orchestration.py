@@ -101,7 +101,10 @@ def test_child_tasks_from_task_spec() -> None:
     )
     assert len(children) == 2
     assert children[0].pipeline == "code_review"
-    assert "interface_brief" in children[0].context.lower() or "Interface contract" in children[0].context
+    assert (
+        "interface_brief" in children[0].context.lower()
+        or "Interface contract" in children[0].context
+    )
     assert "api/" in children[0].context
     assert "Parent acceptance criteria" in children[1].context
 
