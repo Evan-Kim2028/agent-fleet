@@ -173,20 +173,16 @@ def park_for_human(
     reason: str,
     *,
     repo_root: Path,
-    label: str,
 ) -> None:
-    if github_ops.pr_has_label(pr_number, label, cwd=repo_root):
-        comments = github_ops.pr_comments(pr_number, cwd=repo_root)
-        if any(_PARK_MARKER in str(c.get("body") or "") for c in comments):
-            return
-    github_ops.add_pr_label(pr_number, label, cwd=repo_root)
+    """Post a one-time human-review comment; parked state is tracked in state file."""
+    comments = github_ops.pr_comments(pr_number, cwd=repo_root)
+    if any(_PARK_MARKER in str(c.get("body") or "") for c in comments):
+        return
     github_ops.post_pr_comment(
         textwrap.dedent(f"""\
             **Auto-merge parked** — human review required.
 
             {reason}
-
-            Remove the `{label}` label after review to allow the watcher to retry.
 
             {_PARK_MARKER}
         """),
@@ -439,7 +435,7 @@ def tiered_merge_allowed(
     if out_of_scope:
         reasons.append("out-of-scope files: " + ", ".join(out_of_scope))
     if parked:
-        reasons.append("needs-human-review label present")
+        reasons.append("PR parked")
     if reasons:
         return False, "; ".join(reasons)
     return True, ""
@@ -462,7 +458,7 @@ def try_merge(
         )
     if github_ops.pr_has_blocking_review(pr_number, cwd=repo_root):
         return LifecycleResult("blocked", "Human requested changes")
-    if github_ops.pr_has_label(pr_number, loop_config.needs_human_review_label, cwd=repo_root):
+    if get_pr_state(state, pr_number).get("parked"):
         return LifecycleResult("blocked", "PR parked for human review")
 
     changed = github_ops.pr_changed_files(pr_number, cwd=repo_root)
@@ -472,7 +468,6 @@ def try_merge(
             pr_number,
             f"Touches protected paths: {', '.join(protected[:5])}",
             repo_root=repo_root,
-            label=loop_config.needs_human_review_label,
         )
         return LifecycleResult("blocked", "Protected paths touched")
 
@@ -496,7 +491,6 @@ def try_merge(
                 pr_number,
                 reason,
                 repo_root=repo_root,
-                label=loop_config.needs_human_review_label,
             )
             return LifecycleResult("blocked", reason)
 
@@ -648,7 +642,6 @@ def _run_pr_lifecycle_body(
                     pr_number,
                     "Review findings were not addressed.",
                     repo_root=repo_root,
-                    label=loop_config.needs_human_review_label,
                 )
                 return LifecycleResult("parked", address.detail)
             if address.status in {"scope_violation", "fix_failed"}:
@@ -698,7 +691,6 @@ def _run_pr_lifecycle_body(
                         pr_number,
                         f"Automated review fix failed: {address.detail}",
                         repo_root=repo_root,
-                        label=loop_config.needs_human_review_label,
                     )
                     return LifecycleResult("parked", address.detail)
                 return address

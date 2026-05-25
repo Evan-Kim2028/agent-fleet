@@ -147,14 +147,6 @@ class PrLoopWatcher:
             if entry.get("parked"):
                 continue
 
-            if github_ops.pr_has_label(
-                pr_number,
-                self.loop_config.needs_human_review_label,
-                cwd=self.repo.repo_root,
-            ):
-                set_pr_state(state, pr_number, {**entry, "parked": True})
-                continue
-
             _all, pending, failed = github_ops.pr_checks(
                 pr_number,
                 cwd=self.repo.repo_root,
