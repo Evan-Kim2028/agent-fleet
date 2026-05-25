@@ -249,7 +249,7 @@ class IssueLoopWatcher:
                 state=state,
                 capacity_gate=self.capacity_gate,
                 spawn_dispatch=_spawn_dispatch,
-                available_ram_gb=available_ram_gb(),
+                available_ram_gb=available_ram_gb() or 0.0,
             )
             results.extend(queue_results)
             if queue_deferred:

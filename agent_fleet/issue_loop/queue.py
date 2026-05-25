@@ -206,7 +206,9 @@ def poll_queue(
             )
             qs["head"] = head + 1
             head += 1
-            results.append({"issue": str(item.issue), "status": "queue_already_in_flight"})
+            results.append(
+                {"issue": str(item.issue), "status": "queue_already_in_flight"}
+            )
             continue
 
         issue_labels: list[str] = []
@@ -218,7 +220,9 @@ def poll_queue(
             issue_body = str(issue.get("body") or "")
             issue_labels = github_ops.issue_labels(item.issue, cwd=repo_root)
         except Exception as exc:
-            logger.warning("Queue: could not load issue #%s metadata: %s", item.issue, exc)
+            logger.warning(
+                "Queue: could not load issue #%s metadata: %s", item.issue, exc
+            )
 
         from agent_fleet.capacity import is_visual_audit_dispatch
 
