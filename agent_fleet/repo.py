@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
+from agent_fleet.level_up.config import LevelUpConfig, load_level_up_config
 from agent_fleet.pr_review.config import PrReviewConfig, load_pr_review_config
 
 if TYPE_CHECKING:
@@ -51,6 +52,7 @@ class RepoConfig:
     issue_dispatch: IssueDispatchConfig | None = None
     capacity: FleetCapacity | None = None
     orchestration: OrchestrationConfig | None = None
+    level_up: LevelUpConfig | None = None
 
     @property
     def display_name(self) -> str:
@@ -134,6 +136,7 @@ def load_repo_config(path: Path | str) -> RepoConfig:
         issue_dispatch=_load_issue_dispatch(repo_root, raw),
         capacity=capacity_cfg,
         orchestration=resolve_orchestration_config(raw),
+        level_up=load_level_up_config(raw),
     )
 
 

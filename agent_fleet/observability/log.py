@@ -6,6 +6,7 @@ import contextlib
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from agent_fleet.config import default_runs_dir
 from agent_fleet.observability.context import bind_phase, get_run_context
 from agent_fleet.observability.events import FleetEvent, RunContext
 from agent_fleet.observability.sinks import (
@@ -18,7 +19,7 @@ from agent_fleet.observability.sinks import (
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-_DEFAULT_RUNS_DIR = Path.home() / ".hermes" / "fleet" / "runs"
+_DEFAULT_RUNS_DIR = default_runs_dir()
 
 
 class RunLog:

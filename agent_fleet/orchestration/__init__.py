@@ -9,6 +9,7 @@ from agent_fleet.orchestration.decompose import (
     handle_preflight_decision,
     preflight_plan,
 )
+from agent_fleet.orchestration.equip import resolve_dispatch_equip
 
 __all__ = [
     "OrchestrationConfig",
@@ -18,5 +19,6 @@ __all__ = [
     "enrich_task_from_task_spec",
     "handle_preflight_decision",
     "preflight_plan",
+    "resolve_dispatch_equip",
     "resolve_orchestration_config",
 ]

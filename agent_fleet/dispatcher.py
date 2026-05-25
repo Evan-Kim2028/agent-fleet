@@ -223,6 +223,7 @@ class FleetDispatcher:
                 child_pipeline=orchestration.default_child_pipeline,
                 persona_resolver=resolver,
                 fallback_persona=task.persona or task_config.default_persona,
+                parent_run_id=fleet_log.run_id,
             )
             fleet_log.emit(
                 "orchestration.decompose",
@@ -434,6 +435,16 @@ class FleetDispatcher:
                 if preflight_result is not None:
                     return preflight_result
 
+                from agent_fleet.orchestration.equip import resolve_dispatch_equip
+
+                equip = resolve_dispatch_equip(
+                    task,
+                    task_config,
+                    repo_config or git_repo,
+                    run_id=fleet_log.run_id,
+                )
+                task = replace(task, equip=equip)
+
                 phase_results: list[dict[str, object]] = []
                 if task_workspace is not None and task_workspace.isolated:
                     phase_results.append(
@@ -468,6 +479,7 @@ class FleetDispatcher:
                     changed_files=changed_files,
                     task_workspace=task_workspace,
                     fleet_log=fleet_log,
+                    workspace=run_workspace,
                 )
 
                 repo_for_publish = repo_config or git_repo

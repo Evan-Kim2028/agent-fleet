@@ -11,6 +11,8 @@ How to define, scope, and route coding agents.
 
 Both merge at dispatch time. Repo settings override global defaults where noted below.
 
+For persona loadouts, overlays, and local level-up journaling, see **[PERSONA-EVOLUTION.md](PERSONA-EVOLUTION.md)**.
+
 ## Execution backends
 
 Agent Fleet runs the same personas and pipelines through a pluggable execution backend. Set `default_backend` in `fleet.yaml`:

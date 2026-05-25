@@ -1,0 +1,15 @@
+schema_version: 1
+stub: coder.md
+skills:
+  execute:
+    - superpowers/test-driven-development
+    - superpowers/verification-before-completion
+    - superpowers/using-git-worktrees
+    - pstack/tdd
+    - pstack/principle-prove-it-works
+    - pstack/principle-minimize-reader-load
+    - pstack/principle-boundary-discipline
+    - pstack/principle-fix-root-causes
+pipeline_skills:
+  code_review:
+    review: []
