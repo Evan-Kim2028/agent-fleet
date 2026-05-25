@@ -123,3 +123,41 @@ def test_prepare_task_workspace_keep_on_success(tmp_path: Path) -> None:
     task.teardown(keep=True)
     assert path.exists()
     task.teardown(keep=False)
+
+
+def test_reap_stale_worktrees(tmp_path: Path) -> None:
+    """Reaper removes stale worktrees outside active_branches and older than max_age_s."""
+    import os
+    import time
+
+    from agent_fleet.integrations.local_git import LocalGitOps
+    from agent_fleet.worktree_reaper import reap_stale_worktrees
+
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+
+    base = tmp_path / "worktrees"
+    git_ops = LocalGitOps(repo_path, use_worktree=True, worktree_base=base)
+
+    # Create two worktrees on distinct branches.
+    stale_wt = git_ops.setup_workspace(repo_path, "stale-run", "main", branch_name="fleet/stale")
+    fresh_wt = git_ops.setup_workspace(repo_path, "fresh-run", "main", branch_name="fleet/fresh")
+
+    assert stale_wt.exists()
+    assert fresh_wt.exists()
+
+    # Back-date stale_wt to be older than max_age_s.
+    old_mtime = time.time() - 7200  # 2 hours ago
+    os.utime(stale_wt, (old_mtime, old_mtime))
+
+    # fresh_wt is active AND recent; stale_wt is inactive AND old.
+    removed = reap_stale_worktrees(
+        repo_path,
+        base_path=base,
+        max_age_s=3600,
+        active_branches={"fleet/fresh"},
+    )
+
+    assert removed == 1
+    assert not stale_wt.exists(), "stale worktree should have been removed"
+    assert fresh_wt.exists(), "fresh active worktree should be kept"

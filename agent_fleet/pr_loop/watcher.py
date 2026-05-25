@@ -18,6 +18,7 @@ from agent_fleet.pr_loop.state import (
     set_pr_state,
     state_path,
 )
+from agent_fleet.worktree_reaper import reap_stale_worktrees
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -98,6 +99,30 @@ class PrLoopWatcher:
             branch_prefixes=self.loop_config.branch_prefixes,
             cwd=self.repo.repo_root,
         )
+
+        # Reap stale worktrees once per poll, before processing PRs.
+        active_branches = {str(pr.get("headRefName") or "") for pr in prs}
+        try:
+            from pathlib import Path as _Path
+
+            from agent_fleet.spine_config import SpineConfig as _SpineConfig
+
+            _wt_base = self.repo.worktree_base
+            if _wt_base is None:
+                _raw = self.repo.spine_overrides.get("worktree_base")
+                if _raw:
+                    _wt_base = _Path(str(_raw)).expanduser()
+            if _wt_base is None:
+                _wt_base = _SpineConfig.defaults().worktree_base
+            reap_stale_worktrees(
+                self.repo.repo_root,
+                _wt_base,
+                self.loop_config.worktree_reaper_max_age_s,
+                active_branches,
+            )
+        except Exception:
+            logger.debug("Worktree reaper failed", exc_info=True)
+
         if not prs:
             return results
 
