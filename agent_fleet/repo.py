@@ -36,9 +36,11 @@ class RepoConfig:
     default_persona: str = "coder"
     default_branch: str = "main"
     personas_dir: Path | None = None
+    skills_dirs: tuple[Path, ...] = ()
     use_worktree: bool = False
     worktree_base: Path | None = None
     verify_commands: list[str] = field(default_factory=list)
+    commit_preflight_commands: list[str] = field(default_factory=list)
     test_command: str | None = None
     lint_command: str | None = None
     typecheck_command: str | None = None
@@ -82,6 +84,7 @@ def load_repo_config(path: Path | str) -> RepoConfig:
         raw = {}
 
     verify_commands = list(raw.get("verify_commands") or [])
+    commit_preflight_commands = list(raw.get("commit_preflight_commands") or [])
     test_command = raw.get("test_command")
     lint_command = raw.get("lint_command")
     typecheck_command = raw.get("typecheck_command")
@@ -94,6 +97,13 @@ def load_repo_config(path: Path | str) -> RepoConfig:
 
     personas_dir_raw = raw.get("personas_dir")
     personas_dir = (repo_root / personas_dir_raw).resolve() if personas_dir_raw else None
+
+    skills_dirs: list[Path] = []
+    skills_dir_raw = raw.get("skills_dir")
+    if skills_dir_raw:
+        skills_dirs.append((repo_root / str(skills_dir_raw)).resolve())
+    for entry in raw.get("skills_dirs") or []:
+        skills_dirs.append((repo_root / str(entry)).resolve())
 
     scope_map: dict[str, tuple[str, ...]] = {}
     for persona, paths in (raw.get("persona_scope_allowlist") or {}).items():
@@ -120,9 +130,11 @@ def load_repo_config(path: Path | str) -> RepoConfig:
         default_persona=str(raw.get("default_persona") or "coder"),
         default_branch=str(raw.get("default_branch") or "main"),
         personas_dir=personas_dir,
+        skills_dirs=tuple(skills_dirs),
         use_worktree=bool(raw.get("use_worktree", False)),
         worktree_base=worktree_base,
         verify_commands=verify_commands,
+        commit_preflight_commands=commit_preflight_commands,
         test_command=test_command,
         lint_command=lint_command,
         typecheck_command=typecheck_command,
@@ -180,5 +192,12 @@ def merge_repo_into_fleet_config(
         fleet_config.default_persona = repo.default_persona
     if repo.capacity is not None:
         fleet_config.max_parallel = repo.capacity.max_dispatches
+    from agent_fleet.skills_lib import merge_skill_dirs, repo_skill_dirs
+
+    fleet_config.skill_dirs = merge_skill_dirs(
+        fleet_config.skill_dirs,
+        repo_skill_dirs(repo),
+        list(repo.skills_dirs),
+    )
     fleet_config.repo_config = repo
     return fleet_config

@@ -16,6 +16,7 @@ from agent_fleet.config import FleetConfig, load_fleet_config
 from agent_fleet.observability.fleet_logger import FleetLogger
 from agent_fleet.personas import YamlPersonaResolver
 from agent_fleet.pr_loop import github_ops
+from agent_fleet.pr_loop.github_ops import CommitPushResult
 from agent_fleet.pr_loop.review_parse import (
     find_reviewer_comment,
     has_blocking_findings,
@@ -233,6 +234,28 @@ def _file_scope_violation_followup(
     )
 
 
+def _commit_preflight_commands(repo: RepoConfig) -> list[str]:
+    if repo.commit_preflight_commands:
+        return list(repo.commit_preflight_commands)
+    return list(repo.verify_commands)
+
+
+def _commit_push(
+    *,
+    worktree: Path,
+    message: str,
+    branch: str,
+    repo: RepoConfig,
+) -> CommitPushResult:
+    return github_ops.commit_and_push(
+        worktree,
+        message,
+        branch,
+        exclude=(STATE_FILENAME,),
+        preflight_commands=_commit_preflight_commands(repo),
+    )
+
+
 def poll_for_review_comment(
     pr_number: int,
     *,
@@ -260,6 +283,7 @@ def address_review_findings(
     loop_config: PrLoopConfig,
     fleet_config: FleetConfig,
     worktree: Path,
+    commit_error_context: str | None = None,
 ) -> LifecycleResult:
     if not has_blocking_findings(
         review_body,
@@ -278,6 +302,23 @@ def address_review_findings(
     verify_block = ""
     if repo.verify_commands:
         verify_block = "\n".join(f"- `{cmd}`" for cmd in repo.verify_commands)
+    preflight_block = ""
+    preflight_cmds = _commit_preflight_commands(repo)
+    if preflight_cmds and preflight_cmds != repo.verify_commands:
+        preflight_block = "\n".join(f"- `{cmd}`" for cmd in preflight_cmds)
+
+    commit_failure_block = ""
+    if commit_error_context:
+        commit_failure_block = textwrap.dedent(f"""
+
+        ## Previous commit/push failure (must fix before finishing)
+        The orchestrator could not commit or push your last attempt. Fix these errors,
+        re-run all verify/preflight commands, and leave the working tree ready to commit.
+
+        ```
+        {commit_error_context[:6000]}
+        ```
+        """)
 
     pr_files_block = "\n".join(f"- `{path}`" for path in pr_files) or "- (unknown)"
 
@@ -290,14 +331,16 @@ def address_review_findings(
 
         ## PR changed files (only edit these or subpaths)
         {pr_files_block}
-
+        {commit_failure_block}
         ## Instructions
         1. Read each finding and fix valid issues in the relevant files above.
         2. Do NOT edit files outside this PR's changed paths.
         3. Run verify commands before finishing:
         {verify_block or "- (none configured)"}
-        4. Do NOT commit or push — the orchestrator commits after this phase.
-        5. If a finding is a false positive, note it but do not change code for it.
+        4. Pre-commit and commit preflight must pass (same gates as git commit):
+        {preflight_block or verify_block or "- pre-commit hooks on changed files (automatic)"}
+        5. Do NOT commit or push — the orchestrator commits after this phase.
+        6. If a finding is a false positive, note it but do not change code for it.
     """)
 
     logger.info(
@@ -322,6 +365,9 @@ def address_review_findings(
         return LifecycleResult("fix_failed", detail)
 
     changed = _git_changed_files(worktree, exclude=(STATE_FILENAME,))
+    if not changed:
+        return LifecycleResult("no_changes", "Review fix agent made no file changes")
+
     violating = _files_outside_pr_scope(pr_files, changed)
     if violating:
         logger.warning(
@@ -335,9 +381,15 @@ def address_review_findings(
         f"fix(fleet): address PR review feedback\n\n"
         f"{_AGENT_FOOTER} persona={fix_persona_name} | PR #{pr_number}"
     )
-    pushed = github_ops.commit_and_push(worktree, message, branch, exclude=(STATE_FILENAME,))
-    if not pushed:
-        return LifecycleResult("ignored", "Review had findings but no fix commit was pushed")
+    push_result = _commit_push(
+        worktree=worktree,
+        message=message,
+        branch=branch,
+        repo=repo,
+    )
+    if not push_result.ok:
+        detail = push_result.detail or f"Commit/push failed ({push_result.phase})"
+        return LifecycleResult("commit_failed", detail)
     return LifecycleResult("addressed", "Fix pushed for review findings")
 
 
@@ -377,7 +429,8 @@ def attempt_ci_fix(
     fleet_config: FleetConfig,
     worktree: Path,
     persona: str,
-) -> bool:
+    commit_error_context: str | None = None,
+) -> CommitPushResult:
     fix_persona_name = _ci_fix_persona(loop_config, persona, repo)
     config = merge_repo_into_fleet_config(fleet_config, repo)
     resolver = YamlPersonaResolver(config)
@@ -385,11 +438,20 @@ def attempt_ci_fix(
     backend = make_backend(config)
 
     verify_block = "\n".join(f"- `{cmd}`" for cmd in repo.verify_commands) or "- (none)"
+    failure_block = ""
+    if commit_error_context:
+        failure_block = textwrap.dedent(f"""
+
+        ## Previous commit/push failure
+        ```
+        {commit_error_context[:6000]}
+        ```
+        """)
     prompt = textwrap.dedent(f"""\
         CI failed on PR #{pr_number}. Fix the failures caused by this branch.
 
         Failed checks: {", ".join(failed_checks)}
-
+        {failure_block}
         Verify commands:
         {verify_block}
 
@@ -413,11 +475,13 @@ def attempt_ci_fix(
         allowed_tools=list(persona_obj.allowed_tools),
     )
     if result.exit_code != 0:
-        return False
+        return CommitPushResult(False, "agent_failed", result.stderr or "Fix agent failed")
+    if not _git_changed_files(worktree, exclude=(STATE_FILENAME,)):
+        return CommitPushResult(False, "no_changes", "CI fix agent made no file changes")
     message = (
         f"fix(fleet): CI failures on PR #{pr_number}\n\n{_AGENT_FOOTER} persona={fix_persona_name}"
     )
-    return github_ops.commit_and_push(worktree, message, branch, exclude=(STATE_FILENAME,))
+    return _commit_push(worktree=worktree, message=message, branch=branch, repo=repo)
 
 
 def tiered_merge_allowed(
@@ -615,6 +679,7 @@ def _run_pr_lifecycle_body(
         fleet_log.emit("pr_loop.review_fix.start", pr_number=pr_number)
         wt = github_ops.checkout_branch(branch, wt, repo_root=repo_root)
         fix_attempts = 0
+        commit_error_context: str | None = None
         while fix_attempts < loop_config.max_fix_attempts:
             fix_attempts += 1
             address = address_review_findings(
@@ -625,6 +690,7 @@ def _run_pr_lifecycle_body(
                 loop_config=loop_config,
                 fleet_config=fleet_config,
                 worktree=wt,
+                commit_error_context=commit_error_context,
             )
             if address.status in {"no_findings", "addressed"}:
                 state_file = state_path(repo_root)
@@ -637,14 +703,7 @@ def _run_pr_lifecycle_body(
                 )
                 save_state(state_file, state)
                 break
-            if address.status == "ignored":
-                park_for_human(
-                    pr_number,
-                    "Review findings were not addressed.",
-                    repo_root=repo_root,
-                )
-                return LifecycleResult("parked", address.detail)
-            if address.status in {"scope_violation", "fix_failed"}:
+            if address.status in {"commit_failed", "no_changes", "fix_failed"}:
                 fleet_log.emit(
                     "pr_loop.review_fix.attempt",
                     level="warning",
@@ -661,7 +720,20 @@ def _run_pr_lifecycle_body(
                     address.status,
                     address.detail,
                 )
-            if address.status == "scope_violation":
+                if address.status == "commit_failed":
+                    commit_error_context = address.detail
+                if fix_attempts >= loop_config.max_fix_attempts:
+                    park_for_human(
+                        pr_number,
+                        f"Automated review fix failed after {fix_attempts} attempt(s): "
+                        f"{address.detail}",
+                        repo_root=repo_root,
+                    )
+                    return LifecycleResult("parked", address.detail)
+                if address.status != "commit_failed":
+                    wt = github_ops.checkout_branch(branch, wt, repo_root=repo_root)
+                continue
+            if address.status in {"scope_violation"}:
                 followup = _file_scope_violation_followup(
                     pr_number=pr_number,
                     branch=branch,
@@ -686,13 +758,6 @@ def _run_pr_lifecycle_body(
                 )
                 break
             if fix_attempts >= loop_config.max_fix_attempts:
-                if address.status == "fix_failed":
-                    park_for_human(
-                        pr_number,
-                        f"Automated review fix failed: {address.detail}",
-                        repo_root=repo_root,
-                    )
-                    return LifecycleResult("parked", address.detail)
                 return address
             review_body = (
                 poll_for_review_comment(
@@ -706,6 +771,7 @@ def _run_pr_lifecycle_body(
             )
 
     ci_fix_attempts = 0
+    ci_commit_error: str | None = None
     while True:
         fleet_log.emit("pr_loop.ci.wait", pr_number=pr_number, attempt=ci_fix_attempts + 1)
         ci = wait_for_ci_green(
@@ -744,9 +810,14 @@ def _run_pr_lifecycle_body(
             fleet_config=fleet_config,
             worktree=wt,
             persona=persona,
+            commit_error_context=ci_commit_error,
         )
-        if not fixed:
-            return LifecycleResult("ci_failed", "CI fix attempt produced no push")
+        if not fixed.ok:
+            return LifecycleResult(
+                "ci_failed",
+                fixed.detail or "CI fix attempt produced no push",
+            )
+        ci_commit_error = None
         time.sleep(loop_config.post_fix_poll_s)
 
     if not loop_config.auto_merge:
