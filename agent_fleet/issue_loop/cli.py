@@ -7,6 +7,7 @@ import json
 import sys
 from pathlib import Path
 
+from agent_fleet.issue_loop import queue as issue_queue
 from agent_fleet.issue_loop.dispatch import run_issue_dispatch
 from agent_fleet.issue_loop.watcher import CombinedWatcher, IssueLoopWatcher, run_watcher_once
 from agent_fleet.repo import find_repo_config
@@ -28,6 +29,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--issue", type=int, help="Run one issue dispatch")
     parser.add_argument("--persona", help="Persona for --issue dispatch")
     parser.add_argument("--comment", default="", help="Trigger comment for --issue dispatch")
+    parser.add_argument(
+        "--queue-status",
+        action="store_true",
+        help="Print FIFO queue status from .agent-fleet-queue.yaml and exit",
+    )
     args = parser.parse_args(argv)
 
     from agent_fleet.logging_config import configure_fleet_logging
@@ -35,6 +41,32 @@ def main(argv: list[str] | None = None) -> int:
     configure_fleet_logging()
 
     workspace = Path(args.workspace or Path.cwd()).resolve()
+
+    if args.queue_status:
+        repo = find_repo_config(workspace)
+        if (
+            repo is None
+            or repo.issue_dispatch is None
+            or not repo.issue_dispatch.queue
+            or not repo.issue_dispatch.queue.enabled
+        ):
+            print(json.dumps({"enabled": False}, indent=2))
+            return 0
+        from agent_fleet.issue_loop.state import load_state, state_path
+
+        state_file = state_path(repo.repo_root, repo.issue_dispatch.state_file)
+        state = load_state(state_file)
+        print(
+            json.dumps(
+                issue_queue.queue_status(
+                    repo.repo_root,
+                    repo.issue_dispatch.queue,
+                    state,
+                ),
+                indent=2,
+            )
+        )
+        return 0
 
     if args.issue is not None:
         if not args.persona:

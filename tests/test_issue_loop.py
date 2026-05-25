@@ -1,10 +1,13 @@
 """Tests for issue comment trigger parsing and GitHub polling helpers."""
 
+from unittest.mock import patch
+
 from agent_fleet.issue_loop.github_ops import (
     as_comment_pages,
     flatten_issue_comment_pages,
     parse_paginated_json_arrays,
 )
+from agent_fleet.issue_loop.queue import _issue_is_open
 from agent_fleet.issue_loop.triggers import (
     extract_issue_number,
     extract_persona,
@@ -56,3 +59,16 @@ def test_parse_api_error_returns_empty_pages() -> None:
     stdout = '{"message":"Not Found","status":"404"}'
     pages = parse_paginated_json_arrays(stdout)
     assert pages == [{"message": "Not Found", "status": "404"}]
+
+
+def test_issue_is_open_uses_state_from_issue_view(tmp_path) -> None:
+    with patch(
+        "agent_fleet.issue_loop.queue.github_ops.issue_view",
+        return_value={"state": "OPEN", "title": "t"},
+    ):
+        assert _issue_is_open(1940, cwd=tmp_path) is True
+    with patch(
+        "agent_fleet.issue_loop.queue.github_ops.issue_view",
+        return_value={"state": "CLOSED", "title": "t"},
+    ):
+        assert _issue_is_open(1940, cwd=tmp_path) is False

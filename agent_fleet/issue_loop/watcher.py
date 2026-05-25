@@ -19,6 +19,7 @@ from agent_fleet.capacity import (
     is_visual_audit_dispatch,
 )
 from agent_fleet.issue_loop import github_ops
+from agent_fleet.issue_loop import queue as issue_queue
 from agent_fleet.issue_loop.state import load_state, now_iso, save_state, state_path
 from agent_fleet.issue_loop.triggers import (
     extract_issue_number,
@@ -141,6 +142,7 @@ class IssueLoopWatcher:
             cwd=self.repo.repo_root,
         )
         new_since = now_iso()
+        retryable_deferred = False
 
         for comment in comments:
             comment_id = str(comment.get("id", ""))
@@ -192,6 +194,8 @@ class IssueLoopWatcher:
             )
             if not admission.allowed:
                 retryable = admission.reason in RETRYABLE_ADMISSION_REASONS
+                if retryable:
+                    retryable_deferred = True
                 get_watcher_logger().emit(
                     "admission.check",
                     level="warning" if retryable else "info",
@@ -251,7 +255,23 @@ class IssueLoopWatcher:
                     }
                 )
 
-        state["since"] = new_since
+        if not retryable_deferred:
+            state["since"] = new_since
+
+        if self.config.queue and self.config.queue.enabled:
+            queue_results, queue_deferred = issue_queue.poll_queue(
+                repo_root=self.repo.repo_root,
+                dispatch_config=self.config,
+                queue_config=self.config.queue,
+                state=state,
+                capacity_gate=self.capacity_gate,
+                spawn_dispatch=_spawn_dispatch,
+                available_ram_gb=available_ram_gb(),
+            )
+            results.extend(queue_results)
+            if queue_deferred:
+                retryable_deferred = True
+
         save_state(self.state_file, state)
         return results
 

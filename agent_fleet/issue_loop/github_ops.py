@@ -113,7 +113,7 @@ def issue_view(issue_number: int, *, cwd: Path | None = None) -> dict[str, Any]:
         "view",
         str(issue_number),
         "--json",
-        "title,body,labels,number",
+        "title,body,labels,number,state",
         cwd=cwd,
     )
     return json.loads(result.stdout)

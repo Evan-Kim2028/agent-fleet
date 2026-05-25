@@ -48,7 +48,11 @@ critical_path_prefixes:
 # issue_dispatch:
 #   enabled: true
 #   poll_interval_s: 30
-#
+#   queue:
+#     enabled: true
+#     file: .agent-fleet-queue.yaml
+#     advance: dispatch   # or complete for strict serial
+# See examples/agent-fleet-queue.yaml
 # Unified concurrency (watcher subprocess limits + per-run RESEARCH workers)
 # capacity:
 #   max_dispatches: 8

@@ -1,0 +1,9 @@
+# Example FIFO dispatch queue — copy to repo root as .agent-fleet-queue.yaml
+# Enable in .agent-fleet.yaml under issue_dispatch.queue
+
+queue:
+  - issue: 1234
+    persona: backend
+    note: "Optional instructions appended to the synthetic dispatch comment"
+  - issue: 1235
+    persona: frontend
