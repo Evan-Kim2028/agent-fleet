@@ -10,7 +10,7 @@ from agent_fleet.contracts.task_spec import (
     TaskSpec,
 )
 from agent_fleet.hooks import FleetTask, FleetTaskResult
-from agent_fleet.orchestration.config import OrchestrationConfig, resolve_orchestration_config
+from agent_fleet.orchestration.config import resolve_orchestration_config
 from agent_fleet.orchestration.decompose import (
     aggregate_child_results,
     child_tasks_from_task_spec,
