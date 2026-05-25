@@ -169,6 +169,7 @@ class FleetDispatcher:
         """Run plan preflight; return (early_result, task_to_run)."""
         from agent_fleet.fleet_session import create_fleet_session
         from agent_fleet.orchestration.decompose import (
+            coerce_empty_decompose,
             dispatch_task_spec_children,
             enrich_task_from_task_spec,
             handle_preflight_decision,
@@ -211,6 +212,13 @@ class FleetDispatcher:
             if session is not None:
                 with contextlib.suppress(Exception):
                     session.dispose()
+
+        task_spec, decompose_fallback = coerce_empty_decompose(task_spec)
+        if decompose_fallback:
+            fleet_log.emit(
+                "orchestration.decompose_fallback",
+                data={"reason": "empty child_issues_proposed"},
+            )
 
         if (
             task_spec.decomposition_decision.value == "decompose"

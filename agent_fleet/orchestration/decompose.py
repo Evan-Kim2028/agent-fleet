@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.contracts.task_spec import DecompositionDecision, TaskSpec
@@ -19,6 +20,33 @@ logger = logging.getLogger(__name__)
 
 _SUCCESS_STATUSES = frozenset({"completed", "merged"})
 _PARTIAL_OK = frozenset({"review_changes_requested"})
+
+
+def coerce_empty_decompose(task_spec: TaskSpec) -> tuple[TaskSpec, bool]:
+    """Downgrade decompose-with-no-children to single so the run can proceed."""
+    if (
+        task_spec.decomposition_decision != DecompositionDecision.DECOMPOSE
+        or task_spec.child_issues_proposed
+    ):
+        return task_spec, False
+    note = (
+        "[orchestration fallback] decompose with no child_issues_proposed; "
+        "continuing as single-agent run."
+    )
+    reason = task_spec.decomposition_reason
+    merged_reason = f"{reason} {note}".strip() if reason else note
+    logger.warning(
+        "Planner chose decompose for issue #%s but proposed no children; falling back to single",
+        task_spec.issue_number,
+    )
+    return (
+        replace(
+            task_spec,
+            decomposition_decision=DecompositionDecision.SINGLE,
+            decomposition_reason=merged_reason,
+        ),
+        True,
+    )
 
 
 def preflight_plan(
@@ -244,6 +272,8 @@ def handle_preflight_decision(
     if task_spec.decomposition_decision == DecompositionDecision.REJECTED:
         return "rejected", task_spec.decomposition_reason
     if task_spec.decomposition_decision == DecompositionDecision.DECOMPOSE:
+        if not task_spec.child_issues_proposed:
+            return "single", None
         return (
             "decompose",
             task_spec.decomposition_reason or "Task requires decomposition",

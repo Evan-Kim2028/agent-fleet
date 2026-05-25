@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 from agent_fleet.pr_loop.config import load_pr_loop_config
@@ -203,9 +204,11 @@ def test_commit_and_push_retries_after_pre_commit_autofix(tmp_path: Path) -> Non
         encoding="utf-8",
     )
     hook.chmod(0o755)
+    subprocess.run(["git", "checkout", "-b", "feature-branch"], cwd=local, check=True)
     (local / "feature.txt").write_text("feature\n", encoding="utf-8")
 
-    assert commit_and_push(local, "test: autofix retry", "feature-branch") is True
+    result = commit_and_push(local, "test: autofix retry", "feature-branch")
+    assert result.ok is True
     assert (local / "autofixed.txt").read_text() == "autofix\n"
     assert counter.read_text().strip() == "2"
 
@@ -220,7 +223,48 @@ def test_commit_and_push_returns_false_when_hook_keeps_failing(tmp_path: Path) -
     hook.chmod(0o755)
     (local / "feature.txt").write_text("feature\n", encoding="utf-8")
 
-    assert commit_and_push(local, "test: real fail", "feature-branch") is False
+    result = commit_and_push(local, "test: real fail", "feature-branch")
+    assert not result
+    assert result.phase == "commit_failed"
+
+
+def test_commit_preflight_blocks_before_commit(tmp_path: Path) -> None:
+    from agent_fleet.pr_loop.github_ops import commit_and_push
+
+    _, local = _init_repo_with_remote(tmp_path)
+    subprocess.run(["git", "checkout", "-b", "feature-branch"], cwd=local, check=True)
+    (local / "bad.txt").write_text("bad\n", encoding="utf-8")
+
+    result = commit_and_push(
+        local,
+        "test: preflight fail",
+        "feature-branch",
+        preflight_commands=["false"],
+    )
+    assert not result.ok
+    assert result.phase == "preflight_failed"
+
+
+def test_maybe_unpark_pr_entry_on_new_commit() -> None:
+    from agent_fleet.pr_loop.watcher import maybe_unpark_pr_entry
+
+    entry: dict[str, object] = {
+        "parked": True,
+        "last_head_oid": "abc123",
+        "review_addressed": True,
+    }
+    updated = maybe_unpark_pr_entry(entry, head_ref_oid="def456")
+    assert updated.get("parked") is False
+    assert "review_addressed" not in updated
+    assert updated.get("last_head_oid") == "def456"
+
+
+def test_maybe_unpark_pr_entry_keeps_parked_when_oid_unchanged() -> None:
+    from agent_fleet.pr_loop.watcher import maybe_unpark_pr_entry
+
+    entry: dict[str, object] = {"parked": True, "last_head_oid": "abc123"}
+    updated = maybe_unpark_pr_entry(entry, head_ref_oid="abc123")
+    assert updated.get("parked") is True
 
 
 def test_poll_once_parks_after_max_ci_timeout_attempts(tmp_path: Path) -> None:

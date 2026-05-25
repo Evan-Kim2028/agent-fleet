@@ -14,6 +14,7 @@ from agent_fleet.orchestration.config import resolve_orchestration_config
 from agent_fleet.orchestration.decompose import (
     aggregate_child_results,
     child_tasks_from_task_spec,
+    coerce_empty_decompose,
     enrich_task_from_task_spec,
     handle_preflight_decision,
 )
@@ -170,15 +171,41 @@ def test_aggregate_child_results_partial() -> None:
     assert error is not None
 
 
+def test_coerce_empty_decompose_falls_back_to_single() -> None:
+    spec = _task_spec(decision=DecompositionDecision.DECOMPOSE, children=[])
+    coerced, fell_back = coerce_empty_decompose(spec)
+    assert fell_back is True
+    assert coerced.decomposition_decision == DecompositionDecision.SINGLE
+    assert "orchestration fallback" in coerced.decomposition_reason
+
+
+def test_coerce_empty_decompose_keeps_decompose_with_children() -> None:
+    spec = _task_spec(
+        decision=DecompositionDecision.DECOMPOSE,
+        children=[{"title": "A", "body": "b", "persona": "coder"}],
+    )
+    coerced, fell_back = coerce_empty_decompose(spec)
+    assert fell_back is False
+    assert coerced.decomposition_decision == DecompositionDecision.DECOMPOSE
+
+
 def test_handle_preflight_decision() -> None:
     rejected = _task_spec(decision=DecompositionDecision.REJECTED)
     status, err = handle_preflight_decision(rejected)
     assert status == "rejected"
     assert err == "cross-cutting change"
 
-    decompose = _task_spec(decision=DecompositionDecision.DECOMPOSE)
+    decompose = _task_spec(
+        decision=DecompositionDecision.DECOMPOSE,
+        children=[{"title": "Split A", "body": "Do backend slice", "persona": "coder"}],
+    )
     status, err = handle_preflight_decision(decompose)
     assert status == "decompose"
+
+    empty_decompose = _task_spec(decision=DecompositionDecision.DECOMPOSE, children=[])
+    status, err = handle_preflight_decision(empty_decompose)
+    assert status == "single"
+    assert err is None
 
     single = _task_spec(decision=DecompositionDecision.SINGLE)
     status, err = handle_preflight_decision(single)

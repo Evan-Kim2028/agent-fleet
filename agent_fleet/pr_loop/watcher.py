@@ -30,6 +30,29 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def maybe_unpark_pr_entry(
+    entry: dict[str, object],
+    *,
+    head_ref_oid: str,
+) -> dict[str, object]:
+    """Clear parked when the PR branch advances (new commits pushed)."""
+    updated = dict(entry)
+    previous_oid = str(entry.get("last_head_oid") or "")
+    if head_ref_oid:
+        updated["last_head_oid"] = head_ref_oid
+    if not entry.get("parked"):
+        return updated
+    if head_ref_oid and previous_oid and head_ref_oid != previous_oid:
+        logger.info(
+            "Unparking PR — branch advanced (%s → %s)",
+            previous_oid[:8],
+            head_ref_oid[:8],
+        )
+        updated["parked"] = False
+        updated.pop("review_addressed", None)
+    return updated
+
+
 def _pr_number(pr: dict[str, object]) -> int:
     number = pr["number"]
     if isinstance(number, int):
@@ -135,7 +158,11 @@ class PrLoopWatcher:
         for pr in prs:
             pr_number = _pr_number(pr)
             branch = str(pr.get("headRefName") or "")
+            head_ref_oid = str(pr.get("headRefOid") or "")
             entry = get_pr_state(state, pr_number)
+            entry = maybe_unpark_pr_entry(entry, head_ref_oid=head_ref_oid)
+            if head_ref_oid:
+                set_pr_state(state, pr_number, entry)
 
             if entry.get("merged"):
                 continue
@@ -197,6 +224,8 @@ class PrLoopWatcher:
                 "fix_attempts": fix_attempts + (1 if outcome.status == "addressed" else 0),
                 "ci_timeout_attempts": new_ci_timeout_attempts,
             }
+            if head_ref_oid:
+                new_entry["last_head_oid"] = head_ref_oid
             if outcome.status == "merged":
                 new_entry["merged"] = True
                 state["last_merge_ts"] = time.time()

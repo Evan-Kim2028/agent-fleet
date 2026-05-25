@@ -6,12 +6,112 @@ import json
 import logging
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from agent_fleet.integrations.github_cli import gh as _gh
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class CommitPushResult:
+    """Outcome of orchestrator commit + push (preflight, hooks, remote sync)."""
+
+    ok: bool
+    phase: str
+    detail: str = ""
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+
+def _git_run(
+    args: list[str],
+    *,
+    cwd: Path,
+    timeout: int = 120,
+    check: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        args,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=check,
+        timeout=timeout,
+    )
+
+
+def _changed_files(worktree: Path, *, exclude: tuple[str, ...] = ()) -> list[str]:
+    exclude_set = set(exclude)
+    status = _git_run(["git", "status", "--porcelain"], cwd=worktree, timeout=30)
+    return [
+        line[3:].strip()
+        for line in status.stdout.splitlines()
+        if line.strip() and len(line) > 3 and line[3:].strip() not in exclude_set
+    ]
+
+
+def run_commit_preflight(
+    worktree: Path,
+    changed_files: list[str],
+    commands: list[str],
+) -> tuple[bool, str]:
+    """Run repo verify/preflight commands and pre-commit on changed paths."""
+    errors: list[str] = []
+
+    precommit_cfg = worktree / ".pre-commit-config.yaml"
+    if precommit_cfg.exists() and changed_files:
+        pc = _git_run(
+            ["pre-commit", "run", "--files", *changed_files],
+            cwd=worktree,
+            timeout=600,
+        )
+        if pc.returncode != 0:
+            combined = "\n".join(part for part in (pc.stdout, pc.stderr) if part).strip()
+            errors.append(combined[:4000] or "pre-commit failed")
+
+    for command in commands:
+        result = subprocess.run(
+            command,
+            shell=True,
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=600,
+        )
+        if result.returncode != 0:
+            combined = "\n".join(
+                part for part in (result.stdout, result.stderr) if part
+            ).strip()
+            errors.append(f"$ {command}\n{combined[:2000]}")
+
+    if errors:
+        return False, "\n\n---\n\n".join(errors)
+    return True, ""
+
+
+def _sync_branch_before_push(worktree: Path, branch: str) -> tuple[bool, str]:
+    fetch = _git_run(["git", "fetch", "origin", branch], cwd=worktree, timeout=120)
+    fetch_output = (fetch.stderr or fetch.stdout or "").lower()
+    if fetch.returncode != 0:
+        if "couldn't find remote ref" in fetch_output:
+            return True, ""
+        return False, (fetch.stderr or fetch.stdout or "git fetch failed")[:500]
+
+    remote = _git_run(["git", "rev-parse", f"origin/{branch}"], cwd=worktree, timeout=30)
+    if remote.returncode != 0:
+        return True, ""
+
+    rebase = _git_run(["git", "rebase", f"origin/{branch}"], cwd=worktree, timeout=180)
+    if rebase.returncode == 0:
+        return True, ""
+
+    _git_run(["git", "rebase", "--abort"], cwd=worktree, timeout=60)
+    return False, (rebase.stderr or rebase.stdout or "git rebase failed")[:500]
 
 
 def list_open_fleet_prs(
@@ -25,7 +125,7 @@ def list_open_fleet_prs(
         "--state",
         "open",
         "--json",
-        "number,headRefName,labels,isDraft,mergeable,mergeStateStatus,createdAt",
+        "number,headRefName,headRefOid,labels,isDraft,mergeable,mergeStateStatus,createdAt",
         "--limit",
         "50",
         cwd=cwd,
@@ -323,77 +423,123 @@ def checkout_branch(branch: str, worktree: Path, *, repo_root: Path) -> Path:
     return worktree
 
 
+def _commits_ahead(worktree: Path, branch: str) -> int:
+    ahead = _git_run(
+        ["git", "rev-list", "--count", f"origin/{branch}..HEAD"],
+        cwd=worktree,
+        timeout=30,
+    )
+    if ahead.returncode != 0:
+        return 0
+    try:
+        return int((ahead.stdout or "0").strip())
+    except ValueError:
+        return 0
+
+
 def commit_and_push(
     worktree: Path,
     message: str,
     branch: str,
     *,
     exclude: tuple[str, ...] = (),
-) -> bool:
-    exclude_set = set(exclude)
-    status = subprocess.run(
-        ["git", "status", "--porcelain"],
-        capture_output=True,
-        text=True,
-        cwd=worktree,
-        check=False,
-        timeout=30,
-    )
-    changed = [
-        line[3:].strip()
-        for line in status.stdout.splitlines()
-        if line.strip() and len(line) > 3 and line[3:].strip() not in exclude_set
-    ]
+    preflight_commands: list[str] | None = None,
+) -> CommitPushResult:
+    changed = _changed_files(worktree, exclude=exclude)
     if not changed:
-        return False
+        _git_run(["git", "fetch", "origin", branch], cwd=worktree, timeout=120)
+        if _commits_ahead(worktree, branch) <= 0:
+            return CommitPushResult(
+                False,
+                "no_changes",
+                "No staged or unstaged changes to commit",
+            )
+        synced, sync_detail = _sync_branch_before_push(worktree, branch)
+        if not synced:
+            return CommitPushResult(False, "push_failed", sync_detail)
+        push = _git_run(
+            ["git", "push", "origin", branch],
+            cwd=worktree,
+            timeout=180,
+        )
+        if push.returncode == 0:
+            return CommitPushResult(True, "ok", "Pushed existing commit(s)")
+        push_detail = (push.stderr or push.stdout or "git push failed").strip()
+        return CommitPushResult(False, "push_failed", push_detail[:500])
+
+    preflight_cmds = list(preflight_commands or [])
+    if preflight_cmds:
+        ok, detail = run_commit_preflight(worktree, changed, preflight_cmds)
+        if not ok:
+            logger.warning(
+                "commit preflight failed on branch %s: %s",
+                branch,
+                detail[:300],
+            )
+            return CommitPushResult(False, "preflight_failed", detail)
+
     max_hook_retries = 2
+    last_commit_output = ""
     for attempt in range(max_hook_retries + 1):
-        # Re-add: a previous attempt's pre-commit hook may have auto-formatted
-        # files (ruff format, eol-fixer); re-staging picks those up.
-        subprocess.run(["git", "add", "-A"], cwd=worktree, check=True, timeout=60)
-        commit = subprocess.run(
+        _git_run(["git", "add", "-A"], cwd=worktree, timeout=60, check=True)
+        commit = _git_run(
             ["git", "commit", "-m", message],
             cwd=worktree,
-            capture_output=True,
-            text=True,
-            check=False,
             timeout=120,
         )
         if commit.returncode == 0:
             break
-        post_status = subprocess.run(
-            ["git", "status", "--porcelain"],
-            capture_output=True,
-            text=True,
-            cwd=worktree,
-            check=False,
-            timeout=30,
-        )
+        last_commit_output = (commit.stderr or commit.stdout or "").strip()
+        post_status = _git_run(["git", "status", "--porcelain"], cwd=worktree, timeout=30)
         if not post_status.stdout.strip() or attempt == max_hook_retries:
             logger.warning(
                 "commit failed on branch %s (attempt %d/%d): %s",
                 branch,
                 attempt + 1,
                 max_hook_retries + 1,
-                (commit.stderr or commit.stdout or "")[:300].strip(),
+                last_commit_output[:300],
             )
-            return False
+            return CommitPushResult(
+                False,
+                "commit_failed",
+                last_commit_output or "git commit failed",
+            )
         logger.info(
             "commit attempt %d/%d failed on branch %s (hook autofix?), retrying: %s",
             attempt + 1,
             max_hook_retries + 1,
             branch,
-            (commit.stderr or commit.stdout or "")[:200].strip(),
+            last_commit_output[:200],
         )
-    push = subprocess.run(
-        ["git", "push", "origin", f"HEAD:{branch}"],
-        cwd=worktree,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=180,
-    )
-    if push.returncode != 0:
-        logger.warning("push failed: %s", push.stderr[:300])
-        return False
-    return True
+
+    synced, sync_detail = _sync_branch_before_push(worktree, branch)
+    if not synced:
+        return CommitPushResult(False, "push_failed", sync_detail)
+
+    for push_attempt in range(2):
+        head = _git_run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=worktree, timeout=30)
+        on_branch = head.returncode == 0 and head.stdout.strip() == branch
+        push_spec = branch if on_branch else f"HEAD:{branch}"
+        push = _git_run(
+            ["git", "push", "origin", push_spec],
+            cwd=worktree,
+            timeout=180,
+        )
+        if push.returncode == 0:
+            return CommitPushResult(True, "ok")
+        push_detail = (push.stderr or push.stdout or "git push failed").strip()
+        non_ff = "non-fast-forward" in push_detail.lower()
+        if push_attempt == 0 and non_ff:
+            logger.info(
+                "push non-fast-forward on %s; rebasing onto origin/%s and retrying",
+                branch,
+                branch,
+            )
+            synced, sync_detail = _sync_branch_before_push(worktree, branch)
+            if not synced:
+                return CommitPushResult(False, "push_failed", sync_detail)
+            continue
+        logger.warning("push failed: %s", push_detail[:300])
+        return CommitPushResult(False, "push_failed", push_detail[:500])
+
+    return CommitPushResult(False, "push_failed", "git push failed after retry")

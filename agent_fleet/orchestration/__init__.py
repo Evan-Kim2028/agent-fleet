@@ -4,6 +4,7 @@ from agent_fleet.orchestration.config import OrchestrationConfig, resolve_orches
 from agent_fleet.orchestration.decompose import (
     aggregate_child_results,
     child_tasks_from_task_spec,
+    coerce_empty_decompose,
     dispatch_task_spec_children,
     enrich_task_from_task_spec,
     handle_preflight_decision,

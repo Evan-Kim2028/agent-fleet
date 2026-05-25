@@ -20,6 +20,7 @@ from agent_fleet.hooks import FleetTask, ResumableGitOps
 from agent_fleet.implementer import implement
 from agent_fleet.observability.context import bind_run
 from agent_fleet.observability.log import RunLog
+from agent_fleet.orchestration.decompose import coerce_empty_decompose
 from agent_fleet.phase_graph import (
     PhaseGraph,
     PhaseRunContext,
@@ -366,7 +367,13 @@ class LocalFleetRunner:
                     )
                 if require_mcp and task_spec.research_plan:
                     task_spec = _task_spec_with_browser_research(task_spec)
+                task_spec, decompose_fallback = coerce_empty_decompose(task_spec)
                 phases["PLAN"] = task_spec.to_dict()
+                if decompose_fallback:
+                    phases["DECOMPOSE_FALLBACK"] = {
+                        "reason": "empty child_issues_proposed",
+                    }
+                    run_log.emit("orchestration.decompose_fallback", data=phases["DECOMPOSE_FALLBACK"])
 
                 if task_spec.decomposition_decision == DecompositionDecision.REJECTED:
                     result = FleetRunResult(
