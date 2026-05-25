@@ -61,7 +61,9 @@ def _repo_key(cfg: FleetConfig) -> str | None:
 def _level_up_overlay_texts(repo_key: str | None, persona: str) -> tuple[str, str, int]:
     fleet_overlay = load_overlay("_fleet", persona)
     repo_overlay = (
-        load_overlay(repo_key, persona) if repo_key else LevelUpOverlay(schema_version=1, rules=(), generation=0)
+        load_overlay(repo_key, persona)
+        if repo_key
+        else LevelUpOverlay(schema_version=1, rules=(), generation=0)
     )
     fleet_text = compose_overlay_text(fleet_overlay.rules)
     repo_text = compose_overlay_text(repo_overlay.rules)
