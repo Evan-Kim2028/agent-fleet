@@ -95,7 +95,7 @@ def load_bridge_state() -> dict[str, Any] | None:
         return None
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except OSError, json.JSONDecodeError:
         return None
 
 
@@ -105,7 +105,7 @@ def _load_supervisor_pid() -> int | None:
         return None
     try:
         return int(path.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return None
 
 
