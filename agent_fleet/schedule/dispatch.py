@@ -5,11 +5,10 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from agent_fleet.issue_loop.config import IssueDispatchConfig
     from agent_fleet.schedule.config import ScheduleDispatchConfig, ScheduleJob
 
@@ -82,3 +81,11 @@ def spawn_task_dispatch(
 def synthetic_issue_number(job_id: str) -> int:
     """Stable negative issue key for headless task schedules in capacity tracking."""
     return -(abs(hash(job_id)) % 900_000 + 1)
+
+
+def resolve_dispatch_workspace(*, job: ScheduleJob, controller_root: Path) -> Path:
+    """Target repo for a scheduled dispatch (defaults to the controller repo)."""
+    raw = job.dispatch.workspace
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return controller_root.resolve()

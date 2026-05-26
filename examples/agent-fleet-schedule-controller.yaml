@@ -1,0 +1,32 @@
+# Schedule controller config — lives on the agent_fleet repo ONLY.
+# Copy relevant sections into agent_fleet/.agent-fleet.yaml (local, typically untracked).
+#
+# Target repos (e.g. silphcoanalytics) keep their own .agent-fleet.yaml for scope,
+# verify, issue_dispatch, and pr_loop — but NO schedules: block.
+#
+# Watcher: agent-fleet-watch --workspace /path/to/agent_fleet
+# Systemd: examples/agent-fleet-schedule-watch.service
+
+schedules:
+  enabled: true
+  poll_interval_s: 60
+  jobs:
+    - id: silphco-docs-daily
+      enabled: true
+      cron: "0 6 * * *"
+      timezone: America/New_York
+      dispatch:
+        workspace: /home/evan/Documents/silphcoanalytics
+        kind: task
+        goal: "Documentation drift audit — compare code changes in the last 24 hours against docs"
+        persona: security_qa
+        pipeline: simple
+        context: |
+          Analyze only. Compare git log/diff on main since 24 hours ago against documentation.
+          Focus: docs/, frontend/docs/, api/DEPRECATIONS.md, README files, docs/ops/, AGENTS.md.
+          Report: (1) code changes lacking docs, (2) stale or wrong docs, (3) prioritized fix list.
+          Do not edit files in this pass unless you find a one-line factual error; prefer a report.
+      policy:
+        skip_if_in_flight: true
+        missed: skip
+        min_interval_s: 82800

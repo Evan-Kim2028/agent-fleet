@@ -19,6 +19,7 @@ from agent_fleet.memory import available_ram_gb
 from agent_fleet.schedule.cron import format_iso, is_due, next_fire_at, parse_iso
 from agent_fleet.schedule.dispatch import (
     build_issue_comment,
+    resolve_dispatch_workspace,
     spawn_issue_dispatch,
     spawn_task_dispatch,
     synthetic_issue_number,
@@ -121,23 +122,42 @@ def _capacity_issue_number(job: ScheduleJob) -> int:
 
 
 class ScheduleWatcher:
-    """Poll cron schedules and spawn dispatches when due."""
+    """Poll cron schedules and spawn dispatches when due.
+
+    The controller repo (*repo*) owns schedule config and ``.agent-fleet-state.json``.
+    Each job may set ``dispatch.workspace`` to dispatch against a different target repo.
+    """
 
     def __init__(
         self,
         repo: RepoConfig,
         schedule_config: ScheduleConfig,
         *,
-        issue_dispatch_config: IssueDispatchConfig | None = None,
         fleet_config_path: str | None = None,
     ) -> None:
         self.repo = repo
         self.config = schedule_config
-        self.issue_dispatch = issue_dispatch_config
         self.fleet_config_path = fleet_config_path
         self.state_file = state_path(repo.repo_root)
-        capacity = repo.capacity or FleetCapacity.defaults()
-        self.capacity_gate = FleetCapacityGate(capacity)
+
+    def _target_root(self, job: ScheduleJob) -> Path:
+        return resolve_dispatch_workspace(job=job, controller_root=self.repo.repo_root)
+
+    def _target_repo(self, job: ScheduleJob) -> RepoConfig | None:
+        from agent_fleet.repo import find_repo_config
+
+        return find_repo_config(self._target_root(job))
+
+    def _capacity_gate(self, job: ScheduleJob) -> FleetCapacityGate:
+        target = self._target_repo(job)
+        capacity = (target.capacity if target else None) or self.repo.capacity or FleetCapacity.defaults()
+        return FleetCapacityGate(capacity)
+
+    def _issue_dispatch_config(self, job: ScheduleJob) -> IssueDispatchConfig | None:
+        target = self._target_repo(job)
+        if target is not None and target.issue_dispatch is not None:
+            return target.issue_dispatch
+        return self.repo.issue_dispatch
 
     def list_jobs(self) -> list[dict[str, Any]]:
         state = load_state(self.state_file)
@@ -152,6 +172,7 @@ class ScheduleWatcher:
                     "cron": job.cron,
                     "timezone": job.timezone,
                     "kind": job.dispatch.kind,
+                    "workspace": str(self._target_root(job)),
                     "next_due_at": entry.get("next_due_at"),
                     "last_run_at": entry.get("last_run_at"),
                     "last_status": entry.get("last_status"),
@@ -209,13 +230,14 @@ class ScheduleWatcher:
             issue_title = ""
             issue_body = ""
             if job.dispatch.kind == "issue" and job.dispatch.issue is not None:
+                target_root = self._target_root(job)
                 try:
-                    issue = github_ops.issue_view(job.dispatch.issue, cwd=self.repo.repo_root)
+                    issue = github_ops.issue_view(job.dispatch.issue, cwd=target_root)
                     issue_title = str(issue.get("title") or "")
                     issue_body = str(issue.get("body") or "")
                     issue_labels = github_ops.issue_labels(
                         job.dispatch.issue,
-                        cwd=self.repo.repo_root,
+                        cwd=target_root,
                     )
                 except Exception as exc:
                     logger.warning(
@@ -230,7 +252,7 @@ class ScheduleWatcher:
                 title=issue_title,
                 body=issue_body,
             )
-            admission = self.capacity_gate.try_admit(
+            admission = self._capacity_gate(job).try_admit(
                 state,
                 issue_number=issue_number,
                 persona=job.dispatch.persona,
@@ -286,21 +308,27 @@ class ScheduleWatcher:
 
     def _spawn(self, job: ScheduleJob) -> int | None:
         dispatch = job.dispatch
+        target_root = self._target_root(job)
         if dispatch.kind == "issue":
-            if dispatch.issue is None or self.issue_dispatch is None:
-                logger.error("Schedule %s issue kind requires issue_dispatch config", job.id)
+            issue_dispatch = self._issue_dispatch_config(job)
+            if dispatch.issue is None or issue_dispatch is None:
+                logger.error(
+                    "Schedule %s issue kind requires issue_dispatch on target %s",
+                    job.id,
+                    target_root,
+                )
                 return None
-            comment = build_issue_comment(job, self.issue_dispatch)
+            comment = build_issue_comment(job, issue_dispatch)
             return spawn_issue_dispatch(
                 issue_number=dispatch.issue,
                 comment_body=comment,
                 persona=dispatch.persona,
-                repo_root=self.repo.repo_root,
+                repo_root=target_root,
             )
         return spawn_task_dispatch(
             job_id=job.id,
             dispatch=dispatch,
-            repo_root=self.repo.repo_root,
+            repo_root=target_root,
             fleet_config_path=self.fleet_config_path,
         )
 
@@ -319,7 +347,6 @@ def run_schedule_once(
     watcher = ScheduleWatcher(
         repo,
         repo.schedules,
-        issue_dispatch_config=repo.issue_dispatch,
         fleet_config_path=fleet_config_path,
     )
     return watcher.poll_once(force_job_id=force_job_id)

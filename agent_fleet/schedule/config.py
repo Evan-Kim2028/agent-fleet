@@ -15,6 +15,7 @@ MissedPolicy = Literal["skip", "catch_up_once", "catch_up_all"]
 @dataclass(frozen=True)
 class ScheduleDispatchConfig:
     kind: DispatchKind
+    workspace: str | None = None
     issue: int | None = None
     persona: str = "coder"
     pipeline: str = "code_review"
@@ -56,6 +57,7 @@ def _load_dispatch(raw: dict[str, Any]) -> ScheduleDispatchConfig:
     issue = int(issue_raw) if issue_raw is not None else None
     return ScheduleDispatchConfig(
         kind=kind,
+        workspace=str(raw.get("workspace")).strip() if raw.get("workspace") else None,
         issue=issue,
         persona=str(raw.get("persona") or "coder"),
         pipeline=str(raw.get("pipeline") or "code_review"),

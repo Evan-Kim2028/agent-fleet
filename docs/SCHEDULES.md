@@ -42,7 +42,38 @@ Headless task (no GitHub issue — like `agent-fleet run`):
         context: "Report only; do not bump versions."
 ```
 
-## Dispatch kinds
+## Cross-repo schedules (agent-fleet controller)
+
+Schedules live on the **agent-fleet repo** (the controller). Target repos keep normal
+`.agent-fleet.yaml` for scope, verify, issue dispatch, and PR loop — but **no**
+`schedules:` block on targets.
+
+```yaml
+# /home/evan/Documents/agent_fleet/.agent-fleet.yaml
+schedules:
+  enabled: true
+  poll_interval_s: 60
+  jobs:
+    - id: silphco-docs-daily
+      cron: "0 6 * * *"
+      timezone: America/New_York
+      dispatch:
+        workspace: /home/evan/Documents/silphcoanalytics   # target repo
+        kind: task
+        goal: "Documentation drift audit for last 24h of changes"
+        persona: security_qa
+        pipeline: simple
+        context: "Report only on first pass."
+```
+
+- **State file:** `.agent-fleet-state.json` in the controller repo (`agent_fleet/`)
+- **Watcher:** `agent-fleet-watch --workspace /path/to/agent_fleet` (schedules-only when
+  the controller has no `issue_dispatch` / `pr_loop`)
+- **SilphCo issue + PR loop:** unchanged — `agent-fleet-watch --workspace silphcoanalytics`
+  on the existing silphco unit
+
+See `examples/agent-fleet-schedule-watch.service` for a dedicated schedule-controller unit.
+
 
 | Kind | Behavior |
 |------|----------|

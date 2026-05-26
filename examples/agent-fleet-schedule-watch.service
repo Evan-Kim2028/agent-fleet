@@ -1,0 +1,22 @@
+[Unit]
+Description=Agent Fleet schedule controller (cron dispatches to target repos)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=/home/evan/Documents/agent_fleet
+EnvironmentFile=/home/evan/agent-fleet-dev/.env
+ExecStart=/home/evan/.local/bin/uv run --directory /home/evan/Documents/agent_fleet agent-fleet-watch --workspace /home/evan/Documents/agent_fleet
+Restart=always
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=30s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=agent-fleet-schedule-watch
+
+[Install]
+WantedBy=default.target

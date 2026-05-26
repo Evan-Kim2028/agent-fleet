@@ -324,7 +324,6 @@ class CombinedWatcher:
             ScheduleWatcher(
                 repo,
                 schedule_config,
-                issue_dispatch_config=issue_config,
                 fleet_config_path=fleet_config_path,
             )
             if schedule_config and schedule_config.enabled
