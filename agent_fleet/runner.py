@@ -286,15 +286,6 @@ class LocalFleetRunner:
         repo_cfg = find_repo_config(repo_root)
         run_goal = f"{title}\n\n{body}".strip()
         level_up_equip = None
-        if self._fleet_config is not None:
-            from agent_fleet.orchestration.equip import resolve_dispatch_equip
-
-            level_up_equip = resolve_dispatch_equip(
-                FleetTask(goal=run_goal, persona=persona, workspace=str(repo_root)),
-                self._fleet_config,
-                repo_cfg,
-                run_id=run_id,
-            )
         require_mcp = is_visual_audit_dispatch(
             issue_labels=issue_labels,
             title=title,
@@ -388,6 +379,16 @@ class LocalFleetRunner:
                     }
                     run_log.emit(
                         "orchestration.decompose_fallback", data=phases["DECOMPOSE_FALLBACK"]
+                    )
+
+                if self._fleet_config is not None:
+                    from agent_fleet.orchestration.equip import resolve_dispatch_equip
+
+                    level_up_equip = resolve_dispatch_equip(
+                        FleetTask(goal=run_goal, persona=persona, workspace=str(repo_root)),
+                        self._fleet_config,
+                        repo_cfg,
+                        run_id=run_id,
                     )
 
                 if task_spec.decomposition_decision == DecompositionDecision.REJECTED:

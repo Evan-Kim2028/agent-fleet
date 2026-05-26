@@ -149,11 +149,10 @@ class PrLoopWatcher:
                     _wt_base = _Path(str(_raw)).expanduser()
             if _wt_base is None:
                 _wt_base = _SpineConfig.defaults().worktree_base
-            dispatch_state = load_state(self.state_file)
             active_branches |= protected_dispatch_branches(
                 self.repo.repo_root,
                 _wt_base,
-                dispatch_state,
+                state,
             )
             sweep_orphan_worktrees(self.repo.repo_root, _wt_base, active_branches)
         except Exception:
