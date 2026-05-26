@@ -43,6 +43,7 @@ def aggregate_fleet_experience(
                     continue
                 try:
                     import json
+
                     row = json.loads(line)
                     row["_source_repo"] = repo_dir.name
                     rows.append(row)

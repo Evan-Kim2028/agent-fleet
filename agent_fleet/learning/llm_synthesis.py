@@ -15,7 +15,7 @@ from agent_fleet.learning.experience import get_fleet_experience_summary
 
 def propose_skills_with_llm(
     persona: str,
-    backend: object,  # the fleet backend (Cursor, Kimi, etc.)
+    backend: Any,  # the fleet backend (Cursor, Kimi, etc.)  # noqa: ANN401
     *,
     max_experience_rows: int = 80,
 ) -> list[dict[str, Any]]:
