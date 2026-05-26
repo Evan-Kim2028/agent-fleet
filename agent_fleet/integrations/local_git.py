@@ -177,6 +177,7 @@ class LocalGitOps:
         if not self.use_worktree or worktree.resolve() == self.repo_root.resolve():
             return
         import traceback
+
         logger.warning(
             "teardown_workspace REMOVING worktree=%s exists=%s caller_stack:\n%s",
             worktree,
