@@ -5,13 +5,15 @@ from __future__ import annotations
 import json
 import re
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from agent_fleet.fleet_paths import agent_fleet_home
 from agent_fleet.pr_review.git import classify_files, is_deletion_only_pr
 from agent_fleet.pr_review.prompts import build_prompt
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from agent_fleet.hooks import LLMBackend
     from agent_fleet.pr_review.config import PrReviewConfig
 
@@ -46,7 +48,7 @@ def _log_analysis(
     parsed: dict[str, Any] | None,
     error: str | None = None,
 ) -> None:
-    log_dir = config.log_dir or Path.home() / ".agent-fleet" / "pr-review-logs"
+    log_dir = config.log_dir or agent_fleet_home() / "pr-review-logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     payload = {
