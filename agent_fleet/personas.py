@@ -23,6 +23,14 @@ _DEFAULT_ALLOWED_TOOLS = ["read_file", "write_file", "run_command"]
 _PACKAGE_PERSONAS = Path(__file__).resolve().parent / "personas"
 
 
+def _persona_search_dirs(cfg: FleetConfig) -> tuple[Path, ...]:
+    """Search repo/local personas_dir first, then bundled package personas."""
+    primary = cfg.personas_dir
+    if primary.resolve() == _PACKAGE_PERSONAS.resolve():
+        return (primary,)
+    return (primary, _PACKAGE_PERSONAS)
+
+
 def read_persona_body(persona: Persona) -> str:
     """Return the composed persona prompt (loadout + overlays) or prompt file contents."""
     if persona.body is not None:
@@ -31,23 +39,33 @@ def read_persona_body(persona: Persona) -> str:
 
 
 def load_loadout(name: str, *, personas_dir: Path | None = None) -> dict[str, Any] | None:
-    base = personas_dir or _PACKAGE_PERSONAS
-    path = base / f"{name}.loadout.yaml"
-    if not path.is_file():
-        return None
-    data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict):
-        raise ValueError(f"Invalid loadout {path}: expected mapping")
-    return data
+    bases: list[Path] = []
+    if personas_dir is not None:
+        bases.append(personas_dir)
+    if personas_dir is None or personas_dir.resolve() != _PACKAGE_PERSONAS.resolve():
+        bases.append(_PACKAGE_PERSONAS)
+    for base in bases:
+        path = base / f"{name}.loadout.yaml"
+        if not path.is_file():
+            continue
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError(f"Invalid loadout {path}: expected mapping")
+        return data
+    return None
 
 
-def _loadout_stub_path(loadout: dict[str, Any], personas_dir: Path) -> Path | None:
+def _loadout_stub_path(
+    loadout: dict[str, Any],
+    personas_dirs: tuple[Path, ...],
+) -> Path | None:
     stub = loadout.get("stub")
     if not stub:
         return None
-    stub_path = personas_dir / str(stub)
-    if stub_path.is_file():
-        return stub_path.resolve()
+    for personas_dir in personas_dirs:
+        stub_path = personas_dir / str(stub)
+        if stub_path.is_file():
+            return stub_path.resolve()
     return None
 
 
@@ -80,20 +98,22 @@ def _resolve_prompt_path(spec: PersonaSpec, cfg: FleetConfig) -> Path:
         return direct
     if direct.exists():
         return direct.resolve()
-    in_personas = cfg.personas_dir / prompt
-    if in_personas.exists():
-        return in_personas.resolve()
-    if not prompt.endswith(".md"):
-        with_suffix = cfg.personas_dir / f"{prompt}.md"
-        if with_suffix.exists():
-            return with_suffix.resolve()
+    for personas_dir in _persona_search_dirs(cfg):
+        in_personas = personas_dir / prompt
+        if in_personas.exists():
+            return in_personas.resolve()
+        if not prompt.endswith(".md"):
+            with_suffix = personas_dir / f"{prompt}.md"
+            if with_suffix.exists():
+                return with_suffix.resolve()
     if spec.skill:
         skill_path = find_skill_path(spec.skill, cfg.skill_dirs)
         if skill_path:
             return skill_path
+    searched = ", ".join(str(path) for path in _persona_search_dirs(cfg))
     raise ValueError(
         f"Persona prompt not found: {prompt!r} "
-        f"(searched personas_dir={cfg.personas_dir}, skill={spec.skill!r})"
+        f"(searched personas_dirs=[{searched}], skill={spec.skill!r})"
     )
 
 
@@ -119,10 +139,12 @@ class YamlPersonaResolver:
 
     def list_personas(self) -> list[str]:
         names = set(self._config.personas.keys())
-        if self._config.personas_dir.exists():
-            for path in sorted(self._config.personas_dir.glob("*.md")):
+        for personas_dir in _persona_search_dirs(self._config):
+            if not personas_dir.exists():
+                continue
+            for path in sorted(personas_dir.glob("*.md")):
                 names.add(path.stem)
-            for path in sorted(self._config.personas_dir.glob("*.loadout.yaml")):
+            for path in sorted(personas_dir.glob("*.loadout.yaml")):
                 names.add(path.stem.replace(".loadout", ""))
         return sorted(names)
 
@@ -148,7 +170,7 @@ class YamlPersonaResolver:
                 repo_key,
                 name,
             )
-            stub_path = _loadout_stub_path(loadout, self._config.personas_dir)
+            stub_path = _loadout_stub_path(loadout, _persona_search_dirs(self._config))
             stub_text = (
                 stub_path.read_text(encoding="utf-8").strip() if stub_path is not None else None
             )

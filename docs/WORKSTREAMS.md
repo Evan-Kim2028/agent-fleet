@@ -29,7 +29,7 @@ Each item becomes one fleet task with:
 
 ## CLI
 
-Primary entry (once wired into `agent-fleet`):
+Primary entry:
 
 ```bash
 # List configured workstreams
@@ -59,7 +59,7 @@ agent-fleet workstream harvest .worktrees/fleet-runs/task-0-abc123 \
   --workspace /path/to/repo
 ```
 
-Module entry (available before top-level CLI wiring):
+Module entry (same handlers, useful when debugging the workstreams package):
 
 ```bash
 python -m agent_fleet.workstreams list --workspace /path/to/repo
