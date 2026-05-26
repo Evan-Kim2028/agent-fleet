@@ -1,4 +1,22 @@
-"""Shared agent prompt assembly for execute and fix dispatch paths."""
+"""Shared agent prompt assembly for persona dispatches.
+
+Every ``backend.run()`` / ``session.send()`` path that represents a persona doing
+work should build its prompt via :func:`build_agent_prompt` with
+``persona_body=equip.compose_body`` (from :func:`resolve_dispatch_equip` or
+``task.equip``) when equip is available.
+
+In-scope call sites (this package):
+
+- ``phases.run_execute_phase`` — equip compose body + ``build_agent_prompt``
+- ``phases._legacy_review_phase`` — reviewer persona + review skills in context
+- ``code_review.fix.run_fix_phase`` — equip via ``_resolve_fix_equip`` + ``build_agent_prompt``
+
+Out-of-scope but audited (must stay aligned when touched elsewhere):
+
+- ``pr_loop.lifecycle`` — review/CI fix agents (equip + ``build_agent_prompt``)
+- ``reviewer.review`` — structured review; review skills via ``task_context``
+- ``planner`` / ``implementer`` / ``researcher`` / scouts — pipeline-specific, no equip yet
+"""
 
 from __future__ import annotations
 

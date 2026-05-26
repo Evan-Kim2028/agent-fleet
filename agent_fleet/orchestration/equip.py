@@ -1,4 +1,9 @@
-"""Resolve dispatch equip: loadouts, overlays, dynamic skills, journaling."""
+"""Resolve dispatch equip: loadouts, overlays, dynamic skills, journaling.
+
+Call :func:`resolve_dispatch_equip` once per dispatch (dispatcher, PR loop, fix phase
+when ``fix_persona != task.persona``). Reuse ``task.equip`` on the execute and
+code-review fix fast paths when the persona matches.
+"""
 
 from __future__ import annotations
 

@@ -58,6 +58,39 @@ def _build_execute_prompt(persona: Persona, task: FleetTask) -> str:
     ).full
 
 
+def _build_legacy_review_prompt(
+    persona: Persona,
+    task: FleetTask,
+    implementation_summary: str,
+) -> str:
+    review_context = task.context
+    skill_append = _review_skill_prompt_append(task)
+    if skill_append:
+        review_context = (
+            f"{skill_append}\n\n{review_context}".strip()
+            if review_context.strip()
+            else skill_append
+        )
+    return build_agent_prompt(
+        persona_body=read_persona_body(persona),
+        task_heading="Original Task",
+        task_body=task.goal,
+        context=review_context,
+        extra_instructions=persona.extra_instructions,
+        allowed_paths=persona.allowed_paths,
+        extra_sections=[
+            (
+                "Implementation Summary",
+                implementation_summary.strip() or "(no implementation output to review)",
+            ),
+        ],
+        closing_instruction=(
+            "Review the implementation. List issues by severity (blocker/major/minor), "
+            "note missing tests, and give a clear verdict: APPROVE or REQUEST_CHANGES."
+        ),
+    ).full
+
+
 def run_execute_phase(
     *,
     backend: LLMBackend,
@@ -456,28 +489,7 @@ def _legacy_review_phase(
     session: LLMSession | None = None,
 ) -> dict[str, Any]:
     persona = resolver.load(reviewer_persona)
-    body = read_persona_body(persona)
-    prompt_parts = [
-        "# Persona",
-        body.strip(),
-    ]
-    skill_append = _review_skill_prompt_append(task)
-    if skill_append:
-        prompt_parts.extend(["", skill_append])
-    prompt_parts.extend(
-        [
-            "",
-            "# Original Task",
-            task.goal.strip(),
-            "",
-            "# Implementation Summary",
-            implementation_summary.strip() or "(no implementation output to review)",
-            "",
-            "Review the implementation. List issues by severity (blocker/major/minor), "
-            "note missing tests, and give a clear verdict: APPROVE or REQUEST_CHANGES.",
-        ]
-    )
-    prompt = "\n".join(prompt_parts)
+    prompt = _build_legacy_review_prompt(persona, task, implementation_summary)
     if session is not None:
         result = session.send(
             prompt,

@@ -85,6 +85,10 @@ personas:
     prompt: tech-scout.md
     mode: plan
 
+# code_review auto_fix is repo-level (.agent-fleet.yaml), not global fleet.yaml.
+# Default: auto_fix=false. When pr_loop.enabled with no code_review section, inherits
+# auto_fix=true, auto_push=true, auto_pr_loop=true. See examples/repo-full.agent-fleet.yaml.
+
 pipelines:
   simple:
     - execute

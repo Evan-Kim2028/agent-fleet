@@ -90,11 +90,7 @@ def _resolve_fix_equip(
         title=task.title,
         equip=task.equip,
     )
-    run_id = (
-        f"{parent_run_id}-fix-{attempt}"
-        if parent_run_id
-        else f"code-review-fix-{attempt}"
-    )
+    run_id = f"{parent_run_id}-fix-{attempt}" if parent_run_id else f"code-review-fix-{attempt}"
     return resolve_dispatch_equip(fix_task, fleet_config, repo, run_id=run_id)
 
 
@@ -138,12 +134,18 @@ def run_fix_phase(
         task_heading="Task",
         task_body="You are fixing issues found during an automated code review pipeline.",
         context=task.context.strip() or "(none)",
+        extra_instructions=persona.extra_instructions,
+        allowed_paths=persona.allowed_paths,
         extra_sections=[
             ("Original task", task.goal.strip()),
             ("Review feedback", review_block or "(none)"),
             ("Verify failures", verify_block or "(none)"),
             ("Instructions", instructions),
         ],
+        closing_instruction=(
+            "Apply the fixes in the workspace. Return a concise summary of what you "
+            "changed and any verify commands you ran."
+        ),
     ).full
 
     result = backend.run(

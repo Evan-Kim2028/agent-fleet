@@ -159,8 +159,30 @@ Leave `personas_dir` unset in global `~/.agent-fleet/fleet.yaml` — bundled per
 | Pipeline | Phases |
 |----------|--------|
 | `simple` | execute |
-| `code_review` | execute → review |
+| `code_review` | execute → review (optional auto-fix loop via `code_review.auto_fix`) |
 | `full` | plan → research → synthesize → implement → verify → review |
+
+### Equip + prompt path
+
+Persona dispatches resolve skills via `resolve_dispatch_equip()` (dispatcher) and assemble
+prompts with `build_agent_prompt()` (`agent_fleet/prompts/agent.py`).
+
+| Call site | Equip | `build_agent_prompt` |
+|-----------|-------|----------------------|
+| `phases.run_execute_phase` | `task.equip.compose_body` | yes |
+| `phases._legacy_review_phase` | review skills via `task.equip.skill_slots_review` | yes |
+| `code_review.fix.run_fix_phase` | `_resolve_fix_equip` / `task.equip` fast path | yes |
+| `pr_loop.lifecycle` (review + CI fix) | `resolve_dispatch_equip` per attempt | yes |
+
+Structured review (`reviewer.review`) injects review skills through `task_context`; planner,
+implementer, researcher, and scout paths are pipeline-specific and do not use equip yet.
+
+**`code_review.auto_fix` defaults** (repo `.agent-fleet.yaml`):
+
+- Explicit `code_review:` block — defaults `auto_fix: false` unless set
+- `pr_loop.enabled: true` with no `code_review:` section — inherits `auto_fix: true`,
+  `auto_push: true`, `auto_pr_loop: true`
+- See `examples/repo-full.agent-fleet.yaml` and `examples/repo.agent-fleet.yaml`
 
 ### Default skills (pstack)
 
