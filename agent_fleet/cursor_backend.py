@@ -477,6 +477,8 @@ class CursorBackend:
             close_default_client()
         except Exception:
             logger.debug("close_default_client failed", exc_info=True)
+        if os.environ.get("AGENT_FLEET_SHARED_BRIDGE") != "1":
+            return
         try:
             from agent_fleet.bridge_daemon import apply_bridge_env
 
@@ -494,14 +496,17 @@ class CursorBackend:
         self.default_model = default_model
         self.default_mode = default_mode
         self.api_key = api_key or os.environ.get("CURSOR_API_KEY", "")
-        # Attach to a shared bridge daemon if one is running so multiple
-        # concurrent agent-fleet processes don't each spawn their own bridge.
-        try:
-            from agent_fleet.bridge_daemon import apply_bridge_env
+        # Default: each agent-fleet process spawns its own private cursor-sdk
+        # bridge (isolation > sharing — the upstream bridge is not concurrency
+        # safe across processes). Opt in to a shared daemon by setting
+        # AGENT_FLEET_SHARED_BRIDGE=1 in the environment.
+        if os.environ.get("AGENT_FLEET_SHARED_BRIDGE") == "1":
+            try:
+                from agent_fleet.bridge_daemon import apply_bridge_env
 
-            apply_bridge_env()
-        except Exception:
-            logger.debug("apply_bridge_env failed; falling back to per-process bridge")
+                apply_bridge_env()
+            except Exception:
+                logger.debug("apply_bridge_env failed; falling back to per-process bridge")
 
     def create_session(
         self,
