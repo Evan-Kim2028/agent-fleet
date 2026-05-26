@@ -1,11 +1,13 @@
-# Schedule controller config — lives on the agent_fleet repo ONLY.
-# Copy relevant sections into agent_fleet/.agent-fleet.yaml (local, typically untracked).
-#
-# Target repos (e.g. silphcoanalytics) keep their own .agent-fleet.yaml for scope,
-# verify, issue_dispatch, and pr_loop — but NO schedules: block.
+# Agent Fleet controller — all fleet config lives here, not on target repos.
+# Copy to agent_fleet/.agent-fleet.yaml (local) or merge with self-dogfood sections.
 #
 # Watcher: agent-fleet-watch --workspace /path/to/agent_fleet
-# Systemd: examples/agent-fleet-schedule-watch.service
+# Systemd: examples/agent-fleet-watch.service
+
+name: agent-fleet-controller
+
+targets:
+  - config: targets/silphcoanalytics.agent-fleet.yaml
 
 schedules:
   enabled: true

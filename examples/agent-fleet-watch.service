@@ -1,5 +1,5 @@
 [Unit]
-Description=Agent Fleet schedule controller (cron dispatches to target repos)
+Description=Agent Fleet controller (schedules, issue dispatch, PR loop for target repos)
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=60
@@ -16,7 +16,7 @@ KillMode=mixed
 TimeoutStopSec=30s
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=agent-fleet-schedule-watch
+SyslogIdentifier=agent-fleet-watch
 
 [Install]
 WantedBy=default.target

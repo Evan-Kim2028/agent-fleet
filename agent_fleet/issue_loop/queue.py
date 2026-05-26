@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import yaml
@@ -14,8 +15,6 @@ from agent_fleet.in_flight import reap_in_flight
 from agent_fleet.issue_loop import github_ops
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from agent_fleet.capacity.gate import FleetCapacityGate
     from agent_fleet.issue_loop.config import IssueDispatchConfig, IssueQueueConfig
 
@@ -32,8 +31,17 @@ class QueueItem:
     note: str = ""
 
 
-def queue_path(repo_root: Path, config: IssueQueueConfig) -> Path:
-    return (repo_root / config.file).resolve()
+def queue_path(
+    repo_root: Path,
+    config: IssueQueueConfig,
+    *,
+    config_root: Path | None = None,
+) -> Path:
+    rel = Path(config.file)
+    if rel.is_absolute():
+        return rel
+    base = config_root if config_root is not None else repo_root
+    return (base / rel).resolve()
 
 
 def queue_content_fingerprint(items: list[QueueItem]) -> str:
@@ -50,8 +58,13 @@ def sync_queue_fingerprint(state: dict[str, Any], items: list[QueueItem]) -> Non
         qs.pop("waiting_index", None)
 
 
-def load_queue_items(repo_root: Path, config: IssueQueueConfig) -> list[QueueItem]:
-    path = queue_path(repo_root, config)
+def load_queue_items(
+    repo_root: Path,
+    config: IssueQueueConfig,
+    *,
+    config_root: Path | None = None,
+) -> list[QueueItem]:
+    path = queue_path(repo_root, config, config_root=config_root)
     if not path.exists():
         return []
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -97,9 +110,11 @@ def queue_status(
     repo_root: Path,
     config: IssueQueueConfig,
     state: dict[str, Any],
+    *,
+    config_root: Path | None = None,
 ) -> dict[str, Any]:
-    path = queue_path(repo_root, config)
-    items = load_queue_items(repo_root, config)
+    path = queue_path(repo_root, config, config_root=config_root)
+    items = load_queue_items(repo_root, config, config_root=config_root)
     qs = queue_state(state)
     head = int(qs.get("head", 0))
     in_flight = state.get("in_flight") or {}
@@ -144,10 +159,11 @@ def poll_queue(
     capacity_gate: FleetCapacityGate,
     spawn_dispatch: SpawnDispatchFn,
     available_ram_gb: float | None,
+    config_root: Path | None = None,
 ) -> tuple[list[dict[str, str]], bool]:
     """Drain the FIFO queue. Returns (results, retryable_deferred)."""
     reap_in_flight(state)
-    items = load_queue_items(repo_root, queue_config)
+    items = load_queue_items(repo_root, queue_config, config_root=config_root)
     if not items:
         return [], False
 

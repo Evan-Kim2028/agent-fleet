@@ -38,12 +38,15 @@ def spawn_issue_dispatch(
     comment_body: str,
     persona: str,
     repo_root: Path,
+    target_config_path: Path | None = None,
 ) -> int | None:
     env = os.environ.copy()
     env["ISSUE_NUMBER"] = str(issue_number)
     env["COMMENT_BODY"] = comment_body
     env["PERSONA"] = persona
     env["AGENT_FLEET_WORKSPACE"] = str(repo_root)
+    if target_config_path is not None:
+        env["AGENT_FLEET_TARGET_CONFIG"] = str(target_config_path)
     proc = subprocess.Popen(
         [sys.executable, "-m", "agent_fleet.issue_loop.dispatch"],
         env=env,
@@ -59,6 +62,7 @@ def spawn_task_dispatch(
     dispatch: ScheduleDispatchConfig,
     repo_root: Path,
     fleet_config_path: str | None = None,
+    target_config_path: Path | None = None,
 ) -> int | None:
     env = os.environ.copy()
     env["SCHEDULE_JOB_ID"] = job_id
@@ -69,6 +73,8 @@ def spawn_task_dispatch(
     env["AGENT_FLEET_WORKSPACE"] = str(repo_root)
     if fleet_config_path:
         env["AGENT_FLEET_CONFIG"] = fleet_config_path
+    if target_config_path is not None:
+        env["AGENT_FLEET_TARGET_CONFIG"] = str(target_config_path)
     proc = subprocess.Popen(
         [sys.executable, "-m", "agent_fleet.schedule.task_dispatch"],
         env=env,

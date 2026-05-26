@@ -16,6 +16,7 @@ from agent_fleet.capacity import (
 from agent_fleet.in_flight import reap_in_flight
 from agent_fleet.issue_loop import github_ops
 from agent_fleet.memory import available_ram_gb
+from agent_fleet.repo import find_repo_config, fleet_state_root
 from agent_fleet.schedule.cron import format_iso, is_due, next_fire_at, parse_iso
 from agent_fleet.schedule.dispatch import (
     build_issue_comment,
@@ -134,23 +135,28 @@ class ScheduleWatcher:
         schedule_config: ScheduleConfig,
         *,
         fleet_config_path: str | None = None,
+        target_registry: dict[Path, RepoConfig] | None = None,
     ) -> None:
         self.repo = repo
         self.config = schedule_config
         self.fleet_config_path = fleet_config_path
-        self.state_file = state_path(repo.repo_root)
+        self.target_registry = target_registry or {}
+        self.state_file = state_path(fleet_state_root(repo))
 
     def _target_root(self, job: ScheduleJob) -> Path:
         return resolve_dispatch_workspace(job=job, controller_root=self.repo.repo_root)
 
     def _target_repo(self, job: ScheduleJob) -> RepoConfig | None:
-        from agent_fleet.repo import find_repo_config
-
-        return find_repo_config(self._target_root(job))
+        root = self._target_root(job)
+        if root in self.target_registry:
+            return self.target_registry[root]
+        return find_repo_config(root)
 
     def _capacity_gate(self, job: ScheduleJob) -> FleetCapacityGate:
         target = self._target_repo(job)
-        capacity = (target.capacity if target else None) or self.repo.capacity or FleetCapacity.defaults()
+        capacity = (
+            (target.capacity if target else None) or self.repo.capacity or FleetCapacity.defaults()
+        )
         return FleetCapacityGate(capacity)
 
     def _issue_dispatch_config(self, job: ScheduleJob) -> IssueDispatchConfig | None:
@@ -324,12 +330,17 @@ class ScheduleWatcher:
                 comment_body=comment,
                 persona=dispatch.persona,
                 repo_root=target_root,
+                target_config_path=target.config_path
+                if (target := self._target_repo(job))
+                else None,
             )
+        target = self._target_repo(job)
         return spawn_task_dispatch(
             job_id=job.id,
             dispatch=dispatch,
             repo_root=target_root,
             fleet_config_path=self.fleet_config_path,
+            target_config_path=target.config_path if target else None,
         )
 
 

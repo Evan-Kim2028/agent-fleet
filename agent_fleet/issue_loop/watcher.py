@@ -33,7 +33,13 @@ from agent_fleet.memory import (
     memory_snapshot,
 )
 from agent_fleet.observability.fleet_logger import get_watcher_logger
-from agent_fleet.repo import RepoConfig, find_repo_config
+from agent_fleet.repo import (
+    RepoConfig,
+    find_repo_config,
+    fleet_state_root,
+    iter_target_repos,
+    target_registry,
+)
 from agent_fleet.state import (
     apply_issue_defaults,
     load_state,
@@ -94,12 +100,15 @@ def _spawn_dispatch(
     comment_body: str,
     persona: str,
     repo_root: Path,
+    target_config_path: Path | None = None,
 ) -> int | None:
     env = os.environ.copy()
     env["ISSUE_NUMBER"] = str(issue_number)
     env["COMMENT_BODY"] = comment_body
     env["PERSONA"] = persona
     env["AGENT_FLEET_WORKSPACE"] = str(repo_root)
+    if target_config_path is not None:
+        env["AGENT_FLEET_TARGET_CONFIG"] = str(target_config_path)
     proc = subprocess.Popen(
         _dispatch_executable(),
         env=env,
@@ -112,12 +121,34 @@ def _spawn_dispatch(
 class IssueLoopWatcher:
     """Long-running watcher for /agent issue comment triggers."""
 
-    def __init__(self, repo: RepoConfig, dispatch_config: IssueDispatchConfig) -> None:
+    def __init__(
+        self,
+        repo: RepoConfig,
+        dispatch_config: IssueDispatchConfig,
+        *,
+        state_root: Path | None = None,
+    ) -> None:
         self.repo = repo
         self.config = dispatch_config
-        self.state_file = state_path(repo.repo_root)
+        self.state_file = state_path(state_root or fleet_state_root(repo))
         capacity = repo.capacity or FleetCapacity.defaults()
         self.capacity_gate = FleetCapacityGate(capacity)
+
+    def _spawn_dispatch(
+        self,
+        *,
+        issue_number: int,
+        comment_body: str,
+        persona: str,
+        repo_root: Path,
+    ) -> int | None:
+        return _spawn_dispatch(
+            issue_number=issue_number,
+            comment_body=comment_body,
+            persona=persona,
+            repo_root=repo_root,
+            target_config_path=self.repo.config_path,
+        )
 
     def poll_once(self, state: dict[str, Any] | None = None) -> list[dict[str, str]]:
         if state is None:
@@ -224,7 +255,7 @@ class IssueLoopWatcher:
             if is_visual_audit:
                 memory_snapshot(label=f"pre-dispatch issue #{issue_number}")
             state["seen"].append(comment_id)
-            pid = _spawn_dispatch(
+            pid = self._spawn_dispatch(
                 issue_number=issue_number,
                 comment_body=body,
                 persona=persona,
@@ -257,8 +288,9 @@ class IssueLoopWatcher:
                 queue_config=self.config.queue,
                 state=state,
                 capacity_gate=self.capacity_gate,
-                spawn_dispatch=_spawn_dispatch,
+                spawn_dispatch=self._spawn_dispatch,
                 available_ram_gb=available_ram_gb(),
+                config_root=self.repo.config_root,
             )
             results.extend(queue_results)
             if queue_deferred:
@@ -311,36 +343,71 @@ class CombinedWatcher:
         from agent_fleet.schedule.watcher import ScheduleWatcher
 
         self.repo = repo
-        self.issue_watcher = (
-            IssueLoopWatcher(repo, issue_config) if issue_config and issue_config.enabled else None
-        )
         self.fleet_config = load_fleet_config(fleet_config_path)
-        self.pr_watcher = (
-            PrLoopWatcher(repo, pr_loop_config, fleet_config=self.fleet_config)
-            if pr_loop_config and pr_loop_config.enabled
-            else None
-        )
+        controller_state_root = fleet_state_root(repo)
+        targets = iter_target_repos(repo)
+        registry = target_registry(targets)
+
+        self.issue_watchers = [
+            IssueLoopWatcher(
+                target,
+                target.issue_dispatch,
+                state_root=controller_state_root,
+            )
+            for target in targets
+            if target.issue_dispatch is not None and target.issue_dispatch.enabled
+        ]
+        if not self.issue_watchers and issue_config and issue_config.enabled:
+            self.issue_watchers = [
+                IssueLoopWatcher(repo, issue_config, state_root=controller_state_root)
+            ]
+
+        self.pr_watchers = [
+            PrLoopWatcher(
+                target,
+                target.pr_loop,
+                fleet_config=self.fleet_config,
+                state_root=controller_state_root,
+            )
+            for target in targets
+            if target.pr_loop is not None and target.pr_loop.enabled
+        ]
+        if not self.pr_watchers and pr_loop_config and pr_loop_config.enabled:
+            self.pr_watchers = [
+                PrLoopWatcher(
+                    repo,
+                    pr_loop_config,
+                    fleet_config=self.fleet_config,
+                    state_root=controller_state_root,
+                )
+            ]
+
         self.schedule_watcher = (
             ScheduleWatcher(
                 repo,
                 schedule_config,
                 fleet_config_path=fleet_config_path,
+                target_registry=registry,
             )
             if schedule_config and schedule_config.enabled
             else None
         )
         intervals: list[int] = []
-        if issue_config and issue_config.enabled:
-            intervals.append(issue_config.poll_interval_s)
-        if pr_loop_config and pr_loop_config.enabled:
-            intervals.append(pr_loop_config.poll_interval_s)
+        for watcher in self.issue_watchers:
+            intervals.append(watcher.config.poll_interval_s)
+        for watcher in self.pr_watchers:
+            intervals.append(watcher.loop_config.poll_interval_s)
         if schedule_config and schedule_config.enabled:
             intervals.append(schedule_config.poll_interval_s)
         self.poll_interval_s = max(intervals) if intervals else 30
 
     def poll_once(self) -> dict[str, list[dict[str, str]]]:
-        issue_results = self.issue_watcher.poll_once() if self.issue_watcher else []
-        pr_results = self.pr_watcher.poll_once() if self.pr_watcher else []
+        issue_results: list[dict[str, str]] = []
+        for watcher in self.issue_watchers:
+            issue_results.extend(watcher.poll_once())
+        pr_results: list[dict[str, str]] = []
+        for watcher in self.pr_watchers:
+            pr_results.extend(watcher.poll_once())
         schedule_results = self.schedule_watcher.poll_once() if self.schedule_watcher else []
         return {
             "issues": issue_results,

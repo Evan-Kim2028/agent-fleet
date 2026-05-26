@@ -42,14 +42,16 @@ Headless task (no GitHub issue — like `agent-fleet run`):
         context: "Report only; do not bump versions."
 ```
 
-## Cross-repo schedules (agent-fleet controller)
+## Agent Fleet controller (all config in agent_fleet)
 
-Schedules live on the **agent-fleet repo** (the controller). Target repos keep normal
-`.agent-fleet.yaml` for scope, verify, issue dispatch, and PR loop — but **no**
-`schedules:` block on targets.
+All fleet configuration lives in the **agent_fleet** repo. Target repos (e.g.
+silphcoanalytics) have **no** `.agent-fleet.yaml`, queue, or watcher units.
 
 ```yaml
-# /home/evan/Documents/agent_fleet/.agent-fleet.yaml
+# agent_fleet/.agent-fleet.yaml
+targets:
+  - config: targets/silphcoanalytics.agent-fleet.yaml
+
 schedules:
   enabled: true
   poll_interval_s: 60
@@ -58,21 +60,20 @@ schedules:
       cron: "0 6 * * *"
       timezone: America/New_York
       dispatch:
-        workspace: /home/evan/Documents/silphcoanalytics   # target repo
+        workspace: /home/evan/Documents/silphcoanalytics
         kind: task
         goal: "Documentation drift audit for last 24h of changes"
         persona: security_qa
         pipeline: simple
-        context: "Report only on first pass."
 ```
 
-- **State file:** `.agent-fleet-state.json` in the controller repo (`agent_fleet/`)
-- **Watcher:** `agent-fleet-watch --workspace /path/to/agent_fleet` (schedules-only when
-  the controller has no `issue_dispatch` / `pr_loop`)
-- **SilphCo issue + PR loop:** unchanged — `agent-fleet-watch --workspace silphcoanalytics`
-  on the existing silphco unit
+Target config (`targets/silphcoanalytics.agent-fleet.yaml`) sets `workspace:` to the
+checkout path and `state_root:` to agent_fleet. Issue dispatch, PR loop, queue, and
+verify scope live there — not on the target repo.
 
-See `examples/agent-fleet-schedule-watch.service` for a dedicated schedule-controller unit.
+- **State:** `.agent-fleet-state.json` in agent_fleet
+- **Watcher:** one `agent-fleet-watch --workspace /path/to/agent_fleet` (see
+  `examples/agent-fleet-watch.service`)
 
 
 | Kind | Behavior |
