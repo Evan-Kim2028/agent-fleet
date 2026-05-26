@@ -46,15 +46,15 @@ def default_runs_dir() -> Path:
     raw = os.environ.get("AGENT_FLEET_RUNS_DIR")
     if raw:
         return Path(raw).expanduser().resolve()
-    preferred = agent_fleet_home() / "runs"
-    if preferred.is_dir() or not _LEGACY_HERMES_RUNS.is_dir():
-        return preferred
-    logger.warning(
-        "Using deprecated runs dir %s — run `agent-fleet migrate-home` to move logs to %s",
-        _LEGACY_HERMES_RUNS,
-        preferred,
-    )
-    return _LEGACY_HERMES_RUNS
+    preferred = agent_fleet_home() / "fleet" / "runs"
+    if _LEGACY_HERMES_RUNS.is_dir():
+        logger.warning(
+            "Using deprecated runs dir %s — run `agent-fleet migrate-home` to move logs to %s",
+            _LEGACY_HERMES_RUNS,
+            preferred,
+        )
+        return _LEGACY_HERMES_RUNS
+    return preferred
 
 
 def user_skill_dir() -> Path:
@@ -65,7 +65,7 @@ def user_skill_dir() -> Path:
 def ensure_agent_fleet_home() -> Path:
     """Create ~/.agent-fleet layout if missing."""
     home = agent_fleet_home()
-    for sub in ("runs", "level_up", "journal", "skills", "pr-review", "scripts"):
+    for sub in ("fleet/runs", "level_up", "journal", "skills", "pr-review-logs", "scripts"):
         (home / sub).mkdir(parents=True, exist_ok=True)
     return home
 
@@ -83,7 +83,7 @@ def migrate_from_hermes(*, dry_run: bool = False) -> dict[str, str]:
             shutil.copy2(_LEGACY_HERMES_CONFIG, target_config)
             actions["fleet.yaml"] = f"copied to {target_config}"
 
-    target_runs = home / "runs"
+    target_runs = home / "fleet" / "runs"
     if _LEGACY_HERMES_RUNS.is_dir():
         target_runs.mkdir(parents=True, exist_ok=True)
         copied = 0

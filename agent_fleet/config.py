@@ -12,24 +12,22 @@ import yaml
 
 from agent_fleet.agent_mode import coerce_agent_mode
 from agent_fleet.contracts.mcp import McpServerSpec, parse_mcp_server_spec
+from agent_fleet.fleet_paths import default_fleet_config_path, default_runs_dir
 from agent_fleet.skills_lib import bundled_skill_dirs, merge_skill_dirs
 
 if TYPE_CHECKING:
     from agent_fleet.agent_mode import AgentMode
     from agent_fleet.repo import RepoConfig
 
-_DEFAULT_CONFIG_PATH = Path.home() / ".hermes" / "coding_fleet" / "fleet.yaml"
 _PACKAGE_PERSONAS = Path(__file__).resolve().parent / "personas"
-_NEW_DEFAULT_RUNS_DIR = Path.home() / ".agent-fleet" / "fleet" / "runs"
-# Keep writing to ~/.hermes/fleet/runs when that directory already exists.
-_LEGACY_RUNS_DIR = Path.home() / ".hermes" / "fleet" / "runs"
 
-
-def default_runs_dir() -> Path:
-    """Default JSONL run log directory for fleet dispatches."""
-    if _LEGACY_RUNS_DIR.exists():
-        return _LEGACY_RUNS_DIR
-    return _NEW_DEFAULT_RUNS_DIR
+__all__ = [
+    "FleetConfig",
+    "PersonaSpec",
+    "default_fleet_config_path",
+    "default_runs_dir",
+    "load_fleet_config",
+]
 
 
 _DEFAULT_PIPELINES: dict[str, list[str]] = {
@@ -152,7 +150,7 @@ def load_fleet_config(
     default_persona: str | None = None,
     default_workspace: str | None = None,
 ) -> FleetConfig:
-    config_path = _expand_path(str(path)) if path else _DEFAULT_CONFIG_PATH
+    config_path = _expand_path(str(path)) if path else default_fleet_config_path()
     data: dict[str, Any] = {}
     if config_path.exists():
         loaded = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}

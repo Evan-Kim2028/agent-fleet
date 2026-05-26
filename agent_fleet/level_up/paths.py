@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-LEVEL_UP_ROOT = Path.home() / ".agent-fleet" / "level_up"
-JOURNAL_INDEX_PATH = Path.home() / ".agent-fleet" / "journal" / "index.jsonl"
+from agent_fleet.fleet_paths import agent_fleet_home
+
+LEVEL_UP_ROOT = agent_fleet_home() / "level_up"
+JOURNAL_INDEX_PATH = agent_fleet_home() / "journal" / "index.jsonl"
 FLEET_TIER = "_fleet"
 
 COMPACTION_IDLE_DAYS = 7
