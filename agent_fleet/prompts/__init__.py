@@ -1,4 +1,4 @@
-"""Prompt builders for fleet agent dispatch."""
+"""Shared prompt builders for agent dispatch paths."""
 
 from agent_fleet.prompts.agent import AgentPrompt, build_agent_prompt
 
