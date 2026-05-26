@@ -259,9 +259,11 @@ def test_schedule_watcher_spawns_on_target_workspace(tmp_path: Path) -> None:
     watcher = ScheduleWatcher(repo, repo.schedules)
     state: dict = {"schedules": {"remote": {"next_due_at": "2020-01-01T00:00:00Z"}}}
 
-    with patch("agent_fleet.schedule.watcher.spawn_task_dispatch", return_value=4242) as spawn:
-        with patch("agent_fleet.schedule.watcher.available_ram_gb", return_value=64.0):
-            results = watcher.poll_once(state)
+    with (
+        patch("agent_fleet.schedule.watcher.spawn_task_dispatch", return_value=4242) as spawn,
+        patch("agent_fleet.schedule.watcher.available_ram_gb", return_value=64.0),
+    ):
+        results = watcher.poll_once(state)
 
     assert any(r.get("status") == "dispatched" for r in results)
     spawn.assert_called_once()
