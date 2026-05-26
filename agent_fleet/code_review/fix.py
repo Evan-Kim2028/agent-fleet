@@ -6,11 +6,17 @@ import textwrap
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.agent_mode import parse_agent_mode
+from agent_fleet.config import load_fleet_config
+from agent_fleet.hooks import FleetTask
+from agent_fleet.orchestration.equip import resolve_dispatch_equip
+from agent_fleet.prompts.agent import build_agent_prompt
+from agent_fleet.repo import merge_repo_into_fleet_config
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from agent_fleet.hooks import FleetTask, LLMBackend
+    from agent_fleet.hooks import LLMBackend
+    from agent_fleet.level_up.models import DispatchEquip
     from agent_fleet.personas import YamlPersonaResolver
     from agent_fleet.repo import RepoConfig
 
@@ -60,6 +66,34 @@ def _verify_feedback(phase_results: list[dict[str, Any]]) -> str:
     return "\n\n".join(lines)
 
 
+def _resolve_fix_equip(
+    *,
+    task: FleetTask,
+    fix_persona: str,
+    repo: RepoConfig | None,
+    attempt: int,
+) -> DispatchEquip:
+    if fix_persona == task.persona and task.equip is not None:
+        return task.equip
+
+    fleet_config = load_fleet_config()
+    if repo is not None:
+        fleet_config = merge_repo_into_fleet_config(fleet_config, repo)
+
+    parent_run_id = task.equip.parent_run_id if task.equip else None
+    fix_task = FleetTask(
+        goal=task.goal,
+        context=task.context,
+        persona=fix_persona,
+        workspace=task.workspace,
+        pipeline=task.pipeline,
+        title=task.title,
+        equip=task.equip,
+    )
+    run_id = f"{parent_run_id}-fix-{attempt}" if parent_run_id else f"code-review-fix-{attempt}"
+    return resolve_dispatch_equip(fix_task, fleet_config, repo, run_id=run_id)
+
+
 def run_fix_phase(
     *,
     backend: LLMBackend,
@@ -76,33 +110,43 @@ def run_fix_phase(
     persona = resolver.load(fix_persona)
     review_block = _review_feedback(phase_results)
     verify_block = _verify_feedback(phase_results)
+    equip = _resolve_fix_equip(
+        task=task,
+        fix_persona=fix_persona,
+        repo=repo,
+        attempt=attempt,
+    )
 
     verify_commands = ""
     if repo and repo.verify_commands:
         verify_commands = "\n".join(f"- `{cmd}`" for cmd in repo.verify_commands)
 
-    prompt = textwrap.dedent(f"""\
-        You are fixing issues found during an automated code review pipeline.
-
-        ## Original task
-        {task.goal.strip()}
-
-        ## Context
-        {task.context.strip() or "(none)"}
-
-        ## Review feedback
-        {review_block or "(none — focus on verify failures below)"}
-
-        ## Verify failures
-        {verify_block or "(none)"}
-
-        ## Instructions
+    instructions = textwrap.dedent(f"""\
         1. Fix every valid blocking issue above with minimal diffs.
         2. Do NOT commit or push — the orchestrator handles git.
         3. Run these verify commands before finishing:
-        {verify_commands or "- (none configured)"}
+        {verify_commands or "- (none)"}
         4. Fix attempt {attempt} — address root causes, not symptoms.
     """)
+
+    prompt = build_agent_prompt(
+        persona_body=equip.compose_body,
+        task_heading="Task",
+        task_body="You are fixing issues found during an automated code review pipeline.",
+        context=task.context.strip() or "(none)",
+        extra_instructions=persona.extra_instructions,
+        allowed_paths=persona.allowed_paths,
+        extra_sections=[
+            ("Original task", task.goal.strip()),
+            ("Review feedback", review_block or "(none)"),
+            ("Verify failures", verify_block or "(none)"),
+            ("Instructions", instructions),
+        ],
+        closing_instruction=(
+            "Apply the fixes in the workspace. Return a concise summary of what you "
+            "changed and any verify commands you ran."
+        ),
+    ).full
 
     result = backend.run(
         prompt,

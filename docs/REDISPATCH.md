@@ -118,3 +118,27 @@ the attempt number and whether a handoff is present:
 The `FleetTaskResult` returned to the caller reflects the final attempt's outcome, so you can
 tell a task succeeded on the second attempt by checking `result.status == "completed"` after
 a run that would otherwise have failed.
+
+## Worktree retention vs auto cleanup
+
+Parallel and `use_worktree: true` runs create an isolated git worktree under
+`worktree_base` (default `/tmp/agent-fleet-worktrees`). When the task finishes,
+`TaskWorkspace.teardown(keep=...)` either removes that directory or leaves it for harvest.
+
+| Mechanism | Behavior |
+|-----------|----------|
+| **`teardown(keep=False)`** (auto cleanup) | Default when the worktree should not survive. Runs `git worktree remove` and deletes the checkout directory. |
+| **`teardown(keep=True)`** | Skips removal; the path stays on disk for `agent-fleet workstream harvest` or manual inspection. |
+| **`should_keep_task_worktree()`** | Central policy used by the dispatcher to choose `keep=`. Keeps on `completed` / `merged`, when `code_review.auto_push` needs an isolated branch, and on recoverable soft failures (`verify_failed`, `review_changes_requested`) **when there are changed files**. |
+
+Recoverable statuses are **not** redispatched (see table above). When they have local
+changes, the dispatcher auto-commits before teardown so WIP is on the fleet branch even if
+the worktree directory is kept:
+
+```python
+maybe_commit_recoverable_worktree(task_workspace, status, goal=task.goal)
+task_workspace.teardown(keep=should_keep_task_worktree(...))
+```
+
+Hard failures (`error`, `timeout`, `scope_violation`, …) always use auto cleanup
+(`keep=False`) so the next redispatch attempt starts from a fresh worktree.
