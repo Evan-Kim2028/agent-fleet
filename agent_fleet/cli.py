@@ -202,6 +202,19 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_migrate_home(args: argparse.Namespace) -> int:
+    from agent_fleet.fleet_paths import agent_fleet_home, migrate_from_hermes
+
+    actions = migrate_from_hermes(dry_run=bool(args.dry_run))
+    if not actions:
+        print(f"nothing to migrate; ~/.agent-fleet already at {agent_fleet_home()}")
+        return 0
+    label = "[dry-run] " if args.dry_run else ""
+    for key, value in actions.items():
+        print(f"{label}{key}: {value}")
+    return 0
+
+
 def _resolve_repo_from_path(repo_path: Path) -> RepoConfig:
     from agent_fleet.repo import find_repo_config, load_repo_config
 
@@ -524,6 +537,17 @@ def main(argv: list[str] | None = None) -> int:
     init_p.add_argument("path", nargs="?", help="Repo path")
     init_p.add_argument("--force", action="store_true")
     init_p.set_defaults(func=cmd_init)
+
+    migrate_home_p = sub.add_parser(
+        "migrate-home",
+        help="Copy legacy ~/.hermes/coding_fleet config + run logs into ~/.agent-fleet/",
+    )
+    migrate_home_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print what would be copied without modifying the filesystem",
+    )
+    migrate_home_p.set_defaults(func=cmd_migrate_home)
 
     level_up_p = sub.add_parser("level-up", help="Persona level-up status and journal")
     level_up_sub = level_up_p.add_subparsers(dest="level_up_command", required=True)
