@@ -1,5 +1,7 @@
 # Global agent fleet config
-# Default location: ~/.hermes/coding_fleet/fleet.yaml
+# Preferred location: ~/.agent-fleet/fleet.yaml
+# Legacy (still supported by some tooling): ~/.hermes/coding_fleet/fleet.yaml
+# See docs/FLEET-CONFIG.md for paths, personas_dir rules, and import-shadow checks.
 
 # Default backend: cursor (Cursor SDK) or kimi (Kimi Code CLI)
 default_backend: cursor
@@ -24,9 +26,12 @@ max_redispatches: 1
 # default_model: kimi-for-coding
 # kimi_bin: ~/.local/bin/kimi-cli
 
-# Bundled personas ship inside the agent_fleet package (agent_fleet/personas/).
-# Override only for repo-local or custom persona directories:
-# personas_dir: /path/to/my/personas
+# personas_dir — bundled personas ship in the installed package (agent_fleet/personas/).
+# Leave UNSET in this global file so fleet uses the package defaults.
+# Relative paths here resolve against this config directory (~/.agent-fleet/) — usually wrong.
+# For repo-local personas, set personas_dir in .agent-fleet.yaml (relative to repo root).
+# Global override only with an absolute path to a custom persona tree:
+# personas_dir: /absolute/path/to/my/personas
 
 # --- MCP server catalog (v0.5.0) ---
 # Named MCP servers that personas can opt into via mcp_servers: [name, ...].

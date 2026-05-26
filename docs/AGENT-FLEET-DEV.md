@@ -70,6 +70,7 @@ max_parallel: 5
 
 ```bash
 uv run --directory ~/agent-fleet-dev agent-fleet paths
+python3 ~/agent-fleet-dev/scripts/check-import-shadow.py
 ```
 
 Upgrading an old machine with Hermes-hosted config:
@@ -142,6 +143,8 @@ Hermes gets the **cursor-fleet** plugin only. Config stays in `~/.agent-fleet/fl
 | `~/.agent-fleet/skills/` | Optional user skill overrides |
 
 ### Bundled personas (`fleet.example.yaml`)
+
+Leave `personas_dir` unset in global `~/.agent-fleet/fleet.yaml` — bundled personas load from the installed package. For repo-local personas, set `personas_dir` in `.agent-fleet.yaml` (relative to repo root). Details: [FLEET-CONFIG.md](FLEET-CONFIG.md).
 
 | Persona | Role |
 |---------|------|

@@ -7,6 +7,7 @@ Built on **[Cursor SDK](https://github.com/cursor/cursor-sdk)** (`cursor-sdk`). 
 | Docs | |
 |------|---|
 | [Quickstart](docs/QUICKSTART.md) | First run in ~15 minutes |
+| [Fleet config](docs/FLEET-CONFIG.md) | Global paths, `personas_dir`, import shadow |
 | [New repo setup](docs/NEW-REPO.md) | `.agent-fleet.yaml`, GHA, PR loop |
 | [Personas](docs/PERSONAS.md) | Fleet cookbook |
 
@@ -72,11 +73,13 @@ cd agent-fleet
 pip install -e ".[dev]"    # or: uv sync --frozen --group dev
 
 export CURSOR_API_KEY=your_key_here
-mkdir -p ~/.hermes/coding_fleet
-cp fleet.example.yaml ~/.hermes/coding_fleet/fleet.yaml
-# ~/.hermes/coding_fleet/ = global fleet config (personas, max_parallel), not your repo
+mkdir -p ~/.agent-fleet
+cp fleet.example.yaml ~/.agent-fleet/fleet.yaml
+# ~/.agent-fleet/fleet.yaml = global fleet config (personas, max_parallel), not your repo
 # edit fleet.yaml: default_model: composer-2.5-fast
 ```
+
+> **Import shadow:** Do not clone into `~/Documents/agent_fleet` (underscore). That path name matches the Python package and can shadow the installed `agent_fleet` module when used as cwd or on `PYTHONPATH`. Prefer `~/agent-fleet-dev` or any hyphenated path. Check with `python3 scripts/check-import-shadow.py` — see [docs/FLEET-CONFIG.md](docs/FLEET-CONFIG.md#import-shadow).
 
 ### 2. Verify install
 
@@ -129,7 +132,7 @@ Expect JSON with `status: completed` or a typed failure (`scope_violation`, `ver
 | PR loop watcher | `agent-fleet loop` / `agent-fleet-pr-loop` | Poll `fleet/*` PRs → fix findings → CI → optional merge |
 | Issue trigger | `agent-fleet-watch` | `/agent --persona …` on issue comments → full pipeline |
 
-**Concurrency** (`~/.hermes/coding_fleet/fleet.yaml`) — starting point for a typical 16–32 GB laptop:
+**Concurrency** (`~/.agent-fleet/fleet.yaml`) — starting point for a typical 16–32 GB laptop:
 
 ```yaml
 default_backend: cursor
@@ -182,7 +185,7 @@ Examples: [`examples/repo.agent-fleet.yaml`](examples/repo.agent-fleet.yaml) · 
 
 ## Personas
 
-Registry: `~/.hermes/coding_fleet/fleet.yaml`. Bundled prompts in `agent_fleet/personas/` (`coder`, `reviewer`, `pr-analyzer`, …). Repo `personas/` and `.agent-fleet.yaml` scope override global `allowed_paths`.
+Registry: `~/.agent-fleet/fleet.yaml` (see [docs/FLEET-CONFIG.md](docs/FLEET-CONFIG.md)). Bundled prompts in `agent_fleet/personas/` (`coder`, `reviewer`, `pr-analyzer`, …). Repo `personas/` and `.agent-fleet.yaml` scope override global `allowed_paths`.
 
 ```yaml
 default_backend: cursor
