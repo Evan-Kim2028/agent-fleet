@@ -38,6 +38,33 @@ logger = logging.getLogger(__name__)
 _READY_PREFIX = "cursor-sdk-bridge ready "
 _DEFAULT_TIMEOUT_S = 30.0
 _SUPERVISOR_BACKOFF_MAX_S = 30.0
+_HEALTH_CHECK_TIMEOUT_S = 1.5
+
+
+def _bridge_url_responsive(url: str, timeout_s: float = _HEALTH_CHECK_TIMEOUT_S) -> bool:
+    """Probe the bridge URL with a fast TCP connect.
+
+    Guards against the common failure mode where bridge.json points at a
+    URL whose listener is gone (supervisor was killed, node crashed without
+    the supervisor cleaning state, port was reclaimed) — attaching env vars
+    to such a URL turns every cursor-sdk call into a ConnectError.
+    """
+    import socket
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    host = parsed.hostname
+    port = parsed.port
+    if not host or port is None:
+        return False
+    try:
+        with socket.create_connection((host, port), timeout=timeout_s):
+            return True
+    except OSError:
+        return False
 
 
 def bridge_state_path() -> Path:
@@ -396,6 +423,10 @@ def apply_bridge_env(*, force: bool = False, wait_s: float = 0.0) -> bool:
     url = str(state.get("url", "")).strip()
     token = str(state.get("auth_token", "")).strip()
     if not url or not token:
+        return False
+    if not _bridge_url_responsive(url):
+        # Stale bridge.json — pid is alive but the HTTP listener is gone.
+        # Refuse to publish dead endpoint env; caller falls back to per-process bridge.
         return False
     os.environ["CURSOR_SDK_BRIDGE_URL"] = url
     os.environ["CURSOR_SDK_BRIDGE_TOKEN"] = token
