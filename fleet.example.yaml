@@ -5,6 +5,9 @@
 
 # Default backend: cursor (Cursor SDK) or kimi (Kimi Code CLI)
 default_backend: cursor
+# composer-2.5 maps to the slow (non-fast) Cursor tier — agent-fleet
+# explicitly sends {fast=false} so you don't get silently routed to the
+# cheaper-quality fast variant. Use `composer-2.5-fast` to opt in.
 default_model: composer-2.5
 default_mode: agent
 default_persona: coder
