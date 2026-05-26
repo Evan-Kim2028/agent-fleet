@@ -203,10 +203,10 @@ Notes:
 
 ### Tasks
 
-- [ ] Write failing tests: PR loop prompt contains `# Fix CI` or skill marker from fix-ci
-- [ ] Wire lifecycle.py (review fix + CI fix)
-- [ ] Wire code_review/fix.py
-- [ ] `pytest tests/test_pr_loop_equip.py tests/test_code_review_fix_equip.py -q`
+- [x] Write failing tests: PR loop prompt contains `# Fix CI` or skill marker from fix-ci
+- [x] Wire lifecycle.py (review fix + CI fix)
+- [x] Wire code_review/fix.py
+- [x] `pytest tests/test_pr_loop_equip.py tests/test_code_review_fix_equip.py -q`
 - [ ] Manual smoke: `agent-fleet loop` dry path with mock backend if available
 - [ ] Open PR3
 

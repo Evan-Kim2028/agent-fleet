@@ -13,7 +13,9 @@ from typing import TYPE_CHECKING
 from agent_fleet.agent_mode import parse_agent_mode
 from agent_fleet.backends import make_backend
 from agent_fleet.config import FleetConfig, load_fleet_config
+from agent_fleet.hooks import FleetTask
 from agent_fleet.observability.fleet_logger import FleetLogger
+from agent_fleet.orchestration.equip import resolve_dispatch_equip
 from agent_fleet.personas import YamlPersonaResolver
 from agent_fleet.pr_loop import github_ops
 from agent_fleet.pr_loop.github_ops import CommitPushResult
@@ -22,6 +24,7 @@ from agent_fleet.pr_loop.review_parse import (
     has_blocking_findings,
     parse_review_risk,
 )
+from agent_fleet.prompts.agent import build_agent_prompt
 from agent_fleet.repo import RepoConfig, merge_repo_into_fleet_config
 from agent_fleet.scope import files_outside_allowed_paths
 from agent_fleet.state import (
@@ -322,26 +325,53 @@ def address_review_findings(
 
     pr_files_block = "\n".join(f"- `{path}`" for path in pr_files) or "- (unknown)"
 
-    prompt = textwrap.dedent(f"""\
-        The PR analyzer posted review findings on PR #{pr_number}. Address every
-        blocking finding in the review comment below.
+    fix_task = FleetTask(
+        goal=f"Fix PR #{pr_number} review findings",
+        context=f"branch={branch}",
+        persona=fix_persona_name,
+        workspace=str(worktree),
+    )
+    equip = resolve_dispatch_equip(
+        fix_task,
+        fleet_config,
+        repo,
+        run_id=f"pr-loop-{pr_number}",
+    )
 
-        ## Review
-        {review_body}
+    extra_sections: list[tuple[str, str]] = [
+        ("Review", review_body),
+        ("PR changed files (only edit these or subpaths)", pr_files_block),
+    ]
+    if commit_failure_block.strip():
+        extra_sections.append(
+            (
+                "Previous commit/push failure (must fix before finishing)",
+                commit_failure_block.strip(),
+            )
+        )
 
-        ## PR changed files (only edit these or subpaths)
-        {pr_files_block}
-        {commit_failure_block}
-        ## Instructions
+    instructions_body = textwrap.dedent(f"""\
         1. Read each finding and fix valid issues in the relevant files above.
         2. Do NOT edit files outside this PR's changed paths.
         3. Run verify commands before finishing:
-        {verify_block or "- (none configured)"}
+        {verify_block or "- (none)"}
         4. Pre-commit and commit preflight must pass (same gates as git commit):
-        {preflight_block or verify_block or "- pre-commit hooks on changed files (automatic)"}
+        {preflight_block or verify_block or "- (none)"}
         5. Do NOT commit or push — the orchestrator commits after this phase.
         6. If a finding is a false positive, note it but do not change code for it.
     """)
+    extra_sections.append(("Instructions", instructions_body))
+
+    prompt = build_agent_prompt(
+        persona_body=equip.compose_body,
+        task_heading="Task",
+        task_body=(
+            f"The PR analyzer posted review findings on PR #{pr_number}. "
+            "Address every blocking finding in the review comment below."
+        ),
+        context=f"branch={branch}",
+        extra_sections=extra_sections,
+    ).full
 
     logger.info(
         "Review fix PR #%s persona=%s worktree=%s pr_files=%d",
@@ -440,24 +470,49 @@ def attempt_ci_fix(
     verify_block = "\n".join(f"- `{cmd}`" for cmd in repo.verify_commands) or "- (none)"
     failure_block = ""
     if commit_error_context:
-        failure_block = textwrap.dedent(f"""
-
-        ## Previous commit/push failure
-        ```
-        {commit_error_context[:6000]}
-        ```
+        failure_block = textwrap.dedent(f"""\
+            ```
+            {commit_error_context[:6000]}
+            ```
         """)
-    prompt = textwrap.dedent(f"""\
+
+    fix_task = FleetTask(
+        goal=f"Fix CI failures on PR #{pr_number}",
+        context=(
+            f"branch={branch}; failed_checks={', '.join(failed_checks)}; ci_fix"
+        ),
+        persona=fix_persona_name,
+        workspace=str(worktree),
+    )
+    equip = resolve_dispatch_equip(
+        fix_task,
+        fleet_config,
+        repo,
+        run_id=f"pr-loop-{pr_number}",
+    )
+
+    extra_sections: list[tuple[str, str]] = []
+    if failure_block.strip():
+        extra_sections.append(("Previous commit/push failure", failure_block.strip()))
+
+    task_body = textwrap.dedent(f"""\
         CI failed on PR #{pr_number}. Fix the failures caused by this branch.
 
         Failed checks: {", ".join(failed_checks)}
-        {failure_block}
+
         Verify commands:
         {verify_block}
 
         Do NOT commit or push — the orchestrator commits after this phase.
         Do NOT weaken CI workflows to make checks pass.
     """)
+    prompt = build_agent_prompt(
+        persona_body=equip.compose_body,
+        task_heading="Task",
+        task_body=task_body,
+        context=f"branch={branch}; ci_fix",
+        extra_sections=extra_sections,
+    ).full
     logger.info(
         "CI fix PR #%s persona=%s worktree=%s checks=%s",
         pr_number,
