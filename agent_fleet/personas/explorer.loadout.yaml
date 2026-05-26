@@ -1,9 +1,0 @@
-schema_version: 1
-stub: explorer.md
-skills:
-  execute:
-    - pstack/how
-    - pstack/why
-pipeline_skills:
-  code_review:
-    review: []
