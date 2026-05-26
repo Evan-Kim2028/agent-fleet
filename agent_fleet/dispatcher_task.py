@@ -120,6 +120,7 @@ def run_configured_pipeline(
                 phases=phases,
                 repo=repo_config or git_repo,
                 config=code_review_cfg,
+                fleet_config=task_config,
             )
         return run_pipeline(
             backend=backend,

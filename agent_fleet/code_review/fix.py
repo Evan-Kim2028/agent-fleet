@@ -6,7 +6,7 @@ import textwrap
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.agent_mode import parse_agent_mode
-from agent_fleet.config import load_fleet_config
+from agent_fleet.config import FleetConfig, load_fleet_config
 from agent_fleet.hooks import FleetTask
 from agent_fleet.orchestration.equip import resolve_dispatch_equip
 from agent_fleet.prompts.agent import build_agent_prompt
@@ -72,11 +72,12 @@ def _resolve_fix_equip(
     fix_persona: str,
     repo: RepoConfig | None,
     attempt: int,
+    fleet_config: FleetConfig | None = None,
 ) -> DispatchEquip:
     if fix_persona == task.persona and task.equip is not None:
         return task.equip
 
-    fleet_config = load_fleet_config()
+    fleet_config = fleet_config or load_fleet_config()
     if repo is not None:
         fleet_config = merge_repo_into_fleet_config(fleet_config, repo)
 
@@ -109,6 +110,7 @@ def run_fix_phase(
     repo: RepoConfig | None,
     fix_persona: str,
     attempt: int,
+    fleet_config: FleetConfig | None = None,
 ) -> dict[str, Any]:
     """Dispatch fix persona to address review or verify failures."""
     persona = resolver.load(fix_persona)
@@ -119,6 +121,7 @@ def run_fix_phase(
         fix_persona=fix_persona,
         repo=repo,
         attempt=attempt,
+        fleet_config=fleet_config,
     )
 
     verify_commands = ""
