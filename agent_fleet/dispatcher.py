@@ -579,7 +579,7 @@ class FleetDispatcher:
             except Exception as exc:
                 logger.exception("Fleet task %s failed", task_index)
                 if task_workspace is not None:
-                    task_workspace.teardown(keep=False)
+                    task_workspace.teardown(keep=True)
                 fleet_log.emit("fleet.task.error", error=str(exc))
                 record_completed_task_experience(
                     task_index=task_index,

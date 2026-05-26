@@ -162,6 +162,15 @@ def run_execute_phase(
             mode=parse_agent_mode(persona.mode),
             allowed_tools=list(persona.allowed_tools),
         )
+    _persist_execute_artifact(
+        persona=persona.name,
+        task=task,
+        workspace=workspace,
+        stdout=result.stdout,
+        stderr=result.stderr,
+        exit_code=result.exit_code,
+        agent_id=result.agent_id,
+    )
     return {
         "phase": "execute",
         "persona": persona.name,
@@ -171,6 +180,43 @@ def run_execute_phase(
         "duration_s": result.duration_s,
         "agent_id": result.agent_id,
     }
+
+
+def _persist_execute_artifact(
+    *,
+    persona: str,
+    task: FleetTask,
+    workspace: Path,
+    stdout: str,
+    stderr: str,
+    exit_code: int,
+    agent_id: str | None,
+) -> None:
+    """Write execute-phase output to ~/.agent-fleet/runs/ so deliverables survive worktree teardown."""
+    import json
+    import time
+    from pathlib import Path as _Path
+
+    try:
+        runs_root = _Path.home() / ".agent-fleet" / "runs"
+        run_id = agent_id or f"run-{int(time.time())}"
+        target = runs_root / run_id
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "stdout.md").write_text(stdout or "", encoding="utf-8")
+        if stderr:
+            (target / "stderr.txt").write_text(stderr, encoding="utf-8")
+        meta = {
+            "persona": persona,
+            "goal": task.goal,
+            "workspace": str(workspace),
+            "exit_code": exit_code,
+            "agent_id": agent_id,
+            "ts": time.time(),
+        }
+        (target / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("persist_execute_artifact failed")
 
 
 def run_scope_phase(
