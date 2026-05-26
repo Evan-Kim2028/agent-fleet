@@ -99,6 +99,10 @@ critical_path_prefixes:
 #   train: true
 #   contribute_to_fleet: true
 #   journal_task_summaries: true
+#   auto_learn: false          # set true to auto-run agent-fleet learn after enough rows
+#   min_experience_rows: 20
+#   min_repos_for_fleet: 1
+#   learn_cooldown_seconds: 3600
 
 # Automated PR lifecycle (requires pr-analyzer workflow + local watcher)
 # Full example: examples/repo-full.agent-fleet.yaml — see docs/NEW-REPO.md

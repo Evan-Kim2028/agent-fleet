@@ -23,6 +23,7 @@ from agent_fleet.observability.context import bind_run
 from agent_fleet.observability.log import RunLog
 from agent_fleet.orchestration.decompose import coerce_empty_decompose
 from agent_fleet.orchestration.equip import resolve_dispatch_equip
+from agent_fleet.level_up.record import record_runner_experience
 from agent_fleet.phase_graph import (
     PhaseGraph,
     PhaseRunContext,
@@ -271,6 +272,8 @@ class LocalFleetRunner:
         pr_labels: list[str] | None = None,
         issue_number: int | None = None,
         issue_labels: list[str] | None = None,
+        experience_source: str = "full_pipeline",
+        pr_loop_round: int | None = None,
     ) -> FleetRunResult:
         start = time.monotonic()
         run_id = str(uuid.uuid4())[:8]
@@ -282,6 +285,7 @@ class LocalFleetRunner:
         brief = None
         resume_mode = False
         result: FleetRunResult | None = None
+        dispatch_equip = None
         session: LLMSession | None = None
         browser_session_factory: Callable[[], LLMSession | None] | None = None
         require_mcp = is_visual_audit_dispatch(
@@ -744,6 +748,16 @@ class LocalFleetRunner:
                 run_log.run_end(outcome="error", error=str(exc))
                 return result
             finally:
+                if result is not None:
+                    record_runner_experience(
+                        result=result,
+                        title=title,
+                        persona=persona,
+                        repo_root=repo_root,
+                        experience_source=experience_source,
+                        pr_loop_round=pr_loop_round,
+                        dispatch_equip=dispatch_equip,
+                    )
                 if session is not None:
                     with contextlib.suppress(Exception):
                         session.dispose()
@@ -858,4 +872,5 @@ def run_full_pipeline(
         persona=persona or repo.default_persona,
         repo_root=ws,
         base_branch=repo.default_branch,
+        experience_source="cli",
     )

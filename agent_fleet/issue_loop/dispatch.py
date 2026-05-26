@@ -149,6 +149,7 @@ def run_issue_dispatch(
         pr_labels=[spine.pr_ready_label],
         issue_number=issue_number,
         issue_labels=issue_labels,
+        experience_source="issue_dispatch",
     )
 
     if result.pr_number:
