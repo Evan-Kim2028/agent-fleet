@@ -9,6 +9,7 @@ Built on **[Cursor SDK](https://github.com/cursor/cursor-sdk)** (`cursor-sdk`). 
 | [Quickstart](docs/QUICKSTART.md) | First run in ~15 minutes |
 | [New repo setup](docs/NEW-REPO.md) | `.agent-fleet.yaml`, GHA, PR loop |
 | [Personas](docs/PERSONAS.md) | Fleet cookbook |
+| [Schedules](docs/SCHEDULES.md) | Cron-based daily/weekly fleet jobs |
 
 **Requires:** Python 3.14 · [Cursor API key](https://cursor.com/dashboard/integrations) · git workspace  
 **Default model:** `composer-2.5-fast` (use `composer-2.5` when you want the full model)
@@ -22,7 +23,7 @@ Built on **[Cursor SDK](https://github.com/cursor/cursor-sdk)** (`cursor-sdk`). 
 | **Parallel implementers** | Up to `max_parallel` Composer agents; same-repo tasks auto-isolate in git worktrees |
 | **In-pipeline review** | `code_review`: implement → scope → verify → **reviewer verdict** (`approve` / `request_changes` / `block`) |
 | **PR analyzer** | Two-pass **Composer PR review** — CLI (`agent-fleet review`), GHA ([`pr-analyzer.yml`](examples/github/pr-analyzer.yml)), feeds PR loop |
-| **Background modes** | PR loop watcher, issue-comment dispatch, parallel Python batch |
+| **Background modes** | PR loop watcher, issue-comment dispatch, **cron schedules**, parallel Python batch |
 | **Structured logs** | JSONL at `~/.hermes/fleet/runs/<run-id>.jsonl` |
 
 Typical focused task on **`composer-2.5-fast`**: **~30–120 seconds** (implement + gates; PR analysis scales with diff size).

@@ -9,12 +9,24 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def pid_is_dispatch(pid: int) -> bool:
+_DISPATCH_MODULES = (
+    b"agent_fleet.issue_loop.dispatch",
+    b"agent_fleet.schedule.task_dispatch",
+)
+
+
+def pid_is_fleet_dispatch(pid: int) -> bool:
     try:
         with Path(f"/proc/{pid}/cmdline").open("rb") as handle:
-            return b"agent_fleet.issue_loop.dispatch" in handle.read()
+            cmdline = handle.read()
+            return any(module in cmdline for module in _DISPATCH_MODULES)
     except FileNotFoundError, ProcessLookupError, PermissionError:
         return False
+
+
+def pid_is_dispatch(pid: int) -> bool:
+    """Backward-compatible alias for issue dispatch PID checks."""
+    return pid_is_fleet_dispatch(pid)
 
 
 def reap_in_flight(state: dict[str, Any]) -> int:

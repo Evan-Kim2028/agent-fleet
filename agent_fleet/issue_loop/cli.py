@@ -10,13 +10,22 @@ from pathlib import Path
 from agent_fleet.issue_loop import queue as issue_queue
 from agent_fleet.issue_loop.dispatch import run_issue_dispatch
 from agent_fleet.issue_loop.watcher import CombinedWatcher, IssueLoopWatcher, run_watcher_once
-from agent_fleet.repo import find_repo_config
+from agent_fleet.repo import RepoConfig, find_repo_config
+
+
+def _watcher_enabled(repo: RepoConfig | None) -> bool:
+    if repo is None:
+        return False
+    return bool(
+        (repo.issue_dispatch is not None and repo.issue_dispatch.enabled)
+        or (repo.schedules is not None and repo.schedules.enabled)
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="agent-fleet-watch",
-        description="Issue comment dispatch + PR loop watcher",
+        description="Issue comment dispatch, schedules, and PR loop watcher",
     )
     parser.add_argument("--workspace", help="Repo path (default: cwd)")
     parser.add_argument("--config", help="Path to fleet.yaml")
@@ -24,7 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--issues-only",
         action="store_true",
-        help="Run issue dispatch loop only (skip PR loop)",
+        help="Run issue dispatch loop only (skip PR loop and schedules)",
     )
     parser.add_argument("--issue", type=int, help="Run one issue dispatch")
     parser.add_argument("--persona", help="Persona for --issue dispatch")
@@ -92,14 +101,18 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     repo = find_repo_config(workspace)
-    if repo is None or repo.issue_dispatch is None or not repo.issue_dispatch.enabled:
-        print("error: issue_dispatch.enabled not set in .agent-fleet.yaml", file=sys.stderr)
+    if repo is None or not _watcher_enabled(repo):
+        print(
+            "error: enable issue_dispatch or schedules in .agent-fleet.yaml",
+            file=sys.stderr,
+        )
         return 1
 
     watcher = CombinedWatcher(
         repo,
         issue_config=repo.issue_dispatch,
         pr_loop_config=repo.pr_loop,
+        schedule_config=repo.schedules,
         fleet_config_path=args.config,
     )
     if args.once:
