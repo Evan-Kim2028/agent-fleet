@@ -166,13 +166,19 @@ def _discovery_to_state(discovery: dict[str, Any], pid: int) -> dict[str, Any]:
     }
 
 
-def _spawn_bridge_subprocess(workspace: str, log_path: Path) -> subprocess.Popen:
-    # cursor-sdk-bridge has a documented opt-in env var that installs
-    # process-level uncaughtException/unhandledRejection survivors. Without
-    # it, an EPIPE on a peer-disconnect socket bubbles up as an unhandled
-    # stream 'error' event and kills the node process, which is fatal when
-    # multiple concurrent agent-fleet runs share one bridge.
-    env = {**os.environ, "CURSOR_SDK_BRIDGE_SURVIVE_UNCAUGHT": "1"}
+def _spawn_bridge_subprocess(
+    workspace: str, log_path: Path, *, survive_uncaught: bool = True
+) -> subprocess.Popen:
+    # cursor-sdk-bridge has an opt-in env var that installs process-level
+    # uncaughtException/unhandledRejection survivors. The shared daemon
+    # needs this — one stray EPIPE would otherwise kill the bridge for all
+    # concurrent clients. But for per-process bridges it hides real crash
+    # diagnostics; private callers pass survive_uncaught=False.
+    env = {**os.environ}
+    if survive_uncaught:
+        env["CURSOR_SDK_BRIDGE_SURVIVE_UNCAUGHT"] = "1"
+    else:
+        env.pop("CURSOR_SDK_BRIDGE_SURVIVE_UNCAUGHT", None)
     log_fh = log_path.open("ab", buffering=0)
     try:
         return subprocess.Popen(
@@ -460,31 +466,48 @@ def launch_private_bridge(
     log_path = bridges_dir / f"{os.getpid()}-{ts}.log"
 
     try:
-        proc = _spawn_bridge_subprocess(workspace, log_path)
+        # survive_uncaught=False: private bridges should crash loudly with
+        # stderr written to log_path; the shared daemon needs survivor
+        # handlers, but for per-process bridges they hide real diagnostics.
+        proc = _spawn_bridge_subprocess(workspace, log_path, survive_uncaught=False)
     except OSError as exc:
         logger.warning("private bridge spawn failed: %s", exc)
         return None
+
+    def _kill_process_group() -> None:
+        """SIGTERM then SIGKILL the bridge's whole process group.
+
+        ``start_new_session=True`` made proc the process-group leader, with
+        any sh/node descendants in the same group. Plain ``proc.terminate``
+        only signals proc itself, so a shell wrapper's node child can be
+        leaked. Signal the group instead.
+        """
+        if proc.poll() is not None:
+            return
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        try:
+            proc.wait(timeout=5)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=2)
 
     deadline = time.monotonic() + timeout_s
     try:
         discovery = _read_discovery_from_log(log_path, deadline)
     except Exception as exc:
         logger.warning("private bridge discovery failed: %s", exc)
-        with contextlib.suppress(Exception):
-            proc.terminate()
+        _kill_process_group()
         return None
 
     state = _discovery_to_state(discovery, proc.pid)
     state["log_path"] = str(log_path)
 
-    def _cleanup() -> None:
-        with contextlib.suppress(Exception):
-            if proc.poll() is None:
-                proc.terminate()
-                with contextlib.suppress(subprocess.TimeoutExpired):
-                    proc.wait(timeout=5)
-
-    atexit.register(_cleanup)
+    atexit.register(_kill_process_group)
     return state
 
 
