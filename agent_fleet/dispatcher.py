@@ -18,6 +18,7 @@ from agent_fleet.dispatcher_task import (
     build_task_result,
     maybe_publish_and_pr_loop,
     prepare_task_workspace_if_needed,
+    record_completed_task_experience,
     run_configured_pipeline,
 )
 from agent_fleet.handoff_context import apply_handoff_to_task
@@ -416,6 +417,7 @@ class FleetDispatcher:
 
             try:
                 workspace = self._resolve_workspace(task)
+                run_workspace = workspace
                 if not workspace.exists():
                     return FleetTaskResult(
                         task_index=task_index,
@@ -523,7 +525,6 @@ class FleetDispatcher:
                     changed_files=changed_files,
                     task_workspace=task_workspace,
                     fleet_log=fleet_log,
-                    workspace=run_workspace,
                 )
 
                 repo_for_publish = repo_config or git_repo
@@ -551,6 +552,16 @@ class FleetDispatcher:
                         pr_loop_status=pr_loop_status,
                     )
 
+                record_completed_task_experience(
+                    task_index=task_index,
+                    task=task,
+                    status=result.status,
+                    phase_results=phase_results,
+                    changed_files=result.changed_files,
+                    workspace=run_workspace,
+                    fleet_log=fleet_log,
+                )
+
                 keep_worktree = should_keep_task_worktree(
                     result.status,
                     auto_push=bool(code_review_cfg and code_review_cfg.auto_push),
@@ -570,6 +581,15 @@ class FleetDispatcher:
                 if task_workspace is not None:
                     task_workspace.teardown(keep=False)
                 fleet_log.emit("fleet.task.error", error=str(exc))
+                record_completed_task_experience(
+                    task_index=task_index,
+                    task=task,
+                    status="error",
+                    phase_results=phase_results,
+                    changed_files=None,
+                    workspace=run_workspace,
+                    fleet_log=fleet_log,
+                )
                 return FleetTaskResult(
                     task_index=task_index,
                     persona=task.persona,

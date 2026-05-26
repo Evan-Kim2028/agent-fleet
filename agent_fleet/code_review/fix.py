@@ -15,6 +15,7 @@ from agent_fleet.repo import merge_repo_into_fleet_config
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from agent_fleet.config import FleetConfig
     from agent_fleet.hooks import LLMBackend
     from agent_fleet.level_up.models import DispatchEquip
     from agent_fleet.personas import YamlPersonaResolver
@@ -72,13 +73,14 @@ def _resolve_fix_equip(
     fix_persona: str,
     repo: RepoConfig | None,
     attempt: int,
+    fleet_config: FleetConfig | None = None,
 ) -> DispatchEquip:
     if fix_persona == task.persona and task.equip is not None:
         return task.equip
 
-    fleet_config = load_fleet_config()
+    fc = fleet_config or load_fleet_config()
     if repo is not None:
-        fleet_config = merge_repo_into_fleet_config(fleet_config, repo)
+        fc = merge_repo_into_fleet_config(fc, repo)
 
     parent_run_id = task.equip.parent_run_id if task.equip else None
     fix_task = FleetTask(
@@ -91,7 +93,7 @@ def _resolve_fix_equip(
         equip=task.equip,
     )
     run_id = f"{parent_run_id}-fix-{attempt}" if parent_run_id else f"code-review-fix-{attempt}"
-    return resolve_dispatch_equip(fix_task, fleet_config, repo, run_id=run_id)
+    return resolve_dispatch_equip(fix_task, fc, repo, run_id=run_id)
 
 
 def run_fix_phase(
@@ -105,6 +107,7 @@ def run_fix_phase(
     repo: RepoConfig | None,
     fix_persona: str,
     attempt: int,
+    fleet_config: FleetConfig | None = None,
 ) -> dict[str, Any]:
     """Dispatch fix persona to address review or verify failures."""
     persona = resolver.load(fix_persona)
@@ -115,6 +118,7 @@ def run_fix_phase(
         fix_persona=fix_persona,
         repo=repo,
         attempt=attempt,
+        fleet_config=fleet_config,
     )
 
     verify_commands = ""

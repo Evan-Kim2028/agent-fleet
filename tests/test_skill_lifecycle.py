@@ -19,6 +19,7 @@ from agent_fleet.contracts.task_spec import (
 from agent_fleet.hooks import FleetTask, Persona
 from agent_fleet.implementer import implement
 from agent_fleet.orchestration.equip import resolve_dispatch_equip
+from agent_fleet.personas import YamlPersonaResolver
 from agent_fleet.repo import load_repo_config
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -163,3 +164,69 @@ def test_implement_falls_back_when_compose_body_empty(tmp_path: Path) -> None:
 
     assert "Static markdown persona body." in backend.prompts[0]
     assert "TDD Bug Fix" not in backend.prompts[0]
+
+
+def test_legacy_review_uses_reviewer_loadout_compose_body(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("agent_fleet.level_up.paths.LEVEL_UP_ROOT", tmp_path / "level_up")
+
+    backend = _CapturingBackend()
+    fleet_config = load_fleet_config(ROOT / "fleet.example.yaml")
+    resolver = YamlPersonaResolver(fleet_config)
+    task = FleetTask(goal="Review changes", persona="coder", workspace=str(tmp_path))
+
+    from agent_fleet.phases import _legacy_review_phase
+
+    _legacy_review_phase(
+        backend=backend,  # type: ignore[arg-type]
+        resolver=resolver,
+        task=task,
+        workspace=tmp_path,
+        timeout_s=30,
+        implementation_summary="Updated module",
+        reviewer_persona="reviewer",
+        fleet_config=fleet_config,
+    )
+
+    assert len(backend.prompts) == 1
+    prompt = backend.prompts[0]
+    assert "Remove AI code slop" in prompt or "deslop" in prompt.lower()
+
+
+def test_fix_phase_injects_equip_compose_body(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("agent_fleet.level_up.paths.LEVEL_UP_ROOT", tmp_path / "level_up")
+
+    captured: list[str] = []
+
+    class _FixBackend:
+        def run(self, prompt: str, **kwargs: object) -> _FakeResult:  # noqa: ARG002
+            captured.append(prompt)
+            return _FakeResult(stdout="fixed")
+
+    fleet_config = load_fleet_config(ROOT / "fleet.example.yaml")
+    resolver = YamlPersonaResolver(fleet_config)
+    task = FleetTask(goal="Fix CI", persona="coder", workspace=str(tmp_path))
+
+    from agent_fleet.code_review.fix import run_fix_phase
+
+    run_fix_phase(
+        backend=_FixBackend(),  # type: ignore[arg-type]
+        resolver=resolver,
+        task=task,
+        workspace=tmp_path,
+        timeout_s=30,
+        phase_results=[{"phase": "review", "verdict": "request_changes", "stdout": "fix tests"}],
+        repo=None,
+        fix_persona="coder",
+        attempt=1,
+        fleet_config=fleet_config,
+    )
+
+    assert len(captured) == 1
+    assert "# Persona" in captured[0]
+    assert "pstack/tdd" in captured[0].lower() or "tdd" in captured[0].lower()

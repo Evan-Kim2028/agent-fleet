@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from agent_fleet.code_review.config import CodeReviewConfig
+    from agent_fleet.config import FleetConfig
     from agent_fleet.hooks import FleetTask, LLMBackend
     from agent_fleet.personas import YamlPersonaResolver
     from agent_fleet.repo import RepoConfig
@@ -78,6 +79,7 @@ def run_code_review_with_auto_fix(
     repo: RepoConfig | None,
     config: CodeReviewConfig,
     reviewer_persona: str = "reviewer",
+    fleet_config: FleetConfig | None = None,
 ) -> tuple[list[dict[str, Any]], str, int, list[str]]:
     """Run code_review pipeline with optional fix → re-check loops."""
     if not config.auto_fix or phases != ["execute", "review"]:
@@ -90,6 +92,7 @@ def run_code_review_with_auto_fix(
             phases=phases,
             reviewer_persona=reviewer_persona,
             repo=repo,
+            fleet_config=fleet_config,
         )
 
     phase_results, summary, exit_code, changed_files = run_pipeline(
@@ -101,6 +104,7 @@ def run_code_review_with_auto_fix(
         phases=phases,
         reviewer_persona=reviewer_persona,
         repo=repo,
+        fleet_config=fleet_config,
     )
 
     fix_persona = config.fix_persona or "coder"
@@ -121,6 +125,7 @@ def run_code_review_with_auto_fix(
             repo=repo,
             fix_persona=fix_persona,
             attempt=attempt,
+            fleet_config=fleet_config,
         )
         phase_results.append(fix_result)
         if fix_result["exit_code"] != 0:

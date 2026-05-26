@@ -46,7 +46,9 @@ def _resolve_persona_loadout(
     """Return loadout dict and display name; markdown-only repos get an empty loadout."""
     kwargs: dict[str, Any] = {}
     if personas_dir is not None:
-        kwargs["personas_dir"] = Path(personas_dir) if isinstance(personas_dir, str) else personas_dir
+        kwargs["personas_dir"] = (
+            Path(personas_dir) if isinstance(personas_dir, str) else personas_dir
+        )
     try:
         loadout = load_loadout(persona, **kwargs)
     except FileNotFoundError:

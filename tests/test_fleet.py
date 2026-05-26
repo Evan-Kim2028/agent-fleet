@@ -6,6 +6,7 @@ import argparse
 import subprocess
 import textwrap
 from pathlib import Path
+from types import MethodType
 from unittest.mock import MagicMock
 
 import pytest
@@ -357,12 +358,12 @@ def test_parallel_dispatch_warns_on_scope_overlap(
     dispatcher.backend = MagicMock()
 
     def fake_execute(
-        _self: FleetDispatcher,
+        self: FleetDispatcher,
         task_index: int,
         task: FleetTask,
         **kwargs: object,
     ) -> FleetTaskResult:
-        del kwargs
+        del self, kwargs
         return FleetTaskResult(
             task_index=task_index,
             persona=task.persona,
@@ -373,7 +374,7 @@ def test_parallel_dispatch_warns_on_scope_overlap(
             duration_seconds=0.1,
         )
 
-    monkeypatch.setattr(dispatcher, "_execute_task", fake_execute)
+    monkeypatch.setattr(dispatcher, "_execute_task", MethodType(fake_execute, dispatcher))
 
     with caplog.at_level("WARNING"):
         results = dispatcher.dispatch(

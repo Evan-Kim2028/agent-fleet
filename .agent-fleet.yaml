@@ -19,6 +19,14 @@ code_review:
   max_fix_attempts: 2
   fix_persona: coder
 
+level_up:
+  train: true
+  contribute_to_fleet: true
+  journal_task_summaries: true
+  auto_learn: false
+  min_experience_rows: 20
+  learn_cooldown_seconds: 3600
+
 workstreams:
   plan: docs/superpowers/plans/2026-05-25-agent-fleet-integration.md
   base_branch: main
@@ -76,6 +84,7 @@ persona_scope_allowlist:
     - agent_fleet/redispatch.py
     - agent_fleet/config.py
     - agent_fleet/orchestration/
+    - agent_fleet/level_up/record.py
     - agent_fleet/implementer.py
     - agent_fleet/skills_lib.py
     - agent_fleet/personas/
@@ -86,6 +95,14 @@ persona_scope_allowlist:
     - fleet.example.yaml
     - examples/
     - README.md
+  bootstrap:
+    - agent_fleet/runner.py
+    - agent_fleet/phases.py
+    - agent_fleet/code_review/fix.py
+    - agent_fleet/code_review/loop.py
+    - agent_fleet/dispatcher_task.py
+    - tests/
+    - docs/
   reviewer:
     - agent_fleet/
     - tests/
@@ -95,6 +112,7 @@ cross_cutting_groups:
   - [agent_fleet/dispatcher.py, agent_fleet/runner.py]
   - [agent_fleet/cursor_backend.py, agent_fleet/sessions.py]
 
+# Bootstrap-trap files: planner decomposes around these unless persona is bootstrap.
 critical_path_prefixes:
   - agent_fleet/runner.py
   - agent_fleet/cursor_backend.py
@@ -113,21 +131,29 @@ schedules:
   enabled: true
   poll_interval_s: 60
   jobs:
-    - id: silphco-docs-daily
+    - id: silphco-docs-sweep
       enabled: true
       cron: "0 6 * * *"
       timezone: America/New_York
       dispatch:
         workspace: /home/evan/Documents/silphcoanalytics
         kind: task
-        goal: "Documentation drift audit — compare code changes in the last 24 hours against docs"
+        goal: "Documentation sweep — update docs for recent changes and current agent-fleet setup"
         persona: security_qa
-        pipeline: simple
+        pipeline: code_review
         context: |
-          Analyze only. Compare git log/diff on main since 24 hours ago against documentation.
-          Focus: docs/, frontend/docs/, api/DEPRECATIONS.md, README files, docs/ops/, AGENTS.md.
-          Report: (1) code changes lacking docs, (2) stale or wrong docs, (3) prioritized fix list.
-          Do not edit files in this pass unless you find a one-line factual error; prefer a report.
+          Sweep and UPDATE documentation (not report-only). Open a PR with doc fixes.
+
+          Scope (edit as needed):
+          - docs/, frontend/docs/, api/DEPRECATIONS.md, README files, docs/ops/, AGENTS.md
+          - agents/SETUP.md and docs/agents/ — fleet ops now live in agent-fleet repo
+            (targets/silphcoanalytics.*); silphco has no .agent-fleet.yaml
+
+          Compare main git history (last 7 days) to docs. Fix stale references, missing
+          setup steps, and wrong paths. Reflect agent-fleet centralization where mentioned.
+
+          Do not change application code unless required for doc accuracy (one-line facts).
+          Prefer small, reviewable doc-only PR. Summarize changes in PR description.
       policy:
         skip_if_in_flight: true
         missed: skip
