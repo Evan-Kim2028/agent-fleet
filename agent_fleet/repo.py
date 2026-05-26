@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from agent_fleet.issue_loop.config import IssueDispatchConfig
     from agent_fleet.orchestration.config import OrchestrationConfig
     from agent_fleet.pr_loop.config import PrLoopConfig
+    from agent_fleet.schedule.config import ScheduleConfig
 
 REPO_CONFIG_NAMES = (
     ".agent-fleet.yaml",
@@ -52,6 +53,7 @@ class RepoConfig:
     pr_loop: PrLoopConfig | None = None
     code_review: CodeReviewConfig | None = None
     issue_dispatch: IssueDispatchConfig | None = None
+    schedules: ScheduleConfig | None = None
     capacity: FleetCapacity | None = None
     orchestration: OrchestrationConfig | None = None
     level_up: LevelUpConfig | None = None
@@ -146,6 +148,7 @@ def load_repo_config(path: Path | str) -> RepoConfig:
         pr_loop=pr_loop_cfg,
         code_review=_load_code_review(raw, pr_loop_cfg),
         issue_dispatch=_load_issue_dispatch(repo_root, raw),
+        schedules=_load_schedules(repo_root, raw),
         capacity=capacity_cfg,
         orchestration=resolve_orchestration_config(raw),
         level_up=load_level_up_config(raw),
@@ -171,6 +174,12 @@ def _load_issue_dispatch(repo_root: Path, raw: dict[str, Any]) -> IssueDispatchC
     from agent_fleet.issue_loop.config import load_issue_dispatch_config
 
     return load_issue_dispatch_config(repo_root, raw)
+
+
+def _load_schedules(repo_root: Path, raw: dict[str, Any]) -> ScheduleConfig | None:
+    from agent_fleet.schedule.config import load_schedule_config
+
+    return load_schedule_config(repo_root, raw)
 
 
 def _load_capacity(raw: dict[str, Any]) -> FleetCapacity:

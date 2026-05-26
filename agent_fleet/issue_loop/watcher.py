@@ -47,6 +47,7 @@ if TYPE_CHECKING:
 
     from agent_fleet.issue_loop.config import IssueDispatchConfig
     from agent_fleet.pr_loop.config import PrLoopConfig
+    from agent_fleet.schedule.config import ScheduleConfig
 
 logger = logging.getLogger(__name__)
 
@@ -294,36 +295,59 @@ def run_watcher_once(workspace: Path) -> list[dict[str, str]]:
 
 
 class CombinedWatcher:
-    """Issue dispatch + PR loop in one poll cycle."""
+    """Issue dispatch, PR loop, and cron schedules in one poll cycle."""
 
     def __init__(
         self,
         repo: RepoConfig,
         *,
-        issue_config: IssueDispatchConfig,
+        issue_config: IssueDispatchConfig | None,
         pr_loop_config: PrLoopConfig | None,
+        schedule_config: ScheduleConfig | None = None,
         fleet_config_path: str | None = None,
     ) -> None:
         from agent_fleet.config import load_fleet_config
         from agent_fleet.pr_loop.watcher import PrLoopWatcher
+        from agent_fleet.schedule.watcher import ScheduleWatcher
 
         self.repo = repo
-        self.issue_watcher = IssueLoopWatcher(repo, issue_config)
+        self.issue_watcher = (
+            IssueLoopWatcher(repo, issue_config) if issue_config and issue_config.enabled else None
+        )
         self.fleet_config = load_fleet_config(fleet_config_path)
         self.pr_watcher = (
             PrLoopWatcher(repo, pr_loop_config, fleet_config=self.fleet_config)
             if pr_loop_config and pr_loop_config.enabled
             else None
         )
-        self.poll_interval_s = max(
-            issue_config.poll_interval_s,
-            pr_loop_config.poll_interval_s if pr_loop_config else issue_config.poll_interval_s,
+        self.schedule_watcher = (
+            ScheduleWatcher(
+                repo,
+                schedule_config,
+                issue_dispatch_config=issue_config,
+                fleet_config_path=fleet_config_path,
+            )
+            if schedule_config and schedule_config.enabled
+            else None
         )
+        intervals: list[int] = []
+        if issue_config and issue_config.enabled:
+            intervals.append(issue_config.poll_interval_s)
+        if pr_loop_config and pr_loop_config.enabled:
+            intervals.append(pr_loop_config.poll_interval_s)
+        if schedule_config and schedule_config.enabled:
+            intervals.append(schedule_config.poll_interval_s)
+        self.poll_interval_s = max(intervals) if intervals else 30
 
     def poll_once(self) -> dict[str, list[dict[str, str]]]:
-        issue_results = self.issue_watcher.poll_once()
+        issue_results = self.issue_watcher.poll_once() if self.issue_watcher else []
         pr_results = self.pr_watcher.poll_once() if self.pr_watcher else []
-        return {"issues": issue_results, "prs": pr_results}
+        schedule_results = self.schedule_watcher.poll_once() if self.schedule_watcher else []
+        return {
+            "issues": issue_results,
+            "prs": pr_results,
+            "schedules": schedule_results,
+        }
 
     def run_forever(self) -> None:
         signal.signal(signal.SIGTERM, _on_sigterm)

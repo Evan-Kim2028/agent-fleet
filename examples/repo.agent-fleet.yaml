@@ -61,6 +61,24 @@ critical_path_prefixes:
 #     file: .agent-fleet-queue.yaml
 #     advance: dispatch   # or complete for strict serial
 # See examples/agent-fleet-queue.yaml
+
+# Cron schedules (daily docs sync, weekly audits) — see docs/SCHEDULES.md
+# schedules:
+#   enabled: true
+#   poll_interval_s: 60
+#   jobs:
+#     - id: docs-daily
+#       cron: "0 6 * * *"
+#       timezone: America/New_York
+#       dispatch:
+#         kind: issue
+#         issue: 42
+#         persona: docs
+#         note: "Sync API docs with code"
+#       policy:
+#         skip_if_in_flight: true
+#         missed: skip
+
 # Unified concurrency (watcher subprocess limits + per-run RESEARCH workers)
 # capacity:
 #   max_dispatches: 8

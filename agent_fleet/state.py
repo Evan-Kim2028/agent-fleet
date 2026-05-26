@@ -4,6 +4,7 @@ Single file: ``.agent-fleet-state.json`` in the repo root. Top-level keys are
 flat (no namespacing) since issue and PR state share no key names:
 
 - issue keys: ``since``, ``seen``, ``in_flight``, ``queue``
+- schedule keys: ``schedules`` (per-job ``next_due_at``, ``last_run_at``, ``in_flight``)
 - PR keys: ``pr:<N>``, ``last_merge_ts``
 
 On first load, legacy ``.agent-fleet-issue-state.json`` and

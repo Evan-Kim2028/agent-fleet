@@ -12,6 +12,7 @@ classifiers = [
     "Topic :: Software Development",
 ]
 dependencies = [
+    "croniter>=2.0",
     "cursor-sdk>=0.1.0",
     "jsonschema>=4.0",
     "pyyaml>=6.0",
@@ -29,6 +30,7 @@ agent-fleet-pr-analyzer = "agent_fleet.pr_review.github_action:main"
 agent-fleet-pr-loop = "agent_fleet.pr_loop.cli:main"
 agent-fleet-watch = "agent_fleet.issue_loop.cli:main"
 agent-fleet-issue-dispatch = "agent_fleet.issue_loop.dispatch:main"
+agent-fleet-schedule = "agent_fleet.schedule.cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]
