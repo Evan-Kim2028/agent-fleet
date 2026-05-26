@@ -45,9 +45,7 @@ def test_migrate_home_no_legacy_reports_noop(
     monkeypatch.setenv("AGENT_FLEET_HOME", str(af_home))
     import agent_fleet.fleet_paths as fleet_paths
 
-    monkeypatch.setattr(
-        fleet_paths, "_LEGACY_HERMES_CONFIG", tmp_path / "missing" / "fleet.yaml"
-    )
+    monkeypatch.setattr(fleet_paths, "_LEGACY_HERMES_CONFIG", tmp_path / "missing" / "fleet.yaml")
     monkeypatch.setattr(fleet_paths, "_LEGACY_HERMES_RUNS", tmp_path / "missing" / "runs")
 
     rc = main(["migrate-home"])
