@@ -12,7 +12,7 @@ from agent_fleet.cli_env import require_backend_env
 from agent_fleet.config import load_fleet_config
 from agent_fleet.dispatcher import FleetDispatcher
 from agent_fleet.logging_config import configure_fleet_logging
-from agent_fleet.repo import find_repo_config
+from agent_fleet.repo import resolve_repo_config
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,7 @@ def run_scheduled_task(
     fleet_config_path: str | None = None,
 ) -> int:
     configure_fleet_logging()
-    repo = find_repo_config(repo_root)
+    repo = resolve_repo_config(repo_root)
     if repo is None:
         logger.error("No .agent-fleet.yaml found under %s", repo_root)
         return 1

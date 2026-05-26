@@ -19,7 +19,7 @@ from agent_fleet.issue_loop.config import IssueDispatchConfig
 from agent_fleet.issue_loop.triggers import extract_persona
 from agent_fleet.memory import memory_snapshot
 from agent_fleet.personas import YamlPersonaResolver
-from agent_fleet.repo import find_repo_config
+from agent_fleet.repo import resolve_repo_config
 from agent_fleet.runner import FleetRunConfig, LocalFleetRunner, _spine_from_repo
 
 logger = logging.getLogger(__name__)
@@ -48,7 +48,7 @@ def run_issue_dispatch(
 
     configure_fleet_logging()
 
-    repo = find_repo_config(repo_root)
+    repo = resolve_repo_config(repo_root)
     if repo is None:
         logger.error("No .agent-fleet.yaml found under %s", repo_root)
         return 1

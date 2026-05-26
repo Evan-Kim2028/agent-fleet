@@ -100,7 +100,7 @@ def test_run_issue_dispatch_skips_closed_issue(tmp_path: Path) -> None:
     fake_repo = RepoConfig(repo_root=tmp_path, default_branch="main")
 
     with (
-        patch("agent_fleet.issue_loop.dispatch.find_repo_config", return_value=fake_repo),
+        patch("agent_fleet.issue_loop.dispatch.resolve_repo_config", return_value=fake_repo),
         patch(
             "agent_fleet.issue_loop.dispatch.github_ops.issue_view",
             return_value={"state": "CLOSED", "title": "x", "body": "y", "labels": [], "number": 42},

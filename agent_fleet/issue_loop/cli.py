@@ -10,15 +10,22 @@ from pathlib import Path
 from agent_fleet.issue_loop import queue as issue_queue
 from agent_fleet.issue_loop.dispatch import run_issue_dispatch
 from agent_fleet.issue_loop.watcher import CombinedWatcher, IssueLoopWatcher, run_watcher_once
-from agent_fleet.repo import RepoConfig, find_repo_config
+from agent_fleet.repo import RepoConfig, find_repo_config, fleet_state_root
 
 
 def _watcher_enabled(repo: RepoConfig | None) -> bool:
     if repo is None:
         return False
-    return bool(
-        (repo.issue_dispatch is not None and repo.issue_dispatch.enabled)
-        or (repo.schedules is not None and repo.schedules.enabled)
+    if repo.schedules is not None and repo.schedules.enabled:
+        return True
+    if repo.issue_dispatch is not None and repo.issue_dispatch.enabled:
+        return True
+    if repo.pr_loop is not None and repo.pr_loop.enabled:
+        return True
+    return any(
+        (target.issue_dispatch is not None and target.issue_dispatch.enabled)
+        or (target.pr_loop is not None and target.pr_loop.enabled)
+        for target in repo.target_configs
     )
 
 
@@ -53,24 +60,31 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.queue_status:
         repo = find_repo_config(workspace)
-        if (
-            repo is None
-            or repo.issue_dispatch is None
-            or not repo.issue_dispatch.queue
-            or not repo.issue_dispatch.queue.enabled
-        ):
+        queue_target = next(
+            (
+                target
+                for target in ([repo] if repo else []) + list(repo.target_configs if repo else [])
+                if target is not None
+                and target.issue_dispatch is not None
+                and target.issue_dispatch.queue is not None
+                and target.issue_dispatch.queue.enabled
+            ),
+            None,
+        )
+        if queue_target is None:
             print(json.dumps({"enabled": False}, indent=2))
             return 0
         from agent_fleet.state import load_state, state_path
 
-        state_file = state_path(repo.repo_root)
+        state_file = state_path(fleet_state_root(queue_target))
         state = load_state(state_file)
         print(
             json.dumps(
                 issue_queue.queue_status(
-                    repo.repo_root,
-                    repo.issue_dispatch.queue,
+                    queue_target.repo_root,
+                    queue_target.issue_dispatch.queue,  # type: ignore[union-attr]
                     state,
+                    config_root=queue_target.config_root,
                 ),
                 indent=2,
             )
@@ -103,7 +117,7 @@ def main(argv: list[str] | None = None) -> int:
     repo = find_repo_config(workspace)
     if repo is None or not _watcher_enabled(repo):
         print(
-            "error: enable issue_dispatch or schedules in .agent-fleet.yaml",
+            "error: enable issue_dispatch, schedules, or targets in .agent-fleet.yaml",
             file=sys.stderr,
         )
         return 1

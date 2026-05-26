@@ -33,6 +33,10 @@ class RepoConfig:
     """Configuration loaded from a repo's .agent-fleet.yaml."""
 
     repo_root: Path
+    config_root: Path | None = None
+    config_path: Path | None = None
+    state_root: Path | None = None
+    target_configs: tuple[RepoConfig, ...] = ()
     name: str = ""
     default_persona: str = "coder"
     default_branch: str = "main"
@@ -78,12 +82,39 @@ def find_repo_config(start: Path | str | None = None) -> RepoConfig | None:
     return None
 
 
-def load_repo_config(path: Path | str) -> RepoConfig:
+def resolve_repo_config(workspace: Path | str) -> RepoConfig | None:
+    """Resolve target repo config from workspace, honoring AGENT_FLEET_TARGET_CONFIG."""
+    import os
+
+    explicit = os.environ.get("AGENT_FLEET_TARGET_CONFIG")
+    if explicit:
+        return load_repo_config(explicit)
+    return find_repo_config(workspace)
+
+
+def load_repo_config(
+    path: Path | str,
+    *,
+    controller_root: Path | None = None,
+) -> RepoConfig:
     config_path = Path(path).expanduser().resolve()
-    repo_root = config_path.parent
+    config_root = config_path.parent
     raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     if not isinstance(raw, dict):
         raw = {}
+
+    workspace_raw = raw.get("workspace")
+    repo_root = Path(str(workspace_raw)).expanduser().resolve() if workspace_raw else config_root
+
+    state_root_raw = raw.get("state_root")
+    if state_root_raw:
+        state_root = Path(str(state_root_raw)).expanduser().resolve()
+    elif workspace_raw and controller_root is not None:
+        state_root = controller_root.resolve()
+    elif workspace_raw and config_root.name == "targets":
+        state_root = config_root.parent.resolve()
+    else:
+        state_root = repo_root
 
     verify_commands = list(raw.get("verify_commands") or [])
     commit_preflight_commands = list(raw.get("commit_preflight_commands") or [])
@@ -126,8 +157,19 @@ def load_repo_config(path: Path | str) -> RepoConfig:
     capacity_cfg = _load_capacity(raw)
     from agent_fleet.orchestration.config import resolve_orchestration_config
 
+    target_configs: list[RepoConfig] = []
+    if not workspace_raw:
+        for entry in raw.get("targets") or []:
+            if isinstance(entry, dict) and entry.get("config"):
+                target_path = (config_root / str(entry["config"])).resolve()
+                target_configs.append(load_repo_config(target_path, controller_root=config_root))
+
     return RepoConfig(
         repo_root=repo_root,
+        config_root=config_root,
+        config_path=config_path,
+        state_root=state_root,
+        target_configs=tuple(target_configs),
         name=str(raw.get("name") or ""),
         default_persona=str(raw.get("default_persona") or "coder"),
         default_branch=str(raw.get("default_branch") or "main"),
@@ -210,3 +252,30 @@ def merge_repo_into_fleet_config(
     )
     fleet_config.repo_config = repo
     return fleet_config
+
+
+def fleet_state_root(repo: RepoConfig) -> Path:
+    return repo.state_root or repo.repo_root
+
+
+def target_registry(repos: list[RepoConfig]) -> dict[Path, RepoConfig]:
+    return {target.repo_root.resolve(): target for target in repos}
+
+
+def iter_target_repos(repo: RepoConfig) -> list[RepoConfig]:
+    """Enabled dispatch targets: explicit targets plus self when configured locally."""
+    targets = list(repo.target_configs)
+    self_root = repo.repo_root.resolve()
+    if (
+        repo.issue_dispatch is not None
+        and repo.issue_dispatch.enabled
+        and not any(t.repo_root.resolve() == self_root for t in targets)
+    ):
+        targets.insert(0, repo)
+    if (
+        repo.pr_loop is not None
+        and repo.pr_loop.enabled
+        and not any(t.repo_root.resolve() == self_root for t in targets)
+    ):
+        targets.insert(0, repo)
+    return targets
