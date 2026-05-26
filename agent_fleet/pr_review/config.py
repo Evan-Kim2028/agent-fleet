@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from agent_fleet.skills_lib import DEFAULT_QUALITY_REVIEW_SKILL
+
 DEFAULT_TRIVIAL_PATTERNS = (
     r"\.md$",
     r"\.txt$",
@@ -48,7 +50,7 @@ class PrReviewConfig:
     fanout_threshold: int = 20
     log_dir: Path | None = None
     quality_review_enabled: bool = True
-    quality_review_skill: str = "thermo-nuclear-code-quality-review"
+    quality_review_skill: str = DEFAULT_QUALITY_REVIEW_SKILL
 
 
 def _tuple_paths(value: object) -> tuple[str, ...]:
@@ -90,12 +92,12 @@ def load_pr_review_config(repo_root: Path, raw: dict[str, Any] | None) -> PrRevi
 
     quality_raw = section.get("quality_review")
     quality_enabled = True
-    quality_skill = "thermo-nuclear-code-quality-review"
+    quality_skill = DEFAULT_QUALITY_REVIEW_SKILL
     if quality_raw is False:
         quality_enabled = False
     elif isinstance(quality_raw, dict):
         quality_enabled = bool(quality_raw.get("enabled", True))
-        quality_skill = str(quality_raw.get("skill") or "thermo-nuclear-code-quality-review")
+        quality_skill = str(quality_raw.get("skill") or DEFAULT_QUALITY_REVIEW_SKILL)
 
     return PrReviewConfig(
         enabled=bool(section.get("enabled", True)),
