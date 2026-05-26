@@ -393,6 +393,35 @@ class CursorBackend:
     # bridge and produce "internal: internal error".  Serialize access.
     _prompt_lock = threading.Lock()
 
+    _BRIDGE_RETRY_SIGNALS = (
+        "Connection refused",
+        "ConnectError",
+        "Connection reset",
+        "Bridge request failed",
+    )
+    _BRIDGE_RETRY_MAX = 3
+    _BRIDGE_RETRY_SLEEP_S = 2.0
+
+    @classmethod
+    def _is_bridge_disconnect(cls, exc: BaseException) -> bool:
+        msg = str(exc)
+        return any(sig in msg for sig in cls._BRIDGE_RETRY_SIGNALS)
+
+    @classmethod
+    def _reconnect_bridge(cls) -> None:
+        try:
+            from cursor_sdk._client import close_default_client
+
+            close_default_client()
+        except Exception:
+            logger.debug("close_default_client failed", exc_info=True)
+        try:
+            from agent_fleet.bridge_daemon import apply_bridge_env
+
+            apply_bridge_env(force=True, wait_s=15.0)
+        except Exception:
+            logger.debug("apply_bridge_env failed during reconnect", exc_info=True)
+
     def __init__(
         self,
         *,
@@ -403,6 +432,14 @@ class CursorBackend:
         self.default_model = default_model
         self.default_mode = default_mode
         self.api_key = api_key or os.environ.get("CURSOR_API_KEY", "")
+        # Attach to a shared bridge daemon if one is running so multiple
+        # concurrent agent-fleet processes don't each spawn their own bridge.
+        try:
+            from agent_fleet.bridge_daemon import apply_bridge_env
+
+            apply_bridge_env()
+        except Exception:
+            logger.debug("apply_bridge_env failed; falling back to per-process bridge")
 
     def create_session(
         self,
@@ -490,17 +527,42 @@ class CursorBackend:
         t0 = time.monotonic()
 
         def _execute() -> CursorLLMResult:
-            try:
-                with CursorBackend._prompt_lock:
-                    result = Agent.prompt(
-                        prompt_with_scope,
-                        AgentOptions(
-                            model=selected_model,
-                            mode=selected_mode,
-                            api_key=self.api_key,
-                            local=LocalAgentOptions(cwd=work_dir),
-                        ),
+            attempt = 0
+            while True:
+                try:
+                    with CursorBackend._prompt_lock:
+                        result = Agent.prompt(
+                            prompt_with_scope,
+                            AgentOptions(
+                                model=selected_model,
+                                mode=selected_mode,
+                                api_key=self.api_key,
+                                local=LocalAgentOptions(cwd=work_dir),
+                            ),
+                        )
+                    break
+                except Exception as exc:
+                    if (
+                        CursorBackend._is_bridge_disconnect(exc)
+                        and attempt < CursorBackend._BRIDGE_RETRY_MAX
+                    ):
+                        attempt += 1
+                        logger.warning(
+                            "bridge disconnect (attempt %d/%d): %s",
+                            attempt,
+                            CursorBackend._BRIDGE_RETRY_MAX,
+                            exc,
+                        )
+                        time.sleep(CursorBackend._BRIDGE_RETRY_SLEEP_S * attempt)
+                        CursorBackend._reconnect_bridge()
+                        continue
+                    return CursorLLMResult(
+                        stdout="",
+                        stderr=str(exc),
+                        exit_code=1,
+                        duration_s=time.monotonic() - t0,
                     )
+            try:
                 duration_s = time.monotonic() - t0
                 text = getattr(result, "result", None) or str(result)
                 agent_id = getattr(result, "agent_id", None)
