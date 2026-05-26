@@ -50,13 +50,12 @@ class ScheduleConfig:
 
 
 def _load_dispatch(raw: dict[str, Any]) -> ScheduleDispatchConfig:
-    kind = str(raw.get("kind", "issue"))
-    if kind not in ("issue", "task"):
-        kind = "issue"
+    kind_raw = str(raw.get("kind", "issue"))
+    kind: DispatchKind = "task" if kind_raw == "task" else "issue"
     issue_raw = raw.get("issue")
     issue = int(issue_raw) if issue_raw is not None else None
     return ScheduleDispatchConfig(
-        kind=kind,  # type: ignore[arg-type]
+        kind=kind,
         issue=issue,
         persona=str(raw.get("persona") or "coder"),
         pipeline=str(raw.get("pipeline") or "code_review"),
@@ -68,12 +67,16 @@ def _load_dispatch(raw: dict[str, Any]) -> ScheduleDispatchConfig:
 
 def _load_policy(raw: dict[str, Any] | None) -> SchedulePolicyConfig:
     section = raw or {}
-    missed = str(section.get("missed", "skip"))
-    if missed not in ("skip", "catch_up_once", "catch_up_all"):
+    missed_raw = str(section.get("missed", "skip"))
+    if missed_raw == "catch_up_once":
+        missed: MissedPolicy = "catch_up_once"
+    elif missed_raw == "catch_up_all":
+        missed = "catch_up_all"
+    else:
         missed = "skip"
     return SchedulePolicyConfig(
         skip_if_in_flight=bool(section.get("skip_if_in_flight", True)),
-        missed=missed,  # type: ignore[arg-type]
+        missed=missed,
         min_interval_s=int(section.get("min_interval_s", 0)),
     )
 

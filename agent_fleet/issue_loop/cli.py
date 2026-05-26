@@ -101,7 +101,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     repo = find_repo_config(workspace)
-    if not _watcher_enabled(repo):
+    if repo is None or not _watcher_enabled(repo):
         print(
             "error: enable issue_dispatch or schedules in .agent-fleet.yaml",
             file=sys.stderr,
