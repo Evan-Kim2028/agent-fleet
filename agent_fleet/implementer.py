@@ -40,12 +40,14 @@ def implement(
     prompt_suffix: str | None = None,
     session: LLMSession | None = None,
     require_mcp_tools: bool = False,
+    compose_body: str | None = None,
 ) -> LLMResult:
     """Run the Implementer phase.
 
-    Loads the persona prompt via *persona_resolver*, builds a structured prompt
-    from *brief* and *task_spec* (allowed_paths, forbidden_paths, acceptance_criteria,
-    files_to_create, files_to_modify, test_strategy), then calls *backend.run()*.
+    Loads the persona prompt via *persona_resolver* (or *compose_body* when set),
+    builds a structured prompt from *brief* and *task_spec* (allowed_paths,
+    forbidden_paths, acceptance_criteria, files_to_create, files_to_modify,
+    test_strategy), then calls *backend.run()*.
 
     The LLM runs inside *worktree_path* (already set up by FleetRunner). This
     function does NOT manage the worktree lifecycle — that is FleetRunner's job.
@@ -56,11 +58,13 @@ def implement(
     # TODO(PR D): admit via fleet.admission.AdmissionController
     persona = persona_resolver.load(persona_name)
 
-    # Load persona prompt text; fall back to default if path doesn't exist on disk.
-    try:
-        persona_prompt = persona.prompt_path.read_text()
-    except FileNotFoundError, OSError:
-        persona_prompt = _DEFAULT_PERSONA_PROMPT
+    if compose_body and compose_body.strip():
+        persona_prompt = compose_body.strip()
+    else:
+        try:
+            persona_prompt = persona.prompt_path.read_text()
+        except FileNotFoundError, OSError:
+            persona_prompt = _DEFAULT_PERSONA_PROMPT
 
     allowed_tools = persona.allowed_tools
 
