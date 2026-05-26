@@ -9,7 +9,8 @@ from typing import TYPE_CHECKING, Any
 
 from agent_fleet.level_up.experience import append_experience, compute_experience_weight
 from agent_fleet.level_up.journal import append_journal
-from agent_fleet.level_up.paths import FLEET_TIER, repo_key as level_up_repo_key
+from agent_fleet.level_up.paths import FLEET_TIER
+from agent_fleet.level_up.paths import repo_key as level_up_repo_key
 from agent_fleet.repo import find_repo_config
 
 if TYPE_CHECKING:
@@ -73,9 +74,7 @@ def _should_record(repo: RepoConfig | None) -> bool:
     if repo is None:
         return True
     level_up_cfg = repo.level_up
-    if level_up_cfg is not None and not level_up_cfg.train:
-        return False
-    return True
+    return level_up_cfg is None or level_up_cfg.train
 
 
 def record_task_experience(
@@ -229,7 +228,7 @@ def maybe_trigger_auto_learn(
             last = json.loads(marker.read_text(encoding="utf-8"))
             if now - float(last.get("ts", 0)) < cooldown:
                 return
-        except (json.JSONDecodeError, TypeError, ValueError):
+        except json.JSONDecodeError, TypeError, ValueError:
             pass
 
     total_rows = 0

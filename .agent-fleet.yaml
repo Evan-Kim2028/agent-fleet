@@ -1,29 +1,24 @@
-# agent_fleet — self-dogfood config for v0.5.0 implementation plan
-# Scoped narrowly to the files the [FLEET] tasks in
-# docs/superpowers/plans/2026-05-23-mcp-sessions-redispatch.md may touch.
-#
-# IMPORTANT: dispatch runs against a *pinned* agent_fleet at v0.4.2 installed at
-# /home/evan/.local/share/agent-fleet-dispatch/.venv. That venv's `agent-fleet`
-# binary is the only one that should be used for fleet runs on this repo while
-# the v0.5.0 implementation is in flight — otherwise edits to dispatcher code
-# bleed back into the dispatcher mid-run. See blocker #4 in the chat log.
-
+# agent-fleet — self-dogfood + integration workstreams
 name: agent-fleet
 default_persona: coder
 default_branch: main
-use_worktree: true
-worktree_base: /tmp/agent-fleet-worktrees
 
-# Tests + lint after every IMPLEMENT phase. uv runs them inside the repo's own
-# editable install (which is fine — they exercise *changed* code in the worktree,
-# they don't import the running dispatcher).
+personas_dir: agents/personas
+
+use_worktree: true
+worktree_base: /home/evan/Documents/agent-fleet/.worktrees/fleet-runs
+
 test_command: uv run pytest -q
-# Scope ruff to *.py files this branch added/modified vs main so pre-existing
-# tech debt in unrelated files doesn't fail every dispatch. The repo still has
-# 17 pre-existing ruff errors as of v0.4.2 — clean them up in a separate PR.
 lint_command: bash -c "git diff --name-only main HEAD -- '*.py' | xargs -r uv run ruff check"
 
-# Privacy / persona evolution (see docs/PERSONA-EVOLUTION.md)
+capacity:
+  max_dispatches: 8
+
+code_review:
+  auto_fix: true
+  max_fix_attempts: 2
+  fix_persona: coder
+
 level_up:
   train: true
   contribute_to_fleet: true
@@ -32,9 +27,57 @@ level_up:
   min_experience_rows: 20
   learn_cooldown_seconds: 3600
 
-# Per-persona scope. Each task tags itself [FLEET] or [BOOTSTRAP] in the plan.
-# BOOTSTRAP = one critical-path file per dispatch (runner, phases, fix).
+workstreams:
+  plan: docs/superpowers/plans/2026-05-25-agent-fleet-integration.md
+  base_branch: main
+  default_target_branch: feature/agent-fleet-integration
+  pipeline: code_review
+  sequential_stack: true
+  items:
+    - id: registry
+      persona: fleet-registry
+      target_branch: feature/agent-fleet-integration
+      goal: |
+        Add tests/test_persona_registry.py that resolves every persona listed in
+        agents/personas and every fleet.yaml entry that points at agents/personas.
+        Prune ~/.agent-fleet/fleet.yaml entries for personas with no .md file.
+        Document persona resolution (repo dir then package fallback) in FLEET-CONFIG.md.
+        Ensure agent-fleet workstream subcommand is registered in cli.py.
+    - id: scout-loadouts
+      persona: fleet-scout-loadouts
+      target_branch: feature/agent-fleet-integration
+      goal: |
+        Add agent_fleet/personas/*.loadout.yaml for pr-analyzer, explorer, tech-scout,
+        product-scout (match coder/reviewer schema). Extend test_loadouts.py. Update
+        docs/PERSONAS.md. Do not touch uv.lock.
+    - id: skills-stack
+      persona: fleet-skills-stack
+      target_branch: feature/skills-personas
+      base_branch: feature/skills-pr-loop
+      goal: |
+        Harvest PR4 scout loadouts from .worktrees/fleet-runs/task-2-6316c6c3 if present
+        (use agent-fleet workstream harvest). Merge skills integration commits from
+        feature/skills-pr-loop into feature/skills-personas. Run test_loadouts.py.
+
 persona_scope_allowlist:
+  fleet-registry:
+    - agent_fleet/cli.py
+    - agent_fleet/config.py
+    - agent_fleet/skills_lib.py
+    - agent_fleet/orchestration/equip.py
+    - agent_fleet/personas.py
+    - agent_fleet/workstreams/
+    - tests/test_persona_registry.py
+    - tests/test_fleet.py
+    - docs/FLEET-CONFIG.md
+    - docs/WORKSTREAMS.md
+  fleet-scout-loadouts:
+    - agent_fleet/personas/
+    - tests/test_loadouts.py
+    - docs/PERSONAS.md
+  fleet-skills-stack:
+    - agents/personas/
+    - docs/superpowers/plans/2026-05-25-skills-integration-buildout.md
   coder:
     - agent_fleet/contracts/
     - agent_fleet/sessions.py
@@ -45,6 +88,8 @@ persona_scope_allowlist:
     - agent_fleet/implementer.py
     - agent_fleet/skills_lib.py
     - agent_fleet/personas/
+    - agent_fleet/personas.py
+    - agent_fleet/workstreams/
     - tests/
     - docs/
     - fleet.example.yaml
@@ -63,14 +108,11 @@ persona_scope_allowlist:
     - tests/
     - docs/
 
-# Block multi-area changes — if a plan task spans these groups the planner
-# decomposes it. Keeps each FLEET dispatch surgical.
 cross_cutting_groups:
   - [agent_fleet/dispatcher.py, agent_fleet/runner.py]
   - [agent_fleet/cursor_backend.py, agent_fleet/sessions.py]
 
 # Bootstrap-trap files: planner decomposes around these unless persona is bootstrap.
-# Use --persona bootstrap for one-file-per-dispatch self-modification runs.
 critical_path_prefixes:
   - agent_fleet/runner.py
   - agent_fleet/cursor_backend.py
@@ -82,7 +124,6 @@ critical_path_prefixes:
   - pyproject.toml
   - uv.lock
 
-# Managed targets — fleet config lives here, not on silphco.
 targets:
   - config: targets/silphcoanalytics.agent-fleet.yaml
 
@@ -117,37 +158,3 @@ schedules:
         skip_if_in_flight: true
         missed: skip
         min_interval_s: 82800
-
-    # Manual / smoke (disabled — use: agent-fleet-schedule run --id silphco-docs-sweep-now):
-    # - id: silphco-docs-sweep-now
-    #   enabled: false
-    #   cron: "0 0 1 1 *"
-    #   timezone: UTC
-    #   dispatch:
-    #     workspace: /home/evan/Documents/silphcoanalytics
-    #     kind: task
-    #     goal: "Documentation sweep (on-demand)"
-    #     persona: security_qa
-    #     pipeline: code_review
-    #     context: "(same as silphco-docs-sweep)"
-    #   policy:
-    #     skip_if_in_flight: true
-    #     missed: skip
-    #     min_interval_s: 0
-
-    # Fast iteration override (disabled by default):
-    # - id: silphco-docs-dev
-    #   enabled: true
-    #   cron: "*/2 * * * *"
-    #   timezone: UTC
-    #   dispatch:
-    #     workspace: /home/evan/Documents/silphcoanalytics
-    #     kind: task
-    #     goal: "Schedule smoke test on silphco"
-    #     persona: security_qa
-    #     pipeline: simple
-    #     context: "Reply SCHEDULE_OK after confirming docs/SCHEDULES.md is absent from silphco (expected)."
-    #   policy:
-    #     skip_if_in_flight: true
-    #     missed: skip
-    #     min_interval_s: 90

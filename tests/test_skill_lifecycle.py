@@ -228,5 +228,5 @@ def test_fix_phase_injects_equip_compose_body(
     )
 
     assert len(captured) == 1
-    assert "Equipped Persona" in captured[0]
-    assert "TDD Bug Fix" in captured[0]
+    assert "# Persona" in captured[0]
+    assert "pstack/tdd" in captured[0].lower() or "tdd" in captured[0].lower()

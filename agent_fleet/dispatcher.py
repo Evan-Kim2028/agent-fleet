@@ -17,8 +17,8 @@ from agent_fleet.config import FleetConfig, load_fleet_config
 from agent_fleet.dispatcher_task import (
     build_task_result,
     maybe_publish_and_pr_loop,
-    record_completed_task_experience,
     prepare_task_workspace_if_needed,
+    record_completed_task_experience,
     run_configured_pipeline,
 )
 from agent_fleet.handoff_context import apply_handoff_to_task
@@ -29,6 +29,7 @@ from agent_fleet.redispatch import dispatch_with_retry
 from agent_fleet.repo import RepoConfig, find_repo_config, merge_repo_into_fleet_config
 from agent_fleet.runner import run_full_pipeline
 from agent_fleet.verify_core import is_git_repo
+from agent_fleet.worktree import maybe_commit_recoverable_worktree, should_keep_task_worktree
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -54,7 +55,8 @@ def _normalize_tasks(
     workspace: str | None,
     pipeline: str | None,
     tasks: list[dict[str, object]] | None,
-) -> list[FleetTask]:
+) -> tuple[list[FleetTask], list[str | None]]:
+    base_branches: list[str | None] = []
     if tasks:
         normalized: list[FleetTask] = []
         for entry in tasks:
@@ -63,6 +65,7 @@ def _normalize_tasks(
             task_goal = str(entry.get("goal") or "").strip()
             if not task_goal:
                 continue
+            base_branches.append(_optional_entry_str(entry.get("base_branch"), None))
             normalized.append(
                 FleetTask(
                     goal=task_goal,
@@ -73,7 +76,7 @@ def _normalize_tasks(
                 )
             )
         if normalized:
-            return normalized
+            return normalized, base_branches
     if goal and goal.strip():
         return [
             FleetTask(
@@ -83,8 +86,39 @@ def _normalize_tasks(
                 workspace=workspace,
                 pipeline=pipeline,
             )
-        ]
+        ], [None]
     raise ValueError("Provide either 'goal' (single task) or 'tasks' (batch).")
+
+
+def _scope_prefixes_for_persona(repo: RepoConfig, persona: str) -> frozenset[str]:
+    allowlist = repo.persona_scope_allowlist.get(persona)
+    if not allowlist:
+        return frozenset()
+    return frozenset(str(prefix).rstrip("/") for prefix in allowlist)
+
+
+def _scope_prefixes_overlap(a: str, b: str) -> bool:
+    return a == b or a.startswith(f"{b}/") or b.startswith(f"{a}/")
+
+
+def _warn_parallel_scope_overlap(repo: RepoConfig, tasks: list[FleetTask]) -> None:
+    """Log when parallel batch personas share scope allowlist prefixes."""
+    personas = [task.persona for task in tasks]
+    overlaps: list[str] = []
+    for i, persona_a in enumerate(personas):
+        prefixes_a = _scope_prefixes_for_persona(repo, persona_a)
+        for persona_b in personas[i + 1 :]:
+            prefixes_b = _scope_prefixes_for_persona(repo, persona_b)
+            for prefix_a in prefixes_a:
+                for prefix_b in prefixes_b:
+                    if _scope_prefixes_overlap(prefix_a, prefix_b):
+                        overlaps.append(f"{persona_a} ↔ {persona_b} (prefix {prefix_a!r})")
+                        break
+    if overlaps:
+        logger.warning(
+            "Parallel batch may collide on shared persona scope prefixes: %s",
+            "; ".join(overlaps[:5]),
+        )
 
 
 class FleetDispatcher:
@@ -341,6 +375,7 @@ class FleetDispatcher:
         batch_size: int = 1,
         same_workspace_tasks: int = 1,
         handoff: HandoffNote | None = None,
+        base_branch: str | None = None,
     ) -> FleetTaskResult:
         start = time.monotonic()
         fleet_log = FleetLogger.for_dispatch(
@@ -412,6 +447,7 @@ class FleetDispatcher:
                     batch_size=batch_size,
                     same_workspace_tasks=same_workspace_tasks,
                     worktree_lock=self._worktree_lock,
+                    base_branch=base_branch,
                 )
                 if wt_error:
                     return FleetTaskResult(
@@ -489,7 +525,6 @@ class FleetDispatcher:
                     changed_files=changed_files,
                     task_workspace=task_workspace,
                     fleet_log=fleet_log,
-                    workspace=run_workspace,
                 )
 
                 repo_for_publish = repo_config or git_repo
@@ -527,13 +562,18 @@ class FleetDispatcher:
                     fleet_log=fleet_log,
                 )
 
-                keep_worktree = result.status in {"completed", "merged"} or (
-                    code_review_cfg is not None
-                    and code_review_cfg.auto_push
-                    and task_workspace is not None
-                    and task_workspace.isolated
+                keep_worktree = should_keep_task_worktree(
+                    result.status,
+                    auto_push=bool(code_review_cfg and code_review_cfg.auto_push),
+                    isolated=bool(task_workspace and task_workspace.isolated),
+                    has_changes=bool(result.changed_files or result.files_modified),
                 )
                 if task_workspace is not None:
+                    maybe_commit_recoverable_worktree(
+                        task_workspace,
+                        result.status,
+                        goal=task.goal,
+                    )
                     task_workspace.teardown(keep=keep_worktree)
                 return result
             except Exception as exc:
@@ -575,7 +615,7 @@ class FleetDispatcher:
         pipeline: str | None = None,
         tasks: list[dict[str, object]] | None = None,
     ) -> list[FleetTaskResult]:
-        normalized = _normalize_tasks(
+        normalized, base_branches = _normalize_tasks(
             goal=goal,
             context=context,
             persona=persona,
@@ -590,6 +630,11 @@ class FleetDispatcher:
 
         batch_size = len(normalized)
         workspace_counts = self._workspace_task_counts(normalized)
+
+        if batch_size > 1:
+            first_repo = find_repo_config(self._resolve_workspace(normalized[0]))
+            if first_repo is not None:
+                _warn_parallel_scope_overlap(first_repo, normalized)
 
         if batch_size == 1:
             task = normalized[0]
@@ -619,6 +664,7 @@ class FleetDispatcher:
                     task,
                     batch_size=batch_size,
                     same_workspace_tasks=workspace_counts[self._workspace_key(task)],
+                    base_branch=base_branches[idx] if idx < len(base_branches) else None,
                 ): idx
                 for idx, task in enumerate(normalized)
             }

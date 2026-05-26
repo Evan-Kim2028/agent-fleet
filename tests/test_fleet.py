@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 import textwrap
 from pathlib import Path
+from types import MethodType
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -15,10 +18,11 @@ from agent_fleet.contracts.review import ReviewResult, ReviewVerdict
 from agent_fleet.contracts.task_spec import validate_task_spec
 from agent_fleet.contracts.tech_lead_review import TechLeadReview, TechLeadVerdict
 from agent_fleet.cursor_backend import CursorBackend
-from agent_fleet.dispatcher import _normalize_tasks
+from agent_fleet.dispatcher import FleetDispatcher, _normalize_tasks
+from agent_fleet.hooks import FleetTask, FleetTaskResult
 from agent_fleet.personas import YamlPersonaResolver
 from agent_fleet.phase_graph import default_phase_graph
-from agent_fleet.repo import load_repo_config
+from agent_fleet.repo import RepoConfig, load_repo_config
 from agent_fleet.runner import _run_outcome, _spine_from_repo
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -50,7 +54,7 @@ def test_load_persona_prompt(fleet_config: FleetConfig) -> None:
 
 
 def test_normalize_single_task() -> None:
-    tasks = _normalize_tasks(
+    tasks, base_branches = _normalize_tasks(
         goal="Fix the bug",
         context="see auth.py",
         persona="coder",
@@ -60,19 +64,24 @@ def test_normalize_single_task() -> None:
     )
     assert len(tasks) == 1
     assert tasks[0].goal == "Fix the bug"
+    assert base_branches == [None]
 
 
 def test_normalize_batch() -> None:
-    tasks = _normalize_tasks(
+    tasks, base_branches = _normalize_tasks(
         goal=None,
         context=None,
         persona=None,
         workspace=None,
         pipeline=None,
-        tasks=[{"goal": "A"}, {"goal": "B", "persona": "explorer"}],
+        tasks=[
+            {"goal": "A"},
+            {"goal": "B", "persona": "explorer", "base_branch": "feature/x"},
+        ],
     )
     assert len(tasks) == 2
     assert tasks[1].persona == "explorer"
+    assert base_branches == [None, "feature/x"]
 
 
 def test_normalize_requires_input() -> None:
@@ -244,3 +253,147 @@ def test_make_backend_kimi(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert isinstance(backend, KimiBackend)
     assert backend.model == "kimi-for-coding"
+
+
+def _init_git_repo(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-b", "main"], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=path, check=True)
+    (path / "README.md").write_text("hello\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=path, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=path, check=True)
+
+
+def test_dispatcher_keeps_worktree_on_recoverable_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recoverable soft failures with changes should retain the isolated worktree."""
+    from agent_fleet.worktree import prepare_task_workspace
+
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+    worktree_base = tmp_path / "worktrees"
+    repo_config = RepoConfig(
+        repo_root=repo_path,
+        use_worktree=True,
+        worktree_base=worktree_base,
+    )
+    shared = prepare_task_workspace(repo_config, task_index=0, force_isolation=True)
+
+    fc = load_fleet_config(ROOT / "fleet.example.yaml")
+    fc.default_workspace = str(repo_path)
+    dispatcher = FleetDispatcher(config=fc)
+    dispatcher.backend = MagicMock()
+
+    monkeypatch.setattr(
+        "agent_fleet.dispatcher.find_repo_config",
+        lambda _workspace: repo_config,
+    )
+
+    def fake_pipeline(**kwargs: object) -> tuple[list[dict[str, object]], str, int, list[str]]:
+        del kwargs
+        (shared.path / "changed.txt").write_text("edited\n", encoding="utf-8")
+        verify_phase: dict[str, object] = {
+            "phase": "verify",
+            "passed": False,
+            "command": "pytest -q",
+        }
+        return [verify_phase], "verify failed", 1, ["changed.txt"]
+
+    monkeypatch.setattr(
+        "agent_fleet.dispatcher.run_configured_pipeline",
+        fake_pipeline,
+    )
+
+    def prepare_once(**kwargs: object) -> tuple[Path, object, None]:
+        del kwargs
+        return shared.path, shared, None
+
+    monkeypatch.setattr(
+        "agent_fleet.dispatcher.prepare_task_workspace_if_needed",
+        prepare_once,
+    )
+
+    results = dispatcher.dispatch(
+        goal="verify failure retention",
+        persona="coder",
+        workspace=str(repo_path),
+        pipeline="simple",
+    )
+    assert len(results) == 1
+    assert results[0].status == "verify_failed"
+    assert results[0].worktree == str(shared.path)
+    assert shared.path.exists()
+    shared.teardown(keep=False)
+
+
+def test_parallel_dispatch_warns_on_scope_overlap(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_yaml = tmp_path / ".agent-fleet.yaml"
+    repo_yaml.write_text(
+        textwrap.dedent(
+            """
+            name: demo
+            persona_scope_allowlist:
+              coder:
+                - src/
+              reviewer:
+                - src/
+            """
+        ),
+        encoding="utf-8",
+    )
+    repo = load_repo_config(repo_yaml)
+    fc = load_fleet_config(ROOT / "fleet.example.yaml")
+    fc.default_workspace = str(tmp_path)
+    fc.max_parallel = 4
+    fc.repo_config = repo
+
+    dispatcher = FleetDispatcher(config=fc)
+    dispatcher.backend = MagicMock()
+
+    def fake_execute(
+        self: FleetDispatcher,
+        task_index: int,
+        task: FleetTask,
+        **kwargs: object,
+    ) -> FleetTaskResult:
+        del self, kwargs
+        return FleetTaskResult(
+            task_index=task_index,
+            persona=task.persona,
+            goal=task.goal,
+            status="completed",
+            summary=None,
+            error=None,
+            duration_seconds=0.1,
+        )
+
+    monkeypatch.setattr(dispatcher, "_execute_task", MethodType(fake_execute, dispatcher))
+
+    with caplog.at_level("WARNING"):
+        results = dispatcher.dispatch(
+            tasks=[
+                {"goal": "task A", "persona": "coder"},
+                {"goal": "task B", "persona": "reviewer"},
+            ],
+            workspace=str(tmp_path),
+            pipeline="simple",
+        )
+
+    assert len(results) == 2
+    assert any("Parallel batch may collide" in record.message for record in caplog.records)
+
+
+def test_workstream_subcommand_registered() -> None:
+    """agent-fleet workstream must be wired into the top-level CLI."""
+    from agent_fleet.cli import main
+
+    with pytest.raises(SystemExit) as exc:
+        main(["workstream", "--help"])
+    assert exc.value.code == 0

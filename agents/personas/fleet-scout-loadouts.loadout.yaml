@@ -1,0 +1,10 @@
+schema_version: 1
+stub: fleet-scout-loadouts.md
+skills:
+  execute:
+    - pstack/tdd
+    - cursor-team-kit/verify-this
+    - superpowers/writing-skills
+pipeline_skills:
+  code_review:
+    review: []

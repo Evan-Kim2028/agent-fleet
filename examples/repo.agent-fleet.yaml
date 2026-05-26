@@ -104,6 +104,15 @@ critical_path_prefixes:
 #   min_repos_for_fleet: 1
 #   learn_cooldown_seconds: 3600
 
+# code_review auto-fix loop (local pipeline: execute → review → fix → re-check)
+# When pr_loop.enabled is true, these defaults inherit automatically.
+# code_review:
+#   auto_fix: true
+#   max_fix_attempts: 2
+#   fix_persona: coder
+#   auto_push: false
+#   auto_pr_loop: false
+
 # Automated PR lifecycle (requires pr-analyzer workflow + local watcher)
 # Full example: examples/repo-full.agent-fleet.yaml — see docs/NEW-REPO.md
 # pr_loop:

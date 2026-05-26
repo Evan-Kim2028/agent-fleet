@@ -1,5 +1,6 @@
-# ruff: noqa: TC002
 """Experience recording from LocalFleetRunner and shared record helpers."""
+
+# ruff: noqa: TC003
 
 from __future__ import annotations
 
@@ -8,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from agent_fleet.hooks import FleetTask
 from agent_fleet.level_up import paths as level_up_paths
 from agent_fleet.level_up.config import LevelUpConfig
 from agent_fleet.level_up.models import DispatchEquip
@@ -16,7 +18,6 @@ from agent_fleet.level_up.record import (
     record_runner_experience,
     record_task_experience,
 )
-from agent_fleet.hooks import FleetTask
 from agent_fleet.runner import FleetRunResult
 
 
@@ -28,7 +29,7 @@ def level_up_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def test_record_runner_experience_appends_row(
-    level_up_root: Path,
+    level_up_root: Path,  # noqa: ARG001
     tmp_path: Path,
 ) -> None:
     repo_yaml = tmp_path / ".agent-fleet.yaml"
@@ -72,7 +73,7 @@ def test_record_runner_experience_appends_row(
 
 
 def test_record_task_experience_respects_train_false(
-    level_up_root: Path,
+    level_up_root: Path,  # noqa: ARG001
     tmp_path: Path,
 ) -> None:
     repo_yaml = tmp_path / ".agent-fleet.yaml"
@@ -92,7 +93,7 @@ def test_record_task_experience_respects_train_false(
 
 
 def test_maybe_trigger_auto_learn_respects_cooldown(
-    level_up_root: Path,
+    level_up_root: Path,  # noqa: ARG001
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -116,7 +117,12 @@ def test_maybe_trigger_auto_learn_respects_cooldown(
 
     calls: list[list[str]] = []
 
-    def _fake_trigger(*, personas: list[str] | None = None, dry_run: bool = False):
+    def _fake_trigger(
+        *,
+        personas: list[str] | None = None,
+        dry_run: bool = False,
+    ) -> object:
+        del dry_run
         calls.append(list(personas or []))
         from agent_fleet.learning.synthesizer import FleetSynthesisResult
 

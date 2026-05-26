@@ -19,11 +19,11 @@ from agent_fleet.contracts.verify_result import VerifySeverity
 from agent_fleet.fleet_session import create_fleet_session
 from agent_fleet.hooks import FleetTask, ResumableGitOps
 from agent_fleet.implementer import implement
+from agent_fleet.level_up.record import record_runner_experience
 from agent_fleet.observability.context import bind_run
 from agent_fleet.observability.log import RunLog
 from agent_fleet.orchestration.decompose import coerce_empty_decompose
 from agent_fleet.orchestration.equip import resolve_dispatch_equip
-from agent_fleet.level_up.record import record_runner_experience
 from agent_fleet.phase_graph import (
     PhaseGraph,
     PhaseRunContext,

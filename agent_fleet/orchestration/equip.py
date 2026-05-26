@@ -1,7 +1,13 @@
-"""Resolve dispatch equip: loadouts, overlays, dynamic skills, journaling."""
+"""Resolve dispatch equip: loadouts, overlays, dynamic skills, journaling.
+
+Call :func:`resolve_dispatch_equip` once per dispatch (dispatcher, PR loop, fix phase
+when ``fix_persona != task.persona``). Reuse ``task.equip`` on the execute and
+code-review fix fast paths when the persona matches.
+"""
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.level_up.compaction import touch_overlay_rules
@@ -32,10 +38,19 @@ def _empty_loadout(persona: str) -> dict[str, Any]:
     return {"name": persona, "skill_slots": {"execute": [], "review": []}}
 
 
-def _resolve_persona_loadout(persona: str) -> tuple[dict[str, Any], str]:
+def _resolve_persona_loadout(
+    persona: str,
+    *,
+    personas_dir: Path | str | None = None,
+) -> tuple[dict[str, Any], str]:
     """Return loadout dict and display name; markdown-only repos get an empty loadout."""
+    kwargs: dict[str, Any] = {}
+    if personas_dir is not None:
+        kwargs["personas_dir"] = (
+            Path(personas_dir) if isinstance(personas_dir, str) else personas_dir
+        )
     try:
-        loadout = load_loadout(persona)
+        loadout = load_loadout(persona, **kwargs)
     except FileNotFoundError:
         return _empty_loadout(persona), persona
     return loadout, str(loadout.get("name") or persona)
@@ -49,7 +64,10 @@ def resolve_dispatch_equip(
 ) -> DispatchEquip:
     """Resolve dispatch equip: loadouts, overlays, dynamic skills, journaling."""
     persona = task.persona or "coder"
-    loadout, loadout_name = _resolve_persona_loadout(persona)
+    personas_dir = fleet_config.personas_dir
+    if repo is not None and repo.personas_dir is not None:
+        personas_dir = repo.personas_dir
+    loadout, loadout_name = _resolve_persona_loadout(persona, personas_dir=personas_dir)
 
     skill_dirs = merge_skill_dirs(base_kit_skill_dirs(), fleet_config.skill_dirs)
 

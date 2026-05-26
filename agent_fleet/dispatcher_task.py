@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from agent_fleet.code_review import publish_fleet_branch, run_code_review_with_auto_fix
 from agent_fleet.fleet_session import create_fleet_session
@@ -45,6 +44,7 @@ def prepare_task_workspace_if_needed(
     batch_size: int,
     same_workspace_tasks: int,
     worktree_lock: threading.Lock,
+    base_branch: str | None = None,
 ) -> tuple[Path, TaskWorkspace | None, str | None]:
     """Return (run_workspace, task_workspace, error_message)."""
     force_parallel = batch_size > 1 and same_workspace_tasks > 1
@@ -71,6 +71,7 @@ def prepare_task_workspace_if_needed(
                 git_repo,
                 task_index=task_index,
                 force_isolation=force_parallel,
+                base_branch=base_branch,
             )
     except RuntimeError as exc:
         return workspace, None, str(exc)
@@ -148,7 +149,6 @@ def build_task_result(
     changed_files: list[str] | None,
     task_workspace: TaskWorkspace | None,
     fleet_log: FleetLogger,
-    workspace: Path | None = None,
 ) -> FleetTaskResult:
     from agent_fleet.hooks import FleetTaskResult
 
