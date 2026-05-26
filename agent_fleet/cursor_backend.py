@@ -526,17 +526,38 @@ class CursorBackend:
         selected_model = _resolve_model_selection(model or self.default_model)
         selected_mode = coerce_agent_mode(mode, default=self.default_mode)
         mcp_dict = {name: _sdk_mcp_config(spec, sdk) for name, spec in (mcp_servers or {}).items()}
+        # Long pytest/vitest audits stream chunked events for >10 minutes;
+        # the cursor-sdk default stream_timeout of 600s causes spurious
+        # ReadTimeout aborts. 1800s matches our session default_timeout_s.
+        client_kwargs: dict[str, Any] = {"stream_timeout": 1800.0}
+        if os.environ.get("AGENT_FLEET_SHARED_BRIDGE") != "1":
+            try:
+                from agent_fleet.bridge_daemon import launch_private_bridge
+
+                bridge_info = launch_private_bridge(str(cwd))
+                if bridge_info is not None:
+                    client_kwargs["base_url"] = bridge_info["url"]
+                    client_kwargs["auth_token"] = bridge_info["auth_token"]
+            except Exception:
+                logger.debug("launch_private_bridge failed; SDK auto-spawn", exc_info=True)
         try:
-            agent = sdk.Agent.create(
-                sdk.AgentOptions(
-                    model=selected_model,
-                    api_key=self.api_key,
-                    local=sdk.LocalAgentOptions(cwd=str(cwd)),
-                    mcp_servers=mcp_dict or None,
-                    mode=selected_mode,
-                    name=f"fleet:{persona_name}",
-                ),
+            client = sdk.Client(**client_kwargs)
+        except Exception:
+            logger.debug("sdk.Client init failed; falling back to default", exc_info=True)
+            client = None
+        try:
+            agent_options = sdk.AgentOptions(
+                model=selected_model,
+                api_key=self.api_key,
+                local=sdk.LocalAgentOptions(cwd=str(cwd)),
+                mcp_servers=mcp_dict or None,
+                mode=selected_mode,
+                name=f"fleet:{persona_name}",
             )
+            if client is not None:
+                agent = sdk.Agent.create(agent_options, client=client)
+            else:
+                agent = sdk.Agent.create(agent_options)
         except Exception as exc:
             return _ErrorSession(f"Agent.create failed: {exc}")
         return CursorSession(

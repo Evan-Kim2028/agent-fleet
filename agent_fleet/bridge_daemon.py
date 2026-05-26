@@ -434,6 +434,60 @@ def apply_bridge_env(*, force: bool = False, wait_s: float = 0.0) -> bool:
     return True
 
 
+def launch_private_bridge(
+    workspace: str, *, timeout_s: float = _DEFAULT_TIMEOUT_S
+) -> dict[str, Any] | None:
+    """Spawn a fresh per-process bridge with stderr captured to disk.
+
+    Unlike the shared daemon, this bridge is owned by the calling process:
+    stderr is written to ``~/.agent-fleet/bridges/<pid>-<ts>.log`` and an
+    atexit handler tears it down on process exit. Use this when concurrent
+    dispatches need their own bridges to avoid the shared-bridge contention
+    (cursor-sdk bridge is not concurrency-safe across processes).
+
+    Returns the discovery state dict (url/auth_token/pid/log_path) on
+    success, or None if spawn or discovery failed.
+    """
+    import atexit
+
+    bridges_dir = agent_fleet_home() / "bridges"
+    try:
+        bridges_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.warning("private bridge log dir setup failed: %s", exc)
+        return None
+    ts = time.strftime("%Y%m%dT%H%M%S")
+    log_path = bridges_dir / f"{os.getpid()}-{ts}.log"
+
+    try:
+        proc = _spawn_bridge_subprocess(workspace, log_path)
+    except OSError as exc:
+        logger.warning("private bridge spawn failed: %s", exc)
+        return None
+
+    deadline = time.monotonic() + timeout_s
+    try:
+        discovery = _read_discovery_from_log(log_path, deadline)
+    except Exception as exc:
+        logger.warning("private bridge discovery failed: %s", exc)
+        with contextlib.suppress(Exception):
+            proc.terminate()
+        return None
+
+    state = _discovery_to_state(discovery, proc.pid)
+    state["log_path"] = str(log_path)
+
+    def _cleanup() -> None:
+        with contextlib.suppress(Exception):
+            if proc.poll() is None:
+                proc.terminate()
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    proc.wait(timeout=5)
+
+    atexit.register(_cleanup)
+    return state
+
+
 def _main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agent_fleet.bridge_daemon")
     parser.add_argument("--supervisor", action="store_true", help="Run the supervisor loop")
