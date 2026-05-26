@@ -611,10 +611,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     learn_p.set_defaults(func=cmd_learn)
 
-    from agent_fleet.workstreams.cli import register_workstream_commands
-
-    register_workstream_commands(sub)
-
     args = parser.parse_args(argv)
     return args.func(args)
 

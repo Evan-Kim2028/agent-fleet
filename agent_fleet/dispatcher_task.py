@@ -46,7 +46,6 @@ def prepare_task_workspace_if_needed(
     batch_size: int,
     same_workspace_tasks: int,
     worktree_lock: threading.Lock,
-    base_branch: str | None = None,
 ) -> tuple[Path, TaskWorkspace | None, str | None]:
     """Return (run_workspace, task_workspace, error_message)."""
     force_parallel = batch_size > 1 and same_workspace_tasks > 1
@@ -73,7 +72,6 @@ def prepare_task_workspace_if_needed(
                 git_repo,
                 task_index=task_index,
                 force_isolation=force_parallel,
-                base_branch=base_branch,
             )
     except RuntimeError as exc:
         return workspace, None, str(exc)
