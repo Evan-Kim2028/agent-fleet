@@ -6,13 +6,12 @@ import json
 import logging
 import re
 import subprocess
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from agent_fleet.pr_loop import github_ops
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from agent_fleet.repo import RepoConfig
 
 logger = logging.getLogger(__name__)
@@ -128,6 +127,13 @@ def publish_fleet_branch(
     persona: str,
 ) -> int | None:
     """Commit, push, and return PR number (existing or newly created)."""
+    if not Path(worktree).is_dir():
+        logger.warning(
+            "publish_fleet_branch: worktree %s vanished; skipping publish for branch %s",
+            worktree,
+            branch,
+        )
+        return None
     message = f"feat(fleet): {task_goal[:72]}\n\n🤖 Agent: persona={persona}"
     pushed = github_ops.commit_and_push(worktree, message, branch)
     if not pushed:

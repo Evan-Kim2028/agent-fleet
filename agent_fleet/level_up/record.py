@@ -228,7 +228,7 @@ def maybe_trigger_auto_learn(
             last = json.loads(marker.read_text(encoding="utf-8"))
             if now - float(last.get("ts", 0)) < cooldown:
                 return
-        except json.JSONDecodeError, TypeError, ValueError:
+        except (json.JSONDecodeError, TypeError, ValueError):
             pass
 
     total_rows = 0
