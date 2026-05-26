@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
-import pytest
+from typing import TYPE_CHECKING
 
 import agent_fleet.fleet_paths as fleet_paths
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    import pytest
 
 
 def test_agent_fleet_home_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
