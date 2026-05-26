@@ -508,6 +508,33 @@ class CursorBackend:
             except Exception:
                 logger.debug("apply_bridge_env failed; falling back to per-process bridge")
 
+    @staticmethod
+    def _build_fleet_client(sdk_mod: Any, cwd: Path | str) -> Any | None:  # noqa: ANN401
+        """Build a cursor-sdk Client wired to a per-process private bridge.
+
+        Each agent-fleet process gets its own bridge with stderr captured to
+        ``~/.agent-fleet/bridges/<pid>-<ts>.log`` and a 1800s stream_timeout
+        (vs the SDK default of 600s, which trips long pytest streams).
+        Returns None on any failure so callers can fall back to default
+        cursor-sdk client behavior.
+        """
+        client_kwargs: dict[str, Any] = {"stream_timeout": 1800.0}
+        if os.environ.get("AGENT_FLEET_SHARED_BRIDGE") != "1":
+            try:
+                from agent_fleet.bridge_daemon import launch_private_bridge
+
+                bridge_info = launch_private_bridge(str(cwd))
+                if bridge_info is not None:
+                    client_kwargs["base_url"] = bridge_info["url"]
+                    client_kwargs["auth_token"] = bridge_info["auth_token"]
+            except Exception:
+                logger.debug("launch_private_bridge failed; SDK auto-spawn", exc_info=True)
+        try:
+            return sdk_mod.Client(**client_kwargs)
+        except Exception:
+            logger.debug("sdk.Client init failed; falling back to default", exc_info=True)
+            return None
+
     def create_session(
         self,
         *,
@@ -526,25 +553,7 @@ class CursorBackend:
         selected_model = _resolve_model_selection(model or self.default_model)
         selected_mode = coerce_agent_mode(mode, default=self.default_mode)
         mcp_dict = {name: _sdk_mcp_config(spec, sdk) for name, spec in (mcp_servers or {}).items()}
-        # Long pytest/vitest audits stream chunked events for >10 minutes;
-        # the cursor-sdk default stream_timeout of 600s causes spurious
-        # ReadTimeout aborts. 1800s matches our session default_timeout_s.
-        client_kwargs: dict[str, Any] = {"stream_timeout": 1800.0}
-        if os.environ.get("AGENT_FLEET_SHARED_BRIDGE") != "1":
-            try:
-                from agent_fleet.bridge_daemon import launch_private_bridge
-
-                bridge_info = launch_private_bridge(str(cwd))
-                if bridge_info is not None:
-                    client_kwargs["base_url"] = bridge_info["url"]
-                    client_kwargs["auth_token"] = bridge_info["auth_token"]
-            except Exception:
-                logger.debug("launch_private_bridge failed; SDK auto-spawn", exc_info=True)
-        try:
-            client = sdk.Client(**client_kwargs)
-        except Exception:
-            logger.debug("sdk.Client init failed; falling back to default", exc_info=True)
-            client = None
+        client = self._build_fleet_client(sdk, cwd)
         try:
             agent_options = sdk.AgentOptions(
                 model=selected_model,
@@ -589,6 +598,7 @@ class CursorBackend:
             )
 
         try:
+            import cursor_sdk as sdk
             from cursor_sdk import Agent, AgentOptions, LocalAgentOptions
         except ImportError as exc:
             return CursorLLMResult(
@@ -601,6 +611,7 @@ class CursorBackend:
         work_dir = str(cwd or Path.cwd())
         selected_model = _resolve_model_selection(model or self.default_model)
         selected_mode = coerce_agent_mode(mode, default=self.default_mode)
+        sdk_client = self._build_fleet_client(sdk, work_dir)
         scope_note = ""
         if allowed_tools:
             scoped = [
@@ -620,15 +631,16 @@ class CursorBackend:
             while True:
                 try:
                     with CursorBackend._prompt_lock:
-                        result = Agent.prompt(
-                            prompt_with_scope,
-                            AgentOptions(
-                                model=selected_model,
-                                mode=selected_mode,
-                                api_key=self.api_key,
-                                local=LocalAgentOptions(cwd=work_dir),
-                            ),
+                        options = AgentOptions(
+                            model=selected_model,
+                            mode=selected_mode,
+                            api_key=self.api_key,
+                            local=LocalAgentOptions(cwd=work_dir),
                         )
+                        if sdk_client is not None:
+                            result = Agent.prompt(prompt_with_scope, options, client=sdk_client)
+                        else:
+                            result = Agent.prompt(prompt_with_scope, options)
                 except Exception as exc:
                     if (
                         CursorBackend._is_bridge_disconnect(exc)
