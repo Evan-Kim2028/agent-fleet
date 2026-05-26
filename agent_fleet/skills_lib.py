@@ -7,7 +7,11 @@ from typing import Any
 
 _BUNDLED_SKILLS_DIR = Path(__file__).resolve().parent / "skills"
 _BASE_KIT_DIR = Path(__file__).resolve().parent / "base-kit"
-DEFAULT_QUALITY_REVIEW_SKILL = "thermo-nuclear-code-quality-review"
+DEFAULT_QUALITY_REVIEW_SKILL = "cursor-team-kit/thermo-nuclear-code-quality-review"
+# Legacy flat ids still accepted in yaml/config; resolve to base-kit paths.
+CANONICAL_SKILL_ALIASES: dict[str, str] = {
+    "thermo-nuclear-code-quality-review": DEFAULT_QUALITY_REVIEW_SKILL,
+}
 # Injected on verify_failed when not already in loadout (pstack-first default).
 SYSTEMATIC_DEBUGGING_SKILL = "pstack/why"
 # Injected when repo pr_loop.enabled (CI fix / watcher workflows).
@@ -29,22 +33,26 @@ def base_kit_skill_dirs() -> list[Path]:
 
 
 def bundled_skill_dirs() -> list[Path]:
+    """Bundled overrides first, then base-kit catalog (single canonical tree)."""
+    dirs: list[Path] = []
     if _BUNDLED_SKILLS_DIR.is_dir():
-        return [_BUNDLED_SKILLS_DIR]
-    return []
+        dirs.append(_BUNDLED_SKILLS_DIR)
+    dirs.extend(base_kit_skill_dirs())
+    return dirs
 
 
 def resolve_skill_path(skill_id: str, skill_dirs: list[Path]) -> Path | None:
     """Resolve a catalog skill id (e.g. cursor-team-kit/deslop) to SKILL.md."""
+    resolved_id = CANONICAL_SKILL_ALIASES.get(skill_id, skill_id)
     for base in skill_dirs:
-        if "/" in skill_id:
-            slash_candidate = base / skill_id / "SKILL.md"
+        if "/" in resolved_id:
+            slash_candidate = base / resolved_id / "SKILL.md"
             if slash_candidate.is_file():
                 return slash_candidate
         for candidate in (
-            base / skill_id / "SKILL.md",
-            base / f"{skill_id}.md",
-            base / skill_id / "skill.md",
+            base / resolved_id / "SKILL.md",
+            base / f"{resolved_id}.md",
+            base / resolved_id / "skill.md",
         ):
             if candidate.is_file():
                 return candidate

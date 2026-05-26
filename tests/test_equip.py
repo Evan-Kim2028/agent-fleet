@@ -35,6 +35,13 @@ def test_load_coder_loadout() -> None:
     loadout = load_loadout("coder")
     execute = loadout_execute_skill_ids(loadout)
     assert "pstack/tdd" in execute
+    assert not any(skill_id.startswith("superpowers/") for skill_id in execute)
+
+
+def test_reviewer_loadout_review_phase_is_curated() -> None:
+    loadout = load_loadout("reviewer")
+    review = loadout["pipeline_skills"]["code_review"]["review"]
+    assert review == ["pstack/unslop", "cursor-team-kit/deslop"]
 
 
 def test_resolve_dispatch_equip_baseline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
