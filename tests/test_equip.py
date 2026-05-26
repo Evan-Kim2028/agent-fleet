@@ -18,6 +18,7 @@ from agent_fleet.orchestration.equip import resolve_dispatch_equip
 from agent_fleet.personas import YamlPersonaResolver
 from agent_fleet.repo import load_repo_config
 from agent_fleet.skills_lib import (
+    PR_LOOP_EXECUTE_SKILLS,
     SYSTEMATIC_DEBUGGING_SKILL,
     load_loadout,
     loadout_execute_skill_ids,
@@ -33,7 +34,26 @@ def _patch_level_up_root(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
 def test_load_coder_loadout() -> None:
     loadout = load_loadout("coder")
     execute = loadout_execute_skill_ids(loadout)
-    assert "superpowers/test-driven-development" in execute
+    assert "pstack/tdd" in execute
+
+
+def test_resolve_dispatch_equip_missing_loadout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_level_up_root(monkeypatch, tmp_path / "level_up")
+    repo_yaml = tmp_path / ".agent-fleet.yaml"
+    repo_yaml.write_text("name: md-only\n", encoding="utf-8")
+    repo = load_repo_config(repo_yaml)
+    fleet_config = load_fleet_config(ROOT / "fleet.example.yaml")
+    task = FleetTask(goal="Slim repo", persona="frontend", workspace=str(tmp_path))
+
+    equip = resolve_dispatch_equip(task, fleet_config, repo, run_id="md-only-run")
+
+    assert equip.base_loadout == "frontend"
+    assert equip.skill_slots_execute == ()
+    assert equip.skill_slots_review == ()
+    journal_path = persona_dir("md-only", "frontend") / "journal.jsonl"
+    assert journal_path.is_file()
 
 
 def test_resolve_dispatch_equip_baseline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -50,9 +70,9 @@ def test_resolve_dispatch_equip_baseline(tmp_path: Path, monkeypatch: pytest.Mon
     assert isinstance(equip, DispatchEquip)
     assert equip.persona == "coder"
     assert equip.base_loadout == "coder"
-    assert "superpowers/test-driven-development" in equip.skill_slots_execute
+    assert "pstack/tdd" in equip.skill_slots_execute
     assert equip.parent_run_id is None
-    assert "Test-Driven Development" in equip.compose_body
+    assert "TDD Bug Fix" in equip.compose_body
 
     journal_path = persona_dir("equip-demo", "coder") / "journal.jsonl"
     assert journal_path.is_file()
@@ -83,7 +103,7 @@ def test_verify_failed_adds_systematic_debugging(
     equip = resolve_dispatch_equip(task, fleet_config, repo)
 
     assert SYSTEMATIC_DEBUGGING_SKILL in equip.skill_slots_execute
-    assert "Systematic Debugging" in equip.compose_body
+    assert "# Why" in equip.compose_body
 
 
 def test_verify_failed_skips_missing_base_kit_skill(
@@ -109,6 +129,23 @@ def test_verify_failed_skips_missing_base_kit_skill(
     equip = resolve_dispatch_equip(task, fleet_config, repo)
 
     assert SYSTEMATIC_DEBUGGING_SKILL not in equip.skill_slots_execute
+
+
+def test_pr_loop_adds_ci_skills(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_level_up_root(monkeypatch, tmp_path / "level_up")
+
+    repo_yaml = tmp_path / ".agent-fleet.yaml"
+    repo_yaml.write_text(
+        "name: pr-loop-repo\npr_loop:\n  enabled: true\n",
+        encoding="utf-8",
+    )
+    repo = load_repo_config(repo_yaml)
+    fleet_config = load_fleet_config(ROOT / "fleet.example.yaml")
+    task = FleetTask(goal="Fix CI", persona="coder", workspace=str(tmp_path))
+    equip = resolve_dispatch_equip(task, fleet_config, repo)
+
+    for skill_id in PR_LOOP_EXECUTE_SKILLS:
+        assert skill_id in equip.skill_slots_execute
 
 
 def test_child_tasks_carry_parent_run_id() -> None:
