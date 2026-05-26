@@ -42,20 +42,6 @@ Bundled personas ship inside the installed package at `agent_fleet/personas/`. *
 | Global `~/.agent-fleet/fleet.yaml` | Omit → bundled package personas. If set, must be absolute; relative paths resolve against the config directory (usually wrong). |
 | Repo `.agent-fleet.yaml` | Optional. Relative paths resolve against the **repo root**. Overrides bundled personas for dispatches in that repo. |
 
-### Resolution order (repo dir, then package fallback)
-
-When a repo sets `personas_dir: agents/personas` (or any custom directory), fleet searches **that directory first**, then falls back to bundled `agent_fleet/personas/` for prompts and loadouts not defined locally.
-
-| Lookup | Order |
-|--------|-------|
-| Prompt markdown (`coder.md`, loadout `stub:`) | repo `personas_dir` → package `agent_fleet/personas/` |
-| Loadout YAML (`*.loadout.yaml`) | repo `personas_dir` → package |
-| `fleet.yaml` `personas:` entries | Must resolve via the same search order; prune stale entries whose prompt `.md` is missing from both dirs |
-
-This lets self-hosted repos keep workstream-specific personas under `agents/personas/` while still dispatching bundled personas like `coder` or `pr-analyzer` without copying them.
-
-Regression coverage: `tests/test_persona_registry.py` resolves every `agents/personas/*.md` and every YAML config that sets `personas_dir: agents/personas`.
-
 Example — repo-local personas (recommended pattern):
 
 ```yaml
@@ -83,6 +69,12 @@ When a persona prompt or loadout is requested, fleet searches in this order:
 2. **Bundled package personas** — `agent_fleet/personas/` inside the installed package (fallback when a file is missing from the repo tree).
 3. **Skill-backed prompt** — if the persona spec sets `skill: …`, fleet searches configured `skill_dirs`.
 4. **Absolute or tilde path** — `prompt: /path/to/foo.md` or `prompt: ~/fleet/foo.md`.
+
+| Lookup | Order |
+|--------|-------|
+| Prompt markdown (`coder.md`, loadout `stub:`) | repo `personas_dir` → package `agent_fleet/personas/` |
+| Loadout YAML (`*.loadout.yaml`) | repo `personas_dir` → package |
+| `fleet.yaml` `personas:` entries | Same search order; use `prune_fleet_yaml_personas()` to drop entries whose prompt `.md` is missing from both dirs |
 
 This lets repos override bundled personas (e.g. `agents/personas/reviewer.md`) while still resolving bundled defaults such as `coder.md` when only repo-specific personas exist locally.
 
