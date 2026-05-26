@@ -1,0 +1,10 @@
+name: fleet-learner
+description: Meta-agent that analyzes fleet-wide experience and improves global skills
+stub: fleet-learner.md
+
+skill_slots:
+  execute:
+    - superpowers/systematic-debugging
+    - pstack/reflect
+  review:
+    - pstack/unslop
