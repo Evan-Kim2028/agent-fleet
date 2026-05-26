@@ -38,9 +38,11 @@ def resolve_dispatch_equip(
     run_id: str | None = None,
 ) -> DispatchEquip:
     """Pick execute/review skill slots and compose body for one dispatch."""
-    del fleet_config  # reserved for fleet-wide equip policy
     persona = task.persona or "coder"
-    loadout = load_loadout(persona)
+    personas_dir = fleet_config.personas_dir
+    if repo is not None and repo.personas_dir is not None:
+        personas_dir = repo.personas_dir
+    loadout = load_loadout(persona, personas_dir=personas_dir)
     loadout_name = str(loadout.get("name") or persona)
 
     repo_key_value = repo_key(
