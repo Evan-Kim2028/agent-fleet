@@ -396,6 +396,50 @@ def cmd_level_up_overlap(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_learn(args: argparse.Namespace) -> int:
+    """Trigger the self-improving flywheel for the global fleet tier.
+
+    When a real backend is available, this will actually dispatch the
+    fleet-learner persona against ~/.agent-fleet/ and use real LLM synthesis.
+    """
+    from agent_fleet.backends import make_backend
+    from agent_fleet.learning import synthesize_fleet_skills
+    from agent_fleet.personas import YamlPersonaResolver
+
+    print("Running fleet self-improvement synthesis...")
+    print(f"  personas: {args.personas or 'default (coder, reviewer, pr-analyzer)'}")
+    print(f"  min_rows: {args.min_rows}")
+    print(f"  dry_run:  {args.dry_run}")
+    print()
+
+    config = load_fleet_config(args.config) if args.config else load_fleet_config()
+    resolver = YamlPersonaResolver(config)
+    backend = make_backend(config)
+
+    result = synthesize_fleet_skills(
+        personas=args.personas,
+        min_experience_rows=args.min_rows,
+        dry_run=args.dry_run,
+        # Pass real objects so LLM synthesis can actually run the fleet-learner
+        backend=backend,
+        resolver=resolver,
+        fleet_config=config,
+    )
+
+    print("Synthesis complete:")
+    print(f"  personas updated:     {result.personas_updated}")
+    print(f"  rules proposed:       {result.new_rules_proposed}")
+    print(f"  promoted to _fleet:   {result.promoted_to_fleet}")
+
+    if result.promoted_to_fleet > 0:
+        print(
+            "\nNew skills are now available in the global _fleet tier "
+            "and will be equipped on future dispatches."
+        )
+
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agent-fleet", description="Agentic coding fleet CLI")
     parser.add_argument(
@@ -543,6 +587,29 @@ def main(argv: list[str] | None = None) -> int:
     level_up_overlap_p.add_argument("--repo", required=True, help="Repo path or .agent-fleet.yaml")
     level_up_overlap_p.add_argument("--persona", required=True, help="Persona name")
     level_up_overlap_p.set_defaults(func=cmd_level_up_overlap)
+
+    # --- Self-improving flywheel (cross-repo skill synthesis) ---
+    learn_p = sub.add_parser(
+        "learn",
+        help=(
+            "Run the fleet self-improvement flywheel "
+            "(synthesizes skills across repos into the global _fleet tier)"
+        ),
+    )
+    learn_p.add_argument(
+        "--personas",
+        nargs="*",
+        default=None,
+        help="Personas to synthesize for (default: coder reviewer pr-analyzer)",
+    )
+    learn_p.add_argument("--dry-run", action="store_true", help="Propose but do not promote")
+    learn_p.add_argument(
+        "--min-rows",
+        type=int,
+        default=20,
+        help="Min total experience rows before synthesizing",
+    )
+    learn_p.set_defaults(func=cmd_learn)
 
     args = parser.parse_args(argv)
     return args.func(args)

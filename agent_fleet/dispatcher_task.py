@@ -243,6 +243,17 @@ def _record_task_experience(
         data={"source": source, "weight": weight},
     )
 
+    # === Self-improving flywheel trigger (very conservative for v1) ===
+    # In a full implementation this would be configurable and would dispatch
+    # the fleet-learner persona as a proper meta-task against ~/.agent-fleet.
+    # For now we keep it extremely rare so it doesn't interfere with normal work.
+    # TODO: Make this properly rate-limited + configurable in fleet.yaml
+    # try:
+    #     from agent_fleet.learning import trigger_fleet_learning_cycle
+    #     trigger_fleet_learning_cycle(personas=[task.persona])
+    # except Exception:
+    #     pass
+
 
 def build_task_result(
     *,
