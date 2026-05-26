@@ -8,6 +8,7 @@ from agent_fleet.agent_mode import parse_agent_mode
 from agent_fleet.contracts.review import ReviewVerdict
 from agent_fleet.personas import read_persona_body
 from agent_fleet.pr_review.runner import run_pr_review
+from agent_fleet.prompts.agent import build_agent_prompt
 from agent_fleet.reviewer import aggregate_verdict
 from agent_fleet.reviewer import review as structured_review
 from agent_fleet.scope import files_outside_allowed_paths
@@ -43,24 +44,23 @@ def _build_execute_prompt(persona: Persona, task: FleetTask) -> str:
         body = task.equip.compose_body.strip()
     else:
         body = read_persona_body(persona)
-    parts = [
-        "# Persona",
-        body.strip(),
-    ]
+    extra_sections: list[tuple[str, str]] = []
     if persona.extra_instructions.strip():
-        parts.extend(["", "# Additional Instructions", persona.extra_instructions.strip()])
+        extra_sections.append(("Additional Instructions", persona.extra_instructions.strip()))
     if persona.allowed_paths:
         paths = ", ".join(persona.allowed_paths)
-        parts.extend(["", f"# Scope: only modify paths matching: {paths}"])
-    parts.extend(["", "# Task", task.goal.strip()])
-    if task.context.strip():
-        parts.extend(["", "# Context", task.context.strip()])
-    parts.append("")
-    parts.append(
-        "Execute this task in the workspace. Return a concise summary of what you "
+        extra_sections.append((f"Scope: only modify paths matching: {paths}", ""))
+    prompt = build_agent_prompt(
+        persona_body=body,
+        task_heading="Task",
+        task_body=task.goal,
+        context=task.context,
+        extra_sections=extra_sections or None,
+    )
+    return prompt.full + (
+        "\n\nExecute this task in the workspace. Return a concise summary of what you "
         "did, files changed, and any follow-up needed."
     )
-    return "\n".join(parts)
 
 
 def run_execute_phase(

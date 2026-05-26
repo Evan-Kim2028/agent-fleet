@@ -32,3 +32,31 @@ def test_execute_prompt_prefers_equip_compose_body() -> None:
     assert "Static persona body from resolver." not in prompt
     assert "Systematic Debugging" in prompt
     assert "Fix failing test" in prompt
+
+
+def test_execute_prompt_includes_persona_modifiers_and_closing() -> None:
+    persona = Persona(
+        name="coder",
+        prompt_path=Path("coder.md"),
+        allowed_tools=[],
+        capabilities={},
+        body="Coder body.",
+        allowed_paths=("src/",),
+        extra_instructions="Prefer small diffs.",
+    )
+    task = FleetTask(
+        goal="Implement feature",
+        context="See design doc.",
+        persona="coder",
+    )
+
+    prompt = _build_execute_prompt(persona, task)
+
+    assert prompt.index("# Persona") < prompt.index("# Additional Instructions")
+    assert prompt.index("# Additional Instructions") < prompt.index("# Scope:")
+    assert prompt.index("# Scope:") < prompt.index("# Task")
+    assert prompt.index("# Task") < prompt.index("# Context")
+    assert prompt.index("# Context") < prompt.index("Execute this task in the workspace")
+    assert "Prefer small diffs." in prompt
+    assert "only modify paths matching: src/" in prompt
+    assert "See design doc." in prompt
