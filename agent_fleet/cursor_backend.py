@@ -229,21 +229,40 @@ class CursorSession:
                 )
         body = f"{prompt}{scope_note}" if scope_note else prompt
         t0 = time.monotonic()
+        run_attempt = 0
         try:
-            run = self._agent.send(body)
-            mcp_tool_calls = _consume_run_events(
-                run,
-                expected_mcp_servers=self._mcp_servers or None,
-                warn_if_unused=requirement.required,
-            )
-            result = getattr(run, "_terminal_result", None)
-            if result is None and hasattr(run, "wait"):
-                result = run.wait()
-            elif result is None:
-                result = run
-            text = getattr(result, "result", None) or str(result)
-            status = getattr(result, "status", "finished")
-            agent_id = getattr(result, "agent_id", None) or self.agent_id
+            while True:
+                run = self._agent.send(body)
+                mcp_tool_calls = _consume_run_events(
+                    run,
+                    expected_mcp_servers=self._mcp_servers or None,
+                    warn_if_unused=requirement.required,
+                )
+                result = getattr(run, "_terminal_result", None)
+                if result is None and hasattr(run, "wait"):
+                    result = run.wait()
+                elif result is None:
+                    result = run
+                text = getattr(result, "result", None) or str(result)
+                status = getattr(result, "status", "finished")
+                agent_id = getattr(result, "agent_id", None) or self.agent_id
+                if (
+                    CursorBackend._is_transient_run_failure(status, text)
+                    and run_attempt < CursorBackend._RUN_RETRY_MAX
+                ):
+                    run_attempt += 1
+                    delay = CursorBackend._backoff_seconds(run_attempt)
+                    logger.warning(
+                        "cursor session.send transient failure (status=%s, "
+                        "attempt %d/%d, sleep %.1fs)",
+                        status,
+                        run_attempt,
+                        CursorBackend._RUN_RETRY_MAX,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                break
             duration_s = time.monotonic() - t0
             check = requirement.check(mcp_tool_calls)
             run_log = get_run_log()
@@ -422,12 +441,35 @@ class CursorBackend:
         "Bridge request failed",
     )
     _BRIDGE_RETRY_MAX = 3
-    _BRIDGE_RETRY_SLEEP_S = 2.0
+    # Cursor-server-side transient failure retries (status=error / empty result)
+    _RUN_RETRY_MAX = 2
+    # Exponential backoff: min(cap, base * 2^(attempt-1)) ± jitter
+    _BACKOFF_BASE_S = 2.0
+    _BACKOFF_CAP_S = 30.0
+    _BACKOFF_JITTER = 0.3
 
     @classmethod
     def _is_bridge_disconnect(cls, exc: BaseException) -> bool:
         msg = str(exc)
         return any(sig in msg for sig in cls._BRIDGE_RETRY_SIGNALS)
+
+    @classmethod
+    def _backoff_seconds(cls, attempt: int) -> float:
+        import random
+
+        delay = min(cls._BACKOFF_CAP_S, cls._BACKOFF_BASE_S * (2 ** max(0, attempt - 1)))
+        return delay * (1.0 + random.uniform(-cls._BACKOFF_JITTER, cls._BACKOFF_JITTER))
+
+    @classmethod
+    def _is_transient_run_failure(cls, status: str, text: str | None) -> bool:
+        # status=='error' from Cursor is almost always a transient backend hiccup;
+        # 'cancelled' is user-initiated and 'expired' indicates the agent ran past
+        # its server-side budget — neither benefits from immediate retry.
+        if status == "error":
+            return True
+        if status == "finished" and (not text or not text.strip()):
+            return True
+        return False
 
     @classmethod
     def _reconnect_bridge(cls) -> None:
@@ -549,7 +591,8 @@ class CursorBackend:
         t0 = time.monotonic()
 
         def _execute() -> CursorLLMResult:
-            attempt = 0
+            bridge_attempt = 0
+            run_attempt = 0
             while True:
                 try:
                     with CursorBackend._prompt_lock:
@@ -562,20 +605,21 @@ class CursorBackend:
                                 local=LocalAgentOptions(cwd=work_dir),
                             ),
                         )
-                    break
                 except Exception as exc:
                     if (
                         CursorBackend._is_bridge_disconnect(exc)
-                        and attempt < CursorBackend._BRIDGE_RETRY_MAX
+                        and bridge_attempt < CursorBackend._BRIDGE_RETRY_MAX
                     ):
-                        attempt += 1
+                        bridge_attempt += 1
+                        delay = CursorBackend._backoff_seconds(bridge_attempt)
                         logger.warning(
-                            "bridge disconnect (attempt %d/%d): %s",
-                            attempt,
+                            "bridge disconnect (attempt %d/%d, sleep %.1fs): %s",
+                            bridge_attempt,
                             CursorBackend._BRIDGE_RETRY_MAX,
+                            delay,
                             exc,
                         )
-                        time.sleep(CursorBackend._BRIDGE_RETRY_SLEEP_S * attempt)
+                        time.sleep(delay)
                         CursorBackend._reconnect_bridge()
                         continue
                     return CursorLLMResult(
@@ -584,11 +628,36 @@ class CursorBackend:
                         exit_code=1,
                         duration_s=time.monotonic() - t0,
                     )
-            try:
+
                 duration_s = time.monotonic() - t0
-                text = getattr(result, "result", None) or str(result)
-                agent_id = getattr(result, "agent_id", None)
-                status = getattr(result, "status", "finished")
+                try:
+                    text = getattr(result, "result", None) or str(result)
+                    agent_id = getattr(result, "agent_id", None)
+                    status = getattr(result, "status", "finished")
+                except Exception as exc:
+                    return CursorLLMResult(
+                        stdout="",
+                        stderr=str(exc),
+                        exit_code=1,
+                        duration_s=duration_s,
+                    )
+
+                if (
+                    CursorBackend._is_transient_run_failure(status, text)
+                    and run_attempt < CursorBackend._RUN_RETRY_MAX
+                ):
+                    run_attempt += 1
+                    delay = CursorBackend._backoff_seconds(run_attempt)
+                    logger.warning(
+                        "cursor run transient failure (status=%s, attempt %d/%d, sleep %.1fs)",
+                        status,
+                        run_attempt,
+                        CursorBackend._RUN_RETRY_MAX,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    continue
+
                 if status in {"error", "cancelled", "expired"}:
                     return CursorLLMResult(
                         stdout=text or "",
@@ -597,12 +666,11 @@ class CursorBackend:
                         duration_s=duration_s,
                         agent_id=agent_id,
                     )
-                # Defensive: empty result is a backend failure, not success
                 if not text or not text.strip():
                     return CursorLLMResult(
                         stdout="",
                         stderr=(
-                            "Cursor returned empty result "
+                            "Cursor returned empty result after retries "
                             "(likely backend timeout or resource exhaustion)"
                         ),
                         exit_code=1,
@@ -615,13 +683,6 @@ class CursorBackend:
                     exit_code=0,
                     duration_s=duration_s,
                     agent_id=agent_id,
-                )
-            except Exception as exc:
-                return CursorLLMResult(
-                    stdout="",
-                    stderr=str(exc),
-                    exit_code=1,
-                    duration_s=time.monotonic() - t0,
                 )
 
         if timeout_s <= 0:
