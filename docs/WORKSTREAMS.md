@@ -67,6 +67,17 @@ python -m agent_fleet.workstreams harvest .worktrees/fleet-runs/task-0-abc123 \
   --target feature/repo-cleanup --dry-run
 ```
 
+### Preflight
+
+Before `run --all`, run the checklist in [DISPATCH-COOKBOOK.md](DISPATCH-COOKBOOK.md#preflight-run-before-every-batch). Minimum:
+
+```bash
+pip install -e .
+agent-fleet personas validate --workspace .
+agent-fleet workstream list --workspace .
+agent-fleet workstream run --all --dry-run --workspace .
+```
+
 ### Flags
 
 | Command | Flag | Purpose |

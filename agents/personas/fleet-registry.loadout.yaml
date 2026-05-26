@@ -1,0 +1,10 @@
+schema_version: 1
+stub: fleet-registry.md
+skills:
+  execute:
+    - pstack/tdd
+    - cursor-team-kit/verify-this
+    - superpowers/verification-before-completion
+pipeline_skills:
+  code_review:
+    review: []

@@ -2,6 +2,35 @@
 
 How to run agent-fleet on itself without losing work or colliding parallel agents.
 
+## Preflight (run before every batch)
+
+Skips the common failure modes that waste 3–6 minutes per workstream:
+
+```bash
+# Installed CLI matches repo (workstream subcommand, scope fixes)
+pip install -e . --quiet
+
+# Personas resolve (repo dir → package fallback)
+agent-fleet personas validate --workspace .
+
+# Workstreams and scopes are sane
+agent-fleet workstream list --workspace .
+python -m agent_fleet.workstreams run --all --dry-run --workspace .
+
+# Optional: full test baseline
+pytest -q
+```
+
+Checklist:
+
+| Check | Why |
+|-------|-----|
+| `pip install -e .` | Stale `agent-fleet` binary missing `workstream` |
+| `personas validate` | Missing `coder.md` / loadouts under `personas_dir` |
+| `workstream list` + dry-run | Overlapping scopes, bad persona names |
+| Allowlist matches goal | e.g. registry needs `tests/`, `docs/`, `config.py` |
+| Harvest completed worktrees first | Avoid duplicate execute passes |
+
 ## Prefer workstreams over scripts
 
 Declare batches in `.agent-fleet.yaml` under `workstreams:` and run:
@@ -9,13 +38,6 @@ Declare batches in `.agent-fleet.yaml` under `workstreams:` and run:
 ```bash
 agent-fleet workstream run worktree
 agent-fleet workstream run --all
-```
-
-Until `agent-fleet workstream` is wired into the top-level CLI, use the module entry:
-
-```bash
-python -m agent_fleet.workstreams run --all --workspace .
-python -m agent_fleet.workstreams list
 ```
 
 See [WORKSTREAMS.md](WORKSTREAMS.md).
@@ -58,10 +80,9 @@ Enable `auto_fix` in `.agent-fleet.yaml` for self-dispatch buildouts.
 
 ## Integration checklist
 
-Wire workstreams into the installed CLI (outside this module):
+For self-hosted batches on agent-fleet:
 
-1. `agent_fleet/cli.py` — call `register_workstream_commands(sub)`
-2. `agent_fleet/repo.py` — expose `RepoConfig.workstreams` via `load_workstreams_config`
-3. `agent_fleet/__init__.py` — export `run_workstreams`
-
-The module is self-contained until those hooks land; `python -m agent_fleet.workstreams` exercises list/run/harvest end-to-end.
+1. `.agent-fleet.yaml` — `workstreams`, `persona_scope_allowlist`, `capacity.max_dispatches`
+2. `agents/personas/` — fleet dispatch personas referenced by workstream items
+3. Preflight (above) — then `agent-fleet workstream run --all`
+4. Harvest surviving worktrees onto `default_target_branch`

@@ -1,0 +1,79 @@
+# Agent-fleet self-hosting — integration workstreams
+name: agent-fleet
+default_persona: coder
+default_branch: feature/flywheel-less-is-more
+
+personas_dir: agents/personas
+
+test_command: pytest -q
+lint_command: ruff check agent_fleet tests
+
+use_worktree: true
+worktree_base: /home/evan/Documents/agent-fleet/.worktrees/fleet-runs
+
+capacity:
+  max_dispatches: 8
+
+code_review:
+  auto_fix: true
+  max_fix_attempts: 2
+  fix_persona: coder
+
+workstreams:
+  plan: docs/superpowers/plans/2026-05-25-agent-fleet-integration.md
+  base_branch: feature/flywheel-less-is-more
+  default_target_branch: feature/agent-fleet-integration
+  pipeline: code_review
+  sequential_stack: true
+  items:
+    - id: registry
+      persona: fleet-registry
+      target_branch: feature/agent-fleet-integration
+      goal: |
+        Add tests/test_persona_registry.py that resolves every persona listed in
+        agents/personas and every fleet.yaml entry that points at agents/personas.
+        Prune ~/.agent-fleet/fleet.yaml entries for personas with no .md file.
+        Document persona resolution (repo dir then package fallback) in FLEET-CONFIG.md.
+        Ensure agent-fleet workstream subcommand is registered in cli.py.
+    - id: scout-loadouts
+      persona: fleet-scout-loadouts
+      target_branch: feature/agent-fleet-integration
+      goal: |
+        Add agent_fleet/personas/*.loadout.yaml for pr-analyzer, explorer, tech-scout,
+        product-scout (match coder/reviewer schema). Extend test_loadouts.py. Update
+        docs/PERSONAS.md. Do not touch uv.lock.
+    - id: skills-stack
+      persona: fleet-skills-stack
+      target_branch: feature/skills-personas
+      base_branch: feature/skills-pr-loop
+      goal: |
+        Harvest PR4 scout loadouts from .worktrees/fleet-runs/task-2-6316c6c3 if present
+        (use agent-fleet workstream harvest). Merge skills integration commits from
+        feature/skills-pr-loop into feature/skills-personas. Run test_loadouts.py.
+
+persona_scope_allowlist:
+  fleet-registry:
+    - agent_fleet/cli.py
+    - agent_fleet/config.py
+    - agent_fleet/skills_lib.py
+    - agent_fleet/orchestration/equip.py
+    - agent_fleet/personas.py
+    - agent_fleet/workstreams/
+    - tests/test_persona_registry.py
+    - tests/test_fleet.py
+    - docs/FLEET-CONFIG.md
+    - docs/WORKSTREAMS.md
+  fleet-scout-loadouts:
+    - agent_fleet/personas/
+    - tests/test_loadouts.py
+    - docs/PERSONAS.md
+  fleet-skills-stack:
+    - agents/personas/
+    - docs/superpowers/plans/2026-05-25-skills-integration-buildout.md
+  coder:
+    - agent_fleet/
+  reviewer:
+    - agent_fleet/
+
+critical_path_prefixes:
+  - .github/workflows/

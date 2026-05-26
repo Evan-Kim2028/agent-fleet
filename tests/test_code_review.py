@@ -9,13 +9,26 @@ import pytest
 from agent_fleet.contracts.review import ReviewResult, ReviewVerdict
 from agent_fleet.phases import resolve_pipeline_outcome, run_scope_phase
 from agent_fleet.reviewer import aggregate_verdict
-from agent_fleet.scope import files_outside_allowed_paths
+from agent_fleet.scope import files_outside_allowed_paths, path_allowed_by_prefix
 from agent_fleet.verify_core import get_working_tree_changes, get_working_tree_diff, is_git_repo
 
 
 def test_files_outside_allowed_paths() -> None:
     assert files_outside_allowed_paths(("src/",), ["src/a.py", "web/b.ts"]) == ("web/b.ts",)
     assert files_outside_allowed_paths((), ["any/file.py"]) == ()
+
+
+def test_path_allowed_by_prefix_parent_directory() -> None:
+    assert path_allowed_by_prefix("agents/personas/foo.md", "agents/personas/")
+    assert path_allowed_by_prefix("agents/", "agents/personas/")
+    assert not path_allowed_by_prefix("agents/other/foo.md", "agents/personas/")
+
+
+def test_files_outside_allowed_paths_directory_entry() -> None:
+    allow = ("agents/personas/",)
+    assert files_outside_allowed_paths(allow, ["agents/"]) == ()
+    assert files_outside_allowed_paths(allow, ["agents/personas/fleet-skills-stack.md"]) == ()
+    assert files_outside_allowed_paths(allow, ["agent_fleet/cli.py"]) == ("agent_fleet/cli.py",)
 
 
 def test_run_scope_phase_passes() -> None:
