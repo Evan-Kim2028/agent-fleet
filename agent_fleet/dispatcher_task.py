@@ -46,6 +46,7 @@ def prepare_task_workspace_if_needed(
     batch_size: int,
     same_workspace_tasks: int,
     worktree_lock: threading.Lock,
+    base_branch: str | None = None,
 ) -> tuple[Path, TaskWorkspace | None, str | None]:
     """Return (run_workspace, task_workspace, error_message)."""
     force_parallel = batch_size > 1 and same_workspace_tasks > 1
@@ -72,6 +73,7 @@ def prepare_task_workspace_if_needed(
                 git_repo,
                 task_index=task_index,
                 force_isolation=force_parallel,
+                base_branch=base_branch,
             )
     except RuntimeError as exc:
         return workspace, None, str(exc)
@@ -242,6 +244,17 @@ def _record_task_experience(
         run_id=fleet_log.run_id,
         data={"source": source, "weight": weight},
     )
+
+    # === Self-improving flywheel trigger (very conservative for v1) ===
+    # In a full implementation this would be configurable and would dispatch
+    # the fleet-learner persona as a proper meta-task against ~/.agent-fleet.
+    # For now we keep it extremely rare so it doesn't interfere with normal work.
+    # TODO: Make this properly rate-limited + configurable in fleet.yaml
+    # try:
+    #     from agent_fleet.learning import trigger_fleet_learning_cycle
+    #     trigger_fleet_learning_cycle(personas=[task.persona])
+    # except Exception:
+    #     pass
 
 
 def build_task_result(
