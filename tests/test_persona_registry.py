@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -61,16 +62,18 @@ def _yaml_uses_agents_personas(raw: dict[str, object]) -> bool:
     return normalized == _AGENTS_PERSONAS_DIR
 
 
-def _persona_refs_from_yaml(raw: dict[str, object]) -> set[str]:
+def _persona_refs_from_yaml(raw: dict[str, Any]) -> set[str]:
     names: set[str] = set()
     personas = raw.get("personas")
     if isinstance(personas, dict):
         names.update(str(name) for name in personas)
-    workstreams = raw.get("workstreams")
+    workstreams: Any = raw.get("workstreams")
     if isinstance(workstreams, dict):
-        for item in workstreams.get("items") or []:
-            if isinstance(item, dict) and item.get("persona"):
-                names.add(str(item["persona"]))
+        items: Any = workstreams.get("items")
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict) and item.get("persona"):
+                    names.add(str(item["persona"]))
     return names
 
 

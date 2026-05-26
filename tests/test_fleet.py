@@ -18,6 +18,7 @@ from agent_fleet.contracts.task_spec import validate_task_spec
 from agent_fleet.contracts.tech_lead_review import TechLeadReview, TechLeadVerdict
 from agent_fleet.cursor_backend import CursorBackend
 from agent_fleet.dispatcher import FleetDispatcher, _normalize_tasks
+from agent_fleet.hooks import FleetTask, FleetTaskResult
 from agent_fleet.personas import YamlPersonaResolver
 from agent_fleet.phase_graph import default_phase_graph
 from agent_fleet.repo import RepoConfig, load_repo_config
@@ -293,14 +294,12 @@ def test_dispatcher_keeps_worktree_on_recoverable_status(
     def fake_pipeline(**kwargs: object) -> tuple[list[dict[str, object]], str, int, list[str]]:
         del kwargs
         (shared.path / "changed.txt").write_text("edited\n", encoding="utf-8")
-        phase_results = [
-            {
-                "phase": "verify",
-                "passed": False,
-                "command": "pytest -q",
-            }
-        ]
-        return phase_results, "verify failed", 1, ["changed.txt"]
+        verify_phase: dict[str, object] = {
+            "phase": "verify",
+            "passed": False,
+            "command": "pytest -q",
+        }
+        return [verify_phase], "verify failed", 1, ["changed.txt"]
 
     monkeypatch.setattr(
         "agent_fleet.dispatcher.run_configured_pipeline",
@@ -332,6 +331,7 @@ def test_dispatcher_keeps_worktree_on_recoverable_status(
 def test_parallel_dispatch_warns_on_scope_overlap(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo_yaml = tmp_path / ".agent-fleet.yaml"
     repo_yaml.write_text(
@@ -359,11 +359,9 @@ def test_parallel_dispatch_warns_on_scope_overlap(
     def fake_execute(
         _self: FleetDispatcher,
         task_index: int,
-        task: object,
+        task: FleetTask,
         **kwargs: object,
-    ) -> object:
-        from agent_fleet.hooks import FleetTaskResult
-
+    ) -> FleetTaskResult:
         del kwargs
         return FleetTaskResult(
             task_index=task_index,
@@ -375,7 +373,7 @@ def test_parallel_dispatch_warns_on_scope_overlap(
             duration_seconds=0.1,
         )
 
-    dispatcher._execute_task = fake_execute.__get__(dispatcher, FleetDispatcher)  # type: ignore[method-assign]
+    monkeypatch.setattr(dispatcher, "_execute_task", fake_execute)
 
     with caplog.at_level("WARNING"):
         results = dispatcher.dispatch(

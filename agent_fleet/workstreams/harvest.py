@@ -89,15 +89,11 @@ def harvest_worktree(
         start = base_ref.stdout.strip() if base_ref.returncode == 0 else "HEAD"
         created = _run_git(["branch", plan.target_branch, start], cwd=plan.repo_root)
         if created.returncode != 0:
-            raise RuntimeError(
-                f"Could not create {plan.target_branch}: {created.stderr.strip()}"
-            )
+            raise RuntimeError(f"Could not create {plan.target_branch}: {created.stderr.strip()}")
 
     checkout = _run_git(["checkout", plan.target_branch], cwd=plan.repo_root)
     if checkout.returncode != 0:
-        raise RuntimeError(
-            f"Could not checkout {plan.target_branch}: {checkout.stderr.strip()}"
-        )
+        raise RuntimeError(f"Could not checkout {plan.target_branch}: {checkout.stderr.strip()}")
 
     merge = _run_git(
         [
@@ -112,8 +108,7 @@ def harvest_worktree(
     if merge.returncode != 0:
         _run_git(["merge", "--abort"], cwd=plan.repo_root)
         raise RuntimeError(
-            f"Merge failed for {plan.target_branch} ← {plan.source_sha}: "
-            f"{merge.stderr.strip()}"
+            f"Merge failed for {plan.target_branch} ← {plan.source_sha}: {merge.stderr.strip()}"
         )
 
     sha = _run_git(["rev-parse", "HEAD"], cwd=plan.repo_root)

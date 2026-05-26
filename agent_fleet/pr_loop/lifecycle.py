@@ -478,9 +478,7 @@ def attempt_ci_fix(
 
     fix_task = FleetTask(
         goal=f"Fix CI failures on PR #{pr_number}",
-        context=(
-            f"branch={branch}; failed_checks={', '.join(failed_checks)}; ci_fix"
-        ),
+        context=(f"branch={branch}; failed_checks={', '.join(failed_checks)}; ci_fix"),
         persona=fix_persona_name,
         workspace=str(worktree),
     )

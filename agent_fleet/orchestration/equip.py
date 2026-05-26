@@ -7,6 +7,7 @@ code-review fix fast paths when the persona matches.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.level_up.compaction import touch_overlay_rules
@@ -40,12 +41,12 @@ def _empty_loadout(persona: str) -> dict[str, Any]:
 def _resolve_persona_loadout(
     persona: str,
     *,
-    personas_dir: str | None = None,
+    personas_dir: Path | str | None = None,
 ) -> tuple[dict[str, Any], str]:
     """Return loadout dict and display name; markdown-only repos get an empty loadout."""
     kwargs: dict[str, Any] = {}
     if personas_dir is not None:
-        kwargs["personas_dir"] = personas_dir
+        kwargs["personas_dir"] = Path(personas_dir) if isinstance(personas_dir, str) else personas_dir
     try:
         loadout = load_loadout(persona, **kwargs)
     except FileNotFoundError:

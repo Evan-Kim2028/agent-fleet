@@ -51,10 +51,7 @@ def validate_parallel_batch(
     overlaps = find_scope_overlaps(repo, personas)
     if not overlaps:
         return
-    lines = [
-        f"{a} ↔ {b} (prefix {prefix!r})"
-        for a, b, prefix in overlaps[:5]
-    ]
+    lines = [f"{a} ↔ {b} (prefix {prefix!r})" for a, b, prefix in overlaps[:5]]
     extra = len(overlaps) - len(lines)
     suffix = f" (+{extra} more)" if extra > 0 else ""
     raise ValueError(
