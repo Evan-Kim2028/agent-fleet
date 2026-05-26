@@ -61,6 +61,34 @@ personas_dir: /home/you/fleet-personas
 
 **Do not** set `personas_dir: personas` or other relative paths in global config — fleet will look under `~/.agent-fleet/personas/`, which is empty, and persona resolution fails.
 
+## Persona resolution order
+
+When a persona prompt or loadout is requested, fleet searches in this order:
+
+1. **Repo `personas_dir`** — from `.agent-fleet.yaml` when dispatching in a repo (relative paths resolve against the repo root).
+2. **Bundled package personas** — `agent_fleet/personas/` inside the installed package (fallback when a file is missing from the repo tree).
+3. **Skill-backed prompt** — if the persona spec sets `skill: …`, fleet searches configured `skill_dirs`.
+4. **Absolute or tilde path** — `prompt: /path/to/foo.md` or `prompt: ~/fleet/foo.md`.
+
+This lets repos override bundled personas (e.g. `agents/personas/reviewer.md`) while still resolving bundled defaults such as `coder.md` when only repo-specific personas exist locally.
+
+Loadouts (`.loadout.yaml`) and stub markdown referenced by a loadout follow the same repo-then-package search. `YamlPersonaResolver.list_personas()` unions names from both directories plus any explicit `personas:` entries in `fleet.yaml`.
+
+Example — repo-local override with package fallback:
+
+```yaml
+# .agent-fleet.yaml
+personas_dir: agents/personas
+```
+
+| Persona | `agents/personas/` | Package fallback |
+|---------|-------------------|------------------|
+| `fleet-registry` | `fleet-registry.md` | — |
+| `coder` | (missing) | `agent_fleet/personas/coder.md` |
+| `reviewer` | `reviewer.md` (repo wins) | `agent_fleet/personas/reviewer.md` |
+
+Run `pytest tests/test_persona_registry.py` to verify every persona under `agents/personas` and every `fleet.yaml` entry tied to that directory resolves on your checkout.
+
 ## Import shadow
 
 Python imports the first `agent_fleet` package it finds on `sys.path`. A checkout at **`~/Documents/agent_fleet`** (underscore) is a frequent mistake: running Python with that directory as cwd or on `PYTHONPATH` loads the wrong tree — stale code, missing CLI commands, or silent behavior drift.
