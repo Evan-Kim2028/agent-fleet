@@ -34,17 +34,34 @@ def _git_run(
     timeout: int = 120,
     check: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        args,
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        check=check,
-        timeout=timeout,
-    )
+    if not Path(cwd).is_dir():
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=128,
+            stdout="",
+            stderr=f"workspace does not exist: {cwd}",
+        )
+    try:
+        return subprocess.run(
+            args,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=check,
+            timeout=timeout,
+        )
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=128,
+            stdout="",
+            stderr=f"workspace vanished mid-run: {exc}",
+        )
 
 
 def _changed_files(worktree: Path, *, exclude: tuple[str, ...] = ()) -> list[str]:
+    if not Path(worktree).is_dir():
+        return []
     exclude_set = set(exclude)
     status = _git_run(["git", "status", "--porcelain"], cwd=worktree, timeout=30)
     return [
@@ -443,6 +460,12 @@ def commit_and_push(
     exclude: tuple[str, ...] = (),
     preflight_commands: list[str] | None = None,
 ) -> CommitPushResult:
+    if not Path(worktree).is_dir():
+        return CommitPushResult(
+            False,
+            "no_workspace",
+            f"worktree disappeared before publish: {worktree}",
+        )
     changed = _changed_files(worktree, exclude=exclude)
     if not changed:
         _git_run(["git", "fetch", "origin", branch], cwd=worktree, timeout=120)
