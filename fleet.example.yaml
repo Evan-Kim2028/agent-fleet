@@ -75,9 +75,6 @@ personas:
     prompt: pr-analyzer.md
     model: composer-2.5
     mode: plan
-  explorer:
-    prompt: explorer.md
-    mode: plan
   product-scout:
     prompt: product-scout.md
     mode: plan
