@@ -195,4 +195,6 @@ def test_review_fix_journals_equip_with_run_id(
     journal_path = persona_dir("pr-loop-equip", "coder") / "journal.jsonl"
     assert journal_path.is_file()
     rows = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()]
-    assert any(row.get("run_id") == "pr-loop-99" for row in rows)
+    assert any(
+        str(row.get("run_id", "")).startswith("pr-loop-99-") for row in rows
+    )

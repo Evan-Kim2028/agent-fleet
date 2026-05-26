@@ -335,7 +335,7 @@ def address_review_findings(
         fix_task,
         fleet_config,
         repo,
-        run_id=f"pr-loop-{pr_number}",
+        run_id=f"pr-loop-{pr_number}-{int(time.time())}",
     )
 
     extra_sections: list[tuple[str, str]] = [
@@ -488,7 +488,7 @@ def attempt_ci_fix(
         fix_task,
         fleet_config,
         repo,
-        run_id=f"pr-loop-{pr_number}",
+        run_id=f"pr-loop-{pr_number}-{int(time.time())}",
     )
 
     extra_sections: list[tuple[str, str]] = []
