@@ -45,7 +45,7 @@ The right decomposition depends on the question. Use your judgment. For narrow q
 Spawn all explorers in a single message:
 
 - `subagent_type`: `generalPurpose`
-- `model`: `composer-2.5-fast`
+- `model`: `composer-2.5`
 - `readonly`: `true`
 
 Each explorer gets the same base prompt from `references/explorer-prompt.md`, plus a specific exploration angle telling it which slice to focus on. Each explorer should:

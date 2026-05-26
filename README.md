@@ -13,7 +13,9 @@ Built on **[Cursor SDK](https://github.com/cursor/cursor-sdk)** (`cursor-sdk`). 
 | [Schedules](docs/SCHEDULES.md) | Cron-based daily/weekly fleet jobs |
 
 **Requires:** Python 3.14 · [Cursor API key](https://cursor.com/dashboard/integrations) · git workspace  
-**Default model:** `composer-2.5-fast` (use `composer-2.5` when you want the full model)
+**Default model:** `composer-2.5`
+
+> **Switch to `composer-2.5-fast`** for higher throughput at lower quality. Edit `~/.agent-fleet/fleet.yaml` — set `default_model: composer-2.5-fast` to apply fleet-wide, or set `model: composer-2.5-fast` under a single persona (under `personas:`) to scope the override.
 
 ---
 
@@ -27,7 +29,7 @@ Built on **[Cursor SDK](https://github.com/cursor/cursor-sdk)** (`cursor-sdk`). 
 | **Background modes** | PR loop watcher, issue-comment dispatch, **cron schedules**, parallel Python batch |
 | **Structured logs** | JSONL at `~/.hermes/fleet/runs/<run-id>.jsonl` |
 
-Typical focused task on **`composer-2.5-fast`**: **~30–120 seconds** (implement + gates; PR analysis scales with diff size).
+Typical focused task on **`composer-2.5`**: **~30–120 seconds** (implement + gates; PR analysis scales with diff size).
 
 ---
 
@@ -77,7 +79,7 @@ export CURSOR_API_KEY=your_key_here
 mkdir -p ~/.agent-fleet
 cp fleet.example.yaml ~/.agent-fleet/fleet.yaml
 # ~/.agent-fleet/fleet.yaml = global fleet config (personas, max_parallel), not your repo
-# edit fleet.yaml: default_model: composer-2.5-fast
+# edit fleet.yaml: default_model: composer-2.5
 ```
 
 > **Import shadow:** Do not clone into `~/Documents/agent_fleet` (underscore). That path name matches the Python package and can shadow the installed `agent_fleet` module when used as cwd or on `PYTHONPATH`. Prefer `~/agent-fleet-dev` or any hyphenated path. Check with `python3 scripts/check-import-shadow.py` — see [docs/FLEET-CONFIG.md](docs/FLEET-CONFIG.md#import-shadow).
@@ -105,7 +107,7 @@ Details: [docs/NEW-REPO.md](docs/NEW-REPO.md).
 
 ### 4. First task
 
-**Implement + review** (~30–120s on `composer-2.5-fast`):
+**Implement + review** (~30–120s on `composer-2.5`):
 
 ```bash
 agent-fleet run "Add a one-line project description to README" \
@@ -137,7 +139,7 @@ Expect JSON with `status: completed` or a typed failure (`scope_violation`, `ver
 
 ```yaml
 default_backend: cursor
-default_model: composer-2.5-fast
+default_model: composer-2.5
 max_parallel: 6              # concurrent Composer agents; lower on 8 GB machines
 max_redispatches: 1          # retry hard failures with handoff context
 timeout_seconds: 900
@@ -190,11 +192,11 @@ Registry: `~/.agent-fleet/fleet.yaml` (see [docs/FLEET-CONFIG.md](docs/FLEET-CON
 
 ```yaml
 default_backend: cursor
-default_model: composer-2.5-fast
+default_model: composer-2.5
 personas:
   backend:
     prompt: coder.md
-    model: composer-2.5-fast
+    model: composer-2.5
     allowed_paths: ["api/", "src/"]
   pr-analyzer:
     prompt: pr-analyzer.md
@@ -241,7 +243,7 @@ Requires `gh` auth + `CURSOR_API_KEY`. Systemd example: [`examples/agent-fleet-p
 ## Tips
 
 1. Scope every persona (`persona_scope_allowlist`).
-2. Default to `code_review` for merge-bound work; `composer-2.5-fast` for throughput.
+2. Default to `code_review` for merge-bound work; `composer-2.5` for throughput.
 3. Pass file paths and verify commands in `--context`.
 4. Parallelize independent packages — never two agents on the same file.
 

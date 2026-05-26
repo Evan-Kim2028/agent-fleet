@@ -117,7 +117,7 @@ Launch all matching investigators in a single message so they run concurrently. 
 
 Subagent config (for each):
 - `subagent_type`: `generalPurpose`
-- `model`: `composer-2.5-fast`
+- `model`: `composer-2.5`
 - `readonly`: `false` (agent mode). **Do not use readonly/Ask mode**. It strips MCP access, which disables MCP-backed investigators entirely. The source control investigator would technically be safe in readonly, but keep modes uniform for consistency. Investigators still shouldn't write anything. That's a posture, not a sandbox.
 
 Each investigator gets:

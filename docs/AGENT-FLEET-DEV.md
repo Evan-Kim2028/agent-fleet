@@ -63,7 +63,7 @@ Minimal edits:
 
 ```yaml
 default_backend: cursor
-default_model: composer-2.5-fast
+default_model: composer-2.5
 default_persona: coder
 max_parallel: 5
 ```

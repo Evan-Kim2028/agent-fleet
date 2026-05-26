@@ -39,7 +39,7 @@ One message, three `Task` calls, `subagent_type: generalPurpose`, explicit `mode
 | Lens | `model` | Prompt template |
 |---|---|---|
 | Judgment | `claude-opus-4-7-thinking-xhigh` | `references/judgment-reviewer.md` |
-| Tooling | `composer-2.5-fast` | `references/tooling-reviewer.md` |
+| Tooling | `composer-2.5` | `references/tooling-reviewer.md` |
 | Divergent | `claude-opus-4-7-thinking-xhigh` | `references/divergent-reviewer.md` |
 
 Pass each template verbatim, substituting the transcript path or digest where marked. Reviewers return findings in the `Task` response body.
