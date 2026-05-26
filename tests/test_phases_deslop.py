@@ -124,6 +124,7 @@ def test_legacy_review_appends_deslop_skill_from_equip(
         timeout_s=30,
         implementation_summary="Changed helper.py",
         reviewer_persona="reviewer",
+        fleet_config=fleet_config,
     )
 
     assert len(backend.prompts) == 1

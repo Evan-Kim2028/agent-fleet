@@ -17,6 +17,7 @@ from agent_fleet.config import FleetConfig, load_fleet_config
 from agent_fleet.dispatcher_task import (
     build_task_result,
     maybe_publish_and_pr_loop,
+    record_completed_task_experience,
     prepare_task_workspace_if_needed,
     run_configured_pipeline,
 )
@@ -381,6 +382,7 @@ class FleetDispatcher:
 
             try:
                 workspace = self._resolve_workspace(task)
+                run_workspace = workspace
                 if not workspace.exists():
                     return FleetTaskResult(
                         task_index=task_index,
@@ -515,6 +517,16 @@ class FleetDispatcher:
                         pr_loop_status=pr_loop_status,
                     )
 
+                record_completed_task_experience(
+                    task_index=task_index,
+                    task=task,
+                    status=result.status,
+                    phase_results=phase_results,
+                    changed_files=result.changed_files,
+                    workspace=run_workspace,
+                    fleet_log=fleet_log,
+                )
+
                 keep_worktree = result.status in {"completed", "merged"} or (
                     code_review_cfg is not None
                     and code_review_cfg.auto_push
@@ -529,6 +541,15 @@ class FleetDispatcher:
                 if task_workspace is not None:
                     task_workspace.teardown(keep=False)
                 fleet_log.emit("fleet.task.error", error=str(exc))
+                record_completed_task_experience(
+                    task_index=task_index,
+                    task=task,
+                    status="error",
+                    phase_results=phase_results,
+                    changed_files=None,
+                    workspace=run_workspace,
+                    fleet_log=fleet_log,
+                )
                 return FleetTaskResult(
                     task_index=task_index,
                     persona=task.persona,

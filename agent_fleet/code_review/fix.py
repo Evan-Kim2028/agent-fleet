@@ -10,6 +10,7 @@ from agent_fleet.agent_mode import parse_agent_mode
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from agent_fleet.config import FleetConfig
     from agent_fleet.hooks import FleetTask, LLMBackend
     from agent_fleet.personas import YamlPersonaResolver
     from agent_fleet.repo import RepoConfig
@@ -71,18 +72,31 @@ def run_fix_phase(
     repo: RepoConfig | None,
     fix_persona: str,
     attempt: int,
+    fleet_config: FleetConfig | None = None,
 ) -> dict[str, Any]:
     """Dispatch fix persona to address review or verify failures."""
+    from dataclasses import replace
+
+    from agent_fleet.config import load_fleet_config
+    from agent_fleet.orchestration.equip import resolve_dispatch_equip
+
     persona = resolver.load(fix_persona)
     review_block = _review_feedback(phase_results)
     verify_block = _verify_feedback(phase_results)
+
+    fc = fleet_config or load_fleet_config()
+    fix_task = replace(task, persona=fix_persona)
+    equip = resolve_dispatch_equip(fix_task, fc, repo)
+    persona_block = ""
+    if equip.compose_body.strip():
+        persona_block = f"## Equipped Persona\n\n{equip.compose_body.strip()}\n\n"
 
     verify_commands = ""
     if repo and repo.verify_commands:
         verify_commands = "\n".join(f"- `{cmd}`" for cmd in repo.verify_commands)
 
     prompt = textwrap.dedent(f"""\
-        You are fixing issues found during an automated code review pipeline.
+        {persona_block}You are fixing issues found during an automated code review pipeline.
 
         ## Original task
         {task.goal.strip()}

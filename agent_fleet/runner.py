@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.capacity import is_visual_audit_dispatch
+from agent_fleet.config import load_fleet_config
 from agent_fleet.contracts.review import ReviewResult, ReviewVerdict
 from agent_fleet.contracts.task_spec import DecompositionDecision, TaskSpec
 from agent_fleet.contracts.tech_lead_review import TechLeadReview, TechLeadVerdict
@@ -21,6 +22,8 @@ from agent_fleet.implementer import implement
 from agent_fleet.observability.context import bind_run
 from agent_fleet.observability.log import RunLog
 from agent_fleet.orchestration.decompose import coerce_empty_decompose
+from agent_fleet.orchestration.equip import resolve_dispatch_equip
+from agent_fleet.level_up.record import record_runner_experience
 from agent_fleet.phase_graph import (
     PhaseGraph,
     PhaseRunContext,
@@ -269,6 +272,8 @@ class LocalFleetRunner:
         pr_labels: list[str] | None = None,
         issue_number: int | None = None,
         issue_labels: list[str] | None = None,
+        experience_source: str = "full_pipeline",
+        pr_loop_round: int | None = None,
     ) -> FleetRunResult:
         start = time.monotonic()
         run_id = str(uuid.uuid4())[:8]
@@ -280,6 +285,7 @@ class LocalFleetRunner:
         brief = None
         resume_mode = False
         result: FleetRunResult | None = None
+        dispatch_equip = None
         session: LLMSession | None = None
         browser_session_factory: Callable[[], LLMSession | None] | None = None
         require_mcp = is_visual_audit_dispatch(
@@ -369,6 +375,29 @@ class LocalFleetRunner:
                     task_spec = _task_spec_with_browser_research(task_spec)
                 task_spec, decompose_fallback = coerce_empty_decompose(task_spec)
                 phases["PLAN"] = task_spec.to_dict()
+
+                repo_cfg = find_repo_config(repo_root)
+                fleet_cfg = self._fleet_config or load_fleet_config()
+                equip_task = FleetTask(
+                    goal=title,
+                    context=body,
+                    persona=persona,
+                    workspace=str(repo_root),
+                )
+                dispatch_equip = resolve_dispatch_equip(
+                    equip_task,
+                    fleet_cfg,
+                    repo_cfg,
+                    run_id=run_id,
+                )
+                phases["EQUIP"] = {
+                    "base_loadout": dispatch_equip.base_loadout,
+                    "skill_slots_execute": list(dispatch_equip.skill_slots_execute),
+                    "skill_slots_review": list(dispatch_equip.skill_slots_review),
+                    "compose_chars": len(dispatch_equip.compose_body),
+                }
+                run_log.emit("equip.resolved", data=phases["EQUIP"])
+
                 if decompose_fallback:
                     phases["DECOMPOSE_FALLBACK"] = {
                         "reason": "empty child_issues_proposed",
@@ -474,6 +503,7 @@ class LocalFleetRunner:
                             memory_limit=self._config.memory_limit_parent,
                             session=session,
                             require_mcp_tools=require_mcp,
+                            compose_body=dispatch_equip.compose_body,
                         )
                     phases["IMPLEMENT"] = {"branch": branch_name, "worktree": str(worktree)}
 
@@ -529,6 +559,7 @@ class LocalFleetRunner:
                         prompt_suffix=f"Previous verify failure: {verify_result.message}",
                         session=session,
                         require_mcp_tools=require_mcp,
+                        compose_body=dispatch_equip.compose_body,
                     )
 
                 if verify_result is None or verify_result.severity != VerifySeverity.OK:
@@ -717,6 +748,16 @@ class LocalFleetRunner:
                 run_log.run_end(outcome="error", error=str(exc))
                 return result
             finally:
+                if result is not None:
+                    record_runner_experience(
+                        result=result,
+                        title=title,
+                        persona=persona,
+                        repo_root=repo_root,
+                        experience_source=experience_source,
+                        pr_loop_round=pr_loop_round,
+                        dispatch_equip=dispatch_equip,
+                    )
                 if session is not None:
                     with contextlib.suppress(Exception):
                         session.dispose()
@@ -831,4 +872,5 @@ def run_full_pipeline(
         persona=persona or repo.default_persona,
         repo_root=ws,
         base_branch=repo.default_branch,
+        experience_source="cli",
     )

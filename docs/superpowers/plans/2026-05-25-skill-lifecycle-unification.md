@@ -56,35 +56,35 @@
 
 ---
 
-## Task 5: FleetRunner resolves equip before IMPLEMENT [MANUAL]
+## Task 5: FleetRunner resolves equip before IMPLEMENT [BOOTSTRAP]
 
 **Files:**
 - Modify: `agent_fleet/runner.py`
-- Test: `tests/test_runner_equip.py` or extend `tests/test_skill_lifecycle.py`
+- Test: `tests/test_skill_lifecycle.py` or extend `tests/test_skill_lifecycle.py`
 
-- [ ] Call `resolve_dispatch_equip` once per run (after persona known, before IMPLEMENT)
-- [ ] Pass `equip.compose_body` into `implement()`
-- [ ] Attach equip to task/handoff for REVIEW phase review-skill append
-- [ ] Do NOT edit dispatcher.py during this task
+- [x] Call `resolve_dispatch_equip` once per run (after persona known, before IMPLEMENT)
+- [x] Pass `equip.compose_body` into `implement()`
+- [x] Attach equip to task/handoff for REVIEW phase review-skill append
+- [x] Do NOT edit dispatcher.py during this task
 
 ---
 
-## Task 6: Review phase uses equip for reviewer body [MANUAL]
+## Task 6: Review phase uses equip for reviewer body [BOOTSTRAP]
 
 **Files:**
 - Modify: `agent_fleet/phases.py` (`_legacy_review_phase`, structured review if applicable)
 
-- [ ] Reviewer persona: prefer loadout compose_body when equip present
-- [ ] Keep `_review_skill_prompt_append` for pipeline_skills.review slots
+- [x] Reviewer persona: prefer loadout compose_body when equip present
+- [x] Keep `_review_skill_prompt_append` for pipeline_skills.review slots
 
 ---
 
-## Task 7: PR-loop fix phase uses equip [MANUAL]
+## Task 7: PR-loop fix phase uses equip [BOOTSTRAP]
 
 **Files:**
 - Modify: `agent_fleet/code_review/fix.py`
 
-- [ ] Resolve equip for fix persona; inject compose_body into fix prompt
+- [x] Resolve equip for fix persona; inject compose_body into fix prompt
 
 ---
 
