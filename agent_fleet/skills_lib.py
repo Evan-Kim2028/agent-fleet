@@ -8,14 +8,7 @@ from typing import Any
 _BUNDLED_SKILLS_DIR = Path(__file__).resolve().parent / "skills"
 _BASE_KIT_DIR = Path(__file__).resolve().parent / "base-kit"
 DEFAULT_QUALITY_REVIEW_SKILL = "thermo-nuclear-code-quality-review"
-# Injected on verify_failed when not already in loadout (pstack-first default).
-SYSTEMATIC_DEBUGGING_SKILL = "pstack/why"
-# Injected when repo pr_loop.enabled (CI fix / watcher workflows).
-PR_LOOP_EXECUTE_SKILLS: tuple[str, ...] = (
-    "cursor-team-kit/fix-ci",
-    "cursor-team-kit/loop-on-ci",
-    "cursor-team-kit/get-pr-comments",
-)
+SYSTEMATIC_DEBUGGING_SKILL = "superpowers/systematic-debugging"
 
 
 def base_kit_dir() -> Path:

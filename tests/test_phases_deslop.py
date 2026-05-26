@@ -68,7 +68,7 @@ def test_structured_review_appends_deslop_skill_from_equip(
         persona="reviewer",
         base_loadout="reviewer",
         skill_slots_execute=(),
-        skill_slots_review=("pstack/unslop", "cursor-team-kit/deslop"),
+        skill_slots_review=("cursor-team-kit/deslop",),
         level_up_generation=0,
     )
     task = FleetTask(
@@ -91,7 +91,7 @@ def test_structured_review_appends_deslop_skill_from_equip(
     assert len(backend.prompts) == 1
     prompt = backend.prompts[0]
     assert "# Review Skills" in prompt
-    assert "Unslop" in prompt
+    assert "Remove AI code slop" in prompt
 
 
 def test_legacy_review_appends_deslop_skill_from_equip(
@@ -105,7 +105,7 @@ def test_legacy_review_appends_deslop_skill_from_equip(
         persona="reviewer",
         base_loadout="reviewer",
         skill_slots_execute=(),
-        skill_slots_review=("pstack/unslop", "cursor-team-kit/deslop"),
+        skill_slots_review=("cursor-team-kit/deslop",),
         level_up_generation=0,
     )
     task = FleetTask(goal="Review slop", persona="coder", equip=equip)
@@ -129,4 +129,4 @@ def test_legacy_review_appends_deslop_skill_from_equip(
     assert len(backend.prompts) == 1
     prompt = backend.prompts[0]
     assert "# Review Skills" in prompt
-    assert "Unslop" in prompt
+    assert "Remove AI code slop" in prompt

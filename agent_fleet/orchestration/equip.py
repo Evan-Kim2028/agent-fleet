@@ -11,7 +11,6 @@ from agent_fleet.level_up.models import DispatchEquip
 from agent_fleet.level_up.overlay import compose_overlay_text, load_overlay
 from agent_fleet.level_up.paths import FLEET_TIER, repo_key
 from agent_fleet.skills_lib import (
-    PR_LOOP_EXECUTE_SKILLS,
     SYSTEMATIC_DEBUGGING_SKILL,
     compose_persona_body,
     load_loadout,
@@ -63,15 +62,6 @@ def resolve_dispatch_equip(
         and SYSTEMATIC_DEBUGGING_SKILL not in loadout_execute
     ):
         extra_execute.append(SYSTEMATIC_DEBUGGING_SKILL)
-
-    if repo is not None and repo.pr_loop is not None and repo.pr_loop.enabled:
-        for skill_id in PR_LOOP_EXECUTE_SKILLS:
-            if (
-                skill_exists_in_base_kit(skill_id)
-                and skill_id not in loadout_execute
-                and skill_id not in extra_execute
-            ):
-                extra_execute.append(skill_id)
 
     skill_slots_execute = [*loadout_execute, *extra_execute]
     skill_slots_review = loadout_review_skill_ids(loadout)

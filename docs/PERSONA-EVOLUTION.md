@@ -26,7 +26,7 @@ agent_fleet/base-kit/
   manifest.yaml                 # pinned upstream SHAs, licenses
   superpowers/                  # vendored skills (sync script)
   pstack/                       # vendored skills
-  cursor-team-kit/              # vendored PR/CI/verify skills (sync script)
+  cursor-team-kit/deslop/
 
 agent_fleet/personas/
   *.loadout.yaml                # human recipes → base-kit skill ids
@@ -102,7 +102,7 @@ persona: coder
 pipeline: code_review
 base_loadout: coder
 skill_slots_execute: [...]      # catalog ids from base-kit
-skill_slots_review: [pstack/unslop, cursor-team-kit/deslop]
+skill_slots_review: [cursor-team-kit/deslop]
 level_up_generation: 2
 parent_run_id: null             # set for decomposed children
 source_weight: 1.0
@@ -146,14 +146,14 @@ Every equip/promote/compact emits structured events to:
 - `~/.agent-fleet/fleet/runs/<run-id>.jsonl` (when `run_id` set)
 - `~/.agent-fleet/level_up/<repo>/<persona>/journal.jsonl`
 
-Event namespaces: `equip.*`, `phase.review.unslop`, `run.complete`, `experience.appended`, `level_up.gate.*`, `level_up.compact.*`.
+Event namespaces: `equip.*`, `phase.review.deslop`, `run.complete`, `experience.appended`, `level_up.gate.*`, `level_up.compact.*`.
 
 ---
 
 ## Pipelines
 
-- **Execute** — persona loadout (default: **pstack** skills) + overlays; no unslop
-- **Review** — reviewer loadout + **unslop** + **deslop** (`review_skill_slots`)
+- **Execute** — persona loadout + overlays; no deslop
+- **Review** — reviewer loadout + **deslop** (`review_skill_slots`)
 
 PR loop, issue dispatch, and CLI all go orchestration equip → dispatcher.
 
@@ -193,7 +193,7 @@ agent-fleet level-up compact --repo NAME --persona coder
 | `agent_fleet/personas.py` | loadout + compose prompt |
 | `agent_fleet/dispatcher.py` | pass equip context |
 | `agent_fleet/dispatcher_task.py` | record experience + journal |
-| `agent_fleet/phases.py` | review unslop + deslop skills |
+| `agent_fleet/phases.py` | review deslop skills |
 | `agent_fleet/tech_lead.py` | skill promotion review (extension) |
 
 No separate “trainer” or “classifier” product terms.

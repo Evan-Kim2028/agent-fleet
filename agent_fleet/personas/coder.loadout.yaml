@@ -1,18 +1,15 @@
 schema_version: 1
 stub: coder.md
-# Default execute skills: Cursor pstack (https://github.com/cursor/plugins/tree/main/pstack)
 skills:
   execute:
+    - superpowers/test-driven-development
+    - superpowers/verification-before-completion
+    - superpowers/using-git-worktrees
     - pstack/tdd
     - pstack/principle-prove-it-works
-    - pstack/principle-fix-root-causes
-    - pstack/principle-boundary-discipline
     - pstack/principle-minimize-reader-load
-    - pstack/principle-never-block-on-the-human
-    - pstack/principle-guard-the-context-window
-    - cursor-team-kit/verify-this
-    - pstack/how
-    - pstack/figure-it-out
+    - pstack/principle-boundary-discipline
+    - pstack/principle-fix-root-causes
 pipeline_skills:
   code_review:
     review: []

@@ -39,21 +39,20 @@ sync_pstack() {
   printf '%s' "$sha"
 }
 
-sync_cursor_team_kit() {
-  log "Syncing cursor/plugins cursor-team-kit → base-kit/cursor-team-kit/"
-  local repo_dir="$TMP/plugins-ctk"
+sync_deslop() {
+  log "Syncing cursor-team-kit deslop"
+  local repo_dir="$TMP/plugins-deslop"
   local sha
   sha="$(clone_sha cursor/plugins "$repo_dir")"
-  rm -rf "$BASE/cursor-team-kit"
-  mkdir -p "$BASE/cursor-team-kit"
-  rsync -a --delete "$repo_dir/cursor-team-kit/skills/" "$BASE/cursor-team-kit/"
+  mkdir -p "$BASE/cursor-team-kit/deslop"
+  cp "$repo_dir/cursor-team-kit/skills/deslop/SKILL.md" "$BASE/cursor-team-kit/deslop/SKILL.md"
   printf '%s' "$sha"
 }
 
 write_manifest() {
   local super_sha="$1"
   local pstack_sha="$2"
-  local ctk_sha="$3"
+  local deslop_sha="$3"
   cat >"$MANIFEST" <<EOF
 schema_version: 1
 synced_at: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -66,9 +65,9 @@ sources:
     upstream: https://github.com/cursor/plugins/tree/main/pstack
     ref: ${pstack_sha}
     license: MIT
-  cursor-team-kit:
-    upstream: https://github.com/cursor/plugins/tree/main/cursor-team-kit/skills
-    ref: ${ctk_sha}
+  deslop:
+    upstream: https://github.com/cursor/plugins/tree/main/cursor-team-kit/skills/deslop
+    ref: ${deslop_sha}
     license: MIT
 EOF
   log "Wrote $MANIFEST"
@@ -79,9 +78,9 @@ main() {
   command -v rsync >/dev/null
   super_sha="$(sync_superpowers)"
   pstack_sha="$(sync_pstack)"
-  ctk_sha="$(sync_cursor_team_kit)"
-  write_manifest "$super_sha" "$pstack_sha" "$ctk_sha"
-  log "Done. superpowers=${super_sha:0:12} pstack=${pstack_sha:0:12} cursor-team-kit=${ctk_sha:0:12}"
+  deslop_sha="$(sync_deslop)"
+  write_manifest "$super_sha" "$pstack_sha" "$deslop_sha"
+  log "Done. superpowers=${super_sha:0:12} pstack=${pstack_sha:0:12}"
 }
 
 main "$@"
