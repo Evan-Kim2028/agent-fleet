@@ -38,6 +38,17 @@ def test_build_agent_prompt_includes_context_and_extra_sections() -> None:
     assert result.full.index("# Original Task") < result.full.index("# Context")
 
 
+def test_build_agent_prompt_emits_heading_for_empty_body_section() -> None:
+    result = build_agent_prompt(
+        persona_body="You are a coder.",
+        task_heading="Task",
+        task_body="Fix the bug.",
+        extra_sections=[("Scope:", "")],
+    )
+
+    assert "# Scope:" in result.task_section
+
+
 def test_build_agent_prompt_strips_whitespace() -> None:
     result = build_agent_prompt(
         persona_body="  persona  ",
