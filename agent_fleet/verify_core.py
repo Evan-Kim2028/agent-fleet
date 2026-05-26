@@ -99,13 +99,18 @@ def get_changed_files(worktree_path: Path) -> list[str]:
 
 
 def is_git_repo(workspace: Path) -> bool:
-    result = subprocess.run(
-        ["git", "rev-parse", "--is-inside-work-tree"],
-        cwd=workspace,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    if not Path(workspace).is_dir():
+        return False
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return False
     return result.returncode == 0 and result.stdout.strip() == "true"
 
 
@@ -161,15 +166,34 @@ def get_working_tree_diff(workspace: Path, *, max_chars: int = 120_000) -> str:
 
 def run_shell_verify(workspace: Path, command: str, *, timeout_s: int = 600) -> dict[str, object]:
     """Run a repo verify command and return a phase-shaped result dict."""
-    result = subprocess.run(
-        command,
-        shell=True,
-        cwd=workspace,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=timeout_s,
-    )
+    if not Path(workspace).is_dir():
+        return {
+            "command": command,
+            "exit_code": 127,
+            "stdout": "",
+            "stderr": f"workspace does not exist: {workspace}",
+            "passed": False,
+            "detail": f"workspace does not exist: {workspace}",
+        }
+    try:
+        result = subprocess.run(
+            command,
+            shell=True,
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout_s,
+        )
+    except (OSError, FileNotFoundError) as exc:
+        return {
+            "command": command,
+            "exit_code": 127,
+            "stdout": "",
+            "stderr": f"subprocess.run failed: {exc}",
+            "passed": False,
+            "detail": str(exc),
+        }
     combined = (result.stdout or "") + (result.stderr or "")
     return {
         "command": command,

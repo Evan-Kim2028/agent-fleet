@@ -215,6 +215,42 @@ def cmd_migrate_home(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bridge(args: argparse.Namespace) -> int:
+    from agent_fleet.bridge_daemon import (
+        start_bridge,
+        status_bridge,
+        stop_bridge,
+    )
+
+    action = args.bridge_action
+    if action == "start":
+        try:
+            state = start_bridge(workspace=args.workspace, timeout_s=args.timeout)
+        except Exception as exc:
+            print(f"bridge start failed: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps(_redact_state(state), indent=2))
+        return 0
+    if action == "stop":
+        result = stop_bridge()
+        print(json.dumps(result, indent=2))
+        return 0 if result.get("stopped") or result.get("reason") else 1
+    if action == "status":
+        result = status_bridge()
+        print(json.dumps(result, indent=2))
+        return 0 if result.get("running") else 1
+    print(f"unknown bridge action: {action}", file=sys.stderr)
+    return 2
+
+
+def _redact_state(state: dict) -> dict:
+    redacted = dict(state)
+    token = redacted.get("auth_token")
+    if isinstance(token, str) and token:
+        redacted["auth_token"] = f"<{len(token)} chars>"
+    return redacted
+
+
 def _resolve_repo_from_path(repo_path: Path) -> RepoConfig:
     from agent_fleet.repo import find_repo_config, load_repo_config
 
@@ -548,6 +584,31 @@ def main(argv: list[str] | None = None) -> int:
         help="Print what would be copied without modifying the filesystem",
     )
     migrate_home_p.set_defaults(func=cmd_migrate_home)
+
+    bridge_p = sub.add_parser(
+        "bridge",
+        help="Manage a shared cursor-sdk bridge daemon (enables concurrent agent-fleet runs)",
+    )
+    bridge_sub = bridge_p.add_subparsers(dest="bridge_action", required=True)
+    bridge_start_p = bridge_sub.add_parser(
+        "start", help="Start a shared bridge daemon (idempotent)"
+    )
+    bridge_start_p.add_argument(
+        "--workspace",
+        default=None,
+        help="Workspace path passed to cursor-sdk-bridge (defaults to ~/.agent-fleet)",
+    )
+    bridge_start_p.add_argument(
+        "--timeout",
+        type=float,
+        default=30.0,
+        help="Seconds to wait for the bridge discovery line",
+    )
+    bridge_start_p.set_defaults(func=cmd_bridge)
+    bridge_stop_p = bridge_sub.add_parser("stop", help="Stop the shared bridge daemon")
+    bridge_stop_p.set_defaults(func=cmd_bridge)
+    bridge_status_p = bridge_sub.add_parser("status", help="Show shared bridge daemon status")
+    bridge_status_p.set_defaults(func=cmd_bridge)
 
     level_up_p = sub.add_parser("level-up", help="Persona level-up status and journal")
     level_up_sub = level_up_p.add_subparsers(dest="level_up_command", required=True)
