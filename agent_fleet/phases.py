@@ -44,18 +44,23 @@ def _build_execute_prompt(persona: Persona, task: FleetTask) -> str:
         body = task.equip.compose_body.strip()
     else:
         body = read_persona_body(persona)
-    return build_agent_prompt(
+    extra_sections: list[tuple[str, str]] = []
+    if persona.extra_instructions.strip():
+        extra_sections.append(("Additional Instructions", persona.extra_instructions.strip()))
+    if persona.allowed_paths:
+        paths = ", ".join(persona.allowed_paths)
+        extra_sections.append((f"Scope: only modify paths matching: {paths}", ""))
+    prompt = build_agent_prompt(
         persona_body=body,
         task_heading="Task",
         task_body=task.goal,
         context=task.context,
-        extra_instructions=persona.extra_instructions,
-        allowed_paths=persona.allowed_paths,
-        closing_instruction=(
-            "Execute this task in the workspace. Return a concise summary of what you "
-            "did, files changed, and any follow-up needed."
-        ),
-    ).full
+        extra_sections=extra_sections or None,
+    )
+    return prompt.full + (
+        "\n\nExecute this task in the workspace. Return a concise summary of what you "
+        "did, files changed, and any follow-up needed."
+    )
 
 
 def run_execute_phase(
