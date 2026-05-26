@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.agent_mode import parse_agent_mode
@@ -21,21 +22,63 @@ from agent_fleet.verify_core import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from agent_fleet.config import FleetConfig
     from agent_fleet.hooks import FleetTask, LLMBackend, LLMSession, Persona, PersonaResolver
+    from agent_fleet.level_up.models import DispatchEquip
     from agent_fleet.repo import RepoConfig
 
 
 def _review_skill_prompt_append(task: FleetTask) -> str:
     if task.equip is None or not task.equip.skill_slots_review:
         return ""
+    return _review_skills_from_slots(task.equip.skill_slots_review)
+
+
+def _review_skills_from_slots(skill_slots_review: tuple[str, ...] | list[str]) -> str:
+    if not skill_slots_review:
+        return ""
     blocks: list[str] = []
-    for skill_id in task.equip.skill_slots_review:
+    for skill_id in skill_slots_review:
         path = resolve_skill_path(skill_id, base_kit_skill_dirs())
         if path is not None:
             blocks.append(path.read_text(encoding="utf-8").strip())
     if not blocks:
         return ""
     return "\n\n".join(["# Review Skills", *blocks])
+
+
+def _resolve_persona_equip(
+    *,
+    persona_name: str,
+    task: FleetTask,
+    fleet_config: FleetConfig | None,
+    repo: RepoConfig | None,
+) -> DispatchEquip | None:
+    if fleet_config is None:
+        return None
+    from agent_fleet.orchestration.equip import resolve_dispatch_equip
+
+    equipped_task = replace(task, persona=persona_name)
+    return resolve_dispatch_equip(equipped_task, fleet_config, repo)
+
+
+def _equipped_persona_body(
+    *,
+    persona_name: str,
+    task: FleetTask,
+    persona: Persona,
+    fleet_config: FleetConfig | None,
+    repo: RepoConfig | None,
+) -> str:
+    equip = _resolve_persona_equip(
+        persona_name=persona_name,
+        task=task,
+        fleet_config=fleet_config,
+        repo=repo,
+    )
+    if equip is not None and equip.compose_body.strip():
+        return equip.compose_body.strip()
+    return read_persona_body(persona)
 
 
 def _build_execute_prompt(persona: Persona, task: FleetTask) -> str:
@@ -347,6 +390,7 @@ def run_pipeline(
     reviewer_persona: str = "reviewer",
     repo: RepoConfig | None = None,
     session: LLMSession | None = None,
+    fleet_config: FleetConfig | None = None,
 ) -> tuple[list[dict[str, Any]], str, int, list[str]]:
     """Run ordered phases.
 
@@ -434,6 +478,8 @@ def run_pipeline(
                     implementation_summary=summary,
                     reviewer_persona=reviewer_persona,
                     session=session,
+                    fleet_config=fleet_config,
+                    repo=repo,
                 )
             results.append(phase_result)
             summary = phase_result.get("summary") or phase_result.get("stdout") or summary
@@ -459,14 +505,30 @@ def _legacy_review_phase(
     implementation_summary: str,
     reviewer_persona: str,
     session: LLMSession | None = None,
+    fleet_config: FleetConfig | None = None,
+    repo: RepoConfig | None = None,
 ) -> dict[str, Any]:
     persona = resolver.load(reviewer_persona)
-    body = read_persona_body(persona)
+    reviewer_equip = _resolve_persona_equip(
+        persona_name=reviewer_persona,
+        task=task,
+        fleet_config=fleet_config,
+        repo=repo,
+    )
+    if reviewer_equip is not None:
+        body = (
+            reviewer_equip.compose_body.strip()
+            if reviewer_equip.compose_body.strip()
+            else read_persona_body(persona)
+        )
+        skill_append = _review_skills_from_slots(reviewer_equip.skill_slots_review)
+    else:
+        body = read_persona_body(persona)
+        skill_append = _review_skill_prompt_append(task)
     prompt_parts = [
         "# Persona",
         body.strip(),
     ]
-    skill_append = _review_skill_prompt_append(task)
     if skill_append:
         prompt_parts.extend(["", skill_append])
     prompt_parts.extend(

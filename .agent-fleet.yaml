@@ -23,8 +23,8 @@ test_command: uv run pytest -q
 # 17 pre-existing ruff errors as of v0.4.2 — clean them up in a separate PR.
 lint_command: bash -c "git diff --name-only main HEAD -- '*.py' | xargs -r uv run ruff check"
 
-# Per-persona scope. Each task tags itself [FLEET] or [MANUAL] in the plan; only
-# the [FLEET] tasks dispatch here, and they only edit the paths below.
+# Per-persona scope. Each task tags itself [FLEET] or [BOOTSTRAP] in the plan.
+# BOOTSTRAP = one critical-path file per dispatch (runner, phases, fix).
 persona_scope_allowlist:
   coder:
     - agent_fleet/contracts/
@@ -40,6 +40,14 @@ persona_scope_allowlist:
     - fleet.example.yaml
     - examples/
     - README.md
+  bootstrap:
+    - agent_fleet/runner.py
+    - agent_fleet/phases.py
+    - agent_fleet/code_review/fix.py
+    - agent_fleet/code_review/loop.py
+    - agent_fleet/dispatcher_task.py
+    - tests/
+    - docs/
   reviewer:
     - agent_fleet/
     - tests/
@@ -51,9 +59,8 @@ cross_cutting_groups:
   - [agent_fleet/dispatcher.py, agent_fleet/runner.py]
   - [agent_fleet/cursor_backend.py, agent_fleet/sessions.py]
 
-# The fleet must NOT edit its own dispatch core or runner during a self-dogfood
-# run — those are the bootstrap-trap files. Tasks that need to touch them are
-# tagged [MANUAL] in the plan and executed via subagents in worktrees instead.
+# Bootstrap-trap files: planner decomposes around these unless persona is bootstrap.
+# Use --persona bootstrap for one-file-per-dispatch self-modification runs.
 critical_path_prefixes:
   - agent_fleet/runner.py
   - agent_fleet/cursor_backend.py

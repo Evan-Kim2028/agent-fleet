@@ -120,16 +120,18 @@ def run_configured_pipeline(
                 phases=phases,
                 repo=repo_config or git_repo,
                 config=code_review_cfg,
+                fleet_config=task_config,
             )
         return run_pipeline(
             backend=backend,
             resolver=resolver,
-            task=effective_task,
+            task=task,
             workspace=run_workspace,
             timeout_s=task_config.timeout_seconds,
             phases=phases,
             repo=repo_config or git_repo,
             session=session,
+            fleet_config=task_config,
         )
     finally:
         if session is not None:
