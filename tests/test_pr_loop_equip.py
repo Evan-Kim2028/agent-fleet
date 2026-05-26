@@ -151,6 +151,42 @@ def test_ci_fix_prompt_includes_fix_ci_skill(
     assert "- (none)" in prompt
 
 
+def test_ci_fix_journals_equip_with_run_id(
+    tmp_path: Path,
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_fleet.level_up.paths import persona_dir
+
+    _patch_level_up_root(monkeypatch, tmp_path / "level_up")
+    repo = _pr_loop_repo(tmp_path)
+    fleet_config = load_fleet_config(ROOT / "fleet.example.yaml")
+    backend = _CapturingBackend()
+
+    with (
+        patch("agent_fleet.pr_loop.lifecycle.make_backend", return_value=backend),
+        patch(
+            "agent_fleet.pr_loop.lifecycle._git_changed_files",
+            return_value=[],
+        ),
+    ):
+        attempt_ci_fix(
+            pr_number=7,
+            branch="fleet/coder/7-def",
+            failed_checks=["pytest"],
+            repo=repo,
+            loop_config=PrLoopConfig(enabled=True),
+            fleet_config=fleet_config,
+            worktree=worktree,
+            persona="coder",
+        )
+
+    journal_path = persona_dir("pr-loop-equip", "coder") / "journal.jsonl"
+    assert journal_path.is_file()
+    rows = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()]
+    assert any(row.get("run_id") == "pr-loop-7" for row in rows)
+
+
 def test_review_fix_journals_equip_with_run_id(
     tmp_path: Path,
     worktree: Path,

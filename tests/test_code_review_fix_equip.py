@@ -74,18 +74,20 @@ def test_fix_phase_uses_task_equip_fast_path(
         equip=equip,
     )
 
-    run_fix_phase(
-        backend=backend,
-        resolver=resolver,
-        task=task,
-        workspace=tmp_path,
-        timeout_s=60,
-        phase_results=[{"phase": "review", "verdict": "request_changes"}],
-        repo=None,
-        fix_persona="coder",
-        attempt=1,
-    )
+    with patch("agent_fleet.code_review.fix.resolve_dispatch_equip") as mock_resolve:
+        run_fix_phase(
+            backend=backend,
+            resolver=resolver,
+            task=task,
+            workspace=tmp_path,
+            timeout_s=60,
+            phase_results=[{"phase": "review", "verdict": "request_changes"}],
+            repo=None,
+            fix_persona="coder",
+            attempt=1,
+        )
 
+    mock_resolve.assert_not_called()
     assert len(backend.prompts) == 1
     prompt = backend.prompts[0]
     assert "TDD Bug Fix" in prompt
