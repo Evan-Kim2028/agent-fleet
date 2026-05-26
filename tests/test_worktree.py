@@ -6,12 +6,17 @@ import subprocess
 from pathlib import Path
 
 from agent_fleet.repo import RepoConfig
-from agent_fleet.worktree import prepare_task_workspace, should_isolate_worktree
+from agent_fleet.worktree import (
+    maybe_commit_recoverable_worktree,
+    prepare_task_workspace,
+    should_isolate_worktree,
+    should_keep_task_worktree,
+)
 
 
 def _init_git_repo(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "init", "-b", "main"], cwd=path, check=True, capture_output=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=path, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=path, check=True)
     (path / "README.md").write_text("hello\n", encoding="utf-8")
@@ -28,6 +33,67 @@ def test_should_isolate_parallel_batch() -> None:
 def test_should_isolate_when_repo_flag_set() -> None:
     repo = RepoConfig(repo_root=Path("/tmp/repo"), use_worktree=True)
     assert should_isolate_worktree(repo, batch_size=1, same_workspace_tasks=1) is True
+
+
+def test_should_keep_task_worktree() -> None:
+    assert should_keep_task_worktree("completed") is True
+    assert should_keep_task_worktree("review_changes_requested") is False
+    assert should_keep_task_worktree("review_changes_requested", has_changes=True) is True
+    assert should_keep_task_worktree("verify_failed", has_changes=True) is True
+    assert should_keep_task_worktree("error", has_changes=True) is False
+
+
+def test_prepare_task_workspace_uses_base_branch(tmp_path: Path) -> None:
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+    subprocess.run(["git", "checkout", "-b", "feature/base"], cwd=repo_path, check=True)
+    (repo_path / "base.txt").write_text("on base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "base.txt"], cwd=repo_path, check=True)
+    subprocess.run(["git", "commit", "-m", "base branch"], cwd=repo_path, check=True)
+    subprocess.run(["git", "checkout", "main"], cwd=repo_path, check=True)
+
+    repo = RepoConfig(
+        repo_root=repo_path,
+        use_worktree=True,
+        worktree_base=tmp_path / "worktrees",
+        default_branch="main",
+    )
+    task = prepare_task_workspace(
+        repo,
+        task_index=0,
+        force_isolation=True,
+        base_branch="feature/base",
+    )
+    assert (task.path / "base.txt").read_text() == "on base\n"
+    task.teardown(keep=False)
+
+
+def test_maybe_commit_recoverable_worktree(tmp_path: Path) -> None:
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+    repo = RepoConfig(
+        repo_root=repo_path,
+        use_worktree=True,
+        worktree_base=tmp_path / "worktrees",
+    )
+    task = prepare_task_workspace(repo, task_index=0, force_isolation=True)
+    (task.path / "wip.txt").write_text("wip\n", encoding="utf-8")
+
+    sha = maybe_commit_recoverable_worktree(
+        task,
+        "verify_failed",
+        goal="fix tests",
+    )
+    assert sha is not None
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=task.path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert not status.stdout.strip()
+    task.teardown(keep=False)
 
 
 def test_prepare_task_workspace_creates_isolated_paths(tmp_path: Path) -> None:

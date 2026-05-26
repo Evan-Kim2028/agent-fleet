@@ -30,6 +30,41 @@ class TaskWorkspace:
         self.git_ops.teardown_workspace(self.path)
 
 
+_RECOVERABLE_WORKTREE_STATUSES = frozenset({"review_changes_requested", "verify_failed"})
+
+
+def should_keep_task_worktree(
+    status: str,
+    *,
+    auto_push: bool = False,
+    isolated: bool = False,
+    has_changes: bool = False,
+) -> bool:
+    """Return True when an isolated worktree should survive teardown."""
+    if status in {"completed", "merged"}:
+        return True
+    if auto_push and isolated:
+        return True
+    return status in _RECOVERABLE_WORKTREE_STATUSES and has_changes
+
+
+def maybe_commit_recoverable_worktree(
+    task_workspace: TaskWorkspace,
+    status: str,
+    *,
+    goal: str,
+) -> str | None:
+    """Commit uncommitted changes before teardown on recoverable soft failures."""
+    if (
+        status not in _RECOVERABLE_WORKTREE_STATUSES
+        or not task_workspace.isolated
+        or task_workspace.git_ops is None
+    ):
+        return None
+    message = f"fleet: auto-commit after {status}\n\n{goal.strip()[:500]}"
+    return task_workspace.git_ops.commit_changes(task_workspace.path, message)
+
+
 def should_isolate_worktree(
     repo: RepoConfig | None,
     *,
@@ -47,6 +82,7 @@ def prepare_task_workspace(
     *,
     task_index: int,
     force_isolation: bool = False,
+    base_branch: str | None = None,
 ) -> TaskWorkspace:
     """Create an isolated worktree for a fleet task, or return the repo root."""
     repo_root = repo.repo_root.resolve()
@@ -73,7 +109,7 @@ def prepare_task_workspace(
     worktree = git_ops.setup_workspace(
         repo_root,
         run_id,
-        repo.default_branch,
+        base_branch or repo.default_branch,
         branch_name=branch_name,
     )
     return TaskWorkspace(
