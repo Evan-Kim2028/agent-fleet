@@ -153,7 +153,7 @@ Event namespaces: `equip.*`, `phase.review.unslop`, `run.complete`, `experience.
 ## Pipelines
 
 - **Execute** — persona loadout (default: **pstack** skills) + overlays; no unslop
-- **Review** — reviewer loadout + **unslop** + **deslop** (`review_skill_slots`)
+- **Review** — reviewer loadout + **unslop** and **deslop** (`review_skill_slots`)
 
 PR loop, issue dispatch, and CLI all go orchestration equip → dispatcher.
 

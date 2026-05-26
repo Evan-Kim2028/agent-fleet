@@ -1,0 +1,1 @@
+error: Parallel workstream dispatch blocked by overlapping persona scopes: fleet-scout-loadouts ↔ fleet-skills-stack (prefix 'tests/test_loadouts.py'); fleet-scout-loadouts ↔ fleet-skills-stack (prefix 'docs/PERSONAS.md'). Run sequentially or adjust persona_scope_allowlist.

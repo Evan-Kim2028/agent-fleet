@@ -1,0 +1,54 @@
+Fleet task 0 failed
+Traceback (most recent call last):
+  File "/home/evan/Documents/agent-fleet/agent_fleet/dispatcher.py", line 503, in _execute_task
+    pipeline_results, summary, exit_code, changed_files = run_configured_pipeline(
+                                                          ~~~~~~~~~~~~~~~~~~~~~~~^
+        backend=self.backend,
+        ^^^^^^^^^^^^^^^^^^^^^
+    ...<7 lines>...
+        handoff=handoff,
+        ^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/evan/Documents/agent-fleet/agent_fleet/dispatcher_task.py", line 116, in run_configured_pipeline
+    return run_code_review_with_auto_fix(
+        backend=backend,
+    ...<6 lines>...
+        config=code_review_cfg,
+    )
+  File "/home/evan/Documents/agent-fleet/agent_fleet/code_review/loop.py", line 114, in run_code_review_with_auto_fix
+    fix_result = run_fix_phase(
+        backend=backend,
+    ...<7 lines>...
+        attempt=attempt,
+    )
+  File "/home/evan/Documents/agent-fleet/agent_fleet/code_review/fix.py", line 110, in run_fix_phase
+    persona = resolver.load(fix_persona)
+  File "/home/evan/Documents/agent-fleet/agent_fleet/personas.py", line 176, in load
+    prompt_path = _resolve_prompt_path(spec, self._config)
+  File "/home/evan/Documents/agent-fleet/agent_fleet/personas.py", line 94, in _resolve_prompt_path
+    raise ValueError(
+    ...<2 lines>...
+    )
+ValueError: Persona prompt not found: 'coder.md' (searched personas_dir=/home/evan/Documents/agent-fleet/agents/personas, skill=None)
+[
+  {
+    "task_index": 0,
+    "persona": "fleet-registry",
+    "goal": "Add tests/test_persona_registry.py that resolves every persona listed in\nagents/personas and every fleet.yaml entry that points at agents/personas.\nPrune ~/.agent-fleet/fleet.yaml entries for personas with no .md file.\nDocument persona resolution (repo dir then package fallback) in FLEET-CONFIG.md.\nEnsure agent-fleet workstream subcommand is registered in cli.py.",
+    "status": "error",
+    "summary": null,
+    "error": "Persona prompt not found: 'coder.md' (searched personas_dir=/home/evan/Documents/agent-fleet/agents/personas, skill=None)",
+    "duration_seconds": 196.93,
+    "agent_id": null,
+    "phases": null,
+    "task_spec": null,
+    "changed_files": null,
+    "worktree": null,
+    "branch_name": null,
+    "pr_number": null,
+    "pr_loop_status": null,
+    "stderr": "Persona prompt not found: 'coder.md' (searched personas_dir=/home/evan/Documents/agent-fleet/agents/personas, skill=None)",
+    "files_modified": []
+  }
+]

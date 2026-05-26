@@ -60,6 +60,29 @@ def test_load_schedule_config_parses_jobs(tmp_path: Path) -> None:
     assert cfg.jobs[1].dispatch.kind == "task"
 
 
+def test_load_schedule_config_parses_workspace(tmp_path: Path) -> None:
+    raw = {
+        "schedules": {
+            "enabled": True,
+            "jobs": [
+                {
+                    "id": "remote",
+                    "cron": "* * * * *",
+                    "dispatch": {
+                        "workspace": "/tmp/silphco",
+                        "kind": "task",
+                        "goal": "Smoke",
+                        "persona": "backend",
+                    },
+                }
+            ],
+        }
+    }
+    cfg = load_schedule_config(tmp_path, raw)
+    assert cfg is not None
+    assert cfg.jobs[0].dispatch.workspace == "/tmp/silphco"
+
+
 def test_next_fire_at_advances_in_utc() -> None:
     after = datetime(2026, 5, 25, 10, 0, tzinfo=UTC)
     nxt = next_fire_at(cron="0 6 * * *", timezone="UTC", after=after)
@@ -198,3 +221,50 @@ def test_job_state_creates_nested_dict() -> None:
     entry = job_state(state, "docs-daily")
     entry["next_due_at"] = "2026-01-01T00:00:00Z"
     assert state["schedules"]["docs-daily"]["next_due_at"] == "2026-01-01T00:00:00Z"
+
+
+def test_schedule_watcher_spawns_on_target_workspace(tmp_path: Path) -> None:
+    controller = tmp_path / "controller"
+    target = tmp_path / "target"
+    controller.mkdir()
+    target.mkdir()
+    (controller / ".agent-fleet.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "schedules": {
+                    "enabled": True,
+                    "jobs": [
+                        {
+                            "id": "remote",
+                            "cron": "* * * * *",
+                            "dispatch": {
+                                "workspace": str(target),
+                                "kind": "task",
+                                "goal": "Remote smoke",
+                                "persona": "coder",
+                            },
+                        }
+                    ],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (target / ".agent-fleet.yaml").write_text("name: target\n", encoding="utf-8")
+
+    from agent_fleet.repo import find_repo_config
+
+    repo = find_repo_config(controller)
+    assert repo is not None and repo.schedules is not None
+    watcher = ScheduleWatcher(repo, repo.schedules)
+    state: dict = {"schedules": {"remote": {"next_due_at": "2020-01-01T00:00:00Z"}}}
+
+    with (
+        patch("agent_fleet.schedule.watcher.spawn_task_dispatch", return_value=4242) as spawn,
+        patch("agent_fleet.schedule.watcher.available_ram_gb", return_value=64.0),
+    ):
+        results = watcher.poll_once(state)
+
+    assert any(r.get("status") == "dispatched" for r in results)
+    spawn.assert_called_once()
+    assert spawn.call_args.kwargs["repo_root"] == target.resolve()

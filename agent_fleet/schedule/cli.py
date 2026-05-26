@@ -45,7 +45,6 @@ def main(argv: list[str] | None = None) -> int:
     watcher = ScheduleWatcher(
         repo,
         repo.schedules,
-        issue_dispatch_config=repo.issue_dispatch,
         fleet_config_path=args.config,
     )
 

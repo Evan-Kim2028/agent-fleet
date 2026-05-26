@@ -1,0 +1,11 @@
+# FIFO dispatch queue for silphcoanalytics — managed from agent_fleet repo.
+queue:
+  - issue: 1769
+    persona: frontend
+    note: "Dead code sweep (knip + ts-prune) — delete unreferenced exports/files/deps"
+  - issue: 1737
+    persona: backend
+    note: "Remove backend GraphQL + agent + decouple MPP (#1692 child)"
+  - issue: 1702
+    persona: data
+    note: "Delete tcgplayer_history raw data (1.1GB) — Wave 5d cleanup"

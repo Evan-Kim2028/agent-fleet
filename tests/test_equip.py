@@ -37,6 +37,25 @@ def test_load_coder_loadout() -> None:
     assert "pstack/tdd" in execute
 
 
+def test_resolve_dispatch_equip_missing_loadout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_level_up_root(monkeypatch, tmp_path / "level_up")
+    repo_yaml = tmp_path / ".agent-fleet.yaml"
+    repo_yaml.write_text("name: md-only\n", encoding="utf-8")
+    repo = load_repo_config(repo_yaml)
+    fleet_config = load_fleet_config(ROOT / "fleet.example.yaml")
+    task = FleetTask(goal="Slim repo", persona="frontend", workspace=str(tmp_path))
+
+    equip = resolve_dispatch_equip(task, fleet_config, repo, run_id="md-only-run")
+
+    assert equip.base_loadout == "frontend"
+    assert equip.skill_slots_execute == ()
+    assert equip.skill_slots_review == ()
+    journal_path = persona_dir("md-only", "frontend") / "journal.jsonl"
+    assert journal_path.is_file()
+
+
 def test_resolve_dispatch_equip_baseline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_level_up_root(monkeypatch, tmp_path / "level_up")
 

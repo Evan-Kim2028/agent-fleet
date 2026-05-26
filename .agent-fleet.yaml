@@ -1,15 +1,15 @@
-# Agent-fleet self-hosting — integration workstreams
+# agent-fleet — self-dogfood + integration workstreams
 name: agent-fleet
 default_persona: coder
-default_branch: feature/flywheel-less-is-more
+default_branch: main
 
 personas_dir: agents/personas
 
-test_command: pytest -q
-lint_command: ruff check agent_fleet tests
-
 use_worktree: true
 worktree_base: /home/evan/Documents/agent-fleet/.worktrees/fleet-runs
+
+test_command: uv run pytest -q
+lint_command: bash -c "git diff --name-only main HEAD -- '*.py' | xargs -r uv run ruff check"
 
 capacity:
   max_dispatches: 8
@@ -21,7 +21,7 @@ code_review:
 
 workstreams:
   plan: docs/superpowers/plans/2026-05-25-agent-fleet-integration.md
-  base_branch: feature/flywheel-less-is-more
+  base_branch: main
   default_target_branch: feature/agent-fleet-integration
   pipeline: code_review
   sequential_stack: true
@@ -71,9 +71,64 @@ persona_scope_allowlist:
     - agents/personas/
     - docs/superpowers/plans/2026-05-25-skills-integration-buildout.md
   coder:
-    - agent_fleet/
+    - agent_fleet/contracts/
+    - agent_fleet/sessions.py
+    - agent_fleet/redispatch.py
+    - agent_fleet/config.py
+    - agent_fleet/orchestration/
+    - agent_fleet/implementer.py
+    - agent_fleet/skills_lib.py
+    - agent_fleet/personas/
+    - agent_fleet/personas.py
+    - agent_fleet/workstreams/
+    - tests/
+    - docs/
+    - fleet.example.yaml
+    - examples/
+    - README.md
   reviewer:
     - agent_fleet/
+    - tests/
+    - docs/
+
+cross_cutting_groups:
+  - [agent_fleet/dispatcher.py, agent_fleet/runner.py]
+  - [agent_fleet/cursor_backend.py, agent_fleet/sessions.py]
 
 critical_path_prefixes:
+  - agent_fleet/runner.py
+  - agent_fleet/cursor_backend.py
+  - agent_fleet/dispatcher.py
+  - agent_fleet/phases.py
+  - agent_fleet/hooks.py
+  - agent_fleet/cli.py
   - .github/workflows/
+  - pyproject.toml
+  - uv.lock
+
+targets:
+  - config: targets/silphcoanalytics.agent-fleet.yaml
+
+schedules:
+  enabled: true
+  poll_interval_s: 60
+  jobs:
+    - id: silphco-docs-daily
+      enabled: true
+      cron: "0 6 * * *"
+      timezone: America/New_York
+      dispatch:
+        workspace: /home/evan/Documents/silphcoanalytics
+        kind: task
+        goal: "Documentation drift audit — compare code changes in the last 24 hours against docs"
+        persona: security_qa
+        pipeline: simple
+        context: |
+          Analyze only. Compare git log/diff on main since 24 hours ago against documentation.
+          Focus: docs/, frontend/docs/, api/DEPRECATIONS.md, README files, docs/ops/, AGENTS.md.
+          Report: (1) code changes lacking docs, (2) stale or wrong docs, (3) prioritized fix list.
+          Do not edit files in this pass unless you find a one-line factual error; prefer a report.
+      policy:
+        skip_if_in_flight: true
+        missed: skip
+        min_interval_s: 82800

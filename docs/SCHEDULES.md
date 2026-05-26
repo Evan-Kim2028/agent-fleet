@@ -42,7 +42,39 @@ Headless task (no GitHub issue — like `agent-fleet run`):
         context: "Report only; do not bump versions."
 ```
 
-## Dispatch kinds
+## Agent Fleet controller (all config in agent_fleet)
+
+All fleet configuration lives in the **agent_fleet** repo. Target repos (e.g.
+silphcoanalytics) have **no** `.agent-fleet.yaml`, queue, or watcher units.
+
+```yaml
+# agent_fleet/.agent-fleet.yaml
+targets:
+  - config: targets/silphcoanalytics.agent-fleet.yaml
+
+schedules:
+  enabled: true
+  poll_interval_s: 60
+  jobs:
+    - id: silphco-docs-daily
+      cron: "0 6 * * *"
+      timezone: America/New_York
+      dispatch:
+        workspace: /home/evan/Documents/silphcoanalytics
+        kind: task
+        goal: "Documentation drift audit for last 24h of changes"
+        persona: security_qa
+        pipeline: simple
+```
+
+Target config (`targets/silphcoanalytics.agent-fleet.yaml`) sets `workspace:` to the
+checkout path and `state_root:` to agent_fleet. Issue dispatch, PR loop, queue, and
+verify scope live there — not on the target repo.
+
+- **State:** `.agent-fleet-state.json` in agent_fleet
+- **Watcher:** one `agent-fleet-watch --workspace /path/to/agent_fleet` (see
+  `examples/agent-fleet-watch.service`)
+
 
 | Kind | Behavior |
 |------|----------|

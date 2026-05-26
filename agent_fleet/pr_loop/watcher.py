@@ -113,11 +113,15 @@ class PrLoopWatcher:
         repo: RepoConfig,
         loop_config: PrLoopConfig,
         fleet_config: FleetConfig | None = None,
+        *,
+        state_root: Path | None = None,
     ) -> None:
         self.repo = repo
         self.loop_config = loop_config
         self.fleet_config = fleet_config or load_fleet_config()
-        self.state_file = state_path(repo.repo_root)
+        from agent_fleet.repo import fleet_state_root
+
+        self.state_file = state_path(state_root or fleet_state_root(repo))
 
     def poll_once(self) -> list[dict[str, str]]:
         state = load_state(self.state_file)
