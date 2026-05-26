@@ -12,7 +12,11 @@ import yaml
 
 from agent_fleet.agent_mode import coerce_agent_mode
 from agent_fleet.contracts.mcp import McpServerSpec, parse_mcp_server_spec
-from agent_fleet.fleet_paths import default_fleet_config_path, default_runs_dir
+from agent_fleet.fleet_paths import (
+    default_fleet_config_path,
+    default_runs_dir,
+    user_skill_dir,
+)
 from agent_fleet.skills_lib import bundled_skill_dirs, merge_skill_dirs
 
 if TYPE_CHECKING:
@@ -170,9 +174,9 @@ def load_fleet_config(
         bundled_skill_dirs(),
         [_expand_path(str(p)) for p in (skill_dirs or data.get("skill_dirs") or [])],
     )
-    default_skill_dir = Path.home() / ".hermes" / "skills"
-    if default_skill_dir.exists():
-        skill_dirs_resolved = merge_skill_dirs(skill_dirs_resolved, [default_skill_dir])
+    skill_home = user_skill_dir()
+    if skill_home.exists():
+        skill_dirs_resolved = merge_skill_dirs(skill_dirs_resolved, [skill_home])
 
     mcp_catalog = _parse_mcp_catalog(data.get("mcp_servers") or {})
 

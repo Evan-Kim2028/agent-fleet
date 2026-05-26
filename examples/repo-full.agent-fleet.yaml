@@ -31,7 +31,7 @@ pr_review:
   # quality_review: false   # disable thermo-nuclear quality pass
   # passes: [backend-security, frontend]
 
-# --- Automated PR lifecycle (local watcher or Hermes coding_fleet_pr_loop) ---
+# --- Automated PR lifecycle (local watcher or gateway coding_fleet_pr_loop) ---
 # When pr_loop.enabled is true, code_review inherits auto_fix + auto_push + auto_pr_loop.
 # Override explicitly:
 code_review:

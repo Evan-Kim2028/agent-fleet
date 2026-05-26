@@ -10,7 +10,7 @@ How to add Agent Fleet to any git repository — from a first local run through 
 | 2 | Per-repo scope + verify commands | ~30 min |
 | 3 | Composer PR analysis on GitHub Actions | ~1 hr |
 | 4 | PR loop (review → fix → CI → merge) | ~2–4 hr (includes bootstrap) |
-| 5 | Hermes / Discord dispatch | ~30 min one-time |
+| 5 | Gateway / Discord dispatch | ~30 min one-time |
 
 Start with [QUICKSTART.md](QUICKSTART.md) for level 1, then return here for repo integration.
 
@@ -80,7 +80,7 @@ Expect JSON with `phases.execute` and `phases.review`. Status `completed` means 
 
 1. Create markdown under e.g. `agents/personas/backend.md`
 2. Set `personas_dir: agents/personas` in `.agent-fleet.yaml`
-3. Register persona names in `~/.hermes/coding_fleet/fleet.yaml` (or use bundled `coder` / `reviewer`)
+3. Register persona names in `~/.agent-fleet/fleet.yaml` (or use bundled `coder` / `reviewer`)
 
 See [PERSONAS.md](PERSONAS.md) for persona authoring.
 
@@ -229,7 +229,7 @@ git checkout -b fleet/fix-login-timeout
 
 ---
 
-## Level 5 — Hermes (optional)
+## Level 5 — Gateway plugin (optional)
 
 One command from the agent-fleet repo root:
 
@@ -262,7 +262,7 @@ Tools: `coding_fleet_dispatch`, `coding_fleet_pr_review`, `coding_fleet_pr_loop`
 [ ] (Optional) pr_review + agents/pr_review_overlay.md
 [ ] (Optional) .github/workflows/pr-analyzer.yml + CURSOR_API_KEY secret
 [ ] (Optional) Bootstrap PR merged manually
-[ ] (Optional) pr_loop + gh auth + watcher or Hermes coding_fleet_pr_loop
+[ ] (Optional) pr_loop + gh auth + watcher or gateway coding_fleet_pr_loop
 [ ] (Optional) Test fleet/<name> PR auto-merge on non-critical paths
 ```
 

@@ -1,4 +1,4 @@
-# Kimi Code CLI fleet config — copy to ~/.hermes/coding_fleet/fleet.yaml
+# Kimi Code CLI fleet config — copy to ~/.agent-fleet/fleet.yaml
 # Requires: kimi-cli on PATH, export KIMI_API_KEY=sk-kimi-...
 
 default_backend: kimi

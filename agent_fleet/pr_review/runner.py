@@ -1,4 +1,4 @@
-"""Shared PR review runner for CLI, Hermes, and GitHub Actions."""
+"""Shared PR review runner for CLI, gateway plugins, and GitHub Actions."""
 
 from __future__ import annotations
 

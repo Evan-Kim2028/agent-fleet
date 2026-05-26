@@ -11,7 +11,7 @@ agent-fleet scope --workspace /path/to/repo   # rank engineering tasks
 agent-fleet run "..." --workspace /path/to/repo --pipeline code_review
 ```
 
-Hermes: `coding_fleet_scout` → `coding_fleet_scope` → `coding_fleet_dispatch`
+Gateway plugin: `coding_fleet_scout` → `coding_fleet_scope` → `coding_fleet_dispatch`
 
 ## Depth
 

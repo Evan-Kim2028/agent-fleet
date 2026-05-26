@@ -27,7 +27,7 @@ Built on **[Cursor SDK](https://github.com/cursor/cursor-sdk)** (`cursor-sdk`). 
 | **In-pipeline review** | `code_review`: implement → scope → verify → **reviewer verdict** (`approve` / `request_changes` / `block`) |
 | **PR analyzer** | Two-pass **Composer PR review** — CLI (`agent-fleet review`), GHA ([`pr-analyzer.yml`](examples/github/pr-analyzer.yml)), feeds PR loop |
 | **Background modes** | PR loop watcher, issue-comment dispatch, **cron schedules**, parallel Python batch |
-| **Structured logs** | JSONL at `~/.hermes/fleet/runs/<run-id>.jsonl` |
+| **Structured logs** | JSONL at `~/.agent-fleet/fleet/runs/<run-id>.jsonl` |
 
 Typical focused task on **`composer-2.5`**: **~30–120 seconds** (implement + gates; PR analysis scales with diff size).
 
@@ -249,13 +249,13 @@ Requires `gh` auth + `CURSOR_API_KEY`. Systemd example: [`examples/agent-fleet-p
 
 ---
 
-## Optional: Kimi · Hermes
+## Optional: Kimi · gateway plugin
 
-Cursor-first. Same personas/pipelines if you swap backend or add a plugin:
+Cursor-first. Same personas/pipelines if you swap backend or add a Discord gateway plugin:
 
 | | Setup |
 |---|--------|
 | [Kimi Code CLI](docs/KIMI.md) | `default_backend: kimi`, `KIMI_API_KEY` |
-| [Hermes plugin](integrations/hermes/) | `./scripts/deploy-hermes.sh` |
+| [cursor-fleet plugin](integrations/hermes/) | `./scripts/deploy-hermes.sh` — fleet config stays in `~/.agent-fleet/fleet.yaml` |
 
 Not required for CLI, Python, or watcher workflows.

@@ -98,7 +98,7 @@ def coding_fleet_dispatch(args: dict[str, object], **kwargs: object) -> str:
         return json.dumps(
             {
                 "error": "CURSOR_API_KEY is not set. "
-                "Add it to ~/.hermes/.env (see https://cursor.com/dashboard/integrations)"
+                "Set CURSOR_API_KEY in the environment (see https://cursor.com/dashboard/integrations)"
             }
         )
     if backend_name == "kimi" and not os.environ.get("KIMI_API_KEY"):
@@ -154,7 +154,7 @@ def coding_fleet_pr_review(args: dict[str, object], **kwargs: object) -> str:
         return json.dumps(
             {
                 "error": "CURSOR_API_KEY is not set. "
-                "Add it to ~/.hermes/.env (see https://cursor.com/dashboard/integrations)"
+                "Set CURSOR_API_KEY in the environment (see https://cursor.com/dashboard/integrations)"
             }
         )
     if backend_name == "kimi" and not os.environ.get("KIMI_API_KEY"):
@@ -205,7 +205,7 @@ def coding_fleet_pr_loop(args: dict[str, object], **kwargs: object) -> str:
         return json.dumps(
             {
                 "error": "CURSOR_API_KEY is not set. "
-                "Add it to ~/.hermes/.env (see https://cursor.com/dashboard/integrations)"
+                "Set CURSOR_API_KEY in the environment (see https://cursor.com/dashboard/integrations)"
             }
         )
     if backend_name == "kimi" and not os.environ.get("KIMI_API_KEY"):
@@ -389,6 +389,8 @@ def coding_fleet_list_personas(args: dict[str, object], **kwargs: object) -> str
     except RuntimeError as exc:
         return json.dumps({"error": str(exc)})
 
+    from agent_fleet.fleet_paths import default_fleet_config_path
+
     config = load_fleet_config()
     resolver = YamlPersonaResolver(config)
     return json.dumps(
@@ -397,6 +399,6 @@ def coding_fleet_list_personas(args: dict[str, object], **kwargs: object) -> str
             "pipelines": config.pipelines,
             "default_model": config.default_model,
             "max_parallel": config.max_parallel,
-            "config_path": str(Path.home() / ".hermes" / "coding_fleet" / "fleet.yaml"),
+            "config_path": str(default_fleet_config_path()),
         }
     )

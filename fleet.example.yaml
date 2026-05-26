@@ -1,6 +1,6 @@
 # Global agent fleet config
 # Preferred location: ~/.agent-fleet/fleet.yaml
-# Legacy (still supported by some tooling): ~/.hermes/coding_fleet/fleet.yaml
+# Copy to ~/.agent-fleet/fleet.yaml (see docs/FLEET-CONFIG.md)
 # See docs/FLEET-CONFIG.md for paths, personas_dir rules, and import-shadow checks.
 
 # Default backend: cursor (Cursor SDK) or kimi (Kimi Code CLI)

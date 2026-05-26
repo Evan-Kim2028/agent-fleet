@@ -2,7 +2,7 @@
 
 Install agent-fleet from scratch on a new machine or side-by-side with production. Uses **`~/agent-fleet-dev`** as the git checkout name.
 
-Hermes is **optional** (Phase 7). Fleet storage lives under **`~/.agent-fleet/`** only.
+Gateway plugin is **optional** (Phase 6). Fleet storage lives under **`~/.agent-fleet/`** only.
 
 ---
 
@@ -73,12 +73,6 @@ uv run --directory ~/agent-fleet-dev agent-fleet paths
 python3 ~/agent-fleet-dev/scripts/check-import-shadow.py
 ```
 
-Upgrading an old machine with Hermes-hosted config:
-
-```bash
-uv run --directory ~/agent-fleet-dev agent-fleet migrate-home
-```
-
 ---
 
 ## Phase 3 — Smoke test
@@ -98,7 +92,7 @@ uv run --directory ~/agent-fleet-dev agent-fleet run \
 Check:
 
 - JSON result with `phases`
-- Log: `~/.agent-fleet/runs/<run-id>.jsonl`
+- Log: `~/.agent-fleet/fleet/runs/<run-id>.jsonl`
 
 ---
 
@@ -121,13 +115,13 @@ EnvironmentFile=%REPO%/.env
 
 ---
 
-## Phase 6 — Hermes (optional interface)
+## Phase 6 — Gateway plugin (optional)
 
 ```bash
 cd ~/agent-fleet-dev && ./scripts/deploy-hermes.sh
 ```
 
-Hermes gets the **cursor-fleet** plugin only. Config stays in `~/.agent-fleet/fleet.yaml`.
+The cursor-fleet plugin reads fleet config from `~/.agent-fleet/fleet.yaml`.
 
 ---
 

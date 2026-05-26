@@ -29,16 +29,9 @@ def test_default_fleet_config_prefers_agent_fleet_home(
     assert fleet_paths.default_fleet_config_path() == home / "fleet.yaml"
 
 
-def test_migrate_from_hermes_copies_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    hermes = tmp_path / ".hermes" / "coding_fleet"
-    hermes.mkdir(parents=True)
-    (hermes / "fleet.yaml").write_text("max_parallel: 2\n", encoding="utf-8")
-    af_home = tmp_path / ".agent-fleet"
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("AGENT_FLEET_HOME", str(af_home))
-    monkeypatch.setattr(fleet_paths, "_LEGACY_HERMES_CONFIG", hermes / "fleet.yaml")
-    monkeypatch.setattr(fleet_paths, "_LEGACY_HERMES_RUNS", tmp_path / ".hermes" / "fleet" / "runs")
-
-    actions = fleet_paths.migrate_from_hermes()
-    assert "fleet.yaml" in actions
-    assert (af_home / "fleet.yaml").read_text(encoding="utf-8") == "max_parallel: 2\n"
+def test_default_runs_dir_under_agent_fleet_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "af-home"
+    monkeypatch.setenv("AGENT_FLEET_HOME", str(home))
+    assert fleet_paths.default_runs_dir() == home / "fleet" / "runs"

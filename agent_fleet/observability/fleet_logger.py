@@ -20,7 +20,7 @@ _WATCHER_LOGGER: FleetLogger | None = None
 
 
 class FleetLogger:
-    """Facade over RunLog that also bridges Hermes-style progress callbacks."""
+    """Facade over RunLog that also bridges optional progress callbacks."""
 
     def __init__(
         self,

@@ -22,8 +22,8 @@ Requires Python 3.14.
 ## 2. Global fleet config
 
 ```bash
-mkdir -p ~/.hermes/coding_fleet
-cp fleet.example.yaml ~/.hermes/coding_fleet/fleet.yaml
+mkdir -p ~/.agent-fleet
+cp fleet.example.yaml ~/.agent-fleet/fleet.yaml
 ```
 
 ### Default backend (Cursor SDK)
@@ -46,7 +46,7 @@ export KIMI_API_KEY=sk-kimi-...       # https://platform.kimi.ai
 # kimi-cli must be on PATH
 ```
 
-Edit `~/.hermes/coding_fleet/fleet.yaml`:
+Edit `~/.agent-fleet/fleet.yaml`:
 
 ```yaml
 default_backend: kimi
@@ -129,9 +129,9 @@ agent-fleet run "Fix failing test in src/" \
   --pipeline code_review
 ```
 
-## 5. Hermes (optional)
+## 5. Gateway plugin (optional)
 
-For Discord / Hermes orchestration, deploy the bundled plugin (pull + pip install + symlink + gateway restart):
+For Discord orchestration via a separate gateway host, deploy the bundled cursor-fleet plugin:
 
 ```bash
 ./scripts/deploy-hermes.sh
@@ -166,7 +166,7 @@ Restart the gateway, then dispatch via `coding_fleet_dispatch` or `@hermes_lao` 
 
 ## 6. Batch parallel tasks
 
-Use the Python API or Hermes `coding_fleet_dispatch` with a `tasks` array (see [PERSONAS.md](PERSONAS.md)):
+Use the Python API or gateway `coding_fleet_dispatch` with a `tasks` array (see [PERSONAS.md](PERSONAS.md)):
 
 ```python
 from agent_fleet import dispatch_tasks

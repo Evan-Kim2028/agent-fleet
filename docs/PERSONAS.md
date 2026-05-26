@@ -6,7 +6,7 @@ How to define, scope, and route coding agents.
 
 | Layer | File | Purpose |
 |-------|------|---------|
-| **Global fleet** | `~/.hermes/coding_fleet/fleet.yaml` | Personas, models, pipelines, parallelism |
+| **Global fleet** | `~/.agent-fleet/fleet.yaml` | Personas, models, pipelines, parallelism |
 | **Repo factory** | `.agent-fleet.yaml` in repo root | Verify commands, scope, worktrees, default persona |
 
 Both merge at dispatch time. Repo settings override global defaults where noted below.
@@ -50,7 +50,7 @@ default_model: composer-2.5
 | Default model | `composer-2.5` | `kimi-for-coding` |
 | Runtime | `cursor-sdk` (pip) | `kimi-cli` binary |
 
-Personas, pipelines, repo scope, and Hermes dispatch are **backend-agnostic**. Kimi setup: **[KIMI.md](KIMI.md)**.
+Personas, pipelines, and repo scope are **backend-agnostic**. Kimi setup: **[KIMI.md](KIMI.md)**.
 
 ## Global fleet (`fleet.yaml`)
 
@@ -87,7 +87,7 @@ pipelines:
 
 1. **Bundled markdown** — `coder.md` resolves to `agent_fleet/personas/coder.md`
 2. **Custom directory** — set `personas_dir: /path/to/personas`
-3. **Hermes skill** — `skill: my-skill-name` (searches `~/.hermes/skills/`)
+3. **User skill** — `skill: my-skill-name` (searches `~/.agent-fleet/skills/`)
 4. **Absolute path** — `prompt: /path/to/backend.md`
 
 ### Global scope (`allowed_paths`)
@@ -156,7 +156,7 @@ Used by the **full** pipeline (`--pipeline full`):
 
 ## Pipelines
 
-| Name | CLI / Hermes | Phases |
+| Name | CLI / plugin | Phases |
 |------|--------------|--------|
 | `simple` | default | execute |
 | `code_review` | recommended | execute → scope → verify? → review |
@@ -227,9 +227,9 @@ personas:
     model: composer-2.5
 ```
 
-Skill lookup order: `~/.hermes/skills/<name>/SKILL.md`, then repo `.cursor/skills/`.
+Skill lookup order: `~/.agent-fleet/skills/<name>/SKILL.md`, then repo `.cursor/skills/`.
 
-## Hermes dispatch
+## Gateway plugin dispatch
 
 Tool: `coding_fleet_dispatch`
 

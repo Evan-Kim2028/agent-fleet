@@ -1,4 +1,4 @@
-"""Persona resolution from markdown prompts, YAML registry, loadouts, and Hermes skills."""
+"""Persona resolution from markdown prompts, YAML registry, loadouts, and skills."""
 
 from __future__ import annotations
 

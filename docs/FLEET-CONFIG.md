@@ -6,8 +6,7 @@ Where global fleet settings live, how `personas_dir` resolves, and how to avoid 
 
 | Location | Status |
 |----------|--------|
-| `~/.agent-fleet/fleet.yaml` | **Preferred** — new installs |
-| `~/.hermes/coding_fleet/fleet.yaml` | Legacy Hermes path (still read by older tooling) |
+| `~/.agent-fleet/fleet.yaml` | **Canonical** global fleet config |
 
 Copy the template:
 
@@ -27,7 +26,7 @@ Environment variables:
 | Variable | Purpose |
 |----------|---------|
 | `AGENT_FLEET_CONFIG` | Global fleet.yaml path (issue dispatch watcher) |
-| `CODING_FLEET_CONFIG` | Global fleet.yaml path (Hermes plugin tools) |
+| `CODING_FLEET_CONFIG` | Global fleet.yaml path (gateway plugin tools) |
 
 Repo-level settings (verify commands, scope, PR loop) always come from `.agent-fleet.yaml` in the target git repo — not from the global file.
 
@@ -115,7 +114,7 @@ The script reports the active import path, flags shadow entries on `sys.path`, a
 
 | Path | Purpose |
 |------|---------|
-| `~/.agent-fleet/runs/` or `~/.hermes/fleet/runs/` | JSONL dispatch logs (legacy dir wins if it already exists) |
+| `~/.agent-fleet/fleet/runs/` | JSONL dispatch logs |
 | `~/.agent-fleet/level_up/` | Persona learning journals and overlays |
 | `~/.agent-fleet/skills/` | Optional user skill overrides |
 

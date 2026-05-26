@@ -1,4 +1,4 @@
-"""Parallel fleet dispatcher — silphcoanalytics admission + Hermes delegate_task."""
+"""Parallel fleet dispatcher — admission control, worktrees, and task execution."""
 
 from __future__ import annotations
 

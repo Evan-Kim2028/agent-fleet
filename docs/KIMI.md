@@ -1,6 +1,6 @@
 # Kimi Code CLI backend (optional)
 
-Agent Fleet can execute fleet runs through **Kimi Code CLI** (`kimi-cli` subprocess) instead of the default Cursor SDK backend. Personas, pipelines, repo scope, and Hermes dispatch are unchanged — only the execution adapter differs.
+Agent Fleet can execute fleet runs through **Kimi Code CLI** (`kimi-cli` subprocess) instead of the default Cursor SDK backend. Personas, pipelines, and repo scope are unchanged — only the execution adapter differs.
 
 ## Kimi execution backend
 
@@ -38,28 +38,22 @@ Personas, `code_review`, `.agent-fleet.yaml`, and batch dispatch work the same a
    export KIMI_API_KEY=sk-kimi-your_key_here
    ```
 
-   For Hermes, add the same to `~/.hermes/.env`:
-
-   ```bash
-   KIMI_API_KEY=sk-kimi-your_key_here
-   ```
-
 ## Fleet config
 
 Copy the example config if you haven't already:
 
 ```bash
-mkdir -p ~/.hermes/coding_fleet
-cp examples/fleet.kimi.yaml ~/.hermes/coding_fleet/fleet.yaml
+mkdir -p ~/.agent-fleet
+cp examples/fleet.kimi.yaml ~/.agent-fleet/fleet.yaml
 ```
 
 Or start from the default example and edit manually:
 
 ```bash
-cp fleet.example.yaml ~/.hermes/coding_fleet/fleet.yaml
+cp fleet.example.yaml ~/.agent-fleet/fleet.yaml
 ```
 
-Edit `~/.hermes/coding_fleet/fleet.yaml` — set the Kimi backend:
+Edit `~/.agent-fleet/fleet.yaml` — set the Kimi backend:
 
 ```yaml
 default_backend: kimi
@@ -128,7 +122,7 @@ persona_scope_allowlist:
 
 Scope is injected into the persona prompt at dispatch — same behavior regardless of backend.
 
-## Hermes / Discord
+## Gateway plugin (optional)
 
 1. Deploy the plugin (pull + install + symlink + restart):
 
@@ -136,13 +130,11 @@ Scope is injected into the persona prompt at dispatch — same behavior regardle
    ./scripts/deploy-hermes.sh
    ```
 
-2. Set `default_backend: kimi` in `~/.hermes/coding_fleet/fleet.yaml`
+2. Set `default_backend: kimi` in `~/.agent-fleet/fleet.yaml`
 
-3. Add `KIMI_API_KEY` to `~/.hermes/.env`
+3. Export `KIMI_API_KEY` in the gateway host environment (or your shell before dispatch)
 
-4. Restart the Hermes gateway
-
-5. Dispatch as usual — `coding_fleet_dispatch` reads backend from fleet config:
+4. Dispatch via `coding_fleet_dispatch` — backend comes from fleet config:
 
    ```json
    {
@@ -154,14 +146,12 @@ Scope is injected into the persona prompt at dispatch — same behavior regardle
    }
    ```
 
-Hermes orchestrator can stay on any model (e.g. glm); only the **fleet execution** uses Kimi.
-
 ## Python API
 
 ```python
 from agent_fleet import dispatch_tasks
 
-# Uses backend from ~/.hermes/coding_fleet/fleet.yaml (default_backend: kimi)
+# Uses backend from ~/.agent-fleet/fleet.yaml (default_backend: kimi)
 results = dispatch_tasks(
     goal="Fix login bug",
     workspace="/path/to/repo",
@@ -195,7 +185,7 @@ Persona `model` is passed through to the backend when supported.
 
 | Problem | Fix |
 |---------|-----|
-| `KIMI_API_KEY is not set` | `export KIMI_API_KEY=...` or add to `~/.hermes/.env` |
+| `KIMI_API_KEY is not set` | `export KIMI_API_KEY=...` |
 | `kimi-cli failed` / command not found | Install Kimi Code CLI; set `kimi_bin` in `fleet.yaml` |
 | Still asks for `CURSOR_API_KEY` | Confirm `default_backend: kimi` in the fleet.yaml being loaded |
 | Wrong backend loaded | Pass `--config /path/to/fleet.yaml` or set `CODING_FLEET_CONFIG` |
