@@ -235,8 +235,8 @@ Optional: `planner` persona if full pipeline uses one — add `pstack/architect`
 
 ### Tasks
 
-- [ ] Add loadout yamls + stub references
-- [ ] Test every skill id resolves under base-kit
+- [x] Add loadout yamls + stub references
+- [x] Test every skill id resolves under base-kit
 - [ ] Open PR4
 
 ---
@@ -311,6 +311,6 @@ Estimated: **PR1 ~2h, PR2 ~1h, PR3 ~3h, PR4 ~1.5h, PR5 ~2h** (agent time, parall
 - [ ] PR loop fix prompts include composed skill text (grep test for skill headings)
 - [ ] Coder loadout has no superpowers/pstack duplication
 - [ ] Reviewer review phase runs unslop + deslop
-- [ ] All bundled personas have loadouts; all ids resolve
+- [x] All bundled personas have loadouts; all ids resolve
 - [ ] thermo-nuclear single canonical path
 - [ ] `pytest -q` green on main after full stack merges

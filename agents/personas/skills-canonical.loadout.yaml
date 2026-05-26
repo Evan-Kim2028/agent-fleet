@@ -1,0 +1,18 @@
+schema_version: 1
+stub: skills-canonical.md
+skills:
+  execute:
+    - pstack/tdd
+    - pstack/principle-prove-it-works
+    - pstack/principle-minimize-reader-load
+    - cursor-team-kit/verify-this
+    - cursor-team-kit/deslop
+    - pstack/how
+    - pstack/why
+    - superpowers/verification-before-completion
+    - superpowers/requesting-code-review
+pipeline_skills:
+  code_review:
+    review:
+      - cursor-team-kit/deslop
+      - pstack/unslop
