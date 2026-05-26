@@ -397,8 +397,14 @@ def cmd_level_up_overlap(args: argparse.Namespace) -> int:
 
 
 def cmd_learn(args: argparse.Namespace) -> int:
-    """Trigger the self-improving flywheel for the global fleet tier."""
+    """Trigger the self-improving flywheel for the global fleet tier.
+
+    When a real backend is available, this will actually dispatch the
+    fleet-learner persona against ~/.agent-fleet/ and use real LLM synthesis.
+    """
+    from agent_fleet.backends import make_backend
     from agent_fleet.learning import synthesize_fleet_skills
+    from agent_fleet.personas import YamlPersonaResolver
 
     print("Running fleet self-improvement synthesis...")
     print(f"  personas: {args.personas or 'default (coder, reviewer, pr-analyzer)'}")
@@ -406,10 +412,18 @@ def cmd_learn(args: argparse.Namespace) -> int:
     print(f"  dry_run:  {args.dry_run}")
     print()
 
+    config = load_fleet_config(args.config) if args.config else load_fleet_config()
+    resolver = YamlPersonaResolver(config)
+    backend = make_backend(config)
+
     result = synthesize_fleet_skills(
         personas=args.personas,
         min_experience_rows=args.min_rows,
         dry_run=args.dry_run,
+        # Pass real objects so LLM synthesis can actually run the fleet-learner
+        backend=backend,
+        resolver=resolver,
+        fleet_config=config,
     )
 
     print("Synthesis complete:")
@@ -596,6 +610,10 @@ def main(argv: list[str] | None = None) -> int:
         help="Min total experience rows before synthesizing",
     )
     learn_p.set_defaults(func=cmd_learn)
+
+    from agent_fleet.workstreams.cli import register_workstream_commands
+
+    register_workstream_commands(sub)
 
     args = parser.parse_args(argv)
     return args.func(args)

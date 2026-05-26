@@ -1,18 +1,21 @@
-"""Self-improving flywheel for Agent Fleet.
+"""Self-improving flywheel integration for Agent Fleet.
 
-This module contains the logic for the fleet to analyze its own experience
-across repositories and update global (_fleet) skills.
+**LESS IS MORE:** The real power comes from the vendored Cursor superpowers
+skills + the existing level_up system, not from custom code here.
 
-The goal is a closed loop:
-  Runs (across repos) → Experience in ~/.agent-fleet/
-  → Synthesis → Skill promotion → Better future runs
+See:
+- superpowers:verification-before-completion (use this before any "flywheel works" claim)
+- superpowers:systematic-debugging
+- superpowers:writing-skills (for the fleet-learner persona)
+- superpowers:subagent-driven-development (preferred pattern for the meta loop)
+
+This package is a thin adapter layer only.
 """
 
 from agent_fleet.learning.experience import (
     aggregate_fleet_experience,
     get_fleet_experience_summary,
 )
-from agent_fleet.learning.llm_synthesis import propose_skills_with_llm
 from agent_fleet.learning.synthesizer import (
     synthesize_fleet_skills,
     trigger_fleet_learning_cycle,
@@ -21,7 +24,6 @@ from agent_fleet.learning.synthesizer import (
 __all__ = [
     "aggregate_fleet_experience",
     "get_fleet_experience_summary",
-    "propose_skills_with_llm",
     "synthesize_fleet_skills",
     "trigger_fleet_learning_cycle",
 ]
