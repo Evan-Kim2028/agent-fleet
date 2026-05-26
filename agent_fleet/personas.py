@@ -7,7 +7,7 @@ from typing import Any
 
 import yaml
 
-from agent_fleet.config import FleetConfig, PersonaSpec
+from agent_fleet.config import FleetConfig, PersonaSpec, load_fleet_config
 from agent_fleet.hooks import Persona
 from agent_fleet.level_up.models import LevelUpOverlay
 from agent_fleet.level_up.overlay import compose_overlay_text, load_overlay
@@ -222,3 +222,50 @@ class YamlPersonaResolver:
             extra_instructions=spec.extra_instructions,
             mcp_servers=list(spec.mcp_servers),
         )
+
+
+def persona_prompt_resolves(_name: str, spec: PersonaSpec, cfg: FleetConfig) -> bool:
+    """Return True when the persona prompt resolves to an existing markdown or skill file."""
+    try:
+        _resolve_prompt_path(spec, cfg)
+    except ValueError:
+        return False
+    return True
+
+
+def prune_fleet_yaml_personas(path: Path) -> list[str]:
+    """Remove fleet.yaml persona entries whose prompt .md is missing from all search dirs.
+
+    Returns the list of pruned persona names. Rewrites *path* only when entries are removed.
+    """
+    if not path.is_file():
+        return []
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, dict):
+        return []
+    personas_raw = raw.get("personas")
+    if not isinstance(personas_raw, dict) or not personas_raw:
+        return []
+
+    cfg = load_fleet_config(path)
+    pruned: list[str] = []
+    kept: dict[str, Any] = {}
+    for name, entry in personas_raw.items():
+        if isinstance(entry, str):
+            spec = PersonaSpec(prompt=entry)
+        elif isinstance(entry, dict):
+            spec = PersonaSpec(prompt=str(entry.get("prompt") or f"{name}.md"))
+        else:
+            kept[name] = entry
+            continue
+        if persona_prompt_resolves(name, spec, cfg):
+            kept[name] = entry
+        else:
+            pruned.append(name)
+
+    if not pruned:
+        return []
+
+    raw["personas"] = kept
+    path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    return pruned

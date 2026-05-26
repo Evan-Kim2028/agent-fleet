@@ -117,10 +117,10 @@ def skill_exists_in_base_kit(skill_id: str) -> bool:
     return resolve_skill_path(skill_id, base_kit_skill_dirs()) is not None
 
 
-def load_loadout(name: str) -> dict[str, Any]:
+def load_loadout(name: str, *, personas_dir: Path | None = None) -> dict[str, Any]:
     from agent_fleet.personas import load_loadout as _load_persona_loadout
 
-    loadout = _load_persona_loadout(name)
+    loadout = _load_persona_loadout(name, personas_dir=personas_dir)
     if loadout is None:
         raise FileNotFoundError(f"Loadout not found for persona {name!r}")
     return loadout

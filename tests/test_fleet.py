@@ -389,3 +389,12 @@ def test_parallel_dispatch_warns_on_scope_overlap(
 
     assert len(results) == 2
     assert any("Parallel batch may collide" in record.message for record in caplog.records)
+
+
+def test_workstream_subcommand_registered() -> None:
+    """agent-fleet workstream must be wired into the top-level CLI."""
+    from agent_fleet.cli import main
+
+    with pytest.raises(SystemExit) as exc:
+        main(["workstream", "--help"])
+    assert exc.value.code == 0

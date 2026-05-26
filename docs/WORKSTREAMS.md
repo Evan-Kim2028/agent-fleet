@@ -59,7 +59,7 @@ agent-fleet workstream harvest .worktrees/fleet-runs/task-0-abc123 \
   --workspace /path/to/repo
 ```
 
-Module entry (same handlers, useful when debugging the workstreams package):
+Module entry (also available as a standalone module):
 
 ```bash
 python -m agent_fleet.workstreams list --workspace /path/to/repo
