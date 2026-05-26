@@ -34,6 +34,28 @@ class CursorLLMResult:
     mcp_tool_calls: tuple[str, ...] = field(default_factory=tuple)
 
 
+def _resolve_model_selection(model: str) -> str | dict[str, Any]:
+    """Translate a user-facing model name to a cursor-sdk model selection.
+
+    Cursor's composer models have a ``fast`` parameter whose default
+    variant is ``fast='true'`` (the cheaper-quality, more-throughput tier
+    that is also billed differently). Passing the bare string
+    ``"composer-2.5"`` therefore silently routes to the fast variant.
+
+    We treat the bare names as the *slow* (non-fast) tier per the
+    long-standing fleet convention (see README) and require the explicit
+    ``-fast`` suffix to opt in.
+    """
+    if model in {"composer-2.5", "composer-2"}:
+        return {"id": model, "params": [{"id": "fast", "value": "false"}]}
+    if model in {"composer-2.5-fast", "composer-2-fast"}:
+        return {
+            "id": model.removesuffix("-fast"),
+            "params": [{"id": "fast", "value": "true"}],
+        }
+    return model
+
+
 def _format_mcp_tool_label(args: Mapping[str, Any] | None) -> str | None:
     if not args:
         return None
@@ -456,7 +478,7 @@ class CursorBackend:
             import cursor_sdk as sdk
         except ImportError as exc:
             return _ErrorSession(f"cursor-sdk not installed: {exc}")
-        selected_model = model or self.default_model
+        selected_model = _resolve_model_selection(model or self.default_model)
         selected_mode = coerce_agent_mode(mode, default=self.default_mode)
         mcp_dict = {name: _sdk_mcp_config(spec, sdk) for name, spec in (mcp_servers or {}).items()}
         try:
@@ -511,7 +533,7 @@ class CursorBackend:
             )
 
         work_dir = str(cwd or Path.cwd())
-        selected_model = model or self.default_model
+        selected_model = _resolve_model_selection(model or self.default_model)
         selected_mode = coerce_agent_mode(mode, default=self.default_mode)
         scope_note = ""
         if allowed_tools:

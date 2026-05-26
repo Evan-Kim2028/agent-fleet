@@ -13,9 +13,9 @@ Built on **[Cursor SDK](https://github.com/cursor/cursor-sdk)** (`cursor-sdk`). 
 | [Schedules](docs/SCHEDULES.md) | Cron-based daily/weekly fleet jobs |
 
 **Requires:** Python 3.14 · [Cursor API key](https://cursor.com/dashboard/integrations) · git workspace  
-**Default model:** `composer-2.5`
+**Default model:** `composer-2.5` (slow / non-fast tier — agent-fleet pins `fast=false` explicitly so you aren't silently routed to the fast variant that Cursor returns as its default for the bare model id).
 
-> **Switch to `composer-2.5-fast`** for higher throughput at lower quality. Edit `~/.agent-fleet/fleet.yaml` — set `default_model: composer-2.5-fast` to apply fleet-wide, or set `model: composer-2.5-fast` under a single persona (under `personas:`) to scope the override.
+> **Switch to `composer-2.5-fast`** for higher throughput at lower quality (agent-fleet pins `fast=true`). Edit `~/.agent-fleet/fleet.yaml` — set `default_model: composer-2.5-fast` to apply fleet-wide, or set `model: composer-2.5-fast` under a single persona (under `personas:`) to scope the override.
 
 ---
 
