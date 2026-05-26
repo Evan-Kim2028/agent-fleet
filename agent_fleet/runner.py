@@ -282,6 +282,19 @@ class LocalFleetRunner:
         result: FleetRunResult | None = None
         session: LLMSession | None = None
         browser_session_factory: Callable[[], LLMSession | None] | None = None
+        review_results: list[ReviewResult] = []
+        repo_cfg = find_repo_config(repo_root)
+        run_goal = f"{title}\n\n{body}".strip()
+        level_up_equip = None
+        if self._fleet_config is not None:
+            from agent_fleet.orchestration.equip import resolve_dispatch_equip
+
+            level_up_equip = resolve_dispatch_equip(
+                FleetTask(goal=run_goal, persona=persona, workspace=str(repo_root)),
+                self._fleet_config,
+                repo_cfg,
+                run_id=run_id,
+            )
         require_mcp = is_visual_audit_dispatch(
             issue_labels=issue_labels,
             title=title,
@@ -701,6 +714,16 @@ class LocalFleetRunner:
                     pr_number=pr_number,
                     jsonl=str(run_log.jsonl_path) if run_log.jsonl_path else None,
                 )
+                self._record_level_up(
+                    repo_cfg=repo_cfg,
+                    persona=persona,
+                    run_id=run_id,
+                    goal=run_goal,
+                    outcome=result.outcome,
+                    changed_files=changed_files,
+                    review_results=review_results,
+                    level_up_equip=level_up_equip,
+                )
                 return result
             except Exception as exc:
                 logger.exception("[%s] fleet run failed", run_id)
@@ -715,6 +738,16 @@ class LocalFleetRunner:
                     duration_seconds=round(time.monotonic() - start, 2),
                 )
                 run_log.run_end(outcome="error", error=str(exc))
+                self._record_level_up(
+                    repo_cfg=repo_cfg,
+                    persona=persona,
+                    run_id=run_id,
+                    goal=run_goal,
+                    outcome="error",
+                    changed_files=None,
+                    review_results=review_results,
+                    level_up_equip=level_up_equip,
+                )
                 return result
             finally:
                 if session is not None:
@@ -727,6 +760,47 @@ class LocalFleetRunner:
                         in ("verify_failed", "error", "review_blocked", "tech_lead_blocked")
                     )
                     self._git_ops.teardown_workspace(worktree, forensic=forensic)
+
+    def _record_level_up(
+        self,
+        *,
+        repo_cfg: RepoConfig | None,
+        persona: str,
+        run_id: str,
+        goal: str,
+        outcome: str,
+        changed_files: list[str] | None,
+        review_results: list[ReviewResult],
+        level_up_equip: object | None,
+    ) -> None:
+        from dataclasses import asdict
+
+        from agent_fleet.level_up.models import DispatchEquip
+        from agent_fleet.level_up.record import record_run_experience
+
+        equip_snapshot: dict[str, object] | None = None
+        if isinstance(level_up_equip, DispatchEquip):
+            equip_snapshot = asdict(level_up_equip)
+            equip_snapshot["skill_slots_execute"] = list(level_up_equip.skill_slots_execute)
+            equip_snapshot["skill_slots_review"] = list(level_up_equip.skill_slots_review)
+
+        review_verdict: str | None = None
+        for review_result in reversed(review_results):
+            if review_result.verdict is not None:
+                review_verdict = review_result.verdict.value
+                break
+
+        record_run_experience(
+            repo=repo_cfg,
+            persona=persona,
+            run_id=run_id,
+            status=outcome,
+            goal=goal,
+            source="issue_dispatch",
+            equip_snapshot=equip_snapshot,
+            review_verdict=review_verdict,
+            changed_files=changed_files,
+        )
 
 
 class TaskRunner:

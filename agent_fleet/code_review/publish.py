@@ -9,6 +9,7 @@ import subprocess
 from typing import TYPE_CHECKING
 
 from agent_fleet.pr_loop import github_ops
+from agent_fleet.repo import commit_preflight_commands_for_persona
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -129,8 +130,13 @@ def publish_fleet_branch(
 ) -> int | None:
     """Commit, push, and return PR number (existing or newly created)."""
     message = f"feat(fleet): {task_goal[:72]}\n\n🤖 Agent: persona={persona}"
-    pushed = github_ops.commit_and_push(worktree, message, branch)
-    if not pushed:
+    push_result = github_ops.commit_and_push(
+        worktree,
+        message,
+        branch,
+        preflight_commands=commit_preflight_commands_for_persona(repo, persona),
+    )
+    if not push_result.ok:
         push_branch_if_ahead(worktree, branch)
 
     existing = find_pr_for_branch(branch, cwd=repo.repo_root)

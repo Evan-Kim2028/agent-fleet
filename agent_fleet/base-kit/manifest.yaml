@@ -1,5 +1,5 @@
 schema_version: 1
-synced_at: "2026-05-25T21:11:33Z"
+synced_at: "2026-05-26T01:16:32Z"
 sources:
   superpowers:
     upstream: https://github.com/obra/superpowers
@@ -7,9 +7,9 @@ sources:
     license: MIT
   pstack:
     upstream: https://github.com/cursor/plugins/tree/main/pstack
-    ref: 11ecc12a3ffc037b4ef3b64de2be449668e8afc7
+    ref: a9e675642ea4297553a4d8c23f5d8a5b004f6626
     license: MIT
-  deslop:
-    upstream: https://github.com/cursor/plugins/tree/main/cursor-team-kit/skills/deslop
-    ref: 11ecc12a3ffc037b4ef3b64de2be449668e8afc7
+  cursor-team-kit:
+    upstream: https://github.com/cursor/plugins/tree/main/cursor-team-kit/skills
+    ref: a9e675642ea4297553a4d8c23f5d8a5b004f6626
     license: MIT

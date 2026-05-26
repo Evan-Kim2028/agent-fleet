@@ -7,6 +7,7 @@ Built on **[Cursor SDK](https://github.com/cursor/cursor-sdk)** (`cursor-sdk`). 
 | Docs | |
 |------|---|
 | [Quickstart](docs/QUICKSTART.md) | First run in ~15 minutes |
+| [agent-fleet-dev](docs/AGENT-FLEET-DEV.md) | Fresh install walkthrough (`~/agent-fleet-dev`) |
 | [New repo setup](docs/NEW-REPO.md) | `.agent-fleet.yaml`, GHA, PR loop |
 | [Personas](docs/PERSONAS.md) | Fleet cookbook |
 
@@ -23,7 +24,7 @@ Built on **[Cursor SDK](https://github.com/cursor/cursor-sdk)** (`cursor-sdk`). 
 | **In-pipeline review** | `code_review`: implement → scope → verify → **reviewer verdict** (`approve` / `request_changes` / `block`) |
 | **PR analyzer** | Two-pass **Composer PR review** — CLI (`agent-fleet review`), GHA ([`pr-analyzer.yml`](examples/github/pr-analyzer.yml)), feeds PR loop |
 | **Background modes** | PR loop watcher, issue-comment dispatch, parallel Python batch |
-| **Structured logs** | JSONL at `~/.hermes/fleet/runs/<run-id>.jsonl` |
+| **Structured logs** | JSONL at `~/.agent-fleet/runs/<run-id>.jsonl` |
 
 Typical focused task on **`composer-2.5-fast`**: **~30–120 seconds** (implement + gates; PR analysis scales with diff size).
 
@@ -72,9 +73,9 @@ cd agent-fleet
 pip install -e ".[dev]"    # or: uv sync --frozen --group dev
 
 export CURSOR_API_KEY=your_key_here
-mkdir -p ~/.hermes/coding_fleet
-cp fleet.example.yaml ~/.hermes/coding_fleet/fleet.yaml
-# ~/.hermes/coding_fleet/ = global fleet config (personas, max_parallel), not your repo
+mkdir -p ~/.agent-fleet
+cp fleet.example.yaml ~/.agent-fleet/fleet.yaml
+# ~/.agent-fleet/fleet.yaml = global fleet config (personas, max_parallel), not your repo
 # edit fleet.yaml: default_model: composer-2.5-fast
 ```
 
@@ -129,7 +130,7 @@ Expect JSON with `status: completed` or a typed failure (`scope_violation`, `ver
 | PR loop watcher | `agent-fleet loop` / `agent-fleet-pr-loop` | Poll `fleet/*` PRs → fix findings → CI → optional merge |
 | Issue trigger | `agent-fleet-watch` | `/agent --persona …` on issue comments → full pipeline |
 
-**Concurrency** (`~/.hermes/coding_fleet/fleet.yaml`) — starting point for a typical 16–32 GB laptop:
+**Concurrency** (`~/.agent-fleet/fleet.yaml`) — starting point for a typical 16–32 GB laptop:
 
 ```yaml
 default_backend: cursor
@@ -182,7 +183,7 @@ Examples: [`examples/repo.agent-fleet.yaml`](examples/repo.agent-fleet.yaml) · 
 
 ## Personas
 
-Registry: `~/.hermes/coding_fleet/fleet.yaml`. Bundled prompts in `agent_fleet/personas/` (`coder`, `reviewer`, `pr-analyzer`, …). Repo `personas/` and `.agent-fleet.yaml` scope override global `allowed_paths`.
+Registry: `~/.agent-fleet/fleet.yaml`. Bundled prompts in `agent_fleet/personas/` (`coder`, `reviewer`, `pr-analyzer`, …). Repo `personas/` and `.agent-fleet.yaml` scope override global `allowed_paths`.
 
 ```yaml
 default_backend: cursor

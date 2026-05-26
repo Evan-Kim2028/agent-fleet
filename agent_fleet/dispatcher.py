@@ -1,4 +1,4 @@
-"""Parallel fleet dispatcher — silphcoanalytics admission + Hermes delegate_task."""
+"""Parallel fleet dispatcher with capacity-aware task execution."""
 
 from __future__ import annotations
 
@@ -28,6 +28,7 @@ from agent_fleet.redispatch import dispatch_with_retry
 from agent_fleet.repo import RepoConfig, find_repo_config, merge_repo_into_fleet_config
 from agent_fleet.runner import run_full_pipeline
 from agent_fleet.verify_core import is_git_repo
+from agent_fleet.worktree import should_keep_task_worktree
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -515,11 +516,11 @@ class FleetDispatcher:
                         pr_loop_status=pr_loop_status,
                     )
 
-                keep_worktree = result.status in {"completed", "merged"} or (
-                    code_review_cfg is not None
-                    and code_review_cfg.auto_push
-                    and task_workspace is not None
-                    and task_workspace.isolated
+                keep_worktree = should_keep_task_worktree(
+                    result.status,
+                    auto_push=bool(code_review_cfg and code_review_cfg.auto_push),
+                    isolated=bool(task_workspace and task_workspace.isolated),
+                    has_changes=bool(result.changed_files or result.files_modified),
                 )
                 if task_workspace is not None:
                     task_workspace.teardown(keep=keep_worktree)

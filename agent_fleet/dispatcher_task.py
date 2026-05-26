@@ -185,62 +185,25 @@ def _record_task_experience(
     workspace: Path | None,
     fleet_log: FleetLogger,
 ) -> None:
-    from agent_fleet.level_up.experience import append_experience, compute_experience_weight
-    from agent_fleet.level_up.journal import append_journal
-    from agent_fleet.level_up.paths import repo_key as level_up_repo_key
+    from agent_fleet.level_up.record import record_run_experience
     from agent_fleet.repo import find_repo_config
 
     repo = find_repo_config(workspace) if workspace is not None else None
-    level_up_cfg = repo.level_up if repo is not None else None
-    if level_up_cfg is not None and not level_up_cfg.train:
-        return
-
-    repo_key_value = level_up_repo_key(
-        name=repo.name if repo else None,
-        repo_root=repo.repo_root if repo else None,
-    )
     source, pr_loop_round = _experience_source_context(task)
-    weight = compute_experience_weight(source, pr_loop_round, status=status)
-    equip_snapshot = _equip_snapshot(task)
     review_verdict = _review_verdict_from_phases(phase_results)
-    journal_summaries = level_up_cfg.journal_task_summaries if level_up_cfg is not None else True
 
-    run_complete_data: dict[str, Any] = {
-        "task_index": task_index,
-        "status": status,
-        "equip_snapshot": equip_snapshot,
-    }
-    if journal_summaries:
-        run_complete_data["goal"] = task.goal
-
-    append_journal(
-        "run.complete",
-        repo_key_value,
-        task.persona,
-        run_id=fleet_log.run_id,
-        data=run_complete_data,
-    )
-
-    append_experience(
-        repo_key=repo_key_value,
+    record_run_experience(
+        repo=repo,
         persona=task.persona,
-        source=source,
-        weight=weight,
-        pr_loop_round=pr_loop_round,
+        run_id=fleet_log.run_id,
         status=status,
-        goal=task.goal if journal_summaries else None,
+        goal=task.goal,
+        source=source,
+        pr_loop_round=pr_loop_round,
+        equip_snapshot=_equip_snapshot(task),
         review_verdict=review_verdict,
-        equip_snapshot=equip_snapshot,
         changed_files=changed_files,
-        run_id=fleet_log.run_id,
-    )
-
-    append_journal(
-        "experience.appended",
-        repo_key_value,
-        task.persona,
-        run_id=fleet_log.run_id,
-        data={"source": source, "weight": weight},
+        task_index=task_index,
     )
 
 

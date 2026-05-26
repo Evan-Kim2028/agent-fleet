@@ -15,21 +15,21 @@ from agent_fleet.skills_lib import (
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def test_deslop_loads_from_base_kit() -> None:
+def test_unslop_loads_from_base_kit() -> None:
     dirs = base_kit_skill_dirs()
     assert dirs
-    path = resolve_skill_path("cursor-team-kit/deslop", dirs)
+    path = resolve_skill_path("pstack/unslop", dirs)
     assert path is not None
     assert path.name == "SKILL.md"
-    text = load_skill_text("cursor-team-kit/deslop", dirs)
-    assert "Remove AI code slop" in text
+    text = load_skill_text("pstack/unslop", dirs)
+    assert "slop" in text.lower()
 
 
-def test_reviewer_loadout_lists_deslop_for_review() -> None:
+def test_reviewer_loadout_lists_unslop_for_review() -> None:
     loadout = load_loadout("reviewer")
     assert loadout is not None
     review_skills = loadout["pipeline_skills"]["code_review"]["review"]
-    assert review_skills == ["cursor-team-kit/deslop"]
+    assert review_skills == ["pstack/unslop", "cursor-team-kit/deslop"]
 
 
 def test_compose_persona_body_includes_sections() -> None:

@@ -40,6 +40,7 @@ class RepoConfig:
     use_worktree: bool = False
     worktree_base: Path | None = None
     verify_commands: list[str] = field(default_factory=list)
+    persona_verify_commands: dict[str, list[str]] = field(default_factory=dict)
     commit_preflight_commands: list[str] = field(default_factory=list)
     test_command: str | None = None
     lint_command: str | None = None
@@ -110,6 +111,11 @@ def load_repo_config(path: Path | str) -> RepoConfig:
         if isinstance(paths, list):
             scope_map[str(persona)] = tuple(str(p) for p in paths)
 
+    persona_verify_map: dict[str, list[str]] = {}
+    for persona, commands in (raw.get("persona_verify_commands") or {}).items():
+        if isinstance(commands, list):
+            persona_verify_map[str(persona)] = [str(cmd) for cmd in commands]
+
     cross_cutting: list[frozenset[str]] = []
     for group in raw.get("cross_cutting_groups") or []:
         if isinstance(group, list):
@@ -134,6 +140,7 @@ def load_repo_config(path: Path | str) -> RepoConfig:
         use_worktree=bool(raw.get("use_worktree", False)),
         worktree_base=worktree_base,
         verify_commands=verify_commands,
+        persona_verify_commands=persona_verify_map,
         commit_preflight_commands=commit_preflight_commands,
         test_command=test_command,
         lint_command=lint_command,
@@ -201,3 +208,19 @@ def merge_repo_into_fleet_config(
     )
     fleet_config.repo_config = repo
     return fleet_config
+
+
+def verify_commands_for_persona(repo: RepoConfig, persona: str | None = None) -> list[str]:
+    """Return verify commands for a persona, falling back to repo-wide verify_commands."""
+    if persona and persona in repo.persona_verify_commands:
+        return list(repo.persona_verify_commands[persona])
+    return list(repo.verify_commands)
+
+
+def commit_preflight_commands_for_persona(
+    repo: RepoConfig, persona: str | None = None
+) -> list[str]:
+    """Preflight gates before PR-loop commit; persona-scoped when configured."""
+    if repo.commit_preflight_commands:
+        return list(repo.commit_preflight_commands)
+    return verify_commands_for_persona(repo, persona)

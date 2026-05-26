@@ -244,3 +244,25 @@ def test_make_backend_kimi(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert isinstance(backend, KimiBackend)
     assert backend.model == "kimi-for-coding"
+
+
+def test_persona_verify_commands(tmp_path: Path) -> None:
+    repo_yaml = tmp_path / ".agent-fleet.yaml"
+    repo_yaml.write_text(
+        """
+name: scoped
+verify_commands:
+  - pytest -q
+persona_verify_commands:
+  iceberg-pro:
+    - uv run pytest packages/lakestore/tests -q
+""".strip(),
+        encoding="utf-8",
+    )
+    from agent_fleet.repo import load_repo_config, verify_commands_for_persona
+
+    repo = load_repo_config(repo_yaml)
+    assert verify_commands_for_persona(repo, "iceberg-pro") == [
+        "uv run pytest packages/lakestore/tests -q"
+    ]
+    assert verify_commands_for_persona(repo, "coder") == ["pytest -q"]

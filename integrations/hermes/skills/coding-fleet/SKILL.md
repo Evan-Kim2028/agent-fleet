@@ -147,7 +147,7 @@ See `docs/NEW-REPO.md` in the agent-fleet repo for full setup.
 
 ## Requirements
 
-- Fleet config: `~/.hermes/coding_fleet/fleet.yaml`
-- Cursor SDK backend: `CURSOR_API_KEY` in `~/.hermes/.env`
+- Fleet config: `~/.agent-fleet/fleet.yaml` (`agent-fleet paths` to verify)
+- Cursor SDK backend: `CURSOR_API_KEY` in the environment
 - Kimi backend: `KIMI_API_KEY` + `kimi-cli` on PATH, `default_backend: kimi`
 - `pip install -e /path/to/agent-fleet`

@@ -1,0 +1,25 @@
+# Skills buildout — register in ~/.agent-fleet/fleet.yaml (optional)
+#
+# Repo-local personas live in agents/personas/ when .agent-fleet.yaml sets personas_dir.
+# Dispatch:
+#   export CURSOR_API_KEY=...
+#   python scripts/dispatch-skills-buildout.py --dry-run
+#   python scripts/dispatch-skills-buildout.py          # PR1
+#   python scripts/dispatch-skills-buildout.py --all  # PR1→PR5 sequential
+
+personas:
+  skills-foundation:
+    prompt: skills-foundation.md
+    model: composer-2.5
+  skills-prompt-builder:
+    prompt: skills-prompt-builder.md
+    model: composer-2.5
+  skills-pr-loop:
+    prompt: skills-pr-loop.md
+    model: composer-2.5
+  skills-personas:
+    prompt: skills-personas.md
+    model: composer-2.5
+  skills-canonical:
+    prompt: skills-canonical.md
+    model: composer-2.5

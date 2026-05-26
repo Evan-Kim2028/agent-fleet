@@ -396,11 +396,47 @@ def cmd_level_up_overlap(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_migrate_home(args: argparse.Namespace) -> int:
+    from agent_fleet.fleet_paths import ensure_agent_fleet_home, migrate_from_hermes
+
+    ensure_agent_fleet_home()
+    actions = migrate_from_hermes(dry_run=bool(getattr(args, "dry_run", False)))
+    print(json.dumps(actions, indent=2))
+    if not actions:
+        print("Nothing to migrate (already using ~/.agent-fleet/)")
+    return 0
+
+
+def cmd_paths(_args: argparse.Namespace) -> int:
+    from agent_fleet.fleet_paths import (
+        agent_fleet_home,
+        default_fleet_config_path,
+        default_runs_dir,
+        user_skill_dir,
+    )
+    from agent_fleet.level_up.paths import JOURNAL_INDEX_PATH, LEVEL_UP_ROOT
+
+    print(
+        json.dumps(
+            {
+                "home": str(agent_fleet_home()),
+                "config": str(default_fleet_config_path()),
+                "runs": str(default_runs_dir()),
+                "skills": str(user_skill_dir()),
+                "level_up": str(LEVEL_UP_ROOT),
+                "journal_index": str(JOURNAL_INDEX_PATH),
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agent-fleet", description="Agentic coding fleet CLI")
     parser.add_argument(
         "--config",
-        help="Path to fleet.yaml (default: ~/.hermes/coding_fleet/fleet.yaml)",
+        help="Path to fleet.yaml (default: ~/.agent-fleet/fleet.yaml)",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -543,6 +579,20 @@ def main(argv: list[str] | None = None) -> int:
     level_up_overlap_p.add_argument("--repo", required=True, help="Repo path or .agent-fleet.yaml")
     level_up_overlap_p.add_argument("--persona", required=True, help="Persona name")
     level_up_overlap_p.set_defaults(func=cmd_level_up_overlap)
+
+    migrate_p = sub.add_parser(
+        "migrate-home",
+        help="Move legacy ~/.hermes/coding_fleet config and runs into ~/.agent-fleet/",
+    )
+    migrate_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be copied without writing files",
+    )
+    migrate_p.set_defaults(func=cmd_migrate_home)
+
+    paths_p = sub.add_parser("paths", help="Print canonical agent-fleet storage paths")
+    paths_p.set_defaults(func=cmd_paths)
 
     args = parser.parse_args(argv)
     return args.func(args)

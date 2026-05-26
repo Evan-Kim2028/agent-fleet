@@ -12,24 +12,14 @@ import yaml
 
 from agent_fleet.agent_mode import coerce_agent_mode
 from agent_fleet.contracts.mcp import McpServerSpec, parse_mcp_server_spec
+from agent_fleet.fleet_paths import default_fleet_config_path, default_runs_dir, user_skill_dir
 from agent_fleet.skills_lib import bundled_skill_dirs, merge_skill_dirs
 
 if TYPE_CHECKING:
     from agent_fleet.agent_mode import AgentMode
     from agent_fleet.repo import RepoConfig
 
-_DEFAULT_CONFIG_PATH = Path.home() / ".hermes" / "coding_fleet" / "fleet.yaml"
 _PACKAGE_PERSONAS = Path(__file__).resolve().parent / "personas"
-_NEW_DEFAULT_RUNS_DIR = Path.home() / ".agent-fleet" / "fleet" / "runs"
-# Keep writing to ~/.hermes/fleet/runs when that directory already exists.
-_LEGACY_RUNS_DIR = Path.home() / ".hermes" / "fleet" / "runs"
-
-
-def default_runs_dir() -> Path:
-    """Default JSONL run log directory for fleet dispatches."""
-    if _LEGACY_RUNS_DIR.exists():
-        return _LEGACY_RUNS_DIR
-    return _NEW_DEFAULT_RUNS_DIR
 
 
 _DEFAULT_PIPELINES: dict[str, list[str]] = {
@@ -58,7 +48,7 @@ class FleetConfig:
     default_backend: str = "cursor"
     kimi_bin: str | None = None
     default_persona: str = "coder"
-    max_parallel: int = 3
+    max_parallel: int = 5
     timeout_seconds: int = 900
     ram_budget_gb: int = 24
     personas_dir: Path = field(default_factory=lambda: _PACKAGE_PERSONAS)
@@ -69,7 +59,7 @@ class FleetConfig:
     default_workspace: str | None = None
     repo_config: RepoConfig | None = None
     mcp_servers: dict[str, McpServerSpec] = field(default_factory=dict)
-    max_redispatches: int = 1
+    max_redispatches: int = 2
 
 
 def _expand_path(value: str) -> Path:
@@ -152,7 +142,7 @@ def load_fleet_config(
     default_persona: str | None = None,
     default_workspace: str | None = None,
 ) -> FleetConfig:
-    config_path = _expand_path(str(path)) if path else _DEFAULT_CONFIG_PATH
+    config_path = _expand_path(str(path)) if path else default_fleet_config_path()
     data: dict[str, Any] = {}
     if config_path.exists():
         loaded = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
@@ -172,9 +162,9 @@ def load_fleet_config(
         bundled_skill_dirs(),
         [_expand_path(str(p)) for p in (skill_dirs or data.get("skill_dirs") or [])],
     )
-    default_skill_dir = Path.home() / ".hermes" / "skills"
-    if default_skill_dir.exists():
-        skill_dirs_resolved = merge_skill_dirs(skill_dirs_resolved, [default_skill_dir])
+    user_skills = user_skill_dir()
+    if user_skills.is_dir():
+        skill_dirs_resolved = merge_skill_dirs(skill_dirs_resolved, [user_skills])
 
     mcp_catalog = _parse_mcp_catalog(data.get("mcp_servers") or {})
 
@@ -183,7 +173,7 @@ def load_fleet_config(
         default_mode=coerce_agent_mode(str(default_mode or data.get("default_mode") or "agent")),
         default_backend=str(default_backend or data.get("default_backend") or "cursor"),
         kimi_bin=kimi_bin or data.get("kimi_bin"),
-        max_parallel=int(max_parallel or data.get("max_parallel") or 3),
+        max_parallel=int(max_parallel or data.get("max_parallel") or 5),
         timeout_seconds=int(timeout_seconds or data.get("timeout_seconds") or 900),
         ram_budget_gb=int(ram_budget_gb or data.get("ram_budget_gb") or 24),
         personas_dir=personas_dir_resolved,
@@ -194,5 +184,5 @@ def load_fleet_config(
         default_persona=str(default_persona or data.get("default_persona") or "coder"),
         default_workspace=default_workspace or data.get("default_workspace"),
         mcp_servers=mcp_catalog,
-        max_redispatches=int(data.get("max_redispatches") or 1),
+        max_redispatches=int(data.get("max_redispatches") or 2),
     )

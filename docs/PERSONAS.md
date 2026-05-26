@@ -6,7 +6,7 @@ How to define, scope, and route coding agents.
 
 | Layer | File | Purpose |
 |-------|------|---------|
-| **Global fleet** | `~/.hermes/coding_fleet/fleet.yaml` | Personas, models, pipelines, parallelism |
+| **Global fleet** | `~/.agent-fleet/fleet.yaml` | Personas, models, pipelines, parallelism |
 | **Repo factory** | `.agent-fleet.yaml` in repo root | Verify commands, scope, worktrees, default persona |
 
 Both merge at dispatch time. Repo settings override global defaults where noted below.
@@ -35,7 +35,7 @@ default_model: composer-2.5
 | Default model | `composer-2.5` | `kimi-for-coding` |
 | Runtime | `cursor-sdk` (pip) | `kimi-cli` binary |
 
-Personas, pipelines, repo scope, and Hermes dispatch are **backend-agnostic**. Kimi setup: **[KIMI.md](KIMI.md)**.
+Personas, pipelines, repo scope, and optional chat integrations are **backend-agnostic**. Kimi setup: **[KIMI.md](KIMI.md)**.
 
 ## Global fleet (`fleet.yaml`)
 
@@ -72,7 +72,7 @@ pipelines:
 
 1. **Bundled markdown** — `coder.md` resolves to `agent_fleet/personas/coder.md`
 2. **Custom directory** — set `personas_dir: /path/to/personas`
-3. **Hermes skill** — `skill: my-skill-name` (searches `~/.hermes/skills/`)
+3. **User skills** — optional `~/.agent-fleet/skills/<name>/SKILL.md`
 4. **Absolute path** — `prompt: /path/to/backend.md`
 
 ### Global scope (`allowed_paths`)
@@ -203,7 +203,7 @@ agent-fleet run "Add unit test for user validation" \
 
 ## Skill-backed personas
 
-Bind a skill as the persona body:
+Bind a skill as the persona body, or use a **loadout** (`.loadout.yaml`) to compose pstack + domain skills:
 
 ```yaml
 personas:
@@ -212,9 +212,21 @@ personas:
     model: composer-2.5
 ```
 
-Skill lookup order: `~/.hermes/skills/<name>/SKILL.md`, then repo `.cursor/skills/`.
+Repo-local loadouts live next to persona stubs (`agents/personas/iceberg-pro.loadout.yaml`). Recommended pstack skills from [cursor/plugins/pstack](https://github.com/cursor/plugins/tree/main/pstack): `poteto-mode`, `how`, `why`, `architect`, `interrogate`, `tdd`, `figure-it-out`, `unslop`.
 
-## Hermes dispatch
+Persona-scoped verify (monorepos):
+
+```yaml
+persona_verify_commands:
+  iceberg-pro:
+    - uv run pytest packages/lakestore/tests -q
+```
+
+Skill lookup order: `~/.agent-fleet/skills/<name>/SKILL.md`, repo `.cursor/skills/`, then `agent_fleet/base-kit/`.
+
+## Optional: Hermes / Discord interface
+
+Agent Fleet is standalone. To expose dispatch via Discord, install the **cursor-fleet** plugin (`integrations/hermes/`, `./scripts/deploy-hermes.sh`). Hermes calls `coding_fleet_*` tools; fleet config and logs live under `~/.agent-fleet/`, not in `~/.hermes/`.
 
 Tool: `coding_fleet_dispatch`
 

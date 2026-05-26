@@ -1,12 +1,13 @@
 # Global agent fleet config
-# Default location: ~/.hermes/coding_fleet/fleet.yaml
+# Default location: ~/.agent-fleet/fleet.yaml
+# Override: AGENT_FLEET_CONFIG or --config
 
 # Default backend: cursor (Cursor SDK) or kimi (Kimi Code CLI)
 default_backend: cursor
 default_model: composer-2.5
 default_mode: agent
 default_persona: coder
-max_parallel: 3
+max_parallel: 5
 timeout_seconds: 900
 default_pipeline: simple
 
@@ -15,7 +16,7 @@ default_pipeline: simple
 # scope_violation/pipeline_nonzero). 1 = one retry, two total attempts. 0 disables.
 # Override per-run with: agent-fleet run ... --max-redispatches N
 # Recommended: 0 in CI (fail fast), 1-2 in interactive use.
-max_redispatches: 1
+max_redispatches: 2
 
 # --- Optional: Kimi Code CLI execution backend ---
 # Requires: pip install not needed; install kimi-cli from Kimi Code
@@ -25,6 +26,7 @@ max_redispatches: 1
 # kimi_bin: ~/.local/bin/kimi-cli
 
 # Bundled personas ship inside the agent_fleet package (agent_fleet/personas/).
+# Default loadouts use Cursor pstack skills (agent_fleet/base-kit/pstack/).
 # Override only for repo-local or custom persona directories:
 # personas_dir: /path/to/my/personas
 

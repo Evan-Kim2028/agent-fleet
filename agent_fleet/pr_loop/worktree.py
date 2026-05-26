@@ -115,6 +115,70 @@ def remove_worktree(repo_root: Path, worktree_path: Path) -> bool:
     return False
 
 
+def protected_dispatch_branches(
+    repo_root: Path,
+    base_path: Path,
+    state: dict[str, object],
+) -> set[str]:
+    """Branches for in-flight issue dispatches — must not be swept before PR open."""
+    from agent_fleet.in_flight import pid_is_dispatch, reap_in_flight
+
+    reap_in_flight(state)  # type: ignore[arg-type]
+    active_issues: set[int] = set()
+    in_flight = state.get("in_flight") or {}
+    if not isinstance(in_flight, dict):
+        return set()
+    for issue_key, runs in in_flight.items():
+        if not isinstance(runs, list) or not runs:
+            continue
+        alive = any(
+            isinstance(run, dict)
+            and run.get("pid") is not None
+            and pid_is_dispatch(int(run["pid"]))
+            for run in runs
+        )
+        if not alive:
+            continue
+        try:
+            active_issues.add(int(issue_key))
+        except (TypeError, ValueError):
+            continue
+
+    if not active_issues:
+        return set()
+
+    result = subprocess.run(
+        ["git", "-C", str(repo_root), "worktree", "list", "--porcelain"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        return set()
+
+    protected: set[str] = set()
+    for entry in _parse_worktree_list(result.stdout):
+        branch = entry.get("branch", "")
+        wt_path = Path(entry.get("worktree", ""))
+        if not branch:
+            continue
+        try:
+            wt_path.relative_to(base_path)
+        except ValueError:
+            continue
+        meta = parse_agent_branch(branch)
+        if meta is None:
+            continue
+        try:
+            issue_num = int(meta.issue)
+        except ValueError:
+            continue
+        if issue_num in active_issues:
+            protected.add(branch)
+    return protected
+
+
 def sweep_orphan_worktrees(
     repo_root: Path,
     base_path: Path,

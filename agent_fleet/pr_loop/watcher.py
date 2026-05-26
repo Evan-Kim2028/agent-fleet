@@ -135,10 +135,11 @@ class PrLoopWatcher:
         )
 
         # Sweep orphan worktrees (no matching open PR) once per poll.
-        active_branches = {str(pr.get("headRefName") or "") for pr in prs}
+        active_branches = {str(pr.get("headRefName") or "") for pr in prs if pr.get("headRefName")}
         try:
             from pathlib import Path as _Path
 
+            from agent_fleet.pr_loop.worktree import protected_dispatch_branches
             from agent_fleet.spine_config import SpineConfig as _SpineConfig
 
             _wt_base = self.repo.worktree_base
@@ -148,6 +149,12 @@ class PrLoopWatcher:
                     _wt_base = _Path(str(_raw)).expanduser()
             if _wt_base is None:
                 _wt_base = _SpineConfig.defaults().worktree_base
+            dispatch_state = load_state(self.state_file)
+            active_branches |= protected_dispatch_branches(
+                self.repo.repo_root,
+                _wt_base,
+                dispatch_state,
+            )
             sweep_orphan_worktrees(self.repo.repo_root, _wt_base, active_branches)
         except Exception:
             logger.debug("Worktree sweep failed", exc_info=True)

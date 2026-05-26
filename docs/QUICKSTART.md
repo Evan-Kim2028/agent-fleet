@@ -22,8 +22,8 @@ Requires Python 3.14.
 ## 2. Global fleet config
 
 ```bash
-mkdir -p ~/.hermes/coding_fleet
-cp fleet.example.yaml ~/.hermes/coding_fleet/fleet.yaml
+mkdir -p ~/.agent-fleet
+cp fleet.example.yaml ~/.agent-fleet/fleet.yaml
 ```
 
 ### Default backend (Cursor SDK)
@@ -46,7 +46,7 @@ export KIMI_API_KEY=sk-kimi-...       # https://platform.kimi.ai
 # kimi-cli must be on PATH
 ```
 
-Edit `~/.hermes/coding_fleet/fleet.yaml`:
+Edit `~/.agent-fleet/fleet.yaml`:
 
 ```yaml
 default_backend: kimi
@@ -152,7 +152,7 @@ toolsets:
   - coding_fleet
 ```
 
-Put the API key for your chosen backend in `~/.hermes/.env`:
+Put the API key for your chosen backend in your environment (or a repo `.env` loaded by your shell):
 
 ```bash
 # Cursor SDK (default)

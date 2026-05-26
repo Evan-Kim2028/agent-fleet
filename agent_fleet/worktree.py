@@ -30,6 +30,26 @@ class TaskWorkspace:
         self.git_ops.teardown_workspace(self.path)
 
 
+_RECOVERABLE_WORKTREE_STATUSES = frozenset({"review_changes_requested", "verify_failed"})
+
+
+def should_keep_task_worktree(
+    status: str,
+    *,
+    auto_push: bool = False,
+    isolated: bool = False,
+    has_changes: bool = False,
+) -> bool:
+    """Return True when an isolated worktree should survive teardown."""
+    if status in {"completed", "merged"}:
+        return True
+    if auto_push and isolated:
+        return True
+    if status in _RECOVERABLE_WORKTREE_STATUSES and has_changes:
+        return True
+    return False
+
+
 def should_isolate_worktree(
     repo: RepoConfig | None,
     *,

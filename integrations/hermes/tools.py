@@ -9,6 +9,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
+from agent_fleet.fleet_paths import default_fleet_config_path
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -98,7 +100,7 @@ def coding_fleet_dispatch(args: dict[str, object], **kwargs: object) -> str:
         return json.dumps(
             {
                 "error": "CURSOR_API_KEY is not set. "
-                "Add it to ~/.hermes/.env (see https://cursor.com/dashboard/integrations)"
+                "Export CURSOR_API_KEY in the environment (see https://cursor.com/dashboard/integrations)"
             }
         )
     if backend_name == "kimi" and not os.environ.get("KIMI_API_KEY"):
@@ -154,7 +156,7 @@ def coding_fleet_pr_review(args: dict[str, object], **kwargs: object) -> str:
         return json.dumps(
             {
                 "error": "CURSOR_API_KEY is not set. "
-                "Add it to ~/.hermes/.env (see https://cursor.com/dashboard/integrations)"
+                "Export CURSOR_API_KEY in the environment (see https://cursor.com/dashboard/integrations)"
             }
         )
     if backend_name == "kimi" and not os.environ.get("KIMI_API_KEY"):
@@ -205,7 +207,7 @@ def coding_fleet_pr_loop(args: dict[str, object], **kwargs: object) -> str:
         return json.dumps(
             {
                 "error": "CURSOR_API_KEY is not set. "
-                "Add it to ~/.hermes/.env (see https://cursor.com/dashboard/integrations)"
+                "Export CURSOR_API_KEY in the environment (see https://cursor.com/dashboard/integrations)"
             }
         )
     if backend_name == "kimi" and not os.environ.get("KIMI_API_KEY"):
@@ -397,6 +399,6 @@ def coding_fleet_list_personas(args: dict[str, object], **kwargs: object) -> str
             "pipelines": config.pipelines,
             "default_model": config.default_model,
             "max_parallel": config.max_parallel,
-            "config_path": str(Path.home() / ".hermes" / "coding_fleet" / "fleet.yaml"),
+            "config_path": str(default_fleet_config_path()),
         }
     )

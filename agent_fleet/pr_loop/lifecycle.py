@@ -22,7 +22,7 @@ from agent_fleet.pr_loop.review_parse import (
     has_blocking_findings,
     parse_review_risk,
 )
-from agent_fleet.repo import RepoConfig, merge_repo_into_fleet_config
+from agent_fleet.repo import RepoConfig, merge_repo_into_fleet_config, verify_commands_for_persona
 from agent_fleet.scope import files_outside_allowed_paths
 from agent_fleet.state import (
     STATE_FILENAME,
@@ -234,10 +234,10 @@ def _file_scope_violation_followup(
     )
 
 
-def _commit_preflight_commands(repo: RepoConfig) -> list[str]:
-    if repo.commit_preflight_commands:
-        return list(repo.commit_preflight_commands)
-    return list(repo.verify_commands)
+def _commit_preflight_commands(repo: RepoConfig, persona: str | None = None) -> list[str]:
+    from agent_fleet.repo import commit_preflight_commands_for_persona
+
+    return commit_preflight_commands_for_persona(repo, persona)
 
 
 def _commit_push(
@@ -246,13 +246,14 @@ def _commit_push(
     message: str,
     branch: str,
     repo: RepoConfig,
+    persona: str | None = None,
 ) -> CommitPushResult:
     return github_ops.commit_and_push(
         worktree,
         message,
         branch,
         exclude=(STATE_FILENAME,),
-        preflight_commands=_commit_preflight_commands(repo),
+        preflight_commands=_commit_preflight_commands(repo, persona),
     )
 
 
@@ -299,12 +300,13 @@ def address_review_findings(
     persona_obj = resolver.load(fix_persona_name)
     backend = make_backend(config)
 
+    verify_cmds = verify_commands_for_persona(repo, fix_persona_name)
     verify_block = ""
-    if repo.verify_commands:
-        verify_block = "\n".join(f"- `{cmd}`" for cmd in repo.verify_commands)
+    if verify_cmds:
+        verify_block = "\n".join(f"- `{cmd}`" for cmd in verify_cmds)
     preflight_block = ""
-    preflight_cmds = _commit_preflight_commands(repo)
-    if preflight_cmds and preflight_cmds != repo.verify_commands:
+    preflight_cmds = _commit_preflight_commands(repo, fix_persona_name)
+    if preflight_cmds and preflight_cmds != verify_cmds:
         preflight_block = "\n".join(f"- `{cmd}`" for cmd in preflight_cmds)
 
     commit_failure_block = ""
@@ -386,6 +388,7 @@ def address_review_findings(
         message=message,
         branch=branch,
         repo=repo,
+        persona=fix_persona_name,
     )
     if not push_result.ok:
         detail = push_result.detail or f"Commit/push failed ({push_result.phase})"
@@ -481,7 +484,13 @@ def attempt_ci_fix(
     message = (
         f"fix(fleet): CI failures on PR #{pr_number}\n\n{_AGENT_FOOTER} persona={fix_persona_name}"
     )
-    return _commit_push(worktree=worktree, message=message, branch=branch, repo=repo)
+    return _commit_push(
+        worktree=worktree,
+        message=message,
+        branch=branch,
+        repo=repo,
+        persona=fix_persona_name,
+    )
 
 
 def tiered_merge_allowed(

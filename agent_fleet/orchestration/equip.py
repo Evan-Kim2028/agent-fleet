@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from agent_fleet.level_up.compaction import touch_overlay_rules
 from agent_fleet.level_up.experience import last_experience_shows_verify_failed
@@ -11,11 +11,14 @@ from agent_fleet.level_up.models import DispatchEquip
 from agent_fleet.level_up.overlay import compose_overlay_text, load_overlay
 from agent_fleet.level_up.paths import FLEET_TIER, repo_key
 from agent_fleet.skills_lib import (
+    PR_LOOP_EXECUTE_SKILLS,
     SYSTEMATIC_DEBUGGING_SKILL,
+    base_kit_skill_dirs,
     compose_persona_body,
     load_loadout,
     loadout_execute_skill_ids,
     loadout_review_skill_ids,
+    merge_skill_dirs,
     skill_exists_in_base_kit,
 )
 
@@ -25,17 +28,30 @@ if TYPE_CHECKING:
     from agent_fleet.repo import RepoConfig
 
 
+def _empty_loadout(persona: str) -> dict[str, Any]:
+    return {"name": persona, "skill_slots": {"execute": [], "review": []}}
+
+
+def _resolve_persona_loadout(persona: str) -> tuple[dict[str, Any], str]:
+    """Return loadout dict and display name; markdown-only repos get an empty loadout."""
+    try:
+        loadout = load_loadout(persona)
+    except FileNotFoundError:
+        return _empty_loadout(persona), persona
+    return loadout, str(loadout.get("name") or persona)
+
+
 def resolve_dispatch_equip(
     task: FleetTask,
     fleet_config: FleetConfig,
     repo: RepoConfig | None,
     run_id: str | None = None,
 ) -> DispatchEquip:
-    """Pick execute/review skill slots and compose body for one dispatch."""
-    del fleet_config  # reserved for fleet-wide equip policy
+    """Resolve dispatch equip: loadouts, overlays, dynamic skills, journaling."""
     persona = task.persona or "coder"
-    loadout = load_loadout(persona)
-    loadout_name = str(loadout.get("name") or persona)
+    loadout, loadout_name = _resolve_persona_loadout(persona)
+
+    skill_dirs = merge_skill_dirs(base_kit_skill_dirs(), fleet_config.skill_dirs)
 
     repo_key_value = repo_key(
         name=repo.name if repo else None,
@@ -63,6 +79,15 @@ def resolve_dispatch_equip(
     ):
         extra_execute.append(SYSTEMATIC_DEBUGGING_SKILL)
 
+    if repo is not None and repo.pr_loop is not None and repo.pr_loop.enabled:
+        for skill_id in PR_LOOP_EXECUTE_SKILLS:
+            if (
+                skill_exists_in_base_kit(skill_id)
+                and skill_id not in loadout_execute
+                and skill_id not in extra_execute
+            ):
+                extra_execute.append(skill_id)
+
     skill_slots_execute = [*loadout_execute, *extra_execute]
     skill_slots_review = loadout_review_skill_ids(loadout)
     parent_run_id = task.equip.parent_run_id if task.equip else None
@@ -73,6 +98,7 @@ def resolve_dispatch_equip(
         repo_overlay=repo_overlay_text,
         extra_skills=extra_execute or None,
         level_up_generation=generation,
+        skill_dirs=skill_dirs,
     )
 
     equip = DispatchEquip(

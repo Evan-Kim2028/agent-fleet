@@ -45,7 +45,12 @@ def _rerun_quality_gates(
     if scope_result["exit_code"] != 0:
         return results, summary, 1, changed_files
 
-    verify_results = run_verify_phases(workspace=workspace, repo=repo, timeout_s=timeout_s)
+    verify_results = run_verify_phases(
+        workspace=workspace,
+        repo=repo,
+        timeout_s=timeout_s,
+        persona=task.persona,
+    )
     results.extend(verify_results)
     if verify_results and not verify_results[-1]["passed"]:
         return results, summary, 1, changed_files

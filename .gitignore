@@ -14,3 +14,6 @@ venv/
 .coverage
 htmlcov/
 .worktrees/
+.env
+.env.*
+!.env.example

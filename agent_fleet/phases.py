@@ -17,6 +17,7 @@ from agent_fleet.verify_core import (
     get_working_tree_diff,
     run_shell_verify,
 )
+from agent_fleet.repo import verify_commands_for_persona
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -124,12 +125,16 @@ def run_verify_phases(
     workspace: Path,
     repo: RepoConfig | None,
     timeout_s: int,
+    persona: str | None = None,
 ) -> list[dict[str, Any]]:
-    if repo is None or not repo.verify_commands:
+    if repo is None:
+        return []
+    commands = verify_commands_for_persona(repo, persona) if persona else repo.verify_commands
+    if not commands:
         return []
 
     results: list[dict[str, Any]] = []
-    for command in repo.verify_commands:
+    for command in commands:
         outcome = run_shell_verify(workspace, command, timeout_s=timeout_s)
         results.append({"phase": "verify", **outcome})
         if not outcome["passed"]:
@@ -391,6 +396,7 @@ def run_pipeline(
                     workspace=workspace,
                     repo=repo,
                     timeout_s=timeout_s,
+                    persona=task.persona,
                 )
                 results.extend(verify_results)
                 if verify_results and not verify_results[-1]["passed"]:

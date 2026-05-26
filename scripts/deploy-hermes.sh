@@ -49,6 +49,9 @@ else
   "$PYTHON" -m pip install -e "$REPO_ROOT[dev]" -q
 fi
 
+echo "==> Migrate fleet storage out of Hermes home (if needed)"
+"$PYTHON" -m agent_fleet.cli migrate-home 2>/dev/null || true
+
 echo "==> Link Hermes plugin"
 mkdir -p "$HERMES_HOME/plugins"
 if [[ -e "$PLUGIN_LINK" && ! -L "$PLUGIN_LINK" ]]; then

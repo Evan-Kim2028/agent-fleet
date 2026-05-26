@@ -151,3 +151,54 @@ def test_sweep_orphan_worktrees(tmp_path: Path) -> None:
     assert removed == 1
     assert not orphan_wt.exists(), "orphan worktree should have been removed"
     assert active_wt.exists(), "active worktree should be kept"
+
+
+def test_protected_dispatch_branches_keeps_in_flight_worktree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In-flight issue dispatch branches must not be swept before PR open."""
+    from agent_fleet.integrations.local_git import LocalGitOps
+    from agent_fleet.pr_loop.worktree import protected_dispatch_branches, sweep_orphan_worktrees
+
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+    base = tmp_path / "worktrees"
+    git_ops = LocalGitOps(repo_path, use_worktree=True, worktree_base=base)
+
+    dispatch_wt = git_ops.setup_workspace(
+        repo_path,
+        "dispatch-run",
+        "main",
+        branch_name="fleet/backend/1737-deadbeef",
+    )
+    orphan_wt = git_ops.setup_workspace(
+        repo_path,
+        "orphan-run",
+        "main",
+        branch_name="fleet/orphan",
+    )
+    assert dispatch_wt.exists()
+    assert orphan_wt.exists()
+
+    state: dict[str, object] = {
+        "in_flight": {
+            "1737": [{"pid": 99999, "persona": "backend"}],
+        },
+    }
+    monkeypatch.setattr(
+        "agent_fleet.in_flight.pid_is_dispatch",
+        lambda pid: pid == 99999,
+    )
+
+    protected = protected_dispatch_branches(repo_path, base, state)
+    assert "fleet/backend/1737-deadbeef" in protected
+
+    removed = sweep_orphan_worktrees(
+        repo_path,
+        base_path=base,
+        active_branches=protected,
+    )
+    assert removed == 1
+    assert dispatch_wt.exists(), "in-flight dispatch worktree must be kept"
+    assert not orphan_wt.exists(), "unprotected orphan should be removed"
