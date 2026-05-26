@@ -13,6 +13,21 @@ Both merge at dispatch time. Repo settings override global defaults where noted 
 
 For persona loadouts, overlays, and local level-up journaling, see **[PERSONA-EVOLUTION.md](PERSONA-EVOLUTION.md)**.
 
+## Bundled persona loadouts
+
+Every first-class bundled persona ships with a `*.loadout.yaml` in `agent_fleet/personas/`. Loadouts reference base-kit skill ids; markdown stubs stay thin role/methodology text.
+
+| Persona | Execute skills | Review / notes |
+|---------|----------------|----------------|
+| `coder` | TDD, prove-it-works, boundary discipline, git worktrees, … | — |
+| `reviewer` | interrogate, reflect | `pstack/unslop`, `cursor-team-kit/deslop` on review phase |
+| `pr-analyzer` | `pstack/interrogate`, `pstack/how` | quality pass in `pr_review/prompts.py` (thermo-nuclear) |
+| `explorer` | `pstack/how`, `pstack/why` | read-only; mode `plan` |
+| `tech-scout` | `pstack/how`, `pstack/figure-it-out` | read-only scout pipeline |
+| `product-scout` | `pstack/how`, `pstack/reflect` | read-only scout pipeline |
+
+At dispatch, orchestration composes: loadout skills + stub markdown + fleet/repo overlays. See `agent_fleet/personas/*.loadout.yaml`.
+
 ## Execution backends
 
 Agent Fleet runs the same personas and pipelines through a pluggable execution backend. Set `default_backend` in `fleet.yaml`:
