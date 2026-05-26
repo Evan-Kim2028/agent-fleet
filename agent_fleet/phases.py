@@ -162,6 +162,15 @@ def run_execute_phase(
             mode=parse_agent_mode(persona.mode),
             allowed_tools=list(persona.allowed_tools),
         )
+    _persist_execute_artifact(
+        persona=persona.name,
+        task=task,
+        workspace=workspace,
+        stdout=result.stdout,
+        stderr=result.stderr,
+        exit_code=result.exit_code,
+        agent_id=result.agent_id,
+    )
     return {
         "phase": "execute",
         "persona": persona.name,
@@ -171,6 +180,124 @@ def run_execute_phase(
         "duration_s": result.duration_s,
         "agent_id": result.agent_id,
     }
+
+
+def _persist_execute_artifact(
+    *,
+    persona: str,
+    task: FleetTask,
+    workspace: Path,
+    stdout: str,
+    stderr: str,
+    exit_code: int,
+    agent_id: str | None,
+) -> None:
+    """Write execute-phase output to ~/.agent-fleet/runs/ so deliverables survive worktree teardown.
+
+    Also snapshots uncommitted/untracked files from the worktree so a future
+    redispatch can resume from where the agent left off even if the worktree
+    is wiped out-of-band (e.g. cursor-sdk bash subprocess churn).
+    """
+    import json
+    import logging
+    import shutil
+    import subprocess
+    import time
+    from pathlib import Path as _Path
+
+    log = logging.getLogger(__name__)
+
+    try:
+        runs_root = _Path.home() / ".agent-fleet" / "runs"
+        run_id = agent_id or f"run-{int(time.time())}"
+        target = runs_root / run_id
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "stdout.md").write_text(stdout or "", encoding="utf-8")
+        if stderr:
+            (target / "stderr.txt").write_text(stderr, encoding="utf-8")
+        meta = {
+            "persona": persona,
+            "goal": task.goal,
+            "workspace": str(workspace),
+            "exit_code": exit_code,
+            "agent_id": agent_id,
+            "ts": time.time(),
+        }
+        (target / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    except Exception:
+        logging.getLogger(__name__).exception("persist_execute_artifact failed")
+        return
+
+    # Best-effort filesystem snapshot of the worktree state. Failures here
+    # must never break the run — stdout/meta have already been persisted.
+    try:
+        if not workspace.exists() or not (workspace / ".git").exists():
+            return
+
+        def _git(args: list[str]) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["git", *args],
+                cwd=str(workspace),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+
+        status = _git(["status", "--porcelain", "-z"])
+        if status.returncode != 0 or not status.stdout:
+            return
+
+        files_dir = target / "files"
+        entries: list[dict[str, str]] = []
+        # -z output uses NUL separators; rename entries use a double NUL.
+        tokens = status.stdout.split("\0")
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            if not tok:
+                i += 1
+                continue
+            code = tok[:2]
+            path = tok[3:] if len(tok) > 3 else ""
+            if code.startswith(("R", "C")):
+                # Rename/copy: next -z token is the source path; skip it.
+                i += 2
+            else:
+                i += 1
+            if not path:
+                continue
+            entries.append({"code": code, "path": path})
+            src = workspace / path
+            if src.is_file():
+                dst = files_dir / path
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    shutil.copy2(src, dst)
+                except OSError as exc:
+                    log.warning("snapshot copy failed for %s: %s", path, exc)
+
+        if not entries:
+            return
+
+        # Capture working-tree diff vs HEAD (covers tracked file edits but not
+        # untracked files; the raw file copies above cover those).
+        diff = _git(["diff", "HEAD", "--binary"])
+        if diff.returncode == 0 and diff.stdout:
+            (target / "worktree.patch").write_text(diff.stdout, encoding="utf-8")
+
+        branch = _git(["rev-parse", "--abbrev-ref", "HEAD"])
+        head_sha = _git(["rev-parse", "HEAD"])
+        snapshot_meta = {
+            "ts": time.time(),
+            "workspace": str(workspace),
+            "branch": branch.stdout.strip() if branch.returncode == 0 else None,
+            "head": head_sha.stdout.strip() if head_sha.returncode == 0 else None,
+            "entries": entries,
+        }
+        (target / "snapshot.json").write_text(json.dumps(snapshot_meta, indent=2), encoding="utf-8")
+    except Exception:
+        log.exception("persist_execute_artifact: snapshot step failed")
 
 
 def run_scope_phase(

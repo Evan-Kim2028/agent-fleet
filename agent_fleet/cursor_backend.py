@@ -467,9 +467,7 @@ class CursorBackend:
         # its server-side budget — neither benefits from immediate retry.
         if status == "error":
             return True
-        if status == "finished" and (not text or not text.strip()):
-            return True
-        return False
+        return status == "finished" and (not text or not text.strip())
 
     @classmethod
     def _reconnect_bridge(cls) -> None:

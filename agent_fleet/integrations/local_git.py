@@ -172,9 +172,18 @@ class LocalGitOps:
 
     def teardown_workspace(self, worktree: Path, *, forensic: bool = False) -> None:
         if forensic:
+            logger.info("teardown_workspace SKIP (forensic) worktree=%s", worktree)
             return
         if not self.use_worktree or worktree.resolve() == self.repo_root.resolve():
             return
+        import traceback
+
+        logger.warning(
+            "teardown_workspace REMOVING worktree=%s exists=%s caller_stack:\n%s",
+            worktree,
+            worktree.exists(),
+            "".join(traceback.format_stack(limit=8)),
+        )
         self._run(["worktree", "remove", "--force", str(worktree)], cwd=self.repo_root)
         if worktree.exists():
             shutil.rmtree(worktree, ignore_errors=True)
