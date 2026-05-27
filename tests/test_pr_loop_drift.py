@@ -225,9 +225,7 @@ def test_detect_drift_conflict_idempotent(tmp_path: Path) -> None:
     ancestor_fail = _make_proc(1)
     conflict_tree = MergeTreeResult(clean=False, conflict_files=("src/a.py",))
     recent = (datetime.now(tz=UTC) - timedelta(hours=1)).isoformat()
-    pr_comments_with_marker = [
-        {"body": f"drift body {_DRIFT_PR_MARKER}", "createdAt": recent}
-    ]
+    pr_comments_with_marker = [{"body": f"drift body {_DRIFT_PR_MARKER}", "createdAt": recent}]
     issue_comments_with_marker = [
         {"body": f"replan body {_DRIFT_ISSUE_MARKER}", "createdAt": recent}
     ]
@@ -273,9 +271,7 @@ def test_detect_drift_pr_marker_but_no_issue_marker_retries(tmp_path: Path) -> N
     ancestor_fail = _make_proc(1)
     conflict_tree = MergeTreeResult(clean=False, conflict_files=("src/a.py",))
     recent = (datetime.now(tz=UTC) - timedelta(hours=1)).isoformat()
-    pr_comments_with_marker = [
-        {"body": f"drift body {_DRIFT_PR_MARKER}", "createdAt": recent}
-    ]
+    pr_comments_with_marker = [{"body": f"drift body {_DRIFT_PR_MARKER}", "createdAt": recent}]
 
     with (
         patch("subprocess.run") as mock_run,
