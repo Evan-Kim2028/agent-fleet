@@ -135,9 +135,9 @@ def cmd_personas(args: argparse.Namespace) -> int:
 
 
 def cmd_loop(args: argparse.Namespace) -> int:
-    from agent_fleet.logging_config import configure_fleet_logging
     from agent_fleet.pr_loop.lifecycle import run_pr_lifecycle
     from agent_fleet.pr_loop.watcher import PrLoopWatcher, run_watcher_once
+    from agent_fleet.telemetry import configure_fleet_logging
 
     configure_fleet_logging()
 

@@ -32,7 +32,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
-    from agent_fleet.logging_config import configure_fleet_logging
+    from agent_fleet.telemetry import configure_fleet_logging
 
     configure_fleet_logging()
 

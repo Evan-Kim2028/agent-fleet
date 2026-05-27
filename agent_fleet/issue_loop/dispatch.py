@@ -44,7 +44,7 @@ def run_issue_dispatch(
     dispatch_config: IssueDispatchConfig | None = None,
 ) -> int:
     """Execute full pipeline for an issue trigger. Returns process exit code."""
-    from agent_fleet.logging_config import configure_fleet_logging
+    from agent_fleet.telemetry import configure_fleet_logging
 
     configure_fleet_logging()
 

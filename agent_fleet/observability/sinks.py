@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from abc import ABC, abstractmethod
 from collections import deque
 from typing import TYPE_CHECKING
@@ -11,8 +10,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from agent_fleet.observability.events import FleetEvent
-
-logger = logging.getLogger(__name__)
 
 
 class LogSink(ABC):
@@ -36,27 +33,6 @@ class JsonlFileSink(LogSink):
         with self._path.open("a", encoding="utf-8") as handle:
             handle.write(event.to_json())
             handle.write("\n")
-
-
-class PythonLoggingSink(LogSink):
-    """Mirror fleet events into the standard Python logging tree."""
-
-    def __init__(self, logger_name: str = "agent_fleet.events") -> None:
-        self._logger = logging.getLogger(logger_name)
-
-    def emit(self, event: FleetEvent) -> None:
-        level = {
-            "debug": logging.DEBUG,
-            "info": logging.INFO,
-            "warning": logging.WARNING,
-            "error": logging.ERROR,
-        }.get(event.level, logging.INFO)
-        summary = event.event
-        if event.phase:
-            summary = f"{event.phase} {summary}"
-        if event.data:
-            summary = f"{summary} {event.data}"
-        self._logger.log(level, "[%s] %s", event.run_id, summary)
 
 
 class MemoryRingSink(LogSink):

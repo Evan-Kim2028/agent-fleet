@@ -32,7 +32,7 @@ from agent_fleet.memory import (
     count_playwright_mcp_processes,
     memory_snapshot,
 )
-from agent_fleet.observability.fleet_logger import get_watcher_logger
+from agent_fleet.observability.fleet_logger import emit_fleet_event
 from agent_fleet.repo import (
     RepoConfig,
     find_repo_config,
@@ -78,7 +78,7 @@ def _cleanup_orphaned_playwright_mcp(state: dict[str, Any]) -> None:
         return
     logger.warning("Orphaned playwright MCP processes detected: count=%s", before)
     result = cleanup_playwright_mcp_processes(force_kill=True)
-    get_watcher_logger().emit(
+    emit_fleet_event(
         "mcp.orphan.cleanup",
         level="warning" if result.after > 0 else "info",
         before=result.before,
@@ -219,7 +219,7 @@ class IssueLoopWatcher:
                 retryable = admission.reason in RETRYABLE_ADMISSION_REASONS
                 if retryable:
                     retryable_deferred = True
-                get_watcher_logger().emit(
+                emit_fleet_event(
                     "admission.check",
                     level="warning" if retryable else "info",
                     issue_number=issue_number,

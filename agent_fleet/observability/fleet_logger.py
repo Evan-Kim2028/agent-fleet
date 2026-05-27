@@ -16,8 +16,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_WATCHER_LOGGER: FleetLogger | None = None
-
 
 class FleetLogger:
     """Facade over RunLog that also bridges optional progress callbacks."""
@@ -97,29 +95,26 @@ class FleetLogger:
             yield self
 
 
-def get_watcher_logger() -> FleetLogger:
-    """Singleton logger for issue/PR watcher background events."""
-    global _WATCHER_LOGGER
-    if _WATCHER_LOGGER is None:
-        _WATCHER_LOGGER = FleetLogger.for_background(run_id="watcher")
-    return _WATCHER_LOGGER
-
-
 def emit_fleet_event(
     event: str,
     *,
     level: str = "info",
-    use_watcher_fallback: bool = True,
     **payload: object,
 ) -> None:
-    """Emit to bound RunLog, else watcher JSONL when ``use_watcher_fallback``."""
+    """Emit to bound RunLog, else to the active Logfire span."""
     run_log = get_run_log()
     data = dict(payload) if payload else None
     if run_log is not None:
         run_log.emit(event, level=level, data=data)
-    elif use_watcher_fallback:
-        get_watcher_logger().emit(event, level=level, **payload)
-    if payload:
-        logger.debug("%s %s", event, payload)
     else:
-        logger.debug("%s", event)
+        try:
+            import logfire
+
+            getattr(logfire, level)(event, **payload)
+        except ImportError, AttributeError:
+            logger.log(
+                logging.getLevelName(level.upper()),
+                "%s %s",
+                event,
+                payload,
+            )

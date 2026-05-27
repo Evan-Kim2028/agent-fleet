@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-from agent_fleet.observability.fleet_logger import FleetLogger, get_watcher_logger
+from agent_fleet.observability.fleet_logger import FleetLogger, emit_fleet_event
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     import pytest
 
 
-def test_watcher_logger_writes_jsonl(
+def test_emit_fleet_event_routes_to_bound_run_log(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -21,14 +21,11 @@ def test_watcher_logger_writes_jsonl(
         "agent_fleet.observability.log._DEFAULT_RUNS_DIR",
         tmp_path,
     )
-    import agent_fleet.observability.fleet_logger as fl_mod
+    fleet_log = FleetLogger.for_background(run_id="watcher-test")
+    with fleet_log.bind():
+        emit_fleet_event("admission.check", allowed=False, reason="max_parallel")
 
-    fl_mod._WATCHER_LOGGER = None
-
-    logger = get_watcher_logger()
-    logger.emit("admission.check", allowed=False, reason="max_parallel")
-
-    path = tmp_path / "watcher.jsonl"
+    path = tmp_path / "watcher-test.jsonl"
     assert path.is_file()
     line = json.loads(path.read_text(encoding="utf-8").strip())
     assert line["event"] == "admission.check"
