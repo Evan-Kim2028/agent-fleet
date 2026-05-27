@@ -193,6 +193,21 @@ def plan(
                 allowed_tools=[],
             )
 
+        # Distinguish backend failure from "model returned prose without JSON".
+        # An exit_code != 0 OR empty stdout means the LLM call itself failed
+        # (auth error, transport timeout, swallowed exception in
+        # CursorSession.send, etc.). Retrying on that just produces the same
+        # opaque failure; raise immediately with the underlying diagnostic
+        # instead of masking it as "No JSON object found in LLM output".
+        if result.exit_code != 0 or not result.stdout.strip():
+            stderr_tail = (result.stderr or "")[-500:]
+            cause = getattr(result, "cause", None)
+            cause_str = f"; cause={type(cause).__name__}: {cause}" if cause else ""
+            raise ValueError(
+                f"PLAN backend call failed: exit_code={result.exit_code}, "
+                f"stderr_tail={stderr_tail!r}{cause_str}"
+            )
+
         try:
             data = _extract_json(result.stdout)
             validate_task_spec(data)
