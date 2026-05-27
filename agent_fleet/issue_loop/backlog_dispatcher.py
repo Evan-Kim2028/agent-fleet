@@ -135,9 +135,7 @@ class BacklogDispatcher:
                 # Treat unknown timestamps as fresh to be safe.
                 return True
             try:
-                created_at = datetime.fromisoformat(
-                    created_at_raw.replace("Z", "+00:00")
-                )
+                created_at = datetime.fromisoformat(created_at_raw.replace("Z", "+00:00"))
                 age_s = (now - created_at).total_seconds()
                 if age_s < self.marker_freshness_s:
                     return True
@@ -153,7 +151,7 @@ class BacklogDispatcher:
         """Return the first ``fleet-persona/<X>`` label's X, else default_persona."""
         for label in labels:
             if label.startswith(self.persona_label_prefix):
-                persona = label[len(self.persona_label_prefix):]
+                persona = label[len(self.persona_label_prefix) :]
                 if persona:
                     return persona
         return self.default_persona
@@ -248,14 +246,10 @@ class BacklogDispatcher:
 
             # --- Cheap filter 4: recent backlog-dispatcher marker ---
             raw_comments = issue.get("comments") or []
-            comments: list[dict[str, Any]] = [
-                c for c in raw_comments if isinstance(c, dict)
-            ]
+            comments: list[dict[str, Any]] = [c for c in raw_comments if isinstance(c, dict)]
             if self._has_recent_marker(comments, now):
                 result._skip("recent_marker")
-                logger.debug(
-                    "backlog_dispatcher: skip #%s — recent marker comment", issue_number
-                )
+                logger.debug("backlog_dispatcher: skip #%s — recent marker comment", issue_number)
                 continue
 
             # --- Persona selection ---

@@ -397,9 +397,7 @@ class CombinedWatcher:
 
         # Build backlog dispatchers for targets that have the feature enabled.
         # Each entry is (BacklogDispatcher, tick_interval_s, last_tick_time | None).
-        self._backlog_dispatchers: list[
-            tuple[BacklogDispatcher, int, datetime | None]
-        ] = []
+        self._backlog_dispatchers: list[tuple[BacklogDispatcher, int, datetime | None]] = []
         # Include the controller repo itself when no explicit targets are configured.
         backlog_targets = targets if targets else [repo]
         for target in backlog_targets:

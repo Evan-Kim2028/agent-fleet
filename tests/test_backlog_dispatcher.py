@@ -119,11 +119,7 @@ def test_in_flight_issue_skipped(tmp_path: Path) -> None:
     sp = tmp_path / ".agent-fleet-state.json"
     sp.write_text(
         json.dumps(
-            {
-                "in_flight": {
-                    "100": [{"pid": 9999, "persona": "data", "visual_audit": False}]
-                }
-            }
+            {"in_flight": {"100": [{"pid": 9999, "persona": "data", "visual_audit": False}]}}
         ),
         encoding="utf-8",
     )
