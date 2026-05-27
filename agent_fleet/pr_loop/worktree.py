@@ -99,8 +99,39 @@ def _parse_worktree_list(stdout: str) -> list[dict[str, str]]:
     return entries
 
 
+def _worktree_in_use(worktree_path: Path) -> bool:
+    """True if any process has *worktree_path* (or a descendant) as its cwd.
+
+    Walks /proc/*/cwd. Used to avoid deleting a worktree out from under a
+    live dispatcher whose branch hasn't yet become an open PR.
+    """
+    try:
+        target = worktree_path.resolve()
+    except OSError:
+        return False
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return False
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            cwd = (entry / "cwd").resolve()
+        except OSError, PermissionError:
+            continue
+        try:
+            cwd.relative_to(target)
+        except ValueError:
+            continue
+        return True
+    return False
+
+
 def remove_worktree(repo_root: Path, worktree_path: Path) -> bool:
     """Force-remove *worktree_path* from the git worktree registry. Returns True on success."""
+    if _worktree_in_use(worktree_path):
+        logger.info("Skipping worktree removal — in use: %s", worktree_path)
+        return False
     rm = subprocess.run(
         ["git", "-C", str(repo_root), "worktree", "remove", "--force", str(worktree_path)],
         capture_output=True,
