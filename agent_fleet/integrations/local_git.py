@@ -206,7 +206,19 @@ class LocalGitOps:
         last_stderr = ""
         last_stdout = ""
         for _ in range(max_hook_retries + 1):
-            self._run(["add", "-A"], cwd=worktree)
+            # Filter forbidden paths (.venv, node_modules, caches) so a stray
+            # symlink in the worktree can't end up in a fleet PR.
+            from agent_fleet.pr_loop.github_ops import _is_forbidden_path
+
+            scan = self._run(["status", "--porcelain", "-uall"], cwd=worktree)
+            stage_paths = [
+                line[3:].strip()
+                for line in scan.stdout.splitlines()
+                if line.strip() and len(line) > 3 and not _is_forbidden_path(line[3:].strip())
+            ]
+            if not stage_paths:
+                return None
+            self._run(["add", "-A", "--", *stage_paths], cwd=worktree)
             result = self._run(
                 ["commit", "-m", message],
                 cwd=worktree,

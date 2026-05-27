@@ -184,6 +184,36 @@ def _init_repo_with_remote(tmp_path: Path) -> tuple[Path, Path]:
     return remote, local
 
 
+def test_commit_and_push_skips_forbidden_paths(tmp_path: Path) -> None:
+    """A stray .venv symlink in the worktree must not end up in the commit.
+
+    Regression guard: silphco PR #2000 committed pipeline/.venv as a
+    self-symlink because `git add -A` blindly staged everything.
+    """
+    from agent_fleet.pr_loop.github_ops import commit_and_push
+
+    _, local = _init_repo_with_remote(tmp_path)
+    subprocess.run(["git", "checkout", "-b", "feature-branch"], cwd=local, check=True)
+    (local / "feature.txt").write_text("feature\n", encoding="utf-8")
+    pipeline = local / "pipeline"
+    pipeline.mkdir()
+    (pipeline / ".venv").symlink_to(pipeline / ".venv")  # self-referential
+    (local / "node_modules").mkdir()
+    (local / "node_modules" / "junk.js").write_text("// junk\n", encoding="utf-8")
+
+    result = commit_and_push(local, "test: forbidden filter", "feature-branch")
+    assert result.ok is True
+    committed = subprocess.run(
+        ["git", "show", "--name-only", "--format=", "HEAD"],
+        cwd=local,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    assert "feature.txt" in committed
+    assert not any(".venv" in p or "node_modules" in p for p in committed), committed
+
+
 def test_commit_and_push_retries_after_pre_commit_autofix(tmp_path: Path) -> None:
     """Pre-commit hook auto-rewrites a file and exits 1 on first call;
     commit_and_push should re-stage and succeed instead of returning False."""
