@@ -198,6 +198,29 @@ def test_session_send_hard_fails_when_mcp_required_but_unused(
     assert result.mcp_tool_calls == ()
 
 
+def test_session_send_populates_cause_when_sdk_raises(
+    fake_sdk: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """When the underlying SDK send() raises, the swallow path must record the
+    original exception on CursorLLMResult.cause so callers (the planner) can
+    surface a real diagnostic instead of an empty stdout."""
+    boom = RuntimeError("upstream transport timeout")
+    agent = MagicMock(
+        agent_id="agent-xyz",
+        send=MagicMock(side_effect=boom),
+        dispose=MagicMock(),
+    )
+    fake_sdk.Agent.create.return_value = agent
+    backend = CursorBackend(api_key="x")
+    sess = backend.create_session(persona_name="coder", cwd=tmp_path)
+    result = sess.send("hi", max_tokens=1, timeout_s=1)
+    assert result.exit_code == 1
+    assert result.cause is boom
+    assert "RuntimeError" in result.stderr
+    assert "upstream transport timeout" in result.stderr
+
+
 def test_session_send_maps_error_status_to_nonzero_exit(
     fake_sdk: MagicMock,
     tmp_path: Path,

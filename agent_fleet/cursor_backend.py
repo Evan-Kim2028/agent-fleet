@@ -33,6 +33,12 @@ class CursorLLMResult:
     duration_s: float
     agent_id: str | None = None
     mcp_tool_calls: tuple[str, ...] = field(default_factory=tuple)
+    # Set when send() catches an exception and falls back to a synthetic
+    # exit_code=1 result. Callers reading only stdout will see empty output;
+    # callers that care about the underlying failure (e.g. the planner)
+    # inspect this to build a diagnostic error message instead of reporting
+    # the generic "no JSON in output" symptom.
+    cause: BaseException | None = None
 
 
 def _resolve_model_selection(model: str) -> str | dict[str, Any]:
@@ -313,10 +319,11 @@ class CursorSession:
             logger.exception("CursorSession.send failed")
             return CursorLLMResult(
                 stdout="",
-                stderr=str(exc),
+                stderr=f"{type(exc).__name__}: {exc}",
                 exit_code=1,
                 duration_s=time.monotonic() - t0,
                 agent_id=self.agent_id,
+                cause=exc,
             )
 
     def dispose(self) -> None:

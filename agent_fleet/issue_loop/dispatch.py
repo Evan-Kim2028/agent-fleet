@@ -193,12 +193,30 @@ def main() -> None:
     issue_number = int(os.environ.get("ISSUE_NUMBER", "0"))
     comment_body = os.environ.get("COMMENT_BODY", "")
     persona = os.environ.get("PERSONA") or None
-    workspace = Path(os.environ.get("AGENT_FLEET_WORKSPACE", Path.cwd())).resolve()
+    workspace_env = os.environ.get("AGENT_FLEET_WORKSPACE")
+    target_config_env = os.environ.get("AGENT_FLEET_TARGET_CONFIG")
     fleet_config_path = os.environ.get("AGENT_FLEET_CONFIG")
 
     if issue_number <= 0:
         print("ISSUE_NUMBER env var required", file=sys.stderr)
         raise SystemExit(1)
+
+    # Refuse the silent-cwd default. Manual invocations from agent-fleet's own
+    # checkout would otherwise resolve the controller's .agent-fleet.yaml as
+    # the "target", silently running the dispatch against the wrong workspace.
+    # The watcher always sets AGENT_FLEET_TARGET_CONFIG; manual callers must
+    # set one of the two.
+    if not workspace_env and not target_config_env:
+        print(
+            "Refusing to dispatch: neither AGENT_FLEET_WORKSPACE nor "
+            "AGENT_FLEET_TARGET_CONFIG is set. Set AGENT_FLEET_WORKSPACE to "
+            "the target repo root (where its .agent-fleet.yaml lives), or "
+            "AGENT_FLEET_TARGET_CONFIG to the target's config file path.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    workspace = Path(workspace_env or Path.cwd()).resolve()
 
     raise SystemExit(
         run_issue_dispatch(
