@@ -59,16 +59,47 @@ def _git_run(
         )
 
 
+_FORBIDDEN_PATH_FRAGMENTS = (
+    "/.venv/",
+    "/.venv",
+    "/node_modules/",
+    "/__pycache__/",
+    "/.pytest_cache/",
+    "/.mypy_cache/",
+    "/.ruff_cache/",
+)
+
+
+def _is_forbidden_path(path: str) -> bool:
+    """True if *path* is a build/runtime artifact a fleet PR must never publish.
+
+    `.venv` symlinks (or directories) accidentally staged by `git add -A`
+    have poisoned merged PRs and broken self-hosted CI. We hard-block them
+    here regardless of repo .gitignore state.
+    """
+    norm = "/" + path.lstrip("/")
+    return any(
+        frag in norm or norm.endswith(frag.rstrip("/")) for frag in _FORBIDDEN_PATH_FRAGMENTS
+    )
+
+
 def _changed_files(worktree: Path, *, exclude: tuple[str, ...] = ()) -> list[str]:
     if not Path(worktree).is_dir():
         return []
     exclude_set = set(exclude)
-    status = _git_run(["git", "status", "--porcelain"], cwd=worktree, timeout=30)
-    return [
-        line[3:].strip()
-        for line in status.stdout.splitlines()
-        if line.strip() and len(line) > 3 and line[3:].strip() not in exclude_set
-    ]
+    # -uall expands untracked directories so per-file forbidden-path filters
+    # can fire (a default `--porcelain` reports `pipeline/` for an entire
+    # untracked dir, hiding a stray `.venv` inside).
+    status = _git_run(["git", "status", "--porcelain", "-uall"], cwd=worktree, timeout=30)
+    out: list[str] = []
+    for line in status.stdout.splitlines():
+        if not line.strip() or len(line) <= 3:
+            continue
+        path = line[3:].strip()
+        if path in exclude_set or _is_forbidden_path(path):
+            continue
+        out.append(path)
+    return out
 
 
 def run_commit_preflight(
@@ -502,7 +533,18 @@ def commit_and_push(
     max_hook_retries = 2
     last_commit_output = ""
     for attempt in range(max_hook_retries + 1):
-        _git_run(["git", "add", "-A"], cwd=worktree, timeout=60, check=True)
+        # Re-scan after hooks (autofixers may add/remove files), filter
+        # forbidden paths, and stage explicitly — never `git add -A` which
+        # would pick up stray .venv / node_modules drops in the worktree.
+        stage_paths = _changed_files(worktree, exclude=exclude)
+        if not stage_paths:
+            return CommitPushResult(False, "no_changes", "No publishable changes after filter")
+        _git_run(
+            ["git", "add", "-A", "--", *stage_paths],
+            cwd=worktree,
+            timeout=60,
+            check=True,
+        )
         commit = _git_run(
             ["git", "commit", "-m", message],
             cwd=worktree,
