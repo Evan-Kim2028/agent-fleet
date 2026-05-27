@@ -28,6 +28,7 @@ from agent_fleet.personas import YamlPersonaResolver
 from agent_fleet.redispatch import dispatch_with_retry
 from agent_fleet.repo import RepoConfig, find_repo_config, merge_repo_into_fleet_config
 from agent_fleet.runner import run_full_pipeline
+from agent_fleet.telemetry import span as _telemetry_span
 from agent_fleet.verify_core import is_git_repo
 from agent_fleet.worktree import maybe_commit_recoverable_worktree, should_keep_task_worktree
 
@@ -384,7 +385,17 @@ class FleetDispatcher:
             progress_callback=self.progress_callback,
         )
 
-        with fleet_log.bind():
+        with (
+            _telemetry_span(
+                "fleet.dispatch",
+                run_id=fleet_log.run_id,
+                task_index=task_index,
+                persona=task.persona,
+                has_handoff=handoff is not None,
+                base_branch=base_branch,
+            ),
+            fleet_log.bind(),
+        ):
             fleet_log.emit(
                 "fleet.task.start",
                 task_index=task_index,

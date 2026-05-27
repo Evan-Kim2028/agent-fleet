@@ -27,6 +27,9 @@ from agent_fleet.repo import find_repo_config
 
 
 def main() -> int:
+    from agent_fleet.logging_config import configure_fleet_logging
+
+    configure_fleet_logging()
     token = os.environ.get("GITHUB_TOKEN")
     repo = os.environ.get("GITHUB_REPOSITORY")
     if not token or not repo:
