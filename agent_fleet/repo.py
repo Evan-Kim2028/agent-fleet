@@ -45,6 +45,7 @@ class RepoConfig:
     use_worktree: bool = False
     worktree_base: Path | None = None
     verify_commands: list[str] = field(default_factory=list)
+    worktree_bootstrap_commands: list[str] = field(default_factory=list)
     commit_preflight_commands: list[str] = field(default_factory=list)
     test_command: str | None = None
     lint_command: str | None = None
@@ -118,6 +119,7 @@ def load_repo_config(
         state_root = repo_root
 
     verify_commands = list(raw.get("verify_commands") or [])
+    worktree_bootstrap_commands = list(raw.get("worktree_bootstrap_commands") or [])
     commit_preflight_commands = list(raw.get("commit_preflight_commands") or [])
     test_command = raw.get("test_command")
     lint_command = raw.get("lint_command")
@@ -179,6 +181,7 @@ def load_repo_config(
         use_worktree=bool(raw.get("use_worktree", False)),
         worktree_base=worktree_base,
         verify_commands=verify_commands,
+        worktree_bootstrap_commands=worktree_bootstrap_commands,
         commit_preflight_commands=commit_preflight_commands,
         test_command=test_command,
         lint_command=lint_command,
