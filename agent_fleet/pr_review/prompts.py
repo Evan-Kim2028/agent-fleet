@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import textwrap
 
-from agent_fleet.pr_review.config import PrReviewConfig, load_overlay_text
+from agent_fleet.pr_review.config import (
+    DEFAULT_QUALITY_REVIEW_SKILLS,
+    PrReviewConfig,
+    load_overlay_text,
+)
 from agent_fleet.pr_review.git import classify_files, diff_for_files, truncate_diff
-from agent_fleet.skills_lib import DEFAULT_QUALITY_REVIEW_SKILL, load_skill_text
+from agent_fleet.skills_lib import load_skill_text
 
 JSON_OUTPUT_SPEC = textwrap.dedent("""\
     Return your complete assessment as **strict JSON**:
@@ -180,13 +184,17 @@ def build_prompt(
 
     elif mode == "quality":
         full_diff = truncate_diff(diff, config.max_diff_chars)
-        skill_name = config.quality_review_skill or DEFAULT_QUALITY_REVIEW_SKILL
-        quality_body = ""
+        skill_names = config.quality_review_skills or DEFAULT_QUALITY_REVIEW_SKILLS
+        skill_bodies: list[str] = []
         if config.quality_review_enabled and skill_dirs:
-            try:
-                quality_body = load_skill_text(skill_name, skill_dirs)
-            except FileNotFoundError:
-                quality_body = ""
+            for skill_name in skill_names:
+                try:
+                    body = load_skill_text(skill_name, skill_dirs)
+                except FileNotFoundError:
+                    continue
+                if body:
+                    skill_bodies.append(f"### Skill: {skill_name}\n\n{body}")
+        quality_body = "\n\n".join(skill_bodies)
         sections.append(
             textwrap.dedent(f"""\
             ## Thermo-nuclear code quality review (mandatory)
