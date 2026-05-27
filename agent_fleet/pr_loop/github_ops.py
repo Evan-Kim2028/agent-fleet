@@ -78,7 +78,9 @@ def _is_forbidden_path(path: str) -> bool:
     here regardless of repo .gitignore state.
     """
     norm = "/" + path.lstrip("/")
-    return any(frag in norm or norm.endswith(frag.rstrip("/")) for frag in _FORBIDDEN_PATH_FRAGMENTS)
+    return any(
+        frag in norm or norm.endswith(frag.rstrip("/")) for frag in _FORBIDDEN_PATH_FRAGMENTS
+    )
 
 
 def _changed_files(worktree: Path, *, exclude: tuple[str, ...] = ()) -> list[str]:
@@ -88,9 +90,7 @@ def _changed_files(worktree: Path, *, exclude: tuple[str, ...] = ()) -> list[str
     # -uall expands untracked directories so per-file forbidden-path filters
     # can fire (a default `--porcelain` reports `pipeline/` for an entire
     # untracked dir, hiding a stray `.venv` inside).
-    status = _git_run(
-        ["git", "status", "--porcelain", "-uall"], cwd=worktree, timeout=30
-    )
+    status = _git_run(["git", "status", "--porcelain", "-uall"], cwd=worktree, timeout=30)
     out: list[str] = []
     for line in status.stdout.splitlines():
         if not line.strip() or len(line) <= 3:
