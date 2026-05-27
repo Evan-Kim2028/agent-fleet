@@ -19,6 +19,7 @@ from agent_fleet.agent_mode import AgentMode, coerce_agent_mode
 from agent_fleet.contracts.mcp import McpServerSpec, StdioMcpServerSpec
 from agent_fleet.contracts.mcp_requirement import McpRequirement
 from agent_fleet.observability.context import get_run_log
+from agent_fleet.telemetry import span as _telemetry_span
 
 logger = logging.getLogger(__name__)
 mcp_logger = logging.getLogger("agent_fleet.mcp")
@@ -734,17 +735,34 @@ class CursorBackend:
                     agent_id=agent_id,
                 )
 
-        if timeout_s <= 0:
-            return _execute()
+        span_model = selected_model if isinstance(selected_model, str) else selected_model.get("id")
+        span_fast = (
+            None
+            if isinstance(selected_model, str)
+            else next(
+                (p.get("value") for p in selected_model.get("params", []) if p.get("id") == "fast"),
+                None,
+            )
+        )
+        with _telemetry_span(
+            "cursor.run",
+            model=span_model,
+            fast=span_fast,
+            timeout_s=timeout_s,
+            prompt_len=len(prompt_with_scope),
+            cwd=str(cwd) if cwd else None,
+        ):
+            if timeout_s <= 0:
+                return _execute()
 
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(_execute)
-            try:
-                return future.result(timeout=timeout_s)
-            except FuturesTimeoutError:
-                return CursorLLMResult(
-                    stdout="",
-                    stderr=f"Cursor run timed out after {timeout_s}s",
-                    exit_code=1,
-                    duration_s=time.monotonic() - t0,
-                )
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(_execute)
+                try:
+                    return future.result(timeout=timeout_s)
+                except FuturesTimeoutError:
+                    return CursorLLMResult(
+                        stdout="",
+                        stderr=f"Cursor run timed out after {timeout_s}s",
+                        exit_code=1,
+                        duration_s=time.monotonic() - t0,
+                    )

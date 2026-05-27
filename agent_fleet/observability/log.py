@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 from agent_fleet.config import default_runs_dir
 from agent_fleet.observability.context import bind_phase, get_run_context
 from agent_fleet.observability.events import FleetEvent, RunContext
+from agent_fleet.observability.logfire_sink import LogfireSink
 from agent_fleet.observability.sinks import (
     JsonlFileSink,
     LogSink,
@@ -60,6 +61,7 @@ class RunLog:
         )
         sinks: list[LogSink] = [
             JsonlFileSink((runs_dir or _DEFAULT_RUNS_DIR) / f"{run_id}.jsonl"),
+            LogfireSink(),
         ]
         if include_python_logging:
             sinks.append(PythonLoggingSink())

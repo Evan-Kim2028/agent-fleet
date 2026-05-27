@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 
+from agent_fleet.telemetry import configure_telemetry
+
 
 def configure_fleet_logging(level: int = logging.INFO) -> None:
     logging.basicConfig(
@@ -11,3 +13,4 @@ def configure_fleet_logging(level: int = logging.INFO) -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         force=True,
     )
+    configure_telemetry()
