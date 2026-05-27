@@ -176,9 +176,17 @@ orchestration:
 **DAG task runner:** For work with explicit dependencies (research ∥ research → implement → integrate), use cookbook-compatible DAG JSON:
 
 ```bash
+# Terminal ASCII diagram (default for validate / dry-run / post-run)
 agent-fleet dag validate --file examples/dag/example_dag.json
+agent-fleet dag validate --file examples/dag/example_dag.json --json   # machine-readable
+
+# Execute (add --canvas for Cursor IDE live graph)
 agent-fleet dag run --file examples/dag/example_dag.json --workspace .
+agent-fleet dag run --file examples/dag/example_dag.json --canvas dag-run --init-only
+# Open the printed canvas path in Cursor, then run without --init-only
 ```
+
+**Visualization:** `dag validate` prints an ASCII rank/edge diagram for terminals and CI. Pass `--canvas` or `--canvas-path` on `dag run` to write a cookbook-compatible `.canvas.tsx` that hot-reloads in the Cursor IDE (optional; no effect in headless runs).
 
 Ranks execute in parallel within each wave; upstream outputs are stitched into downstream prompts; failed nodes skip transitive dependents. The planner can also return `decomposition_decision: dag` with a `dag` object when `preflight_on_code_review` is enabled.
 

@@ -11,6 +11,12 @@ from typing import TYPE_CHECKING
 
 from agent_fleet.hooks import FleetTask, FleetTaskResult
 from agent_fleet.level_up.models import DispatchEquip
+from agent_fleet.orchestration.dag.canvas_state import (
+    finalize_run_state,
+    fleet_status_to_canvas,
+    initial_run_state,
+    set_task_status,
+)
 from agent_fleet.orchestration.dag.scheduler import (
     topo_sort_ranks,
     transitive_dependents,
@@ -22,6 +28,7 @@ from agent_fleet.orchestration.dag.stitch import build_dag_task_context
 if TYPE_CHECKING:
     from agent_fleet.dispatcher import FleetDispatcher
     from agent_fleet.hooks import PersonaResolver
+    from agent_fleet.orchestration.dag.canvas_writer import DagCanvasWriter
 
 logger = logging.getLogger(__name__)
 
@@ -167,11 +174,20 @@ def dispatch_dag(
     max_chars_per_parent: int = 2000,
     acceptance_criteria: list[str] | None = None,
     fleet_log: object | None = None,
+    canvas_writer: DagCanvasWriter | None = None,
 ) -> DagRunSummary:
     """Run DAG tasks rank-by-rank through the fleet dispatcher."""
     validate_dag_graph(spec)
     ranks = topo_sort_ranks(spec.tasks)
     rank_ids = [[task.id for task in rank] for rank in ranks]
+    canvas_state = initial_run_state(spec) if canvas_writer is not None else None
+
+    def _sync_canvas() -> None:
+        if canvas_writer is not None and canvas_state is not None:
+            canvas_writer.schedule(canvas_state)
+
+    if canvas_writer is not None and canvas_state is not None:
+        _sync_canvas()
 
     if fleet_log is not None:
         fleet_log.emit(
@@ -190,6 +206,14 @@ def dispatch_dag(
         runnable = [task for task in rank if task.id not in skip_ids]
         skipped_in_rank = [task for task in rank if task.id in skip_ids]
         for task in skipped_in_rank:
+            if canvas_state is not None:
+                set_task_status(
+                    canvas_state,
+                    task.id,
+                    status="ERROR",
+                    error_message="Skipped: upstream task failed",
+                    duration_ms=0,
+                )
             all_results.append(
                 FleetTaskResult(
                     task_index=len(all_results),
@@ -201,6 +225,8 @@ def dispatch_dag(
                     duration_seconds=0.0,
                 )
             )
+        if skipped_in_rank:
+            _sync_canvas()
 
         if not runnable:
             continue
@@ -211,6 +237,11 @@ def dispatch_dag(
                 rank=rank_index,
                 tasks=[task.id for task in runnable],
             )
+
+        for dag_task in runnable:
+            if canvas_state is not None:
+                set_task_status(canvas_state, dag_task.id, status="RUNNING")
+        _sync_canvas()
 
         fleet_tasks: list[tuple[DagTask, FleetTask]] = []
         for dag_task in runnable:
@@ -268,15 +299,36 @@ def dispatch_dag(
                     status=result.status,
                     duration_s=result.duration_seconds,
                 )
+            if canvas_state is not None:
+                output = _result_output(result)
+                canvas_status = fleet_status_to_canvas(result.status)
+                set_task_status(
+                    canvas_state,
+                    dag_task.id,
+                    status=canvas_status,
+                    result_text=output if canvas_status == "FINISHED" else None,
+                    error_message=(
+                        (result.error or result.status) if canvas_status == "ERROR" else None
+                    ),
+                    duration_ms=int(result.duration_seconds * 1000),
+                )
             if _is_success(result.status):
                 upstream_outputs[dag_task.id] = _result_output(result)
             elif _is_failure(result.status):
                 failed_ids.add(dag_task.id)
 
+        _sync_canvas()
+
         if failed_ids:
             skip_ids |= transitive_dependents(spec, failed_ids)
 
     status, error, summary = aggregate_dag_results(all_results)
+    if canvas_state is not None and canvas_writer is not None:
+        outcome = "SUCCESS" if status == "completed" else "FAILED"
+        finalize_run_state(canvas_state, outcome=outcome, message=error or summary)
+        canvas_writer.schedule(canvas_state)
+        canvas_writer.flush()
+
     if fleet_log is not None:
         fleet_log.emit(
             "orchestration.dag.done",

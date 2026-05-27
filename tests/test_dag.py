@@ -1,8 +1,10 @@
+# ruff: noqa: TC003
 """Tests for DAG task runner — schema, scheduler, stitch, and dispatch."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
 
@@ -10,6 +12,8 @@ from agent_fleet.config import load_fleet_config
 from agent_fleet.contracts.task_spec import DecompositionDecision, RiskTier, Scope, TaskSpec
 from agent_fleet.hooks import FleetTask, FleetTaskResult
 from agent_fleet.orchestration.config import resolve_orchestration_config
+from agent_fleet.orchestration.dag.ascii import render_dag_ascii
+from agent_fleet.orchestration.dag.canvas_state import initial_run_state
 from agent_fleet.orchestration.dag.runner import aggregate_dag_results, dispatch_dag
 from agent_fleet.orchestration.dag.scheduler import topo_sort_ranks, validate_dag_graph
 from agent_fleet.orchestration.dag.schema import DagSpec, DagTask, load_dag_spec
@@ -235,7 +239,7 @@ def test_dag_subcommand_registered() -> None:
     assert exc.value.code == 0
 
 
-def test_dag_validate_cli(capsys: pytest.CaptureFixture[str]) -> None:
+def test_dag_validate_cli_ascii(capsys: pytest.CaptureFixture[str]) -> None:
     from agent_fleet.cli import main
 
     code = main(
@@ -248,5 +252,58 @@ def test_dag_validate_cli(capsys: pytest.CaptureFixture[str]) -> None:
     )
     assert code == 0
     out = capsys.readouterr().out
+    assert "Rank 1" in out
+    assert "research-api" in out
+    assert '"valid"' not in out
+
+
+def test_dag_validate_cli_json(capsys: pytest.CaptureFixture[str]) -> None:
+    from agent_fleet.cli import main
+
+    code = main(
+        [
+            "dag",
+            "validate",
+            "--file",
+            str(ROOT / "examples" / "dag" / "example_dag.json"),
+            "--json",
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
     assert '"valid": true' in out
     assert "rank_count" in out
+
+
+def test_render_dag_ascii() -> None:
+    spec = _example_spec()
+    ranks = topo_sort_ranks(spec.tasks)
+    text = render_dag_ascii(spec, ranks)
+    assert "OAuth integration" in text
+    assert "research-a" in text
+    assert "implement-ui" in text
+
+
+def test_canvas_writer_writes_tsx(tmp_path: Path) -> None:
+    from agent_fleet.orchestration.dag.canvas_writer import DagCanvasWriter
+
+    spec = _example_spec()
+    path = tmp_path / "run.canvas.tsx"
+    writer = DagCanvasWriter(path, debounce_ms=0)
+    writer.schedule(initial_run_state(spec))
+    writer.flush()
+    source = path.read_text(encoding="utf-8")
+    assert "cursor/canvas" in source
+    assert "research-a" in source
+    assert "PENDING" in source
+
+
+def test_resolve_canvas_path() -> None:
+    from agent_fleet.orchestration.dag.paths import resolve_canvas_path
+
+    path = resolve_canvas_path(
+        workspace=ROOT,
+        canvas="my-dag",
+    )
+    assert path.name == "my-dag.canvas.tsx"
+    assert path.suffix == ".tsx"
