@@ -52,6 +52,7 @@ class RunLog:
         self._usage_calls: int = 0
         self._usage_duration_s: float = 0.0
         self._usage_by_phase: dict[str, dict[str, int]] = {}
+        self._usage_rollup_emitted: bool = False
 
     @classmethod
     def create(
@@ -122,6 +123,11 @@ class RunLog:
         self.emit("run.start", data=dict(data))
 
     def run_end(self, *, outcome: str, **data: object) -> None:
+        # Flush per-task token rollup before the run terminates so the
+        # consolidated log carries totals even for ad-hoc `agent-fleet run`
+        # paths that don't pass through the dispatcher.
+        if self._usage_calls > 0:
+            self.task_usage_rollup(task_id=self.context.task_id if self.context else None)
         payload = {"outcome": outcome, **data}
         self.emit("run.end", data=payload)
 
@@ -164,6 +170,7 @@ class RunLog:
             "cache_read_tokens": int(cache_read_tokens),
             "cache_write_tokens": int(cache_write_tokens),
         }
+        tokens["total_tokens"] = sum(tokens.values())
         data: dict[str, Any] = {
             "model": model,
             "agent_id": agent_id,
@@ -184,15 +191,24 @@ class RunLog:
         self.emit("llm.usage", phase=phase, data=data)
 
     def task_usage_rollup(self, *, task_id: int | None = None) -> dict[str, Any] | None:
-        """Emit a per-task usage summary; returns the totals payload (or None)."""
-        if self._usage_calls == 0:
+        """Emit a per-task usage summary; returns the totals payload (or None).
+        Idempotent: only emits once per RunLog lifetime."""
+        if self._usage_calls == 0 or self._usage_rollup_emitted:
             return None
+        self._usage_rollup_emitted = True
+        totals = dict(self._usage_totals)
+        totals["total_tokens"] = sum(totals.values())
+        by_phase: dict[str, dict[str, int]] = {}
+        for phase_key, bucket in self._usage_by_phase.items():
+            entry = dict(bucket)
+            entry["total_tokens"] = sum(entry[k] for k in self._USAGE_FIELDS)
+            by_phase[phase_key] = entry
         payload: dict[str, Any] = {
             "task_id": task_id,
             "calls": self._usage_calls,
             "duration_s": round(self._usage_duration_s, 3),
-            "totals": dict(self._usage_totals),
-            "by_phase": {p: dict(b) for p, b in self._usage_by_phase.items()},
+            "totals": totals,
+            "by_phase": by_phase,
         }
         self.emit("llm.usage.task_rollup", data=payload)
         return payload
