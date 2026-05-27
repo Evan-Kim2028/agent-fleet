@@ -175,6 +175,10 @@ def test_detect_drift_conflict_first_call(tmp_path: Path) -> None:
             return_value=[],
         ),
         patch(
+            "agent_fleet.pr_loop.lifecycle.github_ops.pr_comments",
+            return_value=[],
+        ),
+        patch(
             "agent_fleet.pr_loop.lifecycle.github_ops.post_issue_comment",
             side_effect=record_post_issue,
         ) as mock_issue_comment,
@@ -212,11 +216,18 @@ def test_detect_drift_conflict_first_call(tmp_path: Path) -> None:
     assert call_order.index("post_issue") < call_order.index("post_pr")
 
 
-# Case 4: idempotency — PR is already closed on GitHub → all actions skipped
+# Case 4: idempotency — PR closed AND source issue already has replan marker → all
+# destructive actions skipped. Closing the PR alone is not enough; a prior cycle
+# that closed the PR but failed to reopen+replan must keep retrying, which means
+# the gate also requires _DRIFT_ISSUE_MARKER present on the source issue.
 def test_detect_drift_conflict_idempotent(tmp_path: Path) -> None:
     fetch_ok = _make_proc(0)
     ancestor_fail = _make_proc(1)
     conflict_tree = MergeTreeResult(clean=False, conflict_files=("src/a.py",))
+    recent = (datetime.now(tz=UTC) - timedelta(hours=1)).isoformat()
+    issue_comments_with_marker = [
+        {"body": f"replan body {_DRIFT_ISSUE_MARKER}", "createdAt": recent}
+    ]
 
     with (
         patch("subprocess.run") as mock_run,
@@ -228,6 +239,10 @@ def test_detect_drift_conflict_idempotent(tmp_path: Path) -> None:
             "agent_fleet.pr_loop.lifecycle.github_ops.is_pr_closed",
             return_value=True,
         ),
+        patch(
+            "agent_fleet.pr_loop.lifecycle.github_ops.issue_comments",
+            return_value=issue_comments_with_marker,
+        ),
         patch("agent_fleet.pr_loop.lifecycle.github_ops.post_pr_comment") as mock_post_pr,
         patch("agent_fleet.pr_loop.lifecycle.github_ops.close_pr") as mock_close,
         patch("agent_fleet.pr_loop.lifecycle.github_ops.reopen_issue") as mock_reopen,
@@ -238,7 +253,7 @@ def test_detect_drift_conflict_idempotent(tmp_path: Path) -> None:
 
     assert result is not None
     assert result.status == "drift"
-    # All destructive actions skipped because PR is already closed
+    # All destructive actions skipped: PR already closed AND issue already replanned
     mock_post_pr.assert_not_called()
     mock_close.assert_not_called()
     mock_reopen.assert_not_called()
@@ -277,6 +292,10 @@ def test_detect_drift_no_issue_in_branch(tmp_path: Path) -> None:
         ) as mock_close,
         patch("agent_fleet.pr_loop.lifecycle.github_ops.reopen_issue") as mock_reopen,
         patch("agent_fleet.pr_loop.lifecycle.github_ops.post_issue_comment") as mock_issue_comment,
+        patch(
+            "agent_fleet.pr_loop.lifecycle.github_ops.pr_comments",
+            return_value=[],
+        ),
         patch("agent_fleet.pr_loop.lifecycle.github_ops.post_pr_comment") as mock_post_pr,
     ):
         mock_run.side_effect = [fetch_ok, ancestor_fail, sha_proc]
@@ -371,6 +390,112 @@ def test_detect_drift_close_failure_no_marker_posted(tmp_path: Path) -> None:
     assert result.status == "drift"
     mock_post_pr.assert_not_called()
     mock_reopen.assert_not_called()
+
+
+def test_detect_drift_reopen_failure_no_pr_marker_posted(tmp_path: Path) -> None:
+    """If reopen_issue fails, the PR drift marker must NOT be posted (allow retry).
+
+    A retry that finds an old marker on the PR would treat the work as done and
+    silently drop the replan, so we must abort BEFORE the PR comment when the
+    reopen step itself failed.
+    """
+    fetch_ok = _make_proc(0)
+    ancestor_fail = _make_proc(1)
+    sha_proc = _make_proc(0, stdout="sha9999\n")
+    conflict_tree = MergeTreeResult(clean=False, conflict_files=("svc/x.py",))
+
+    with (
+        patch("subprocess.run") as mock_run,
+        patch(
+            "agent_fleet.pr_loop.lifecycle.github_ops.merge_tree_against",
+            return_value=conflict_tree,
+        ),
+        patch(
+            "agent_fleet.pr_loop.lifecycle.github_ops.is_pr_closed",
+            return_value=False,
+        ),
+        patch(
+            "agent_fleet.pr_loop.lifecycle.github_ops.close_pr",
+            return_value=True,
+        ) as mock_close,
+        patch(
+            "agent_fleet.pr_loop.lifecycle.github_ops.reopen_issue",
+            return_value=False,
+        ) as mock_reopen,
+        patch(
+            "agent_fleet.pr_loop.lifecycle.github_ops.issue_comments",
+            return_value=[],
+        ),
+        patch(
+            "agent_fleet.pr_loop.lifecycle.github_ops.pr_comments",
+            return_value=[],
+        ),
+        patch("agent_fleet.pr_loop.lifecycle.github_ops.post_issue_comment") as mock_issue_comment,
+        patch("agent_fleet.pr_loop.lifecycle.github_ops.post_pr_comment") as mock_post_pr,
+    ):
+        mock_run.side_effect = [fetch_ok, ancestor_fail, sha_proc]
+        result = _call_detect_drift(tmp_path, branch="fleet/coder/42-abc")
+
+    assert result is not None
+    assert result.status == "drift"
+    assert "reopen failed" in result.detail
+    mock_close.assert_called_once()
+    mock_reopen.assert_called_once()
+    # PR marker NOT posted so next cycle retries
+    mock_post_pr.assert_not_called()
+    mock_issue_comment.assert_not_called()
+
+
+def test_detect_drift_pr_closed_but_issue_not_replanned_retries(tmp_path: Path) -> None:
+    """PR already closed but no replan marker on issue → re-run reopen + replan.
+
+    A prior cycle that closed the PR but crashed before reopening the issue
+    must not be silently abandoned. The gate skips destructive actions only
+    when BOTH the PR is closed AND the source issue has a recent replan marker.
+    """
+    fetch_ok = _make_proc(0)
+    ancestor_fail = _make_proc(1)
+    conflict_tree = MergeTreeResult(clean=False, conflict_files=("x.py",))
+
+    with (
+        patch("subprocess.run") as mock_run,
+        patch(
+            "agent_fleet.pr_loop.lifecycle.github_ops.merge_tree_against",
+            return_value=conflict_tree,
+        ),
+        patch(
+            "agent_fleet.pr_loop.lifecycle.github_ops.is_pr_closed",
+            return_value=True,
+        ),
+        patch(
+            "agent_fleet.pr_loop.lifecycle.github_ops.close_pr",
+            return_value=True,
+        ) as mock_close,
+        patch(
+            "agent_fleet.pr_loop.lifecycle.github_ops.reopen_issue",
+            return_value=True,
+        ) as mock_reopen,
+        patch(
+            "agent_fleet.pr_loop.lifecycle.github_ops.issue_comments",
+            return_value=[],
+        ),
+        patch(
+            "agent_fleet.pr_loop.lifecycle.github_ops.pr_comments",
+            return_value=[],
+        ),
+        patch("agent_fleet.pr_loop.lifecycle.github_ops.post_issue_comment") as mock_issue_comment,
+        patch("agent_fleet.pr_loop.lifecycle.github_ops.post_pr_comment") as mock_post_pr,
+    ):
+        mock_run.side_effect = [fetch_ok, ancestor_fail, _make_proc(0, stdout="sha\n")]
+        result = _call_detect_drift(tmp_path, branch="fleet/coder/42-abc")
+
+    assert result is not None
+    assert result.status == "drift"
+    # close_pr is idempotent (already-closed = success); reopen + replan + marker run
+    mock_close.assert_called_once()
+    mock_reopen.assert_called_once_with(42, cwd=tmp_path)
+    mock_issue_comment.assert_called_once()
+    mock_post_pr.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

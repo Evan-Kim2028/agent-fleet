@@ -749,12 +749,24 @@ def _detect_drift(
     # Step 4: unresolvable conflict
     conflict_files = merge_result.conflict_files
 
-    # Idempotency: the real state-of-record is whether the PR is already closed.
-    # A comment marker alone is insufficient because the comment may exist while
-    # close_pr failed on a previous cycle.
-    if github_ops.is_pr_closed(pr_number, cwd=repo_root):
+    # Idempotency: full action requires BOTH the PR closed AND the source issue
+    # reopened with a replan marker (when an issue number is parseable). A prior
+    # cycle that closed the PR but failed to reopen+replan must keep retrying;
+    # checking the PR state alone would silently abandon those issues.
+    issue_number = _issue_number_from_branch(branch)
+    pr_already_closed = github_ops.is_pr_closed(pr_number, cwd=repo_root)
+    issue_already_replanned = False
+    if pr_already_closed:
+        if issue_number is None:
+            issue_already_replanned = True
+        else:
+            existing_issue_comments = github_ops.issue_comments(issue_number, cwd=repo_root)
+            issue_already_replanned = _marker_within_window(
+                existing_issue_comments, _DRIFT_ISSUE_MARKER
+            )
+    if pr_already_closed and issue_already_replanned:
         logger.info(
-            "drift-check: PR #%s is already closed; skipping destructive actions",
+            "drift-check: PR #%s already closed and issue replan posted; skipping",
             pr_number,
         )
         return LifecycleResult(
@@ -788,7 +800,6 @@ def _detect_drift(
             "drift", f"{default_branch} moved out from under PR (close failed, will retry)"
         )
 
-    issue_number = _issue_number_from_branch(branch)
     if issue_number is None:
         logger.warning(
             "drift-check: PR #%s branch %r has no parseable issue number; skipping issue reopen",
@@ -799,47 +810,53 @@ def _detect_drift(
         reopen_ok = github_ops.reopen_issue(issue_number, cwd=repo_root)
         if not reopen_ok:
             logger.warning(
-                "drift-check: reopen_issue #%s failed; posting PR marker anyway",
+                "drift-check: reopen_issue #%s failed; aborting before PR marker so next "
+                "cycle retries the reopen+comment",
                 issue_number,
             )
-        else:
-            existing_issue_comments = github_ops.issue_comments(issue_number, cwd=repo_root)
-            if not _marker_within_window(existing_issue_comments, _DRIFT_ISSUE_MARKER):
-                replan_header = (
-                    f"**Replan needed — fleet PR #{pr_number} closed due to"
-                    f" merge conflict with `{default_branch}`.**"
-                )
-                issue_comment_body = textwrap.dedent(f"""\
-                    {replan_header}
+            return LifecycleResult(
+                "drift",
+                f"{default_branch} moved out from under PR (issue reopen failed, will retry)",
+            )
+        existing_issue_comments = github_ops.issue_comments(issue_number, cwd=repo_root)
+        if not _marker_within_window(existing_issue_comments, _DRIFT_ISSUE_MARKER):
+            replan_header = (
+                f"**Replan needed — fleet PR #{pr_number} closed due to"
+                f" merge conflict with `{default_branch}`.**"
+            )
+            issue_comment_body = textwrap.dedent(f"""\
+                {replan_header}
 
-                    `{origin_base}` at `{base_sha}` introduced changes that conflict with the
-                    PR branch.  The conflicting files were:
-                    {files_block}
+                `{origin_base}` at `{base_sha}` introduced changes that conflict with the
+                PR branch.  The conflicting files were:
+                {files_block}
 
-                    Please replan this issue from scratch, taking the current state
-                    of `{default_branch}` into account.
+                Please replan this issue from scratch, taking the current state
+                of `{default_branch}` into account.
 
-                    {_DRIFT_ISSUE_MARKER}
-                """)
-                github_ops.post_issue_comment(issue_comment_body, issue_number, cwd=repo_root)
+                {_DRIFT_ISSUE_MARKER}
+            """)
+            github_ops.post_issue_comment(issue_comment_body, issue_number, cwd=repo_root)
 
     # Post the PR comment with the drift marker last — its presence is the
     # UI hint; the actual idempotency gate is the PR state check above.
-    pr_comment_body = textwrap.dedent(f"""\
-        **Drift detected — unresolvable merge conflict with `{default_branch}`.**
+    existing_pr_comments = github_ops.pr_comments(pr_number, cwd=repo_root)
+    if not _marker_within_window(existing_pr_comments, _DRIFT_PR_MARKER):
+        pr_comment_body = textwrap.dedent(f"""\
+            **Drift detected — unresolvable merge conflict with `{default_branch}`.**
 
-        The PR's premise has changed: `{origin_base}` (at `{base_sha}`) introduced
-        edits that conflict with this branch and cannot be auto-merged.
+            The PR's premise has changed: `{origin_base}` (at `{base_sha}`) introduced
+            edits that conflict with this branch and cannot be auto-merged.
 
-        **Conflicting files:**
-        {files_block}
+            **Conflicting files:**
+            {files_block}
 
-        This PR has been closed automatically. The source issue will be re-opened
-        with a replan comment so the next dispatcher can start fresh.
+            This PR has been closed automatically. The source issue will be re-opened
+            with a replan comment so the next dispatcher can start fresh.
 
-        {_DRIFT_PR_MARKER}
-    """)
-    github_ops.post_pr_comment(pr_comment_body, pr_number, cwd=repo_root)
+            {_DRIFT_PR_MARKER}
+        """)
+        github_ops.post_pr_comment(pr_comment_body, pr_number, cwd=repo_root)
 
     return LifecycleResult("drift", f"{default_branch} moved out from under PR")
 
