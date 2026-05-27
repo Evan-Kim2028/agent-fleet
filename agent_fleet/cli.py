@@ -174,6 +174,12 @@ def cmd_loop(args: argparse.Namespace) -> int:
             if not branch:
                 branch = payload.get("headRefName", "")
             base_ref_name = payload.get("baseRefName", "")
+        if not base_ref_name:
+            print(
+                f"warning: could not resolve baseRefName for PR #{args.pr_number}; "
+                f"drift will be judged against repo.default_branch",
+                file=sys.stderr,
+            )
         if not branch:
             print("error: --branch required or gh must resolve PR head", file=sys.stderr)
             return 1

@@ -750,18 +750,26 @@ def _detect_drift(
     conflict_files = merge_result.conflict_files
 
     # Idempotency: a prior cycle is "already actioned" only when every visible
-    # marker for this drift has been posted. The PR marker is posted LAST, so
-    # its presence implies the issue marker (when an issue is parseable) was
-    # already posted by the same cycle. Gating on the PR marker alone avoids
-    # the bug where a no-issue branch (issue_number is None) would skip the
-    # PR-marker post on subsequent cycles.
+    # marker for this drift has been posted. When an issue is parseable, we
+    # require BOTH the issue replan marker AND the PR drift marker — the
+    # post_issue_comment call uses check=False, so a silent failure can leave
+    # the issue un-replanned even after the PR marker lands. When no issue is
+    # parseable, the PR marker alone is the recovery signal.
     issue_number = _issue_number_from_branch(branch)
     pr_already_closed = github_ops.is_pr_closed(pr_number, cwd=repo_root)
-    pr_marker_posted = False
+    recovery_complete = False
     if pr_already_closed:
         existing_pr_comments = github_ops.pr_comments(pr_number, cwd=repo_root)
         pr_marker_posted = _marker_within_window(existing_pr_comments, _DRIFT_PR_MARKER)
-    if pr_already_closed and pr_marker_posted:
+        if issue_number is None:
+            recovery_complete = pr_marker_posted
+        else:
+            existing_issue_comments = github_ops.issue_comments(issue_number, cwd=repo_root)
+            issue_marker_posted = _marker_within_window(
+                existing_issue_comments, _DRIFT_ISSUE_MARKER
+            )
+            recovery_complete = pr_marker_posted and issue_marker_posted
+    if pr_already_closed and recovery_complete:
         logger.info(
             "drift-check: PR #%s already closed and drift marker posted; skipping",
             pr_number,

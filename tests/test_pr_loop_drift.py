@@ -228,6 +228,9 @@ def test_detect_drift_conflict_idempotent(tmp_path: Path) -> None:
     pr_comments_with_marker = [
         {"body": f"drift body {_DRIFT_PR_MARKER}", "createdAt": recent}
     ]
+    issue_comments_with_marker = [
+        {"body": f"replan body {_DRIFT_ISSUE_MARKER}", "createdAt": recent}
+    ]
 
     with (
         patch("subprocess.run") as mock_run,
@@ -243,6 +246,10 @@ def test_detect_drift_conflict_idempotent(tmp_path: Path) -> None:
             "agent_fleet.pr_loop.lifecycle.github_ops.pr_comments",
             return_value=pr_comments_with_marker,
         ),
+        patch(
+            "agent_fleet.pr_loop.lifecycle.github_ops.issue_comments",
+            return_value=issue_comments_with_marker,
+        ),
         patch("agent_fleet.pr_loop.lifecycle.github_ops.post_pr_comment") as mock_post_pr,
         patch("agent_fleet.pr_loop.lifecycle.github_ops.close_pr") as mock_close,
         patch("agent_fleet.pr_loop.lifecycle.github_ops.reopen_issue") as mock_reopen,
@@ -253,11 +260,64 @@ def test_detect_drift_conflict_idempotent(tmp_path: Path) -> None:
 
     assert result is not None
     assert result.status == "drift"
-    # All destructive actions skipped: PR already closed AND PR drift marker present
+    # All destructive actions skipped: PR already closed AND both markers present
     mock_post_pr.assert_not_called()
     mock_close.assert_not_called()
     mock_reopen.assert_not_called()
     mock_issue_comment.assert_not_called()
+
+
+def test_detect_drift_pr_marker_but_no_issue_marker_retries(tmp_path: Path) -> None:
+    """PR closed + PR marker but issue replan marker missing → retry replan path."""
+    fetch_ok = _make_proc(0)
+    ancestor_fail = _make_proc(1)
+    conflict_tree = MergeTreeResult(clean=False, conflict_files=("src/a.py",))
+    recent = (datetime.now(tz=UTC) - timedelta(hours=1)).isoformat()
+    pr_comments_with_marker = [
+        {"body": f"drift body {_DRIFT_PR_MARKER}", "createdAt": recent}
+    ]
+
+    with (
+        patch("subprocess.run") as mock_run,
+        patch(
+            "agent_fleet.pr_loop.lifecycle.github_ops.merge_tree_against",
+            return_value=conflict_tree,
+        ),
+        patch(
+            "agent_fleet.pr_loop.lifecycle.github_ops.is_pr_closed",
+            return_value=True,
+        ),
+        patch(
+            "agent_fleet.pr_loop.lifecycle.github_ops.pr_comments",
+            return_value=pr_comments_with_marker,
+        ),
+        patch(
+            "agent_fleet.pr_loop.lifecycle.github_ops.issue_comments",
+            return_value=[],
+        ),
+        patch(
+            "agent_fleet.pr_loop.lifecycle.github_ops.close_pr",
+            return_value=True,
+        ) as mock_close,
+        patch(
+            "agent_fleet.pr_loop.lifecycle.github_ops.reopen_issue",
+            return_value=True,
+        ) as mock_reopen,
+        patch("agent_fleet.pr_loop.lifecycle.github_ops.post_pr_comment") as mock_post_pr,
+        patch("agent_fleet.pr_loop.lifecycle.github_ops.post_issue_comment") as mock_issue_comment,
+    ):
+        mock_run.side_effect = [fetch_ok, ancestor_fail, _make_proc(0, stdout="sha\n")]
+        result = _call_detect_drift(tmp_path, branch="fleet/coder/42-abc")
+
+    assert result is not None
+    assert result.status == "drift"
+    # post_issue_comment uses check=False so silent failure can leave issue
+    # un-replanned; the retry must re-run reopen + replan even though PR marker is present.
+    mock_close.assert_called_once()
+    mock_reopen.assert_called_once_with(42, cwd=tmp_path)
+    mock_issue_comment.assert_called_once()
+    # PR marker should not be re-posted since _marker_within_window finds the recent one.
+    mock_post_pr.assert_not_called()
 
 
 # Case 5: drift_check=False → entire detection skipped

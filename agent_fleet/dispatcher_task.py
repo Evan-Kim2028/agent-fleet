@@ -24,10 +24,14 @@ if TYPE_CHECKING:
 
 
 def _resolve_pr_base_ref(pr_number: int, workspace: object | None) -> str:
-    """Fetch baseRefName via `gh pr view`; return empty string on any failure."""
+    """Fetch baseRefName via `gh pr view`; log + return "" on any failure so the
+    caller falls back to repo.default_branch with a visible warning rather than
+    silently judging drift against the wrong base."""
     import json
+    import logging
     import subprocess
 
+    logger = logging.getLogger(__name__)
     cwd = str(workspace) if workspace else None
     try:
         view = subprocess.run(
@@ -37,14 +41,36 @@ def _resolve_pr_base_ref(pr_number: int, workspace: object | None) -> str:
             check=False,
             cwd=cwd,
         )
-    except (OSError, ValueError):
+    except (OSError, ValueError) as exc:
+        logger.warning(
+            "gh pr view baseRefName failed for PR #%s: %s; drift will use repo.default_branch",
+            pr_number,
+            exc,
+        )
         return ""
     if view.returncode != 0:
+        logger.warning(
+            "gh pr view baseRefName for PR #%s exited %s: %s; drift will use repo.default_branch",
+            pr_number,
+            view.returncode,
+            (view.stderr or "").strip()[:200],
+        )
         return ""
     try:
-        return str(json.loads(view.stdout).get("baseRefName") or "")
-    except (ValueError, json.JSONDecodeError):
+        base = str(json.loads(view.stdout).get("baseRefName") or "")
+    except (ValueError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "gh pr view JSON parse failed for PR #%s: %s; drift will use repo.default_branch",
+            pr_number,
+            exc,
+        )
         return ""
+    if not base:
+        logger.warning(
+            "gh pr view returned empty baseRefName for PR #%s; drift will use repo.default_branch",
+            pr_number,
+        )
+    return base
 
 
 def _stderr_from_phases(phase_results: list[dict[str, object]]) -> str:
