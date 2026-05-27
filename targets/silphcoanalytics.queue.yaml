@@ -1,11 +1,9 @@
 # FIFO dispatch queue for silphcoanalytics — managed from agent_fleet repo.
+# Issues already dispatched by comment-trigger are not listed here (the
+# trigger label takes precedence; the queue is the "next when capacity
+# frees" list). Curated to avoid known-bad: #1734 (TC violations even
+# with safe-fix), #1704 (RUF043 metacharacter regression).
 queue:
-  - issue: 1769
-    persona: frontend
-    note: "Dead code sweep (knip + ts-prune) — delete unreferenced exports/files/deps"
   - issue: 1737
     persona: backend
     note: "Remove backend GraphQL + agent + decouple MPP (#1692 child)"
-  - issue: 1702
-    persona: data
-    note: "Delete tcgplayer_history raw data (1.1GB) — Wave 5d cleanup"
