@@ -171,7 +171,7 @@ def list_open_fleet_prs(
         "--state",
         "open",
         "--json",
-        "number,headRefName,headRefOid,labels,isDraft,mergeable,mergeStateStatus,createdAt",
+        "number,headRefName,headRefOid,baseRefName,labels,isDraft,mergeable,mergeStateStatus,createdAt",
         "--limit",
         "50",
         cwd=cwd,
@@ -423,6 +423,111 @@ def merge_pr(
 
 def mark_pr_ready(pr_number: int, *, cwd: Path | None = None) -> None:
     _gh("pr", "ready", str(pr_number), cwd=cwd, check=False)
+
+
+# ---------------------------------------------------------------------------
+# Drift-detection helpers
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class MergeTreeResult:
+    """Result of a git merge-tree dry-run between a branch and origin/main."""
+
+    clean: bool
+    """True when main merges into the branch without conflicts."""
+    conflict_files: tuple[str, ...]
+    """File paths that have conflict markers (empty when clean)."""
+    git_error: bool = False
+    """True when git itself failed (bad ref, wrong cwd, version mismatch, etc.).
+    Callers must NOT treat this as a conflict."""
+
+
+def merge_tree_against(base: str, head: str, *, cwd: Path) -> MergeTreeResult:
+    """Dry-run merge of *base* into *head* without touching the working tree.
+
+    Uses ``git merge-tree --write-tree --name-only <head> <base>`` (git >= 2.38).
+    Exit code 0 means clean; exit code 1 means conflicts; any other exit code is
+    a git error (bad ref, missing binary, etc.) and must NOT be treated as conflict.
+    """
+    result = _git_run(
+        ["git", "merge-tree", "--write-tree", "--name-only", head, base],
+        cwd=cwd,
+        timeout=60,
+    )
+    if result.returncode == 0:
+        return MergeTreeResult(clean=True, conflict_files=())
+    if result.returncode == 1:
+        conflict_files = tuple(line.strip() for line in result.stdout.splitlines() if line.strip())
+        return MergeTreeResult(clean=False, conflict_files=conflict_files)
+    # exit code > 1 → git error; do not treat as conflict
+    logger.warning(
+        "merge-tree exited %d (git error, not conflict): %s",
+        result.returncode,
+        (result.stderr or "").strip()[:300],
+    )
+    return MergeTreeResult(clean=False, conflict_files=(), git_error=True)
+
+
+def is_pr_closed(pr_number: int, *, cwd: Path | None = None) -> bool:
+    """Return True if the PR is in a closed or merged state on GitHub."""
+    result = _gh("pr", "view", str(pr_number), "--json", "state", cwd=cwd, check=False)
+    if result.returncode != 0:
+        return False
+    try:
+        state = json.loads(result.stdout).get("state", "").upper()
+        return state in {"CLOSED", "MERGED"}
+    except Exception:
+        return False
+
+
+def close_pr(pr_number: int, *, cwd: Path | None = None) -> bool:
+    """Close a PR without deleting the branch.  Safe if already closed.
+
+    Returns True when the PR is now closed (including already-closed).
+    Returns False on real errors (network, auth, etc.).
+    "Already closed" is idempotent; "not found" is treated as already-closed and
+    logged at WARNING so callers can retry safely.
+    """
+    result = _gh("pr", "close", str(pr_number), cwd=cwd, check=False)
+    if result.returncode == 0:
+        return True
+    stderr_lower = (result.stderr or "").lower()
+    if "already closed" in stderr_lower:
+        return True
+    if "not found" in stderr_lower:
+        logger.warning("close_pr #%s: PR not found (treating as already closed)", pr_number)
+        return True
+    logger.warning("close_pr #%s failed: %s", pr_number, (result.stderr or "").strip()[:300])
+    return False
+
+
+def issue_comments(issue_number: int, *, cwd: Path | None = None) -> list[dict[str, Any]]:
+    """Return the comment list for a GitHub issue (not a PR)."""
+    result = _gh("issue", "view", str(issue_number), "--json", "comments", cwd=cwd, check=False)
+    if result.returncode != 0:
+        return []
+    try:
+        return json.loads(result.stdout).get("comments", [])
+    except json.JSONDecodeError:
+        return []
+
+
+def reopen_issue(issue_number: int, *, cwd: Path | None = None) -> bool:
+    """Reopen a closed issue.  Safe (no-op) if already open."""
+    result = _gh("issue", "reopen", str(issue_number), cwd=cwd, check=False)
+    if result.returncode == 0:
+        return True
+    stderr_lower = (result.stderr or "").lower()
+    if "already open" in stderr_lower or "not found" in stderr_lower:
+        return True
+    logger.warning("reopen_issue #%s failed: %s", issue_number, (result.stderr or "").strip()[:300])
+    return False
+
+
+def post_issue_comment(body: str, issue_number: int, *, cwd: Path | None = None) -> None:
+    """Post a comment on a GitHub issue."""
+    _gh("issue", "comment", str(issue_number), "--body", body, cwd=cwd, check=False)
 
 
 def checkout_branch(branch: str, worktree: Path, *, repo_root: Path) -> Path:

@@ -23,6 +23,56 @@ if TYPE_CHECKING:
     from agent_fleet.repo import RepoConfig
 
 
+def _resolve_pr_base_ref(pr_number: int, workspace: object | None) -> str:
+    """Fetch baseRefName via `gh pr view`; log + return "" on any failure so the
+    caller falls back to repo.default_branch with a visible warning rather than
+    silently judging drift against the wrong base."""
+    import json
+    import logging
+    import subprocess
+
+    logger = logging.getLogger(__name__)
+    cwd = str(workspace) if workspace else None
+    try:
+        view = subprocess.run(
+            ["gh", "pr", "view", str(pr_number), "--json", "baseRefName"],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=cwd,
+        )
+    except (OSError, ValueError) as exc:
+        logger.warning(
+            "gh pr view baseRefName failed for PR #%s: %s; drift will use repo.default_branch",
+            pr_number,
+            exc,
+        )
+        return ""
+    if view.returncode != 0:
+        logger.warning(
+            "gh pr view baseRefName for PR #%s exited %s: %s; drift will use repo.default_branch",
+            pr_number,
+            view.returncode,
+            (view.stderr or "").strip()[:200],
+        )
+        return ""
+    try:
+        base = str(json.loads(view.stdout).get("baseRefName") or "")
+    except (ValueError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "gh pr view JSON parse failed for PR #%s: %s; drift will use repo.default_branch",
+            pr_number,
+            exc,
+        )
+        return ""
+    if not base:
+        logger.warning(
+            "gh pr view returned empty baseRefName for PR #%s; drift will use repo.default_branch",
+            pr_number,
+        )
+    return base
+
+
 def _stderr_from_phases(phase_results: list[dict[str, object]]) -> str:
     for item in reversed(phase_results):
         raw = item.get("stderr")
@@ -251,6 +301,7 @@ def maybe_publish_and_pr_loop(
     ):
         from agent_fleet.pr_loop.lifecycle import run_pr_lifecycle
 
+        base_ref_name = _resolve_pr_base_ref(pr_number, run_workspace)
         loop_result = run_pr_lifecycle(
             pr_number=pr_number,
             branch=task_workspace.branch_name,
@@ -260,6 +311,7 @@ def maybe_publish_and_pr_loop(
             worktree=run_workspace,
             skip_review_wait=False,
             persona=task.persona,
+            base_ref_name=base_ref_name,
         )
         pr_loop_status = loop_result.status
         if loop_result.status == "merged":

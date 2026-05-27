@@ -174,6 +174,7 @@ class PrLoopWatcher:
             pr_number = _pr_number(pr)
             branch = str(pr.get("headRefName") or "")
             head_ref_oid = str(pr.get("headRefOid") or "")
+            base_ref_name = str(pr.get("baseRefName") or "")
             entry = get_pr_state(state, pr_number)
             entry = maybe_unpark_pr_entry(entry, head_ref_oid=head_ref_oid)
             if head_ref_oid:
@@ -229,6 +230,7 @@ class PrLoopWatcher:
                 loop_config=self.loop_config,
                 fleet_config=self.fleet_config,
                 skip_review_wait=True,
+                base_ref_name=base_ref_name,
             )
 
             new_ci_timeout_attempts = (

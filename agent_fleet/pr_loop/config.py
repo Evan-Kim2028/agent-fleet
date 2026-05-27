@@ -33,6 +33,7 @@ class PrLoopConfig:
     ignored_ci_checks: tuple[str, ...] = field(
         default_factory=lambda: ("composer pr analysis", "kimi pr analysis")
     )
+    drift_check: bool = True
 
 
 def load_pr_loop_config(_repo_root: Path, raw: dict[str, Any] | None) -> PrLoopConfig | None:
@@ -66,4 +67,5 @@ def load_pr_loop_config(_repo_root: Path, raw: dict[str, Any] | None) -> PrLoopC
         fix_persona=(str(section["fix_persona"]) if section.get("fix_persona") else None),
         ci_fix_persona=(str(section["ci_fix_persona"]) if section.get("ci_fix_persona") else None),
         ignored_ci_checks=tuple(str(c).lower() for c in ignored),
+        drift_check=bool(section.get("drift_check", True)),
     )
