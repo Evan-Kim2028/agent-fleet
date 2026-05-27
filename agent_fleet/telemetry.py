@@ -135,6 +135,7 @@ def configure_telemetry(*, force: bool = False) -> bool:
         logfire.configure(
             send_to_logfire=False,
             console=False,
+            inspect_arguments=False,
             additional_span_processors=[processor],
             service_name="agent-fleet",
         )
