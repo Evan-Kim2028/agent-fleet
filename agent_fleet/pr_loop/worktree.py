@@ -117,7 +117,7 @@ def _worktree_in_use(worktree_path: Path) -> bool:
             continue
         try:
             cwd = (entry / "cwd").resolve()
-        except (OSError, PermissionError):
+        except OSError, PermissionError:
             continue
         try:
             cwd.relative_to(target)
