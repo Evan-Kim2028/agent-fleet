@@ -113,11 +113,16 @@ def test_two_eligible_issues_dispatched(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test: issue in in_flight is skipped
+# Test: same persona already in_flight on issue is refused at the gate
 # ---------------------------------------------------------------------------
 
 
-def test_in_flight_issue_skipped(tmp_path: Path) -> None:
+def test_same_persona_in_flight_refused_at_gate(tmp_path: Path) -> None:
+    """Same persona already running on the issue → gate refuses with already_in_flight.
+
+    The dispatcher has no cheap in_flight pre-filter; admission is delegated
+    to FleetCapacityGate so backlog and watcher share one source of truth.
+    """
     dispatcher = _make_dispatcher(tmp_path)
     sp = tmp_path / ".agent-fleet-state.json"
     sp.write_text(
@@ -126,6 +131,7 @@ def test_in_flight_issue_skipped(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
+    # Issue 100 has persona=data running; default_persona=data → already_in_flight.
     issues = [_issue(100), _issue(101)]
 
     with (
@@ -139,7 +145,7 @@ def test_in_flight_issue_skipped(tmp_path: Path) -> None:
         result = dispatcher.dispatch_once(_NOW)
 
     assert result.considered == 2
-    assert result.skipped_for_reason.get("in_flight") == 1
+    assert result.skipped_for_reason.get("capacity:already_in_flight") == 1
     assert len(result.dispatched) == 1
     assert result.dispatched[0] == (101, "data")
     assert mock_post.call_count == 1
@@ -416,6 +422,8 @@ def test_per_issue_refusal_continues(tmp_path: Path) -> None:
     dispatcher = _make_dispatcher(tmp_path, max_dispatches=10)
     sp = tmp_path / ".agent-fleet-state.json"
     # Issue 100 already has 3 runs in_flight (hits per_issue.default=3).
+    # The gate (issue_at_capacity) — not a cheap pre-filter — must refuse #100
+    # and the loop must `continue` to #101 rather than `break`.
     sp.write_text(
         json.dumps(
             {
@@ -430,7 +438,8 @@ def test_per_issue_refusal_continues(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
-    # Issue 100 is in_flight (skipped by cheap filter), issue 101 is clear.
+    # Issue 100 hits per-issue limit at the gate; #101 has no runs and should
+    # be admitted on the same tick.
     issues = [_issue(100), _issue(101)]
 
     with (

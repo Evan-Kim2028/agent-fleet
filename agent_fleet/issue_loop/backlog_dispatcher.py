@@ -218,20 +218,19 @@ class BacklogDispatcher:
 
             result.considered += 1
 
-            # --- Cheap filter 1: in_flight check ---
-            in_flight_map: dict[str, Any] = state.get("in_flight") or {}
-            if str(issue_number) in in_flight_map:
-                result._skip("in_flight")
-                logger.debug("backlog_dispatcher: skip #%s — in_flight", issue_number)
-                continue
+            # In-flight enforcement is delegated to FleetCapacityGate.try_admit
+            # (already_in_flight + issue_at_capacity) so backlog and watcher
+            # share one source of truth. A cheap pre-filter here would block
+            # legitimate second-persona dispatches and contradict watcher
+            # semantics (multi-persona-per-issue up to per_issue_limit).
 
-            # --- Cheap filter 2: open PR ---
+            # --- Cheap filter 1: open PR ---
             if issue_number in open_pr_issues:
                 result._skip("open_pr")
                 logger.debug("backlog_dispatcher: skip #%s — open PR exists", issue_number)
                 continue
 
-            # --- Cheap filter 3: mutex label ---
+            # --- Cheap filter 2: mutex label ---
             raw_labels = issue.get("labels") or []
             labels: list[str] = []
             for lbl in raw_labels:
@@ -246,7 +245,7 @@ class BacklogDispatcher:
                 logger.debug("backlog_dispatcher: skip #%s — mutex label", issue_number)
                 continue
 
-            # --- Cheap filter 4: recent backlog-dispatcher marker ---
+            # --- Cheap filter 3: recent backlog-dispatcher marker ---
             raw_comments = issue.get("comments") or []
             comments: list[dict[str, Any]] = [c for c in raw_comments if isinstance(c, dict)]
             if self._has_recent_marker(comments, now):
