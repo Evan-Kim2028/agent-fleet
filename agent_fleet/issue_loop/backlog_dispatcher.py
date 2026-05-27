@@ -94,7 +94,7 @@ class BacklogDispatcher:
             "--state",
             "open",
             "--json",
-            "number,labels,comments",
+            "number,title,body,labels,comments",
             "--limit",
             "100",
             cwd=self.repo.repo_root,
@@ -257,7 +257,13 @@ class BacklogDispatcher:
             persona = self._pick_persona(labels)
 
             # --- Visual-audit classification (mirrors watcher.py) ---
-            is_visual_audit = is_visual_audit_dispatch(issue_labels=labels)
+            issue_title = str(issue.get("title") or "")
+            issue_body = str(issue.get("body") or "")
+            is_visual_audit = is_visual_audit_dispatch(
+                issue_labels=labels,
+                title=issue_title,
+                body=issue_body,
+            )
 
             # --- Capacity check ---
             admission = self.capacity_gate.try_admit(
