@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 import textwrap
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -38,6 +40,9 @@ from agent_fleet.state import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+    from typing import Any
+
     from agent_fleet.pr_loop.config import PrLoopConfig
 
 logger = logging.getLogger(__name__)
@@ -619,6 +624,184 @@ def try_merge(
     return LifecycleResult("merge_error", "gh pr merge failed")
 
 
+_DRIFT_PR_MARKER = "<!-- pr_loop:drift-detected -->"
+_DRIFT_ISSUE_MARKER = "<!-- pr_loop:replan -->"
+_DEDUP_WINDOW = timedelta(hours=24)
+_BRANCH_ISSUE_RE = re.compile(r"(?:agent[-_]fleet|fleet|agent)/[^/]+/(\d+)")
+
+
+def _issue_number_from_branch(branch: str) -> int | None:
+    """Extract the source issue number from a fleet branch name.
+
+    Supports patterns like ``fleet/<persona>/<issue>-…`` and
+    ``agent_fleet/<persona>/<issue>``.
+    """
+    m = _BRANCH_ISSUE_RE.search(branch)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _marker_within_window(
+    comments: Sequence[Mapping[str, Any]],
+    marker: str,
+    window: timedelta = _DEDUP_WINDOW,
+) -> bool:
+    """Return True if *marker* appears in any comment created within *window*."""
+    now = datetime.now(tz=UTC)
+    for c in comments:
+        body = str(c.get("body") or "")
+        if marker not in body:
+            continue
+        created_raw = c.get("createdAt") or c.get("created_at") or ""
+        if not created_raw:
+            return True  # no timestamp → assume recent
+        try:
+            created = datetime.fromisoformat(str(created_raw).replace("Z", "+00:00"))
+            if now - created < window:
+                return True
+        except ValueError:
+            return True  # unparseable → assume recent
+    return False
+
+
+def _detect_drift(
+    *,
+    pr_number: int,
+    branch: str,
+    worktree: Path,
+    repo_root: Path,
+    loop_config: PrLoopConfig,
+) -> LifecycleResult | None:
+    """Check whether origin/main has drifted under the PR branch.
+
+    Returns:
+        ``None`` — no drift; caller continues normally.
+        ``LifecycleResult("behind", …)`` — drift is auto-mergeable; caller should
+            proceed (update-branch already requested).
+        ``LifecycleResult("drift", …)`` — unresolvable conflict; PR closed, issue
+            re-queued.
+    """
+    if not loop_config.drift_check:
+        return None
+
+    # Step 1: fetch origin/main
+    fetch = subprocess.run(
+        ["git", "fetch", "origin", "main"],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+    if fetch.returncode != 0:
+        logger.warning(
+            "drift-check: git fetch origin main failed for PR #%s: %s",
+            pr_number,
+            (fetch.stderr or "").strip()[:300],
+        )
+        return None  # can't check → skip drift gate, continue cycle
+
+    # Step 2: is origin/main already an ancestor of HEAD?
+    ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", "origin/main", "HEAD"],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    if ancestor.returncode == 0:
+        # origin/main is already reachable from HEAD — no drift
+        return None
+
+    # Step 3: dry-run merge to see if it's clean or conflicted
+    merge_result = github_ops.merge_tree_against("origin/main", "HEAD", cwd=worktree)
+
+    if merge_result.clean:
+        # Auto-mergeable: use the existing update-branch path
+        logger.info(
+            "drift-check: PR #%s is behind origin/main but auto-mergeable; "
+            "requesting update-branch",
+            pr_number,
+        )
+        github_ops.update_branch(pr_number, cwd=repo_root)
+        return LifecycleResult("behind", "main moved ahead; update-branch requested")
+
+    # Step 4: unresolvable conflict
+    conflict_files = merge_result.conflict_files
+
+    # Idempotency: skip all actions if drift comment already posted within 24 h
+    existing_pr_comments = github_ops.pr_comments(pr_number, cwd=repo_root)
+    if _marker_within_window(existing_pr_comments, _DRIFT_PR_MARKER):
+        logger.info(
+            "drift-check: PR #%s already has drift comment within 24h; skipping actions",
+            pr_number,
+        )
+        return LifecycleResult("drift", "main moved out from under PR (already actioned)")
+
+    # Get the current main commit SHA for the comment
+    rev = subprocess.run(
+        ["git", "rev-parse", "--short", "origin/main"],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    main_sha = rev.stdout.strip() if rev.returncode == 0 else "unknown"
+
+    files_block = (
+        "\n".join(f"- `{f}`" for f in conflict_files) if conflict_files else "- (unknown)"
+    )
+    pr_comment_body = textwrap.dedent(f"""\
+        **Drift detected — unresolvable merge conflict with `main`.**
+
+        The PR's premise has changed: `origin/main` (at `{main_sha}`) introduced
+        edits that conflict with this branch and cannot be auto-merged.
+
+        **Conflicting files:**
+        {files_block}
+
+        This PR has been closed automatically. The source issue will be re-opened
+        with a replan comment so the next dispatcher can start fresh.
+
+        {_DRIFT_PR_MARKER}
+    """)
+
+    github_ops.post_pr_comment(pr_comment_body, pr_number, cwd=repo_root)
+    github_ops.close_pr(pr_number, cwd=repo_root)
+
+    # Reopen + comment on the source issue (best-effort)
+    issue_number = _issue_number_from_branch(branch)
+    if issue_number is None:
+        logger.warning(
+            "drift-check: PR #%s branch %r has no parseable issue number; "
+            "skipping issue reopen",
+            pr_number,
+            branch,
+        )
+    else:
+        github_ops.reopen_issue(issue_number, cwd=repo_root)
+        existing_issue_comments = github_ops.issue_comments(issue_number, cwd=repo_root)
+        if not _marker_within_window(existing_issue_comments, _DRIFT_ISSUE_MARKER):
+            issue_comment_body = textwrap.dedent(f"""\
+                **Replan needed — fleet PR #{pr_number} closed due to merge conflict with `main`.**
+
+                `origin/main` at `{main_sha}` introduced changes that conflict with the
+                PR branch.  The conflicting files were:
+                {files_block}
+
+                Please replan this issue from scratch, taking the current state of `main`
+                into account.
+
+                {_DRIFT_ISSUE_MARKER}
+            """)
+            github_ops.post_issue_comment(issue_comment_body, issue_number, cwd=repo_root)
+
+    return LifecycleResult("drift", "main moved out from under PR")
+
+
 def run_pr_lifecycle(
     *,
     pr_number: int,
@@ -702,6 +885,22 @@ def _run_pr_lifecycle_body(
             base = repo.worktree_base or Path("/tmp/agent-fleet-loop")
             wt = resolve_worktree_path(branch, repo_root=repo_root, worktree_base=base)
             logger.info("Resolved worktree for %s → %s", branch, wt)
+
+    # Drift check: compare origin/main against the PR branch before anything else.
+    # We use repo_root as the git context (always valid) since the per-PR worktree
+    # may not be set up yet at this point in the cycle.
+    _wt_is_git = wt.exists() and ((wt / ".git").exists() or (wt / ".git").is_file())
+    _git_cwd = wt if _wt_is_git else repo_root
+    drift = _detect_drift(
+        pr_number=pr_number,
+        branch=branch,
+        worktree=_git_cwd,
+        repo_root=repo_root,
+        loop_config=loop_config,
+    )
+    if drift is not None and drift.status == "drift":
+        fleet_log.emit("pr_loop.drift", pr_number=pr_number, detail=drift.detail)
+        return drift
 
     review_body: str | None = find_reviewer_comment(
         github_ops.pr_comments(pr_number, cwd=repo_root),
