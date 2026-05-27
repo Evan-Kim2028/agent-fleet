@@ -440,10 +440,17 @@ def apply_bridge_env(*, force: bool = False, wait_s: float = 0.0) -> bool:
     return True
 
 
+# Per-process cache of private bridges keyed by absolute workspace path.
+# A single dispatcher walks RESEARCH/PLAN/EXECUTE/REVIEW phases and builds a
+# new sdk.Client each phase; without caching, every phase spawns and leaks a
+# fresh bridge subprocess. Reuse the live bridge for the same workspace.
+_private_bridges_by_workspace: dict[str, dict[str, Any]] = {}
+
+
 def launch_private_bridge(
     workspace: str, *, timeout_s: float = _DEFAULT_TIMEOUT_S
 ) -> dict[str, Any] | None:
-    """Spawn a fresh per-process bridge with stderr captured to disk.
+    """Spawn (or reuse) a per-process bridge with stderr captured to disk.
 
     Unlike the shared daemon, this bridge is owned by the calling process:
     stderr is written to ``~/.agent-fleet/bridges/<pid>-<ts>.log`` and an
@@ -451,10 +458,25 @@ def launch_private_bridge(
     dispatches need their own bridges to avoid the shared-bridge contention
     (cursor-sdk bridge is not concurrency-safe across processes).
 
+    Within a single process, repeated calls for the same workspace reuse
+    the same bridge if it is still alive and its HTTP listener responds.
+
     Returns the discovery state dict (url/auth_token/pid/log_path) on
     success, or None if spawn or discovery failed.
     """
     import atexit
+
+    workspace_key = str(Path(workspace).resolve())
+    cached = _private_bridges_by_workspace.get(workspace_key)
+    if cached is not None:
+        cached_pid = int(cached.get("pid", 0) or 0)
+        if (
+            cached_pid > 0
+            and _pid_alive(cached_pid)
+            and _bridge_url_responsive(str(cached.get("url", "")))
+        ):
+            return cached
+        _private_bridges_by_workspace.pop(workspace_key, None)
 
     bridges_dir = agent_fleet_home() / "bridges"
     try:
@@ -508,6 +530,7 @@ def launch_private_bridge(
     state["log_path"] = str(log_path)
 
     atexit.register(_kill_process_group)
+    _private_bridges_by_workspace[workspace_key] = state
     return state
 
 
