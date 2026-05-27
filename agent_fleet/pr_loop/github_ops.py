@@ -429,9 +429,7 @@ def merge_tree_against(base: str, head: str, *, cwd: Path) -> MergeTreeResult:
     if result.returncode == 0:
         return MergeTreeResult(clean=True, conflict_files=())
     # exit code 1 → conflicts; any other non-zero is also treated as conflict
-    conflict_files = tuple(
-        line.strip() for line in result.stdout.splitlines() if line.strip()
-    )
+    conflict_files = tuple(line.strip() for line in result.stdout.splitlines() if line.strip())
     return MergeTreeResult(clean=False, conflict_files=conflict_files)
 
 
@@ -450,9 +448,7 @@ def close_pr(pr_number: int, *, cwd: Path | None = None) -> bool:
 
 def issue_comments(issue_number: int, *, cwd: Path | None = None) -> list[dict[str, Any]]:
     """Return the comment list for a GitHub issue (not a PR)."""
-    result = _gh(
-        "issue", "view", str(issue_number), "--json", "comments", cwd=cwd, check=False
-    )
+    result = _gh("issue", "view", str(issue_number), "--json", "comments", cwd=cwd, check=False)
     if result.returncode != 0:
         return []
     try:
@@ -469,9 +465,7 @@ def reopen_issue(issue_number: int, *, cwd: Path | None = None) -> bool:
     stderr_lower = (result.stderr or "").lower()
     if "already open" in stderr_lower or "not found" in stderr_lower:
         return True
-    logger.warning(
-        "reopen_issue #%s failed: %s", issue_number, (result.stderr or "").strip()[:300]
-    )
+    logger.warning("reopen_issue #%s failed: %s", issue_number, (result.stderr or "").strip()[:300])
     return False
 
 

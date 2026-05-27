@@ -751,9 +751,7 @@ def _detect_drift(
     )
     main_sha = rev.stdout.strip() if rev.returncode == 0 else "unknown"
 
-    files_block = (
-        "\n".join(f"- `{f}`" for f in conflict_files) if conflict_files else "- (unknown)"
-    )
+    files_block = "\n".join(f"- `{f}`" for f in conflict_files) if conflict_files else "- (unknown)"
     pr_comment_body = textwrap.dedent(f"""\
         **Drift detected — unresolvable merge conflict with `main`.**
 
@@ -776,8 +774,7 @@ def _detect_drift(
     issue_number = _issue_number_from_branch(branch)
     if issue_number is None:
         logger.warning(
-            "drift-check: PR #%s branch %r has no parseable issue number; "
-            "skipping issue reopen",
+            "drift-check: PR #%s branch %r has no parseable issue number; skipping issue reopen",
             pr_number,
             branch,
         )

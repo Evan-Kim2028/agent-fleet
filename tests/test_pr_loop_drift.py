@@ -186,9 +186,7 @@ def test_detect_drift_conflict_idempotent(tmp_path: Path) -> None:
     fetch_ok = _make_proc(0)
     ancestor_fail = _make_proc(1)
     recent_ts = datetime.now(tz=UTC).isoformat()
-    existing_drift_comment = [
-        {"body": f"old comment {_DRIFT_PR_MARKER}", "createdAt": recent_ts}
-    ]
+    existing_drift_comment = [{"body": f"old comment {_DRIFT_PR_MARKER}", "createdAt": recent_ts}]
     conflict_tree = MergeTreeResult(clean=False, conflict_files=("src/a.py",))
 
     with (
@@ -278,9 +276,7 @@ def test_pr_loop_config_drift_check_default() -> None:
 def test_pr_loop_config_drift_check_disabled() -> None:
     from agent_fleet.pr_loop.config import load_pr_loop_config
 
-    cfg = load_pr_loop_config(
-        Path("/tmp"), {"pr_loop": {"enabled": True, "drift_check": False}}
-    )
+    cfg = load_pr_loop_config(Path("/tmp"), {"pr_loop": {"enabled": True, "drift_check": False}})
     assert cfg is not None
     assert cfg.drift_check is False
 
