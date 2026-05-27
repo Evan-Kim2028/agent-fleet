@@ -34,7 +34,9 @@ class LogfireSink(LogSink):
         except ImportError:
             self._logfire = None
             return
-        self._logfire = logfire
+        from typing import Any, cast
+
+        self._logfire = cast("Any", logfire)
 
     def emit(self, event: FleetEvent) -> None:
         if self._logfire is None:
@@ -55,6 +57,6 @@ class LogfireSink(LogSink):
             for key, value in event.data.items():
                 attrs[f"data.{key}"] = value
         try:
-            log_fn(event.event, _tags=None, **attrs)  # type: ignore[arg-type]
+            log_fn(event.event, **attrs)
         except Exception as exc:
             logger.debug("logfire sink emit failed: %s", exc)

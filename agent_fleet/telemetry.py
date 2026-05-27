@@ -142,4 +142,6 @@ def span(name: str, **attributes: object) -> AbstractContextManager[object]:
         from contextlib import nullcontext
 
         return nullcontext()
-    return logfire.span(name, _tags=None, **attributes)  # type: ignore[arg-type]
+    from typing import Any, cast
+
+    return cast("Any", logfire).span(name, **attributes)
