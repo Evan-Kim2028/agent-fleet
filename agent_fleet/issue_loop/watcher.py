@@ -404,6 +404,18 @@ class CombinedWatcher:
             bd_cfg = getattr(target, "backlog_dispatcher", None)
             if bd_cfg is None or not bd_cfg.enabled:
                 continue
+            # backlog_dispatcher posts /agent comments on labeled issues; the
+            # consumer is IssueLoopWatcher on the same target. Without
+            # issue_dispatch.enabled, comments are written to GitHub but nothing
+            # picks them up — a silent dead-letter queue. Fail loud.
+            issue_dispatch = getattr(target, "issue_dispatch", None)
+            if issue_dispatch is None or not issue_dispatch.enabled:
+                logger.warning(
+                    "backlog_dispatcher enabled on %s but issue_dispatch is "
+                    "disabled — /agent comments have no consumer. Skipping.",
+                    target.display_name,
+                )
+                continue
             capacity = target.capacity or FleetCapacity.defaults()
             bd_state_path = state_path(controller_state_root)
             dispatcher = BacklogDispatcher(
