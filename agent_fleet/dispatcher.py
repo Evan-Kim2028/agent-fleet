@@ -204,6 +204,8 @@ class FleetDispatcher:
     ) -> tuple[FleetTaskResult | None, FleetTask]:
         """Run plan preflight; return (early_result, task_to_run)."""
         from agent_fleet.fleet_session import create_fleet_session
+        from agent_fleet.orchestration.dag.runner import dispatch_dag
+        from agent_fleet.orchestration.dag.schema import dag_spec_from_dict
         from agent_fleet.orchestration.decompose import (
             coerce_empty_decompose,
             dispatch_task_spec_children,
@@ -257,6 +259,48 @@ class FleetDispatcher:
             )
 
         if (
+            task_spec.decomposition_decision.value == "dag"
+            and orchestration.auto_dispatch_dag
+            and task_spec.dag
+        ):
+            dag_spec = dag_spec_from_dict(task_spec.dag)
+            dag_summary = dispatch_dag(
+                spec=dag_spec,
+                parent_task=task,
+                dispatcher=self,
+                persona_resolver=resolver,
+                fallback_persona=task.persona or task_config.default_persona,
+                default_pipeline=orchestration.default_dag_pipeline,
+                parent_run_id=fleet_log.run_id,
+                max_chars_per_parent=orchestration.dag_upstream_context_chars,
+                acceptance_criteria=task_spec.acceptance_criteria,
+                fleet_log=fleet_log,
+            )
+            fleet_log.emit(
+                "orchestration.dag",
+                task_count=len(dag_summary.results),
+                status=dag_summary.aggregate_status,
+            )
+            return (
+                FleetTaskResult(
+                    task_index=task_index,
+                    persona=task.persona,
+                    goal=task.goal,
+                    status=dag_summary.aggregate_status,
+                    summary=dag_summary.summary,
+                    error=dag_summary.error,
+                    duration_seconds=round(time.monotonic() - start, 2),
+                    phases={
+                        "plan": task_spec.to_dict(),
+                        "dag_dispatch": [r.__dict__ for r in dag_summary.results],
+                        "dag_ranks": dag_summary.ranks,
+                    },
+                    task_spec=task_spec.to_dict(),
+                ),
+                task,
+            )
+
+        if (
             task_spec.decomposition_decision.value == "decompose"
             and orchestration.auto_dispatch_children
         ):
@@ -293,7 +337,7 @@ class FleetDispatcher:
             )
 
         preflight_status, preflight_error = handle_preflight_decision(task_spec)
-        if preflight_status in {"rejected", "decompose"}:
+        if preflight_status in {"rejected", "decompose", "dag"}:
             return (
                 FleetTaskResult(
                     task_index=task_index,

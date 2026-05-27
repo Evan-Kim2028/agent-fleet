@@ -298,6 +298,10 @@ def handle_preflight_decision(
     """Map planner decision to dispatcher status when not auto-dispatching."""
     if task_spec.decomposition_decision == DecompositionDecision.REJECTED:
         return "rejected", task_spec.decomposition_reason
+    if task_spec.decomposition_decision == DecompositionDecision.DAG:
+        if not task_spec.dag:
+            return "single", None
+        return "dag", task_spec.decomposition_reason or "Task requires DAG dispatch"
     if task_spec.decomposition_decision == DecompositionDecision.DECOMPOSE:
         if not task_spec.child_issues_proposed:
             return "single", None

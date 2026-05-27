@@ -19,7 +19,7 @@
     "issue_number": {"type": "integer", "minimum": 1},
     "decomposition_decision": {
       "type": "string",
-      "enum": ["single", "decompose", "rejected"]
+      "enum": ["single", "decompose", "dag", "rejected"]
     },
     "decomposition_reason": {"type": "string"},
     "cross_cutting_acknowledged": {
@@ -105,6 +105,37 @@
           }
         }
       ]
+    },
+    "dag": {
+      "type": "object",
+      "description": "Cookbook-compatible DAG spec when decomposition_decision is dag",
+      "additionalProperties": false,
+      "required": ["title", "tasks"],
+      "properties": {
+        "title": {"type": "string", "minLength": 1},
+        "models": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        },
+        "tasks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "depends_on", "complexity", "subtask_prompt"],
+            "properties": {
+              "id": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"},
+              "depends_on": {"type": "array", "items": {"type": "string"}},
+              "complexity": {"type": "string", "enum": ["HIGH", "MED", "LOW"]},
+              "subtask_prompt": {"type": "string", "minLength": 1},
+              "persona": {"type": "string"},
+              "pipeline": {"type": "string"},
+              "allowed_paths": {"type": "array", "items": {"type": "string"}}
+            }
+          }
+        }
+      }
     }
   }
 }

@@ -12,9 +12,12 @@ class OrchestrationConfig:
 
     enabled: bool = True
     auto_dispatch_children: bool = True
+    auto_dispatch_dag: bool = True
     preflight_on_code_review: bool = False
     max_decomposition_depth: int = 1
     default_child_pipeline: str = "code_review"
+    default_dag_pipeline: str = "code_review"
+    dag_upstream_context_chars: int = 2000
 
     @classmethod
     def defaults(cls) -> OrchestrationConfig:
@@ -28,14 +31,18 @@ class OrchestrationConfig:
             return cls(
                 enabled=False,
                 auto_dispatch_children=False,
+                auto_dispatch_dag=False,
                 preflight_on_code_review=False,
             )
         return cls(
             enabled=bool(raw.get("enabled", True)),
             auto_dispatch_children=bool(raw.get("auto_dispatch_children", True)),
+            auto_dispatch_dag=bool(raw.get("auto_dispatch_dag", True)),
             preflight_on_code_review=bool(raw.get("preflight_on_code_review", False)),
             max_decomposition_depth=max(1, int(raw.get("max_decomposition_depth", 1))),
             default_child_pipeline=str(raw.get("default_child_pipeline") or "code_review"),
+            default_dag_pipeline=str(raw.get("default_dag_pipeline") or "code_review"),
+            dag_upstream_context_chars=max(0, int(raw.get("dag_upstream_context_chars", 2000))),
         )
 
 
@@ -45,6 +52,7 @@ def resolve_orchestration_config(raw: dict[str, Any] | None) -> OrchestrationCon
         return OrchestrationConfig(
             enabled=False,
             auto_dispatch_children=False,
+            auto_dispatch_dag=False,
             preflight_on_code_review=False,
         )
     if isinstance(section, dict):
