@@ -244,7 +244,7 @@ class PrLoopWatcher:
             if outcome.status == "merged":
                 new_entry["merged"] = True
                 state["last_merge_ts"] = time.time()
-            if outcome.status == "parked":
+            if outcome.status in {"parked", "blocked"}:
                 new_entry["parked"] = True
             if (
                 outcome.status == "ci_timeout"
