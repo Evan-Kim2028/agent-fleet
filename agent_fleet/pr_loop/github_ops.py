@@ -197,13 +197,34 @@ def pr_comments(pr_number: int, *, cwd: Path | None = None) -> list[dict[str, An
     return json.loads(result.stdout).get("comments", [])
 
 
+@dataclass(frozen=True)
+class PrChecksSnapshot:
+    """All buckets the merge gate cares about, with ignored checks called out
+    separately so a debug log line can show ``failed=[...] ignored_failed=[...]``
+    side-by-side. Knowing which check the loop saw as failing is the entire
+    diagnostic when the merge gate refuses to merge a PR that GitHub considers
+    mergeable.
+    """
+
+    all_filtered: list[dict[str, Any]]
+    pending: list[dict[str, Any]]
+    failed: list[dict[str, Any]]
+    ignored_failed: list[dict[str, Any]]
+
+
 def pr_checks(
     pr_number: int,
     *,
     cwd: Path | None = None,
     ignored: tuple[str, ...] = (),
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Return (all_checks, pending, failed) excluding ignored check names."""
+) -> PrChecksSnapshot:
+    """Snapshot of CI checks for the merge gate.
+
+    ``ignored`` names are removed from ``all_filtered`` (and therefore from
+    ``pending`` / ``failed``). Any of those ignored checks that happened to be
+    in ``bucket=fail`` are surfaced via ``ignored_failed`` for diagnostics —
+    callers that want to log "we suppressed failure X" can read that field.
+    """
     result = _gh(
         "pr",
         "checks",
@@ -214,17 +235,22 @@ def pr_checks(
         check=False,
     )
     if result.returncode != 0 or not result.stdout.strip():
-        return [], [], []
+        return PrChecksSnapshot([], [], [], [])
     try:
         checks = json.loads(result.stdout)
     except json.JSONDecodeError:
-        return [], [], []
+        return PrChecksSnapshot([], [], [], [])
 
     ignored_set = {name.lower() for name in ignored}
     filtered = [check for check in checks if str(check.get("name", "")).lower() not in ignored_set]
+    ignored_failed = [
+        c
+        for c in checks
+        if str(c.get("name", "")).lower() in ignored_set and c.get("bucket") == "fail"
+    ]
     pending = [c for c in filtered if c.get("bucket") == "pending"]
     failed = [c for c in filtered if c.get("bucket") == "fail"]
-    return filtered, pending, failed
+    return PrChecksSnapshot(filtered, pending, failed, ignored_failed)
 
 
 def pr_changed_files(pr_number: int, *, cwd: Path | None = None) -> list[str]:

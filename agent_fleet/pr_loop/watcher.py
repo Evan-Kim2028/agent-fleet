@@ -184,11 +184,13 @@ class PrLoopWatcher:
             if entry.get("parked"):
                 continue
 
-            _all, pending, failed = github_ops.pr_checks(
+            snap = github_ops.pr_checks(
                 pr_number,
                 cwd=self.repo.repo_root,
                 ignored=self.loop_config.ignored_ci_checks,
             )
+            pending = snap.pending
+            failed = snap.failed
 
             comments = github_ops.pr_comments(pr_number, cwd=self.repo.repo_root)
             review_body = find_reviewer_comment(comments, marker=marker)
