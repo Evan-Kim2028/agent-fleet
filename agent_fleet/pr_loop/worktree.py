@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -103,8 +104,10 @@ def _parse_worktree_list(stdout: str) -> list[dict[str, str]]:
 def _worktree_in_use(worktree_path: Path) -> bool:
     """True if any process has *worktree_path* (or a descendant) as its cwd.
 
-    Walks /proc/*/cwd. Used to avoid deleting a worktree out from under a
-    live dispatcher whose branch hasn't yet become an open PR.
+    Walks /proc/*/cwd. Coarse heuristic — misses processes that take the
+    worktree as an argument but run from elsewhere (the common case for
+    cursor-agent and ``git -C <path>`` calls). Kept as defense-in-depth
+    alongside the precise PID-lock check in ``_worktree_locked``.
     """
     try:
         target = worktree_path.resolve()
@@ -155,8 +158,82 @@ def _alive_dispatch_issue_numbers() -> set[int]:
     return out
 
 
+def _worktree_lock_path(worktree_path: Path) -> Path:
+    """Sidecar lock file path for *worktree_path*. Lives next to the worktree dir."""
+    return worktree_path.parent / f"{worktree_path.name}.lock"
+
+
+def _proc_start_time(pid: int) -> int | None:
+    """Read field 22 (starttime, clock ticks since boot) from /proc/<pid>/stat."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError, PermissionError:
+        return None
+    # Field 2 is comm in parens, which may contain spaces. Split after the
+    # closing paren so subsequent fields are positional.
+    rparen = stat.rfind(")")
+    if rparen < 0:
+        return None
+    rest = stat[rparen + 2 :].split()
+    # rest[0] is field 3 (state); starttime is field 22, so index 19 here.
+    try:
+        return int(rest[19])
+    except IndexError, ValueError:
+        return None
+
+
+def claim_worktree_lock(worktree_path: Path, pid: int | None = None) -> None:
+    """Write a sidecar lock declaring *pid* (default: caller) owns *worktree_path*.
+
+    Format: ``<pid> <starttime_clock_ticks>``. The starttime pins a specific
+    process incarnation so PID reuse cannot trick the sweeper into preserving
+    an orphaned worktree.
+    """
+    owner = pid if pid is not None else os.getpid()
+    start = _proc_start_time(owner)
+    if start is None:
+        return
+    lock = _worktree_lock_path(worktree_path)
+    with contextlib.suppress(OSError):
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.write_text(f"{owner} {start}\n")
+
+
+def release_worktree_lock(worktree_path: Path) -> None:
+    """Remove the sidecar lock for *worktree_path* if present."""
+    with contextlib.suppress(OSError):
+        _worktree_lock_path(worktree_path).unlink()
+
+
+def _worktree_locked(worktree_path: Path) -> bool:
+    """True if a live process declared ownership of *worktree_path* via lock file.
+
+    The lock binds (pid, starttime) — a recycled PID with a different starttime
+    is treated as stale, so the sweeper can reclaim worktrees abandoned by
+    crashed dispatchers without waiting for a watcher restart.
+    """
+    lock = _worktree_lock_path(worktree_path)
+    try:
+        text = lock.read_text().strip()
+    except OSError, ValueError:
+        return False
+    parts = text.split()
+    if len(parts) < 2:
+        return False
+    try:
+        pid = int(parts[0])
+        recorded_start = int(parts[1])
+    except ValueError:
+        return False
+    actual_start = _proc_start_time(pid)
+    return actual_start is not None and actual_start == recorded_start
+
+
 def remove_worktree(repo_root: Path, worktree_path: Path) -> bool:
     """Force-remove *worktree_path* from the git worktree registry. Returns True on success."""
+    if _worktree_locked(worktree_path):
+        logger.info("Skipping worktree removal — locked by live owner: %s", worktree_path)
+        return False
     if _worktree_in_use(worktree_path):
         logger.info("Skipping worktree removal — in use: %s", worktree_path)
         return False
@@ -168,6 +245,7 @@ def remove_worktree(repo_root: Path, worktree_path: Path) -> bool:
         timeout=30,
     )
     if rm.returncode == 0:
+        release_worktree_lock(worktree_path)
         logger.info("Removed worktree %s", worktree_path)
         return True
     logger.warning("Failed to remove worktree %s: %s", worktree_path, rm.stderr.strip())

@@ -194,7 +194,7 @@ def test_prepare_task_workspace_keep_on_success(tmp_path: Path) -> None:
 def test_sweep_orphan_worktrees(tmp_path: Path) -> None:
     """Sweep removes worktrees whose branch is not in active_branches."""
     from agent_fleet.integrations.local_git import LocalGitOps
-    from agent_fleet.pr_loop.worktree import sweep_orphan_worktrees
+    from agent_fleet.pr_loop.worktree import release_worktree_lock, sweep_orphan_worktrees
 
     repo_path = tmp_path / "repo"
     _init_git_repo(repo_path)
@@ -204,6 +204,11 @@ def test_sweep_orphan_worktrees(tmp_path: Path) -> None:
 
     orphan_wt = git_ops.setup_workspace(repo_path, "orphan-run", "main", branch_name="fleet/orphan")
     active_wt = git_ops.setup_workspace(repo_path, "active-run", "main", branch_name="fleet/active")
+
+    # setup_workspace claims a lock for the current PID; drop the orphan's
+    # lock so the sweep treats it as eligible for removal.
+    release_worktree_lock(orphan_wt)
+    release_worktree_lock(active_wt)
 
     assert orphan_wt.exists()
     assert active_wt.exists()
@@ -217,3 +222,55 @@ def test_sweep_orphan_worktrees(tmp_path: Path) -> None:
     assert removed == 1
     assert not orphan_wt.exists(), "orphan worktree should have been removed"
     assert active_wt.exists(), "active worktree should be kept"
+
+
+def test_sweep_skips_worktree_locked_by_live_owner(tmp_path: Path) -> None:
+    """A worktree with a sidecar lock pointing to a live PID survives the sweep."""
+    from agent_fleet.integrations.local_git import LocalGitOps
+    from agent_fleet.pr_loop.worktree import sweep_orphan_worktrees
+
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+
+    base = tmp_path / "worktrees"
+    git_ops = LocalGitOps(repo_path, use_worktree=True, worktree_base=base)
+
+    # setup_workspace auto-claims a lock for the current pytest PID.
+    live_wt = git_ops.setup_workspace(repo_path, "live-run", "main", branch_name="fleet/live")
+    assert (live_wt.parent / f"{live_wt.name}.lock").exists()
+
+    removed = sweep_orphan_worktrees(
+        repo_path,
+        base_path=base,
+        active_branches=set(),
+    )
+
+    assert removed == 0
+    assert live_wt.exists(), "live-locked worktree must survive the sweep"
+
+
+def test_sweep_removes_worktree_with_stale_pid_lock(tmp_path: Path) -> None:
+    """A lock whose PID is dead (or recycled with different starttime) is stale."""
+    from agent_fleet.integrations.local_git import LocalGitOps
+    from agent_fleet.pr_loop.worktree import _worktree_lock_path, sweep_orphan_worktrees
+
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+
+    base = tmp_path / "worktrees"
+    git_ops = LocalGitOps(repo_path, use_worktree=True, worktree_base=base)
+
+    wt = git_ops.setup_workspace(repo_path, "stale-run", "main", branch_name="fleet/stale")
+    # Overwrite the auto-claimed lock with a guaranteed-dead-or-mismatched record:
+    # PID 1 (init) exists, but with an obviously bogus starttime so the
+    # (pid, starttime) tuple does not validate.
+    _worktree_lock_path(wt).write_text("1 999999999999\n")
+
+    removed = sweep_orphan_worktrees(
+        repo_path,
+        base_path=base,
+        active_branches=set(),
+    )
+
+    assert removed == 1
+    assert not wt.exists(), "stale-lock worktree should be reclaimed"
