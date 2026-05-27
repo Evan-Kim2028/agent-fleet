@@ -158,25 +158,28 @@ class RunLog:
         cache_write_tokens: int = 0,
     ) -> None:
         """Record one LLM call's token usage and accumulate per-task totals."""
-        data = {
-            "model": model,
-            "agent_id": agent_id,
-            "duration_s": round(duration_s, 3),
+        tokens: dict[str, int] = {
             "input_tokens": int(input_tokens),
             "output_tokens": int(output_tokens),
             "cache_read_tokens": int(cache_read_tokens),
             "cache_write_tokens": int(cache_write_tokens),
         }
+        data: dict[str, Any] = {
+            "model": model,
+            "agent_id": agent_id,
+            "duration_s": round(duration_s, 3),
+            **tokens,
+        }
         self._usage_calls += 1
         self._usage_duration_s += duration_s
         for key in self._USAGE_FIELDS:
-            self._usage_totals[key] += int(data[key])
+            self._usage_totals[key] += tokens[key]
         phase_key = phase or (self.context.phase if self.context else None) or "unknown"
         bucket = self._usage_by_phase.setdefault(
             phase_key, dict.fromkeys(self._USAGE_FIELDS, 0) | {"calls": 0}
         )
         for key in self._USAGE_FIELDS:
-            bucket[key] += int(data[key])
+            bucket[key] += tokens[key]
         bucket["calls"] += 1
         self.emit("llm.usage", phase=phase, data=data)
 

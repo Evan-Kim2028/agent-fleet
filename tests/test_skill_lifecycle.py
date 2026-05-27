@@ -36,6 +36,7 @@ class _FakeResult:
     exit_code: int = 0
     duration_s: float = 0.0
     agent_id: str | None = None
+    usage: dict[str, int] | None = None
 
 
 class _CapturingBackend:
