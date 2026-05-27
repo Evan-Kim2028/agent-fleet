@@ -15,10 +15,12 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from agent_fleet.capacity import FleetCapacity, FleetCapacityGate
+from agent_fleet.capacity import FleetCapacity, FleetCapacityGate, is_visual_audit_dispatch
+from agent_fleet.capacity.gate import RETRYABLE_ADMISSION_REASONS
 from agent_fleet.in_flight import reap_in_flight
 from agent_fleet.integrations.github_cli import gh as _gh
 from agent_fleet.issue_loop import github_ops
+from agent_fleet.memory import available_ram_gb
 from agent_fleet.state import load_state
 
 if TYPE_CHECKING:
@@ -111,14 +113,6 @@ class BacklogDispatcher:
             logger.debug("backlog_dispatcher: invalid JSON from gh issue list")
             return []
 
-    def _issue_has_open_pr(self, issue_number: int) -> bool:
-        """Return True if there is an open fleet PR for this issue."""
-        open_issues = github_ops.open_fleet_pr_issue_numbers(
-            branch_prefixes=("agent-fleet/", "fleet/"),
-            cwd=self.repo.repo_root,
-        )
-        return issue_number in open_issues
-
     def _issue_has_mutex_label(self, labels: list[str], issue_number: int) -> bool:
         """Return True if the issue carries an ``agent-running/<N>`` mutex label."""
         mutex_label = f"agent-running/{issue_number}"
@@ -209,7 +203,15 @@ class BacklogDispatcher:
             logger.warning("backlog_dispatcher: could not fetch open PRs: %s", exc)
             open_pr_issues = set()
 
+        ram_gb = available_ram_gb()
+        capacity_limit = self.capacity_gate.capacity.max_dispatches
+        in_flight_base = len(list((state.get("in_flight") or {}).values()))
+
         for issue in issues:
+            # Stop as soon as this tick has filled the remaining capacity.
+            if len(result.dispatched) >= capacity_limit - in_flight_base:
+                break
+
             issue_number = int(issue.get("number", 0))
             if issue_number <= 0:
                 continue
@@ -255,24 +257,28 @@ class BacklogDispatcher:
             # --- Persona selection ---
             persona = self._pick_persona(labels)
 
+            # --- Visual-audit classification (mirrors watcher.py) ---
+            is_visual_audit = is_visual_audit_dispatch(issue_labels=labels)
+
             # --- Capacity check ---
             admission = self.capacity_gate.try_admit(
                 state,
                 issue_number=issue_number,
                 persona=persona,
-                is_visual_audit=False,
-                available_ram_gb=None,
+                is_visual_audit=is_visual_audit,
+                available_ram_gb=ram_gb,
             )
             if not admission.allowed:
                 result._skip(f"capacity:{admission.reason}")
                 logger.info(
-                    "backlog_dispatcher: capacity gate refused #%s persona=%s reason=%s — stopping",
+                    "backlog_dispatcher: capacity gate refused #%s persona=%s reason=%s",
                     issue_number,
                     persona,
                     admission.reason,
                 )
-                # Stop iterating on first capacity refusal (gate is shared).
-                break
+                if admission.reason in RETRYABLE_ADMISSION_REASONS:
+                    break
+                continue
 
             # --- Post the /agent comment ---
             try:

@@ -96,7 +96,10 @@ def test_two_eligible_issues_dispatched(tmp_path: Path) -> None:
 
     with (
         patch.object(dispatcher, "_list_label_issues", return_value=issues),
-        patch.object(dispatcher, "_issue_has_open_pr", return_value=False),
+        patch(
+            "agent_fleet.issue_loop.backlog_dispatcher.github_ops.open_fleet_pr_issue_numbers",
+            return_value=set(),
+        ),
         patch.object(dispatcher, "_post_dispatch_comment") as mock_post,
     ):
         result = dispatcher.dispatch_once(_NOW)
@@ -127,7 +130,10 @@ def test_in_flight_issue_skipped(tmp_path: Path) -> None:
 
     with (
         patch.object(dispatcher, "_list_label_issues", return_value=issues),
-        patch.object(dispatcher, "_issue_has_open_pr", return_value=False),
+        patch(
+            "agent_fleet.issue_loop.backlog_dispatcher.github_ops.open_fleet_pr_issue_numbers",
+            return_value=set(),
+        ),
         patch.object(dispatcher, "_post_dispatch_comment") as mock_post,
     ):
         result = dispatcher.dispatch_once(_NOW)
@@ -150,7 +156,10 @@ def test_mutex_label_issue_skipped(tmp_path: Path) -> None:
 
     with (
         patch.object(dispatcher, "_list_label_issues", return_value=issues),
-        patch.object(dispatcher, "_issue_has_open_pr", return_value=False),
+        patch(
+            "agent_fleet.issue_loop.backlog_dispatcher.github_ops.open_fleet_pr_issue_numbers",
+            return_value=set(),
+        ),
         patch.object(dispatcher, "_post_dispatch_comment") as mock_post,
     ):
         result = dispatcher.dispatch_once(_NOW)
@@ -177,7 +186,10 @@ def test_recent_marker_issue_skipped(tmp_path: Path) -> None:
 
     with (
         patch.object(dispatcher, "_list_label_issues", return_value=issues),
-        patch.object(dispatcher, "_issue_has_open_pr", return_value=False),
+        patch(
+            "agent_fleet.issue_loop.backlog_dispatcher.github_ops.open_fleet_pr_issue_numbers",
+            return_value=set(),
+        ),
         patch.object(dispatcher, "_post_dispatch_comment") as mock_post,
     ):
         result = dispatcher.dispatch_once(_NOW)
@@ -204,7 +216,10 @@ def test_stale_marker_not_skipped(tmp_path: Path) -> None:
 
     with (
         patch.object(dispatcher, "_list_label_issues", return_value=issues),
-        patch.object(dispatcher, "_issue_has_open_pr", return_value=False),
+        patch(
+            "agent_fleet.issue_loop.backlog_dispatcher.github_ops.open_fleet_pr_issue_numbers",
+            return_value=set(),
+        ),
         patch.object(dispatcher, "_post_dispatch_comment") as mock_post,
     ):
         result = dispatcher.dispatch_once(_NOW)
@@ -228,7 +243,10 @@ def test_persona_label_picked(tmp_path: Path) -> None:
 
     with (
         patch.object(dispatcher, "_list_label_issues", return_value=issues),
-        patch.object(dispatcher, "_issue_has_open_pr", return_value=False),
+        patch(
+            "agent_fleet.issue_loop.backlog_dispatcher.github_ops.open_fleet_pr_issue_numbers",
+            return_value=set(),
+        ),
         patch.object(dispatcher, "_post_dispatch_comment") as mock_post,
     ):
         result = dispatcher.dispatch_once(_NOW)
@@ -250,16 +268,15 @@ def test_capacity_gate_stops_iteration(tmp_path: Path) -> None:
 
     with (
         patch.object(dispatcher, "_list_label_issues", return_value=issues),
-        patch.object(dispatcher, "_issue_has_open_pr", return_value=False),
+        patch(
+            "agent_fleet.issue_loop.backlog_dispatcher.github_ops.open_fleet_pr_issue_numbers",
+            return_value=set(),
+        ),
         patch.object(dispatcher, "_post_dispatch_comment") as mock_post,
     ):
         result = dispatcher.dispatch_once(_NOW)
 
-    # The first issue hits capacity; iteration stops.
     assert len(result.dispatched) == 0
-    assert sum(result.skipped_for_reason.values()) >= 1
-    # At most one issue is counted as skipped (iteration stopped early)
-    assert result.considered == 1
     assert mock_post.call_count == 0
 
 
@@ -283,7 +300,10 @@ def test_idempotent_second_call_skips(tmp_path: Path) -> None:
 
     with (
         patch.object(dispatcher, "_list_label_issues", return_value=issues),
-        patch.object(dispatcher, "_issue_has_open_pr", return_value=False),
+        patch(
+            "agent_fleet.issue_loop.backlog_dispatcher.github_ops.open_fleet_pr_issue_numbers",
+            return_value=set(),
+        ),
         patch.object(dispatcher, "_post_dispatch_comment", side_effect=fake_post),
     ):
         result1 = dispatcher.dispatch_once(_NOW)
@@ -293,7 +313,10 @@ def test_idempotent_second_call_skips(tmp_path: Path) -> None:
 
     with (
         patch.object(dispatcher, "_list_label_issues", return_value=issues_with_marker),
-        patch.object(dispatcher, "_issue_has_open_pr", return_value=False),
+        patch(
+            "agent_fleet.issue_loop.backlog_dispatcher.github_ops.open_fleet_pr_issue_numbers",
+            return_value=set(),
+        ),
         patch.object(dispatcher, "_post_dispatch_comment") as mock_post2,
     ):
         result2 = dispatcher.dispatch_once(_NOW)
@@ -359,3 +382,111 @@ def test_post_dispatch_comment_format(tmp_path: Path) -> None:
     assert issue_arg == 42
     assert "/agent --persona frontend" in body_arg
     assert BACKLOG_MARKER in body_arg
+
+
+# ---------------------------------------------------------------------------
+# Test: per-tick capacity cap — 10 issues, max_dispatches=3 → only 3 posted
+# ---------------------------------------------------------------------------
+
+
+def test_per_tick_capacity_cap(tmp_path: Path) -> None:
+    dispatcher = _make_dispatcher(tmp_path, max_dispatches=3)
+    issues = [_issue(i) for i in range(100, 110)]  # 10 issues
+
+    with (
+        patch.object(dispatcher, "_list_label_issues", return_value=issues),
+        patch(
+            "agent_fleet.issue_loop.backlog_dispatcher.github_ops.open_fleet_pr_issue_numbers",
+            return_value=set(),
+        ),
+        patch.object(dispatcher, "_post_dispatch_comment") as mock_post,
+    ):
+        result = dispatcher.dispatch_once(_NOW)
+
+    assert len(result.dispatched) == 3
+    assert mock_post.call_count == 3
+
+
+# ---------------------------------------------------------------------------
+# Test: per-issue refusal (issue_at_capacity) continues to next issue
+# ---------------------------------------------------------------------------
+
+
+def test_per_issue_refusal_continues(tmp_path: Path) -> None:
+    dispatcher = _make_dispatcher(tmp_path, max_dispatches=10)
+    sp = tmp_path / ".agent-fleet-state.json"
+    # Issue 100 already has 3 runs in_flight (hits per_issue.default=3).
+    sp.write_text(
+        json.dumps(
+            {
+                "in_flight": {
+                    "100": [
+                        {"pid": 1001, "persona": "data", "visual_audit": False},
+                        {"pid": 1002, "persona": "backend", "visual_audit": False},
+                        {"pid": 1003, "persona": "frontend", "visual_audit": False},
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    # Issue 100 is in_flight (skipped by cheap filter), issue 101 is clear.
+    issues = [_issue(100), _issue(101)]
+
+    with (
+        patch.object(dispatcher, "_list_label_issues", return_value=issues),
+        patch(
+            "agent_fleet.issue_loop.backlog_dispatcher.github_ops.open_fleet_pr_issue_numbers",
+            return_value=set(),
+        ),
+        patch.object(dispatcher, "_post_dispatch_comment") as mock_post,
+    ):
+        result = dispatcher.dispatch_once(_NOW)
+
+    assert result.dispatched == [(101, "data")]
+    assert mock_post.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Test: visual-audit label flows through to try_admit as is_visual_audit=True
+# ---------------------------------------------------------------------------
+
+
+def test_visual_audit_label_passed_to_gate(tmp_path: Path) -> None:
+    dispatcher = _make_dispatcher(tmp_path, max_dispatches=4)
+    issues = [_issue(200, labels=["fleet-ready", "visual-audit"])]
+
+    from agent_fleet.capacity.gate import AdmissionResult
+
+    admitted_kwargs: dict = {}
+
+    def fake_try_admit(
+        _state: dict,
+        *,
+        issue_number: int,
+        persona: str,  # noqa: ARG001
+        is_visual_audit: bool,
+        available_ram_gb: float | None,
+    ) -> AdmissionResult:
+        admitted_kwargs.update(
+            {
+                "issue_number": issue_number,
+                "is_visual_audit": is_visual_audit,
+                "available_ram_gb": available_ram_gb,
+            }
+        )
+        return AdmissionResult(True, "ok")
+
+    with (
+        patch.object(dispatcher, "_list_label_issues", return_value=issues),
+        patch(
+            "agent_fleet.issue_loop.backlog_dispatcher.github_ops.open_fleet_pr_issue_numbers",
+            return_value=set(),
+        ),
+        patch.object(dispatcher.capacity_gate, "try_admit", side_effect=fake_try_admit),
+        patch.object(dispatcher, "_post_dispatch_comment"),
+    ):
+        dispatcher.dispatch_once(_NOW)
+
+    assert admitted_kwargs["is_visual_audit"] is True
+    assert admitted_kwargs["issue_number"] == 200
