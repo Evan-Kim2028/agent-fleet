@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from agent_fleet.pr_loop import github_ops
 from agent_fleet.pr_loop.config import load_pr_loop_config
 from agent_fleet.pr_loop.review_parse import (
     find_reviewer_comment,
@@ -332,10 +333,11 @@ def test_poll_once_parks_after_max_ci_timeout_attempts(tmp_path: Path) -> None:
         # One failed check with fix_attempts < max forces lifecycle to run.
         patch(
             "agent_fleet.pr_loop.watcher.github_ops.pr_checks",
-            return_value=(
-                [{"name": "ci"}],
-                [],
-                [{"name": "ci"}],
+            return_value=github_ops.PrChecksSnapshot(
+                all_filtered=[{"name": "ci"}],
+                pending=[],
+                failed=[{"name": "ci"}],
+                ignored_failed=[],
             ),
         ),
         patch("agent_fleet.pr_loop.watcher.github_ops.pr_comments", return_value=[]),
@@ -398,7 +400,12 @@ def test_poll_once_parks_on_blocked_outcome(tmp_path: Path) -> None:
         patch("agent_fleet.pr_loop.watcher.github_ops.pr_has_label", return_value=False),
         patch(
             "agent_fleet.pr_loop.watcher.github_ops.pr_checks",
-            return_value=([{"name": "ci"}], [], [{"name": "ci"}]),
+            return_value=github_ops.PrChecksSnapshot(
+                all_filtered=[{"name": "ci"}],
+                pending=[],
+                failed=[{"name": "ci"}],
+                ignored_failed=[],
+            ),
         ),
         patch("agent_fleet.pr_loop.watcher.github_ops.pr_comments", return_value=[]),
         patch(

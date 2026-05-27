@@ -432,18 +432,22 @@ def wait_for_ci_green(
 ) -> LifecycleResult:
     deadline = time.time() + (timeout_s or loop_config.ci_poll_timeout_s)
     while time.time() < deadline:
-        all_checks, pending, failed = github_ops.pr_checks(
+        snap = github_ops.pr_checks(
             pr_number,
             cwd=repo_root,
             ignored=loop_config.ignored_ci_checks,
         )
-        if not all_checks:
+        if not snap.all_filtered:
             time.sleep(loop_config.ci_register_poll_s)
             continue
-        if failed:
-            names = [str(c.get("name", "")) for c in failed]
-            return LifecycleResult("ci_failed", f"Failed checks: {names}")
-        if not pending:
+        if snap.failed:
+            names = [str(c.get("name", "")) for c in snap.failed]
+            ignored_names = [str(c.get("name", "")) for c in snap.ignored_failed]
+            return LifecycleResult(
+                "ci_failed",
+                f"Failed checks: {names}; suppressed-fails: {ignored_names}",
+            )
+        if not snap.pending:
             return LifecycleResult("ci_green", "All checks passed")
         time.sleep(loop_config.ci_poll_s)
     return LifecycleResult("ci_timeout", "CI did not pass within timeout")
@@ -841,18 +845,21 @@ def _run_pr_lifecycle_body(
             )
             return ci
         ci_fix_attempts += 1
+        snap = github_ops.pr_checks(
+            pr_number,
+            cwd=repo_root,
+            ignored=loop_config.ignored_ci_checks,
+        )
+        failed_names = [str(c.get("name", "")) for c in snap.failed]
+        ignored_failed_names = [str(c.get("name", "")) for c in snap.ignored_failed]
         fleet_log.emit(
             "pr_loop.ci.fix",
             pr_number=pr_number,
             attempt=ci_fix_attempts,
             max_attempts=loop_config.max_ci_fix_attempts,
+            failed_checks=failed_names,
+            ignored_failed_checks=ignored_failed_names,
         )
-        _all, _pending, failed = github_ops.pr_checks(
-            pr_number,
-            cwd=repo_root,
-            ignored=loop_config.ignored_ci_checks,
-        )
-        failed_names = [str(c.get("name", "")) for c in failed]
         wt = github_ops.checkout_branch(branch, wt, repo_root=repo_root)
         fixed = attempt_ci_fix(
             pr_number=pr_number,
