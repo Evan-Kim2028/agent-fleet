@@ -14,3 +14,4 @@ venv/
 .coverage
 htmlcov/
 .worktrees/
+.agent-fleet-state.json
