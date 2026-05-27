@@ -470,8 +470,10 @@ def launch_private_bridge(
     cached = _private_bridges_by_workspace.get(workspace_key)
     if cached is not None:
         cached_pid = int(cached.get("pid", 0) or 0)
-        if cached_pid > 0 and _pid_alive(cached_pid) and _bridge_url_responsive(
-            str(cached.get("url", ""))
+        if (
+            cached_pid > 0
+            and _pid_alive(cached_pid)
+            and _bridge_url_responsive(str(cached.get("url", "")))
         ):
             return cached
         _private_bridges_by_workspace.pop(workspace_key, None)
