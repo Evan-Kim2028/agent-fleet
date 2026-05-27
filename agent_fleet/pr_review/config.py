@@ -30,6 +30,12 @@ DEFAULT_AREA_PREFIXES: dict[str, tuple[str, ...]] = {
 }
 
 
+DEFAULT_QUALITY_REVIEW_SKILLS: tuple[str, ...] = (
+    "thermo-nuclear-code-quality-review",
+    "deslop",
+)
+
+
 @dataclass(frozen=True)
 class PrReviewConfig:
     enabled: bool = True
@@ -48,7 +54,7 @@ class PrReviewConfig:
     fanout_threshold: int = 20
     log_dir: Path | None = None
     quality_review_enabled: bool = True
-    quality_review_skill: str = "thermo-nuclear-code-quality-review"
+    quality_review_skills: tuple[str, ...] = DEFAULT_QUALITY_REVIEW_SKILLS
 
 
 def _tuple_paths(value: object) -> tuple[str, ...]:
@@ -90,12 +96,18 @@ def load_pr_review_config(repo_root: Path, raw: dict[str, Any] | None) -> PrRevi
 
     quality_raw = section.get("quality_review")
     quality_enabled = True
-    quality_skill = "thermo-nuclear-code-quality-review"
+    quality_skills: tuple[str, ...] = DEFAULT_QUALITY_REVIEW_SKILLS
     if quality_raw is False:
         quality_enabled = False
     elif isinstance(quality_raw, dict):
         quality_enabled = bool(quality_raw.get("enabled", True))
-        quality_skill = str(quality_raw.get("skill") or "thermo-nuclear-code-quality-review")
+        skills_raw = quality_raw.get("skills")
+        if isinstance(skills_raw, list) and skills_raw:
+            quality_skills = tuple(str(s) for s in skills_raw if s)
+        elif "skill" in quality_raw:
+            single = str(quality_raw.get("skill") or "").strip()
+            if single:
+                quality_skills = (single,)
 
     return PrReviewConfig(
         enabled=bool(section.get("enabled", True)),
@@ -112,7 +124,7 @@ def load_pr_review_config(repo_root: Path, raw: dict[str, Any] | None) -> PrRevi
         fanout_threshold=int(section.get("fanout_threshold") or 20),
         log_dir=log_dir,
         quality_review_enabled=quality_enabled,
-        quality_review_skill=quality_skill,
+        quality_review_skills=quality_skills,
     )
 
 

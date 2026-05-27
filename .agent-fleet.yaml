@@ -14,6 +14,24 @@ lint_command: bash -c "git diff --name-only main HEAD -- '*.py' | xargs -r uv ru
 capacity:
   max_dispatches: 8
 
+pr_review:
+  enabled: true
+  use_in_code_review: true
+  overlay: agents/pr_review_overlay.md
+  comment_title: Composer PR Analysis
+  oversized_threshold: 60
+  area_prefixes:
+    backend:
+      - agent_fleet/
+      - tests/
+      - integrations/
+      - scripts/
+  quality_review:
+    enabled: true
+    skills:
+      - thermo-nuclear-code-quality-review
+      - deslop
+
 code_review:
   auto_fix: true
   max_fix_attempts: 2

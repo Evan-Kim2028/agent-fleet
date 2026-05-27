@@ -46,4 +46,4 @@ def test_load_pr_review_quality_from_yaml() -> None:
     )
     assert cfg is not None
     assert cfg.quality_review_enabled is True
-    assert cfg.quality_review_skill == "thermo-nuclear-code-quality-review"
+    assert cfg.quality_review_skills == ("thermo-nuclear-code-quality-review",)

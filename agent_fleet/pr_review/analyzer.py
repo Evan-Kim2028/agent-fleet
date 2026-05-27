@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 from datetime import UTC, datetime
@@ -10,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 from agent_fleet.fleet_paths import agent_fleet_home
 from agent_fleet.pr_review.git import classify_files, is_deletion_only_pr
 from agent_fleet.pr_review.prompts import build_prompt
+from agent_fleet.telemetry import span as _telemetry_span
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -176,48 +178,75 @@ def _run_pass(
     skill_dirs: list | None = None,
 ) -> dict[str, Any] | None:
     prompt = build_prompt(diff, files, mode, config, skill_dirs=skill_dirs or [])
-    result = backend.run(
-        prompt,
-        max_tokens=8192,
-        timeout_s=timeout_s,
-        cwd=workspace,
-        model=model,
-        mode="plan",
-        allowed_tools=allowed_tools or ["Read", "Grep"],
-    )
-    if result.exit_code != 0:
-        _log_analysis(
-            config,
-            pr_number=pr_number,
-            mode=f"{mode}_error",
-            prompt=prompt,
-            raw_output=result.stdout,
-            parsed=None,
-            error=result.stderr or f"exit {result.exit_code}",
-        )
-        return None
-    try:
-        parsed = _extract_json(result.stdout)
-    except (ValueError, json.JSONDecodeError) as exc:
-        _log_analysis(
-            config,
-            pr_number=pr_number,
-            mode=f"{mode}_parse_error",
-            prompt=prompt,
-            raw_output=result.stdout,
-            parsed=None,
-            error=str(exc),
-        )
-        return None
-    _log_analysis(
-        config,
+    with _telemetry_span(
+        "pr_review.pass",
         pr_number=pr_number,
         mode=mode,
-        prompt=prompt,
-        raw_output=result.stdout,
-        parsed=parsed,
-    )
-    return parsed
+        model=model,
+        prompt_chars=len(prompt),
+        files=len(files),
+    ) as pass_span:
+        result = backend.run(
+            prompt,
+            max_tokens=8192,
+            timeout_s=timeout_s,
+            cwd=workspace,
+            model=model,
+            mode="plan",
+            allowed_tools=allowed_tools or ["Read", "Grep"],
+        )
+        if result.exit_code != 0:
+            _log_analysis(
+                config,
+                pr_number=pr_number,
+                mode=f"{mode}_error",
+                prompt=prompt,
+                raw_output=result.stdout,
+                parsed=None,
+                error=result.stderr or f"exit {result.exit_code}",
+            )
+            _set_span_attrs(pass_span, status="backend_error", exit_code=result.exit_code)
+            return None
+        try:
+            parsed = _extract_json(result.stdout)
+        except (ValueError, json.JSONDecodeError) as exc:
+            _log_analysis(
+                config,
+                pr_number=pr_number,
+                mode=f"{mode}_parse_error",
+                prompt=prompt,
+                raw_output=result.stdout,
+                parsed=None,
+                error=str(exc),
+            )
+            _set_span_attrs(pass_span, status="parse_error")
+            return None
+        _log_analysis(
+            config,
+            pr_number=pr_number,
+            mode=mode,
+            prompt=prompt,
+            raw_output=result.stdout,
+            parsed=parsed,
+        )
+        _set_span_attrs(
+            pass_span,
+            status="ok",
+            risk_level=str(parsed.get("risk_level") or "unknown"),
+            findings_count=len(parsed.get("findings") or []),
+            suggestions_count=len(parsed.get("suggestions") or []),
+        )
+        return parsed
+
+
+def _set_span_attrs(span: object, **attrs: object) -> None:
+    """Best-effort attribute setting; no-ops when telemetry is disabled."""
+    set_attr = getattr(span, "set_attribute", None)
+    if set_attr is None:
+        return
+    for key, value in attrs.items():
+        with contextlib.suppress(Exception):
+            set_attr(key, value)
 
 
 def passes_for_files(files: list[str], config: PrReviewConfig) -> list[str]:
