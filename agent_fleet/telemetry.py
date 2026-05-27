@@ -102,6 +102,15 @@ class _JsonlSpanProcessor(SpanProcessor):
         }
 
 
+def configure_fleet_logging(level: int = logging.INFO) -> None:
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        force=True,
+    )
+    configure_telemetry()
+
+
 def configure_telemetry(*, force: bool = False) -> bool:
     """Initialize Logfire for local-only span capture.
 

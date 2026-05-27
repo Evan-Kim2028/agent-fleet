@@ -16,7 +16,6 @@ from agent_fleet.observability.sinks import (
     JsonlFileSink,
     LogSink,
     MemoryRingSink,
-    PythonLoggingSink,
 )
 
 if TYPE_CHECKING:
@@ -49,7 +48,6 @@ class RunLog:
         persona: str | None = None,
         visual_audit: bool = False,
         runs_dir: Path | None = None,
-        include_python_logging: bool = True,
         include_memory_ring: bool = True,
     ) -> RunLog:
         context = RunContext(
@@ -63,8 +61,6 @@ class RunLog:
             JsonlFileSink((runs_dir or _DEFAULT_RUNS_DIR) / f"{run_id}.jsonl"),
             LogfireSink(),
         ]
-        if include_python_logging:
-            sinks.append(PythonLoggingSink())
         if include_memory_ring:
             sinks.append(MemoryRingSink())
         return cls(run_id=run_id, context=context, sinks=sinks)

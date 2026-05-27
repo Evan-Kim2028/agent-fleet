@@ -34,7 +34,7 @@ def test_run_log_writes_jsonl(tmp_path: Path) -> None:
         issue_number=42,
         persona="frontend",
         runs_dir=tmp_path,
-        include_python_logging=False,
+
         include_memory_ring=False,
     )
     with bind_run(run_log, run_log.context):
@@ -52,7 +52,7 @@ def test_run_log_writes_jsonl(tmp_path: Path) -> None:
 def test_bind_run_context_var() -> None:
     run_log = RunLog.create(
         run_id="ctx1",
-        include_python_logging=False,
+
         include_memory_ring=False,
     )
     assert get_run_log() is None

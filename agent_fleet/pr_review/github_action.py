@@ -27,7 +27,7 @@ from agent_fleet.repo import find_repo_config
 
 
 def main() -> int:
-    from agent_fleet.logging_config import configure_fleet_logging
+    from agent_fleet.telemetry import configure_fleet_logging
 
     configure_fleet_logging()
     token = os.environ.get("GITHUB_TOKEN")

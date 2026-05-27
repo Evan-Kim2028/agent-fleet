@@ -11,8 +11,8 @@ from pathlib import Path
 from agent_fleet.cli_env import require_backend_env
 from agent_fleet.config import load_fleet_config
 from agent_fleet.dispatcher import FleetDispatcher
-from agent_fleet.logging_config import configure_fleet_logging
 from agent_fleet.repo import resolve_repo_config
+from agent_fleet.telemetry import configure_fleet_logging
 
 logger = logging.getLogger(__name__)
 
