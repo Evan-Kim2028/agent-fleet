@@ -447,6 +447,13 @@ def apply_bridge_env(*, force: bool = False, wait_s: float = 0.0) -> bool:
 _private_bridges_by_workspace: dict[str, dict[str, Any]] = {}
 
 
+def invalidate_private_bridge(workspace: str) -> None:
+    """Drop the cached private bridge for ``workspace`` so the next launch
+    call spawns a fresh subprocess. Used by reconnect after disconnect."""
+    workspace_key = str(Path(workspace).resolve())
+    _private_bridges_by_workspace.pop(workspace_key, None)
+
+
 def launch_private_bridge(
     workspace: str, *, timeout_s: float = _DEFAULT_TIMEOUT_S
 ) -> dict[str, Any] | None:

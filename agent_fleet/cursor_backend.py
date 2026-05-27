@@ -470,21 +470,31 @@ class CursorBackend:
         return status == "finished" and (not text or not text.strip())
 
     @classmethod
-    def _reconnect_bridge(cls) -> None:
+    def _reconnect_bridge(cls, *, workspace: str | None = None) -> None:
         try:
             from cursor_sdk._client import close_default_client
 
             close_default_client()
         except Exception:
             logger.debug("close_default_client failed", exc_info=True)
-        if os.environ.get("AGENT_FLEET_SHARED_BRIDGE") != "1":
+        if os.environ.get("AGENT_FLEET_SHARED_BRIDGE") == "1":
+            try:
+                from agent_fleet.bridge_daemon import apply_bridge_env
+
+                apply_bridge_env(force=True, wait_s=15.0)
+            except Exception:
+                logger.debug("apply_bridge_env failed during reconnect", exc_info=True)
+            return
+        # Private-bridge mode: drop the dead bridge from the per-workspace cache
+        # so the next launch_private_bridge call spawns a fresh subprocess.
+        if workspace is None:
             return
         try:
-            from agent_fleet.bridge_daemon import apply_bridge_env
+            from agent_fleet.bridge_daemon import invalidate_private_bridge
 
-            apply_bridge_env(force=True, wait_s=15.0)
+            invalidate_private_bridge(workspace)
         except Exception:
-            logger.debug("apply_bridge_env failed during reconnect", exc_info=True)
+            logger.debug("invalidate_private_bridge failed", exc_info=True)
 
     def __init__(
         self,
@@ -626,6 +636,7 @@ class CursorBackend:
         t0 = time.monotonic()
 
         def _execute() -> CursorLLMResult:
+            nonlocal sdk_client
             bridge_attempt = 0
             run_attempt = 0
             while True:
@@ -656,7 +667,9 @@ class CursorBackend:
                             exc,
                         )
                         time.sleep(delay)
-                        CursorBackend._reconnect_bridge()
+                        CursorBackend._reconnect_bridge(workspace=work_dir)
+                        # Rebuild the SDK client so it points at the new bridge URL.
+                        sdk_client = self._build_fleet_client(sdk, work_dir)
                         continue
                     return CursorLLMResult(
                         stdout="",
