@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 from typing import TYPE_CHECKING
 
 from agent_fleet.contracts.verify_result import VerifyResult, VerifySeverity
@@ -45,7 +46,12 @@ class CommandVerifier:
             "ISSUE_NUMBER": str(task_id),
             "FLEET_PERSONA": persona,
         }
-        for cmd in self.repo.worktree_bootstrap_commands:
+        bootstrap_commands = list(self.repo.worktree_bootstrap_commands)
+        bootstrap_t0 = time.monotonic()
+        bootstrap_exit_code = 0
+        bootstrap_fatal_proc: subprocess.CompletedProcess[str] | None = None
+        bootstrap_fatal_cmd: str | None = None
+        for cmd in bootstrap_commands:
             proc = subprocess.run(
                 cmd,
                 shell=True,
@@ -64,29 +70,34 @@ class CommandVerifier:
                     "exit_code": proc.returncode,
                 }
             )
+            if proc.returncode != 0:
+                bootstrap_exit_code = proc.returncode
+                bootstrap_fatal_proc = proc
+                bootstrap_fatal_cmd = cmd
+                break
+        if bootstrap_commands:
             emit_fleet_event(
                 "worktree.bootstrap",
-                passed=proc.returncode == 0,
-                command=cmd,
-                exit_code=proc.returncode,
-                stderr_tail=proc.stderr[-500:],
-                stdout_tail=proc.stdout[-500:],
-                persona=persona,
-                task_id=task_id,
+                commands=bootstrap_commands,
+                duration_s=round(time.monotonic() - bootstrap_t0, 3),
+                exit_code=bootstrap_exit_code,
             )
-            if proc.returncode != 0:
-                # Bootstrap prepares the worktree. It is deterministic on
-                # rerun and not fixable by editing the code under task
-                # (lockfile drift, missing tools, network). Classify FATAL
-                # so the runner bails immediately instead of burning fix
-                # iterations on an environmental problem.
-                return VerifyResult(
-                    severity=VerifySeverity.FATAL,
-                    checks=checks,
-                    violating_paths=[],
-                    files_changed=rel_changed,
-                    message=_format_failure(f"Worktree bootstrap failed: {cmd}", proc),
-                )
+        if bootstrap_fatal_proc is not None and bootstrap_fatal_cmd is not None:
+            # Bootstrap prepares the worktree. It is deterministic on
+            # rerun and not fixable by editing the code under task
+            # (lockfile drift, missing tools, network). Classify FATAL
+            # so the runner bails immediately instead of burning fix
+            # iterations on an environmental problem.
+            return VerifyResult(
+                severity=VerifySeverity.FATAL,
+                checks=checks,
+                violating_paths=[],
+                files_changed=rel_changed,
+                message=_format_failure(
+                    f"Worktree bootstrap failed: {bootstrap_fatal_cmd}",
+                    bootstrap_fatal_proc,
+                ),
+            )
 
         verify_commands_ran = bool(self.repo.verify_commands)
         for cmd in self.repo.verify_commands:

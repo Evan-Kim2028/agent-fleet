@@ -139,7 +139,7 @@ def count_verify_fix_loops(
         verify_keys = [k for k in phases if str(k).startswith("VERIFY")]
         verify_attempts = len(verify_keys) if verify_keys else 0
         if verify_attempts == 0:
-            for key, value in phases.items():
+            for _key, value in phases.items():
                 if isinstance(value, dict) and value.get("phase") == "verify":
                     verify_attempts += 1
         fix_attempts = max(0, verify_attempts - 1)

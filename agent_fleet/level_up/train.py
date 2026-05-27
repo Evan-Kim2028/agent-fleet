@@ -96,9 +96,7 @@ def _rule_text_for_row(row: dict[str, Any]) -> tuple[str, str] | None:
             "Fix worktree_bootstrap_commands in .agent-fleet.yaml before dispatching tasks.",
         )
     if status == "verify_failed" or "verify_failed" in status:
-        verify_failure = (
-            metrics.get("verify_failure") if isinstance(metrics, dict) else None
-        )
+        verify_failure = metrics.get("verify_failure") if isinstance(metrics, dict) else None
         if isinstance(verify_failure, dict) and verify_failure.get("command"):
             cmd = str(verify_failure["command"])[:120]
             return (

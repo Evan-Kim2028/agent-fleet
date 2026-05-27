@@ -344,8 +344,9 @@ def test_runlog_llm_usage_accumulates_per_phase_then_rollup() -> None:
     events = [e.event for e in sink.events]
     assert events.count("llm.usage") == 2
     assert events.count("llm.usage.task_rollup") == 1
-    # Second call is a no-op (idempotent).
-    assert log.task_usage_rollup(task_id=0) is None
+    # Second call is a no-op (idempotent) — returns cached value, does not re-emit.
+    second = log.task_usage_rollup(task_id=0)
+    assert second is not None and second["calls"] == 2
     assert [e.event for e in sink.events].count("llm.usage.task_rollup") == 1
 
     usage_events = [e for e in sink.events if e.event == "llm.usage"]

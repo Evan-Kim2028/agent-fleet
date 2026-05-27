@@ -12,12 +12,14 @@ from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from agent_fleet.agent_mode import AgentMode, coerce_agent_mode
 from agent_fleet.contracts.mcp import McpServerSpec, StdioMcpServerSpec
 from agent_fleet.contracts.mcp_requirement import McpRequirement
+from agent_fleet.fleet_paths import default_runs_dir
 from agent_fleet.observability.context import get_run_context, get_run_log
 from agent_fleet.telemetry import span as _telemetry_span
 
@@ -134,6 +136,49 @@ def _format_mcp_tool_label(args: Mapping[str, Any] | None) -> str | None:
     return None
 
 
+def _bridge_log_path(run_id: str) -> Path:
+    """Return the per-run raw bridge event log path."""
+    ctx = get_run_context()
+    runs_dir: Path
+    if ctx is not None:
+        # Try to find the runs dir from the active run log.
+        run_log = get_run_log()
+        if run_log is not None and run_log.jsonl_path is not None:
+            runs_dir = run_log.jsonl_path.parent
+        else:
+            runs_dir = default_runs_dir()
+    else:
+        runs_dir = default_runs_dir()
+    return runs_dir / f"{run_id}.bridge.jsonl"
+
+
+def _write_bridge_event(run_id: str, event: object) -> None:
+    """Append one raw SDK event to the per-run bridge passthrough log."""
+    try:
+        raw: dict[str, object] = {}
+        for attr in dir(event):
+            if attr.startswith("_"):
+                continue
+            try:
+                val = getattr(event, attr)
+                if callable(val):
+                    continue
+                raw[attr] = val
+            except Exception:
+                pass
+        record = {
+            "ts": datetime.now(UTC).isoformat(),
+            "run_id": run_id,
+            "event": raw,
+        }
+        path = _bridge_log_path(run_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, default=str) + "\n")
+    except Exception:
+        pass
+
+
 def _consume_run_events(
     run,  # noqa: ANN001
     *,
@@ -159,7 +204,12 @@ def _consume_run_events(
             run.wait()
         return tuple(labels), usage
 
+    ctx = get_run_context()
+    run_id_for_bridge: str | None = ctx.run_id if ctx is not None else None
+
     for event in events():
+        if run_id_for_bridge is not None:
+            _write_bridge_event(run_id_for_bridge, event)
         upd = getattr(event, "interaction_update", None)
         if upd is not None and getattr(upd, "type", None) == "turn-ended":
             raw_usage = getattr(upd, "usage", None)
@@ -272,6 +322,7 @@ class CursorSession:
         default_timeout_s: int,
         mcp_servers: frozenset[str] | None = None,
         model_label: str | None = None,
+        workspace: str | None = None,
     ) -> None:
         self._agent = agent
         self._default_timeout_s = default_timeout_s
@@ -288,6 +339,18 @@ class CursorSession:
                 "MCP session created agent_id=%s servers=%s",
                 self.agent_id,
                 ", ".join(sorted(self._mcp_servers)),
+            )
+        ctx = get_run_context()
+        run_log = get_run_log()
+        if run_log is not None and self.agent_id is not None:
+            run_log.emit(
+                "bridge.session.start",
+                data={
+                    "agent_id": self.agent_id,
+                    "phase": ctx.phase if ctx is not None else None,
+                    "run_id": ctx.run_id if ctx is not None else None,
+                    "workspace": workspace,
+                },
             )
 
     def send(
@@ -689,6 +752,7 @@ class CursorBackend:
             default_timeout_s=900,
             mcp_servers=frozenset(mcp_dict),
             model_label=model_label,
+            workspace=str(cwd),
         )
 
     def run(

@@ -113,12 +113,29 @@ class RunLog:
 
     @contextlib.contextmanager
     def phase(self, name: str, **data: object) -> Iterator[str]:
+        import time
+
+        t0 = time.monotonic()
+        start_payload: dict[str, Any] = {"phase": name, "run_id": self.run_id}
+        if data:
+            start_payload.update(data)
         with bind_phase(name):
-            self.emit("phase.start", phase=name, data=data or None)
+            self.emit("phase.start", phase=name, data=start_payload)
+            status = "completed"
             try:
                 yield name
+            except Exception:
+                status = "failed"
+                raise
             finally:
-                self.emit("phase.end", phase=name)
+                wall_s = round(time.monotonic() - t0, 3)
+                end_payload: dict[str, Any] = {
+                    "phase": name,
+                    "run_id": self.run_id,
+                    "wall_s": wall_s,
+                    "status": status,
+                }
+                self.emit("phase.end", phase=name, data=end_payload)
 
     def run_start(self, **data: object) -> None:
         self.emit("run.start", data=dict(data))
