@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.capacity import FleetCapacity, FleetCapacityGate, is_visual_audit_dispatch
-from agent_fleet.capacity.gate import RETRYABLE_ADMISSION_REASONS
+from agent_fleet.capacity.gate import RETRYABLE_ADMISSION_REASONS, count_in_flight
 from agent_fleet.in_flight import reap_in_flight
 from agent_fleet.integrations.github_cli import gh as _gh
 from agent_fleet.issue_loop import github_ops
@@ -205,7 +205,7 @@ class BacklogDispatcher:
 
         ram_gb = available_ram_gb()
         capacity_limit = self.capacity_gate.capacity.max_dispatches
-        in_flight_base = len(list((state.get("in_flight") or {}).values()))
+        in_flight_base = count_in_flight(state)
 
         for issue in issues:
             # Stop as soon as this tick has filled the remaining capacity.
