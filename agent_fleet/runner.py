@@ -57,6 +57,22 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _truncate_verify_message(message: str, *, max_lines: int = 50) -> str:
+    """Truncate verify failure output to keep fix-loop prompts small.
+
+    Whole pytest dumps balloon the IMPLEMENT prompt and inflate token cost.
+    Keep the first ``max_lines`` lines; mark the elision so the agent knows
+    output was clipped.
+    """
+    if not message:
+        return message
+    lines = message.splitlines()
+    if len(lines) <= max_lines:
+        return message
+    omitted = len(lines) - max_lines
+    return "\n".join(lines[:max_lines]) + f"\n... [{omitted} more lines truncated]"
+
+
 def _task_spec_with_browser_research(task_spec: TaskSpec) -> TaskSpec:
     if not task_spec.research_plan:
         return task_spec
@@ -80,7 +96,7 @@ def _run_outcome(
 
 @dataclass
 class FleetRunConfig:
-    max_verify_retries: int = 3
+    max_verify_retries: int = 1
     max_research_workers: int = 4
     memory_limit_parent: str = "4G"
     memory_limit_research: str = "2G"
@@ -528,39 +544,54 @@ class LocalFleetRunner:
                     verify_attempts += 1
                     if verify_attempts > self._config.max_verify_retries:
                         break
-                    if notes is None:
-                        logger.info("[%s] RESEARCH (resume retry)", run_id)
-                        notes = research_all(
-                            task_spec.research_plan,
-                            backend=self._backend,
-                            memory_limit=self._config.memory_limit_research,
-                            max_workers=self._config.max_research_workers,
+                    with run_log.phase("FIX", attempt=verify_attempts):
+                        if notes is None:
+                            logger.info("[%s] RESEARCH (resume retry)", run_id)
+                            notes = research_all(
+                                task_spec.research_plan,
+                                backend=self._backend,
+                                memory_limit=self._config.memory_limit_research,
+                                max_workers=self._config.max_research_workers,
+                                cwd=repo_root,
+                                browser_session_factory=browser_session_factory,
+                            )
+                            phases.setdefault("RESEARCH", [n.to_dict() for n in notes])
+                        # Recycle the persistent session before each fix iteration.
+                        # The full pipeline reuses one session across PLAN→…→IMPLEMENT,
+                        # so its conversation history balloons and re-running
+                        # SYNTHESIZE+IMPLEMENT on retry costs ~M tokens of cache reads.
+                        # A fresh session per fix keeps the prompt scope minimal.
+                        if session is not None:
+                            with contextlib.suppress(Exception):
+                                session.dispose()
+                        session = create_fleet_session(
+                            self._backend,
+                            fleet_config=self._fleet_config,
+                            persona_resolver=self._persona_resolver,
+                            persona=persona,
                             cwd=repo_root,
-                            browser_session_factory=browser_session_factory,
                         )
-                        phases.setdefault("RESEARCH", [n.to_dict() for n in notes])
-                    brief = synthesize(
-                        task_spec,
-                        notes,
-                        backend=self._backend,
-                        extra_context=(
-                            f"Verification failed: {verify_result.message}. Fix and retry."
-                        ),
-                        session=session,
-                    )
-                    implement(
-                        brief,
-                        task_spec,
-                        worktree,
-                        branch_name,
-                        backend=self._backend,
-                        persona_resolver=self._persona_resolver,
-                        persona_name=persona,
-                        prompt_suffix=f"Previous verify failure: {verify_result.message}",
-                        session=session,
-                        require_mcp_tools=require_mcp,
-                        compose_body=dispatch_equip.compose_body,
-                    )
+                        verify_msg = _truncate_verify_message(verify_result.message)
+                        brief = synthesize(
+                            task_spec,
+                            notes,
+                            backend=self._backend,
+                            extra_context=(f"Verification failed: {verify_msg}. Fix and retry."),
+                            session=session,
+                        )
+                        implement(
+                            brief,
+                            task_spec,
+                            worktree,
+                            branch_name,
+                            backend=self._backend,
+                            persona_resolver=self._persona_resolver,
+                            persona_name=persona,
+                            prompt_suffix=f"Previous verify failure: {verify_msg}",
+                            session=session,
+                            require_mcp_tools=require_mcp,
+                            compose_body=dispatch_equip.compose_body,
+                        )
 
                 if verify_result is None or verify_result.severity != VerifySeverity.OK:
                     result = FleetRunResult(
