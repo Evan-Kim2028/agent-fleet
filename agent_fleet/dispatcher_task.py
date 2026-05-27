@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from agent_fleet.code_review import publish_fleet_branch, run_code_review_with_auto_fix
 from agent_fleet.fleet_session import create_fleet_session
 from agent_fleet.handoff_context import apply_handoff_to_task
+from agent_fleet.observability.context import get_run_log
 from agent_fleet.phases import resolve_pipeline_outcome, run_pipeline
 from agent_fleet.worktree import TaskWorkspace, prepare_task_workspace, should_isolate_worktree
 
@@ -229,6 +230,9 @@ def build_task_result(
         stderr=stderr_tail,
         files_modified=files_modified,
     )
+    run_log = get_run_log()
+    if run_log is not None:
+        run_log.task_usage_rollup(task_id=task_index)
     fleet_log.emit(
         "fleet.task.complete",
         task_index=task_index,

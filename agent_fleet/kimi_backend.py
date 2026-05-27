@@ -120,6 +120,7 @@ class KimiLLMResult:
     exit_code: int
     duration_s: float
     agent_id: str | None = None
+    usage: dict[str, int] | None = None
 
 
 class KimiBackend:

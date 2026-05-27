@@ -27,6 +27,13 @@ _DEFAULT_RUNS_DIR = default_runs_dir()
 class RunLog:
     """Emit structured fleet events to one or more sinks."""
 
+    _USAGE_FIELDS = (
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+    )
+
     def __init__(
         self,
         *,
@@ -37,6 +44,14 @@ class RunLog:
         self.run_id = run_id
         self.context = context
         self._sinks = sinks
+        # Accumulates token usage across every llm_usage() emit so the
+        # dispatcher can flush a single per-task rollup before
+        # fleet.task.complete. Per-phase subtotals plus the grand total
+        # live side-by-side; missing fields default to zero.
+        self._usage_totals: dict[str, int] = dict.fromkeys(self._USAGE_FIELDS, 0)
+        self._usage_calls: int = 0
+        self._usage_duration_s: float = 0.0
+        self._usage_by_phase: dict[str, dict[str, int]] = {}
 
     @classmethod
     def create(
@@ -129,3 +144,55 @@ class RunLog:
             level="info" if passed else "error",
             data={"passed": passed, **data},
         )
+
+    def llm_usage(
+        self,
+        *,
+        phase: str | None,
+        model: str | None,
+        duration_s: float,
+        agent_id: str | None = None,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+    ) -> None:
+        """Record one LLM call's token usage and accumulate per-task totals."""
+        tokens: dict[str, int] = {
+            "input_tokens": int(input_tokens),
+            "output_tokens": int(output_tokens),
+            "cache_read_tokens": int(cache_read_tokens),
+            "cache_write_tokens": int(cache_write_tokens),
+        }
+        data: dict[str, Any] = {
+            "model": model,
+            "agent_id": agent_id,
+            "duration_s": round(duration_s, 3),
+            **tokens,
+        }
+        self._usage_calls += 1
+        self._usage_duration_s += duration_s
+        for key in self._USAGE_FIELDS:
+            self._usage_totals[key] += tokens[key]
+        phase_key = phase or (self.context.phase if self.context else None) or "unknown"
+        bucket = self._usage_by_phase.setdefault(
+            phase_key, dict.fromkeys(self._USAGE_FIELDS, 0) | {"calls": 0}
+        )
+        for key in self._USAGE_FIELDS:
+            bucket[key] += tokens[key]
+        bucket["calls"] += 1
+        self.emit("llm.usage", phase=phase, data=data)
+
+    def task_usage_rollup(self, *, task_id: int | None = None) -> dict[str, Any] | None:
+        """Emit a per-task usage summary; returns the totals payload (or None)."""
+        if self._usage_calls == 0:
+            return None
+        payload: dict[str, Any] = {
+            "task_id": task_id,
+            "calls": self._usage_calls,
+            "duration_s": round(self._usage_duration_s, 3),
+            "totals": dict(self._usage_totals),
+            "by_phase": {p: dict(b) for p, b in self._usage_by_phase.items()},
+        }
+        self.emit("llm.usage.task_rollup", data=payload)
+        return payload
