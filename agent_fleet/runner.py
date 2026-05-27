@@ -576,9 +576,7 @@ class LocalFleetRunner:
                             task_spec,
                             notes,
                             backend=self._backend,
-                            extra_context=(
-                                f"Verification failed: {verify_msg}. Fix and retry."
-                            ),
+                            extra_context=(f"Verification failed: {verify_msg}. Fix and retry."),
                             session=session,
                         )
                         implement(
