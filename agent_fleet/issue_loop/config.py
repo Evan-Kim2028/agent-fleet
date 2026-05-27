@@ -23,6 +23,25 @@ class IssueQueueConfig:
 
 
 @dataclass
+class BacklogDispatcherConfig:
+    """Settings for the backlog auto-dispatcher.
+
+    When enabled, the dispatcher polls GitHub for issues labelled ``label``
+    and posts ``/agent --persona <X>`` comments to eligible issues so that the
+    existing comment-trigger path handles the actual dispatch.
+
+    Default ``enabled=False`` so merging this is safe without opting in.
+    """
+
+    enabled: bool = False
+    label: str = "fleet-ready"
+    persona_label_prefix: str = "fleet-persona/"
+    default_persona: str = "data"
+    tick_interval_s: int = 600
+    marker_freshness_s: int = 300
+
+
+@dataclass
 class IssueDispatchConfig:
     """Settings for /agent --persona issue comment dispatch.
 
@@ -69,4 +88,25 @@ def load_issue_dispatch_config(
         running_label_prefix=str(section.get("running_label_prefix", "fleet-running")),
         comment_marker=str(section.get("comment_marker", "<!-- agent-fleet-watcher -->")),
         queue=queue_cfg,
+    )
+
+
+def load_backlog_dispatcher_config(
+    raw: dict[str, Any] | None,
+) -> BacklogDispatcherConfig:
+    """Parse the ``backlog_dispatcher`` section from repo YAML.
+
+    Returns a disabled config when the section is absent or malformed, so
+    this is always safe to call.
+    """
+    section = (raw or {}).get("backlog_dispatcher")
+    if not section or not isinstance(section, dict):
+        return BacklogDispatcherConfig()
+    return BacklogDispatcherConfig(
+        enabled=bool(section.get("enabled", False)),
+        label=str(section.get("label", "fleet-ready")),
+        persona_label_prefix=str(section.get("persona_label_prefix", "fleet-persona/")),
+        default_persona=str(section.get("default_persona", "data")),
+        tick_interval_s=int(section.get("tick_interval_s", 600)),
+        marker_freshness_s=int(section.get("marker_freshness_s", 300)),
     )

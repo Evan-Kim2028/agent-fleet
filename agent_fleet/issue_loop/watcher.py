@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import time
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.capacity import (
@@ -20,6 +21,7 @@ from agent_fleet.capacity import (
 from agent_fleet.in_flight import reap_in_flight
 from agent_fleet.issue_loop import github_ops
 from agent_fleet.issue_loop import queue as issue_queue
+from agent_fleet.issue_loop.backlog_dispatcher import BacklogDispatcher
 from agent_fleet.issue_loop.triggers import (
     extract_issue_number,
     extract_persona,
@@ -392,6 +394,41 @@ class CombinedWatcher:
             if schedule_config and schedule_config.enabled
             else None
         )
+
+        # Build backlog dispatchers for targets that have the feature enabled.
+        # Each entry is (BacklogDispatcher, tick_interval_s, last_tick_time | None).
+        self._backlog_dispatchers: list[tuple[BacklogDispatcher, int, datetime | None]] = []
+        # Include the controller repo itself when no explicit targets are configured.
+        backlog_targets = targets if targets else [repo]
+        for target in backlog_targets:
+            bd_cfg = getattr(target, "backlog_dispatcher", None)
+            if bd_cfg is None or not bd_cfg.enabled:
+                continue
+            # backlog_dispatcher posts /agent comments on labeled issues; the
+            # consumer is IssueLoopWatcher on the same target. Without
+            # issue_dispatch.enabled, comments are written to GitHub but nothing
+            # picks them up — a silent dead-letter queue. Fail loud.
+            issue_dispatch = getattr(target, "issue_dispatch", None)
+            if issue_dispatch is None or not issue_dispatch.enabled:
+                logger.warning(
+                    "backlog_dispatcher enabled on %s but issue_dispatch is "
+                    "disabled — /agent comments have no consumer. Skipping.",
+                    target.display_name,
+                )
+                continue
+            capacity = target.capacity or FleetCapacity.defaults()
+            bd_state_path = state_path(controller_state_root)
+            dispatcher = BacklogDispatcher(
+                target,
+                capacity,
+                bd_state_path,
+                label=bd_cfg.label,
+                persona_label_prefix=bd_cfg.persona_label_prefix,
+                default_persona=bd_cfg.default_persona,
+                marker_freshness_s=bd_cfg.marker_freshness_s,
+            )
+            self._backlog_dispatchers.append((dispatcher, bd_cfg.tick_interval_s, None))
+
         intervals: list[int] = []
         for watcher in self.issue_watchers:
             intervals.append(watcher.config.poll_interval_s)
@@ -409,6 +446,38 @@ class CombinedWatcher:
         for watcher in self.pr_watchers:
             pr_results.extend(watcher.poll_once())
         schedule_results = self.schedule_watcher.poll_once() if self.schedule_watcher else []
+
+        # Run backlog dispatchers whose tick interval has elapsed.
+        now = datetime.now(UTC)
+        updated: list[tuple[BacklogDispatcher, int, datetime | None]] = []
+        for dispatcher, tick_interval_s, last_tick in self._backlog_dispatchers:
+            elapsed = (
+                (now - last_tick).total_seconds() if last_tick is not None else tick_interval_s
+            )
+            if elapsed >= tick_interval_s:
+                try:
+                    tick_result = dispatcher.dispatch_once(now)
+                    logger.info(
+                        "backlog.tick repo=%s considered=%s dispatched=%s skipped=%s",
+                        dispatcher.repo.display_name,
+                        tick_result.considered,
+                        len(tick_result.dispatched),
+                        tick_result.skipped_for_reason,
+                    )
+                    emit_fleet_event(
+                        "backlog.tick",
+                        repo=dispatcher.repo.display_name,
+                        considered=tick_result.considered,
+                        dispatched=[(n, p) for n, p in tick_result.dispatched],
+                        skipped=tick_result.skipped_for_reason,
+                    )
+                except Exception as exc:
+                    logger.exception("backlog_dispatcher error: %s", exc)
+                updated.append((dispatcher, tick_interval_s, now))
+            else:
+                updated.append((dispatcher, tick_interval_s, last_tick))
+        self._backlog_dispatchers = updated
+
         return {
             "issues": issue_results,
             "prs": pr_results,

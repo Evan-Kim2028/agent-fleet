@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from agent_fleet.capacity.config import FleetCapacity
     from agent_fleet.code_review.config import CodeReviewConfig
     from agent_fleet.config import FleetConfig
-    from agent_fleet.issue_loop.config import IssueDispatchConfig
+    from agent_fleet.issue_loop.config import BacklogDispatcherConfig, IssueDispatchConfig
     from agent_fleet.orchestration.config import OrchestrationConfig
     from agent_fleet.pr_loop.config import PrLoopConfig
     from agent_fleet.schedule.config import ScheduleConfig
@@ -57,6 +57,7 @@ class RepoConfig:
     pr_loop: PrLoopConfig | None = None
     code_review: CodeReviewConfig | None = None
     issue_dispatch: IssueDispatchConfig | None = None
+    backlog_dispatcher: BacklogDispatcherConfig | None = None
     schedules: ScheduleConfig | None = None
     capacity: FleetCapacity | None = None
     orchestration: OrchestrationConfig | None = None
@@ -190,6 +191,7 @@ def load_repo_config(
         pr_loop=pr_loop_cfg,
         code_review=_load_code_review(raw, pr_loop_cfg),
         issue_dispatch=_load_issue_dispatch(repo_root, raw),
+        backlog_dispatcher=_load_backlog_dispatcher(raw),
         schedules=_load_schedules(repo_root, raw),
         capacity=capacity_cfg,
         orchestration=resolve_orchestration_config(raw),
@@ -216,6 +218,12 @@ def _load_issue_dispatch(repo_root: Path, raw: dict[str, Any]) -> IssueDispatchC
     from agent_fleet.issue_loop.config import load_issue_dispatch_config
 
     return load_issue_dispatch_config(repo_root, raw)
+
+
+def _load_backlog_dispatcher(raw: dict[str, Any]) -> BacklogDispatcherConfig | None:
+    from agent_fleet.issue_loop.config import load_backlog_dispatcher_config
+
+    return load_backlog_dispatcher_config(raw)
 
 
 def _load_schedules(repo_root: Path, raw: dict[str, Any]) -> ScheduleConfig | None:
