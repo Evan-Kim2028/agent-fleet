@@ -15,6 +15,13 @@ if TYPE_CHECKING:
     from agent_fleet.repo import RepoConfig
 
 
+def _format_failure(headline: str, proc: subprocess.CompletedProcess[str]) -> str:
+    detail = (proc.stderr or proc.stdout or "")[-2000:].rstrip()
+    if not detail:
+        return f"{headline}\nexit={proc.returncode}"
+    return f"{headline}\nexit={proc.returncode}\n{detail}"
+
+
 class CommandVerifier:
     """Run configured shell commands as verification gates."""
 
@@ -37,6 +44,39 @@ class CommandVerifier:
             "ISSUE_NUMBER": str(task_id),
             "FLEET_PERSONA": persona,
         }
+        for cmd in self.repo.worktree_bootstrap_commands:
+            proc = subprocess.run(
+                cmd,
+                shell=True,
+                cwd=str(worktree),
+                capture_output=True,
+                text=True,
+                check=False,
+                env=verify_env,
+            )
+            checks.append(
+                {
+                    "name": f"bootstrap: {cmd}",
+                    "passed": proc.returncode == 0,
+                    "stdout_tail": proc.stdout[-2000:],
+                    "stderr_tail": proc.stderr[-2000:],
+                    "exit_code": proc.returncode,
+                }
+            )
+            if proc.returncode != 0:
+                # Bootstrap prepares the worktree. It is deterministic on
+                # rerun and not fixable by editing the code under task
+                # (lockfile drift, missing tools, network). Classify FATAL
+                # so the runner bails immediately instead of burning fix
+                # iterations on an environmental problem.
+                return VerifyResult(
+                    severity=VerifySeverity.FATAL,
+                    checks=checks,
+                    violating_paths=[],
+                    files_changed=rel_changed,
+                    message=_format_failure(f"Worktree bootstrap failed: {cmd}", proc),
+                )
+
         verify_commands_ran = bool(self.repo.verify_commands)
         for cmd in self.repo.verify_commands:
             proc = subprocess.run(
@@ -63,7 +103,7 @@ class CommandVerifier:
                     checks=checks,
                     violating_paths=[],
                     files_changed=rel_changed,
-                    message=f"Verification failed: {cmd}",
+                    message=_format_failure(f"Verification failed: {cmd}", proc),
                 )
 
         if not verify_commands_ran:
