@@ -130,9 +130,7 @@ def cmd_dag_run(args: argparse.Namespace) -> int:
         pipeline=args.pipeline or config.default_pipeline,
     )
     orchestration = repo.orchestration if repo and repo.orchestration else None
-    default_pipeline = (
-        orchestration.default_dag_pipeline if orchestration else "code_review"
-    )
+    default_pipeline = orchestration.default_dag_pipeline if orchestration else "code_review"
     max_chars = orchestration.dag_upstream_context_chars if orchestration else 2000
 
     summary = dispatch_dag(

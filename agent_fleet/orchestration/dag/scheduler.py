@@ -28,9 +28,7 @@ def validate_dag_graph(spec: DagSpec) -> None:
 def topo_sort_ranks(tasks: tuple[DagTask, ...]) -> list[list[DagTask]]:
     """Kahn topo-sort into parallel ranks (tasks in a rank may run concurrently)."""
     by_id = {task.id: task for task in tasks}
-    remaining_deps: dict[str, set[str]] = {
-        task.id: set(task.depends_on) for task in tasks
-    }
+    remaining_deps: dict[str, set[str]] = {task.id: set(task.depends_on) for task in tasks}
     dependents: dict[str, list[str]] = {task.id: [] for task in tasks}
     for task in tasks:
         for dep in task.depends_on:

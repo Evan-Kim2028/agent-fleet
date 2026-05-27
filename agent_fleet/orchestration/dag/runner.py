@@ -7,7 +7,7 @@ from __future__ import annotations
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from agent_fleet.hooks import FleetTask, FleetTaskResult
 from agent_fleet.level_up.models import DispatchEquip
@@ -28,6 +28,7 @@ from agent_fleet.orchestration.dag.stitch import build_dag_task_context
 if TYPE_CHECKING:
     from agent_fleet.dispatcher import FleetDispatcher
     from agent_fleet.hooks import PersonaResolver
+    from agent_fleet.observability.fleet_logger import FleetLogger
     from agent_fleet.orchestration.dag.canvas_writer import DagCanvasWriter
 
 logger = logging.getLogger(__name__)
@@ -52,10 +53,10 @@ def _result_output(result: FleetTaskResult) -> str:
     parts: list[str] = []
     if result.summary:
         parts.append(result.summary.strip())
-    phases = result.phases or {}
+    phases: dict[str, object] = result.phases or {}
     execute = phases.get("execute")
     if isinstance(execute, dict):
-        stdout = execute.get("stdout")
+        stdout = cast("dict[str, object]", execute).get("stdout")
         if isinstance(stdout, str) and stdout.strip():
             parts.append(stdout.strip())
     if result.error:
@@ -173,7 +174,7 @@ def dispatch_dag(
     parent_run_id: str | None = None,
     max_chars_per_parent: int = 2000,
     acceptance_criteria: list[str] | None = None,
-    fleet_log: object | None = None,
+    fleet_log: FleetLogger | None = None,
     canvas_writer: DagCanvasWriter | None = None,
 ) -> DagRunSummary:
     """Run DAG tasks rank-by-rank through the fleet dispatcher."""

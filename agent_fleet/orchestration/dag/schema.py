@@ -48,11 +48,7 @@ class DagSpec:
                     "subtask_prompt": task.subtask_prompt,
                     **({"persona": task.persona} if task.persona else {}),
                     **({"pipeline": task.pipeline} if task.pipeline else {}),
-                    **(
-                        {"allowed_paths": list(task.allowed_paths)}
-                        if task.allowed_paths
-                        else {}
-                    ),
+                    **({"allowed_paths": list(task.allowed_paths)} if task.allowed_paths else {}),
                 }
                 for task in self.tasks
             ],

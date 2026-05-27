@@ -5,6 +5,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from agent_fleet.dispatcher import FleetDispatcher
 
 import pytest
 
@@ -191,7 +195,7 @@ class _FakeDispatcher:
     outcomes: dict[str, str] = field(default_factory=dict)
 
     def _execute_task(self, task_index: int, task: FleetTask, **_: object) -> FleetTaskResult:
-        node_id = task.title.rsplit(" — ", 1)[-1]
+        node_id = (task.title or "").rsplit(" — ", 1)[-1]
         self.calls.append(node_id)
         status = self.outcomes.get(node_id, "completed")
         return FleetTaskResult(
@@ -216,7 +220,7 @@ def test_dispatch_dag_skips_downstream_on_failure() -> None:
     summary = dispatch_dag(
         spec=_example_spec(),
         parent_task=parent,
-        dispatcher=dispatcher,  # type: ignore[arg-type]
+        dispatcher=cast("FleetDispatcher", dispatcher),
         persona_resolver=resolver,
         fallback_persona="coder",
         default_pipeline="simple",
