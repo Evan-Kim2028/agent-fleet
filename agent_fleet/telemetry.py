@@ -103,6 +103,16 @@ class _JsonlSpanProcessor(SpanProcessor):
 
 
 def configure_fleet_logging(level: int = logging.INFO) -> None:
+    import warnings
+
+    try:
+        from logfire._internal.ast_utils import (
+            InspectArgumentsFailedWarning,  # type: ignore[import-untyped]
+        )
+
+        warnings.filterwarnings("ignore", category=InspectArgumentsFailedWarning)
+    except ImportError:
+        pass
     logging.basicConfig(
         level=level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
