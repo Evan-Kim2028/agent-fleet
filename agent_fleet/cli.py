@@ -159,20 +159,24 @@ def cmd_loop(args: argparse.Namespace) -> int:
     watcher = PrLoopWatcher(repo, repo.pr_loop, fleet_config=config)
     if args.pr_number:
         branch = args.branch
-        if not branch:
-            import subprocess
+        base_ref_name = ""
+        import subprocess
 
-            result = subprocess.run(
-                ["gh", "pr", "view", str(args.pr_number), "--json", "headRefName"],
-                capture_output=True,
-                text=True,
-                check=False,
-                cwd=workspace,
-            )
-            if result.returncode != 0:
-                print("error: --branch required or gh must resolve PR head", file=sys.stderr)
-                return 1
-            branch = json.loads(result.stdout).get("headRefName", "")
+        view = subprocess.run(
+            ["gh", "pr", "view", str(args.pr_number), "--json", "headRefName,baseRefName"],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=workspace,
+        )
+        if view.returncode == 0:
+            payload = json.loads(view.stdout)
+            if not branch:
+                branch = payload.get("headRefName", "")
+            base_ref_name = payload.get("baseRefName", "")
+        if not branch:
+            print("error: --branch required or gh must resolve PR head", file=sys.stderr)
+            return 1
 
         result = run_pr_lifecycle(
             pr_number=args.pr_number,
@@ -181,6 +185,7 @@ def cmd_loop(args: argparse.Namespace) -> int:
             loop_config=repo.pr_loop,
             fleet_config=config,
             skip_review_wait=bool(args.skip_review_wait),
+            base_ref_name=base_ref_name,
         )
         print(json.dumps({"status": result.status, "detail": result.detail}, indent=2))
         return 0 if result.status in {"merged", "ready", "no_findings", "ci_green"} else 1

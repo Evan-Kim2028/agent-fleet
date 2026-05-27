@@ -749,24 +749,21 @@ def _detect_drift(
     # Step 4: unresolvable conflict
     conflict_files = merge_result.conflict_files
 
-    # Idempotency: full action requires BOTH the PR closed AND the source issue
-    # reopened with a replan marker (when an issue number is parseable). A prior
-    # cycle that closed the PR but failed to reopen+replan must keep retrying;
-    # checking the PR state alone would silently abandon those issues.
+    # Idempotency: a prior cycle is "already actioned" only when every visible
+    # marker for this drift has been posted. The PR marker is posted LAST, so
+    # its presence implies the issue marker (when an issue is parseable) was
+    # already posted by the same cycle. Gating on the PR marker alone avoids
+    # the bug where a no-issue branch (issue_number is None) would skip the
+    # PR-marker post on subsequent cycles.
     issue_number = _issue_number_from_branch(branch)
     pr_already_closed = github_ops.is_pr_closed(pr_number, cwd=repo_root)
-    issue_already_replanned = False
+    pr_marker_posted = False
     if pr_already_closed:
-        if issue_number is None:
-            issue_already_replanned = True
-        else:
-            existing_issue_comments = github_ops.issue_comments(issue_number, cwd=repo_root)
-            issue_already_replanned = _marker_within_window(
-                existing_issue_comments, _DRIFT_ISSUE_MARKER
-            )
-    if pr_already_closed and issue_already_replanned:
+        existing_pr_comments = github_ops.pr_comments(pr_number, cwd=repo_root)
+        pr_marker_posted = _marker_within_window(existing_pr_comments, _DRIFT_PR_MARKER)
+    if pr_already_closed and pr_marker_posted:
         logger.info(
-            "drift-check: PR #%s already closed and issue replan posted; skipping",
+            "drift-check: PR #%s already closed and drift marker posted; skipping",
             pr_number,
         )
         return LifecycleResult(

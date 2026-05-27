@@ -23,6 +23,30 @@ if TYPE_CHECKING:
     from agent_fleet.repo import RepoConfig
 
 
+def _resolve_pr_base_ref(pr_number: int, workspace: object | None) -> str:
+    """Fetch baseRefName via `gh pr view`; return empty string on any failure."""
+    import json
+    import subprocess
+
+    cwd = str(workspace) if workspace else None
+    try:
+        view = subprocess.run(
+            ["gh", "pr", "view", str(pr_number), "--json", "baseRefName"],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=cwd,
+        )
+    except (OSError, ValueError):
+        return ""
+    if view.returncode != 0:
+        return ""
+    try:
+        return str(json.loads(view.stdout).get("baseRefName") or "")
+    except (ValueError, json.JSONDecodeError):
+        return ""
+
+
 def _stderr_from_phases(phase_results: list[dict[str, object]]) -> str:
     for item in reversed(phase_results):
         raw = item.get("stderr")
@@ -251,6 +275,7 @@ def maybe_publish_and_pr_loop(
     ):
         from agent_fleet.pr_loop.lifecycle import run_pr_lifecycle
 
+        base_ref_name = _resolve_pr_base_ref(pr_number, run_workspace)
         loop_result = run_pr_lifecycle(
             pr_number=pr_number,
             branch=task_workspace.branch_name,
@@ -260,6 +285,7 @@ def maybe_publish_and_pr_loop(
             worktree=run_workspace,
             skip_review_wait=False,
             persona=task.persona,
+            base_ref_name=base_ref_name,
         )
         pr_loop_status = loop_result.status
         if loop_result.status == "merged":

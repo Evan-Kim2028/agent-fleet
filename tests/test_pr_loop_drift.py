@@ -225,8 +225,8 @@ def test_detect_drift_conflict_idempotent(tmp_path: Path) -> None:
     ancestor_fail = _make_proc(1)
     conflict_tree = MergeTreeResult(clean=False, conflict_files=("src/a.py",))
     recent = (datetime.now(tz=UTC) - timedelta(hours=1)).isoformat()
-    issue_comments_with_marker = [
-        {"body": f"replan body {_DRIFT_ISSUE_MARKER}", "createdAt": recent}
+    pr_comments_with_marker = [
+        {"body": f"drift body {_DRIFT_PR_MARKER}", "createdAt": recent}
     ]
 
     with (
@@ -240,8 +240,8 @@ def test_detect_drift_conflict_idempotent(tmp_path: Path) -> None:
             return_value=True,
         ),
         patch(
-            "agent_fleet.pr_loop.lifecycle.github_ops.issue_comments",
-            return_value=issue_comments_with_marker,
+            "agent_fleet.pr_loop.lifecycle.github_ops.pr_comments",
+            return_value=pr_comments_with_marker,
         ),
         patch("agent_fleet.pr_loop.lifecycle.github_ops.post_pr_comment") as mock_post_pr,
         patch("agent_fleet.pr_loop.lifecycle.github_ops.close_pr") as mock_close,
@@ -253,7 +253,7 @@ def test_detect_drift_conflict_idempotent(tmp_path: Path) -> None:
 
     assert result is not None
     assert result.status == "drift"
-    # All destructive actions skipped: PR already closed AND issue already replanned
+    # All destructive actions skipped: PR already closed AND PR drift marker present
     mock_post_pr.assert_not_called()
     mock_close.assert_not_called()
     mock_reopen.assert_not_called()
