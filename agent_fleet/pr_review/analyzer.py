@@ -229,13 +229,15 @@ def _run_pass(
             raw_output=result.stdout,
             parsed=parsed,
         )
-        _set_span_attrs(
-            pass_span,
-            status="ok",
-            risk_level=str(parsed.get("risk_level") or "unknown"),
-            findings_count=len(parsed.get("findings") or []),
-            suggestions_count=len(parsed.get("suggestions") or []),
-        )
+        span_attrs: dict[str, object] = {
+            "status": "ok",
+            "risk_level": str(parsed.get("risk_level") or "unknown"),
+            "findings_count": len(parsed.get("findings") or []),
+            "suggestions_count": len(parsed.get("suggestions") or []),
+        }
+        if result.usage:
+            span_attrs.update({k: int(v) for k, v in result.usage.items()})
+        _set_span_attrs(pass_span, **span_attrs)
         return parsed
 
 

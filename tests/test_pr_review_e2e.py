@@ -26,6 +26,7 @@ class _MockResult:
     exit_code: int = 0
     duration_s: float = 0.1
     agent_id: str | None = None
+    usage: dict[str, int] | None = None
 
 
 @dataclass

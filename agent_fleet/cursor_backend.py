@@ -18,7 +18,7 @@ from typing import Any
 from agent_fleet.agent_mode import AgentMode, coerce_agent_mode
 from agent_fleet.contracts.mcp import McpServerSpec, StdioMcpServerSpec
 from agent_fleet.contracts.mcp_requirement import McpRequirement
-from agent_fleet.observability.context import get_run_log
+from agent_fleet.observability.context import get_run_context, get_run_log
 from agent_fleet.telemetry import span as _telemetry_span
 
 logger = logging.getLogger(__name__)
@@ -39,6 +39,65 @@ class CursorLLMResult:
     # inspect this to build a diagnostic error message instead of reporting
     # the generic "no JSON in output" symptom.
     cause: BaseException | None = None
+    # Token usage harvested from the Cursor SDK stream's TurnEndedUpdate.
+    # Keys are normalized snake_case: input_tokens, output_tokens,
+    # cache_read_tokens, cache_write_tokens. None when the stream did not
+    # surface usage (e.g. older bridge, error path).
+    usage: Mapping[str, int] | None = None
+
+
+# Upstream Cursor SDK emits usage keys as camelCase; we normalize so all
+# downstream consumers (RunLog, Logfire spans, tests) read snake_case.
+_USAGE_KEY_MAP = {
+    "inputTokens": "input_tokens",
+    "outputTokens": "output_tokens",
+    "cacheReadTokens": "cache_read_tokens",
+    "cacheWriteTokens": "cache_write_tokens",
+}
+
+
+def _normalize_usage(raw: Mapping[str, Any] | None) -> dict[str, int] | None:
+    if not raw:
+        return None
+    out: dict[str, int] = {}
+    for src, dst in _USAGE_KEY_MAP.items():
+        val = raw.get(src)
+        if val is None:
+            continue
+        try:
+            out[dst] = int(val)
+        except TypeError, ValueError:
+            continue
+    return out or None
+
+
+def _log_llm_usage(
+    *,
+    phase: str | None,
+    model: str | None,
+    usage: Mapping[str, int] | None,
+    duration_s: float,
+    agent_id: str | None,
+    span: object | None = None,
+) -> None:
+    """Emit an llm.usage RunLog entry and tag the active Logfire span."""
+    if not usage:
+        return
+    run_log = get_run_log()
+    if run_log is not None:
+        run_log.llm_usage(
+            phase=phase,
+            model=model,
+            duration_s=duration_s,
+            agent_id=agent_id,
+            **{k: int(v) for k, v in usage.items()},
+        )
+    if span is not None:
+        set_attr = getattr(span, "set_attribute", None)
+        if set_attr is not None:
+            for key, val in usage.items():
+                with contextlib.suppress(Exception):
+                    set_attr(key, int(val))
 
 
 def _resolve_model_selection(model: str) -> str | dict[str, Any]:
@@ -80,18 +139,34 @@ def _consume_run_events(
     *,
     expected_mcp_servers: frozenset[str] | None = None,
     warn_if_unused: bool = False,
-) -> tuple[str, ...]:
-    """Drain a Run event stream and log MCP tool invocations."""
+) -> tuple[tuple[str, ...], dict[str, int] | None]:
+    """Drain a Run event stream, log MCP tool invocations, harvest usage.
+
+    Returns ``(mcp_tool_calls, usage)``. ``usage`` is the normalized
+    ``TurnEndedUpdate.usage`` dict (snake_case keys) from the final turn,
+    or ``None`` if the stream did not emit one. The bridge only emits
+    ``interaction_update`` events when ``SendOptions.on_delta`` is set
+    (the SDK flips ``enableDeltas`` based on that callback); call sites
+    that want usage MUST pass a SendOptions with an on_delta callback.
+    """
     labels: list[str] = []
     seen_running: set[str] = set()
+    usage: dict[str, int] | None = None
 
     events = getattr(run, "events", None)
     if not callable(events):
         if hasattr(run, "wait"):
             run.wait()
-        return tuple(labels)
+        return tuple(labels), usage
 
     for event in events():
+        upd = getattr(event, "interaction_update", None)
+        if upd is not None and getattr(upd, "type", None) == "turn-ended":
+            raw_usage = getattr(upd, "usage", None)
+            normalized = _normalize_usage(raw_usage)
+            if normalized is not None:
+                usage = normalized
+
         msg = getattr(event, "sdk_message", None)
         if msg is None or getattr(msg, "type", None) != "tool_call":
             continue
@@ -160,7 +235,7 @@ def _consume_run_events(
             ", ".join(f"{name}x{labels.count(name)}" for name in dict.fromkeys(labels)),
         )
 
-    return tuple(labels)
+    return tuple(labels), usage
 
 
 def _sdk_mcp_config(spec: McpServerSpec, sdk):  # noqa: ANN001, ANN202
@@ -196,12 +271,14 @@ class CursorSession:
         *,
         default_timeout_s: int,
         mcp_servers: frozenset[str] | None = None,
+        model_label: str | None = None,
     ) -> None:
         self._agent = agent
         self._default_timeout_s = default_timeout_s
         self._mcp_servers = mcp_servers or frozenset()
         self._disposed = False
         self.agent_id: str | None = getattr(agent, "agent_id", None)
+        self._model_label = model_label
         if "playwright" in self._mcp_servers:
             from agent_fleet.memory import PlaywrightSessionRegistry
 
@@ -237,14 +314,20 @@ class CursorSession:
         body = f"{prompt}{scope_note}" if scope_note else prompt
         t0 = time.monotonic()
         run_attempt = 0
+        usage: dict[str, int] | None = None
         try:
+            import cursor_sdk as sdk
+
+            send_options = sdk.SendOptions(on_delta=lambda _u: None)
             while True:
-                run = self._agent.send(body)
-                mcp_tool_calls = _consume_run_events(
+                run = self._agent.send(body, send_options)
+                mcp_tool_calls, turn_usage = _consume_run_events(
                     run,
                     expected_mcp_servers=self._mcp_servers or None,
                     warn_if_unused=requirement.required,
                 )
+                if turn_usage is not None:
+                    usage = turn_usage
                 result = getattr(run, "_terminal_result", None)
                 if result is None and hasattr(run, "wait"):
                     result = run.wait()
@@ -296,6 +379,7 @@ class CursorSession:
                     duration_s=duration_s,
                     agent_id=agent_id,
                     mcp_tool_calls=mcp_tool_calls,
+                    usage=usage,
                 )
 
             if status in {"error", "cancelled", "expired"}:
@@ -306,7 +390,16 @@ class CursorSession:
                     duration_s=duration_s,
                     agent_id=agent_id,
                     mcp_tool_calls=mcp_tool_calls,
+                    usage=usage,
                 )
+            ctx = get_run_context()
+            _log_llm_usage(
+                phase=ctx.phase if ctx is not None else None,
+                model=self._model_label,
+                usage=usage,
+                duration_s=duration_s,
+                agent_id=agent_id,
+            )
             return CursorLLMResult(
                 stdout=text or "",
                 stderr="",
@@ -314,6 +407,7 @@ class CursorSession:
                 duration_s=duration_s,
                 agent_id=agent_id,
                 mcp_tool_calls=mcp_tool_calls,
+                usage=usage,
             )
         except Exception as exc:
             logger.exception("CursorSession.send failed")
@@ -587,10 +681,14 @@ class CursorBackend:
                 agent = sdk.Agent.create(agent_options)
         except Exception as exc:
             return _ErrorSession(f"Agent.create failed: {exc}")
+        model_label = (
+            selected_model if isinstance(selected_model, str) else selected_model.get("id")
+        )
         return CursorSession(
             agent,
             default_timeout_s=900,
             mcp_servers=frozenset(mcp_dict),
+            model_label=model_label,
         )
 
     def run(
@@ -617,7 +715,7 @@ class CursorBackend:
 
         try:
             import cursor_sdk as sdk
-            from cursor_sdk import Agent, AgentOptions, LocalAgentOptions
+            from cursor_sdk import Agent, AgentOptions, LocalAgentOptions, SendOptions
         except ImportError as exc:
             return CursorLLMResult(
                 stdout="",
@@ -643,8 +741,10 @@ class CursorBackend:
         prompt_with_scope = f"{prompt}{scope_note}" if scope_note else prompt
         t0 = time.monotonic()
 
+        usage_capture: dict[str, int] | None = None
+
         def _execute() -> CursorLLMResult:
-            nonlocal sdk_client
+            nonlocal sdk_client, usage_capture
             bridge_attempt = 0
             run_attempt = 0
             while True:
@@ -657,9 +757,19 @@ class CursorBackend:
                             local=LocalAgentOptions(cwd=work_dir),
                         )
                         if sdk_client is not None:
-                            result = Agent.prompt(prompt_with_scope, options, client=sdk_client)
+                            agent = Agent.create(options, client=sdk_client)
                         else:
-                            result = Agent.prompt(prompt_with_scope, options)
+                            agent = Agent.create(options)
+                        try:
+                            send_options = SendOptions(on_delta=lambda _u: None)
+                            run = agent.send(prompt_with_scope, send_options)
+                            _mcp_calls, turn_usage = _consume_run_events(run)
+                            if turn_usage is not None:
+                                usage_capture = turn_usage
+                            result = run.wait() if hasattr(run, "wait") else run
+                        finally:
+                            with contextlib.suppress(Exception):
+                                agent.close()
                 except Exception as exc:
                     if (
                         CursorBackend._is_bridge_disconnect(exc)
@@ -722,6 +832,7 @@ class CursorBackend:
                         exit_code=1,
                         duration_s=duration_s,
                         agent_id=agent_id,
+                        usage=usage_capture,
                     )
                 if not text or not text.strip():
                     return CursorLLMResult(
@@ -733,6 +844,7 @@ class CursorBackend:
                         exit_code=1,
                         duration_s=duration_s,
                         agent_id=agent_id,
+                        usage=usage_capture,
                     )
                 return CursorLLMResult(
                     stdout=text or "",
@@ -740,6 +852,7 @@ class CursorBackend:
                     exit_code=0,
                     duration_s=duration_s,
                     agent_id=agent_id,
+                    usage=usage_capture,
                 )
 
         span_model = selected_model if isinstance(selected_model, str) else selected_model.get("id")
@@ -758,18 +871,29 @@ class CursorBackend:
             timeout_s=timeout_s,
             prompt_len=len(prompt_with_scope),
             cwd=str(cwd) if cwd else None,
-        ):
+        ) as run_span:
             if timeout_s <= 0:
-                return _execute()
-
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(_execute)
-                try:
-                    return future.result(timeout=timeout_s)
-                except FuturesTimeoutError:
-                    return CursorLLMResult(
-                        stdout="",
-                        stderr=f"Cursor run timed out after {timeout_s}s",
-                        exit_code=1,
-                        duration_s=time.monotonic() - t0,
-                    )
+                result = _execute()
+            else:
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(_execute)
+                    try:
+                        result = future.result(timeout=timeout_s)
+                    except FuturesTimeoutError:
+                        return CursorLLMResult(
+                            stdout="",
+                            stderr=f"Cursor run timed out after {timeout_s}s",
+                            exit_code=1,
+                            duration_s=time.monotonic() - t0,
+                        )
+            if result.exit_code == 0:
+                ctx = get_run_context()
+                _log_llm_usage(
+                    phase=ctx.phase if ctx is not None else None,
+                    model=span_model if isinstance(span_model, str) else None,
+                    usage=result.usage,
+                    duration_s=result.duration_s,
+                    agent_id=result.agent_id,
+                    span=run_span,
+                )
+            return result
