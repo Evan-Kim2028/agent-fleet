@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import subprocess
@@ -127,6 +128,33 @@ def _worktree_in_use(worktree_path: Path) -> bool:
     return False
 
 
+def _alive_dispatch_issue_numbers() -> set[int]:
+    """ISSUE_NUMBER env values of currently-alive dispatcher subprocesses.
+
+    The watcher spawns each issue dispatch as a subprocess with
+    ``ISSUE_NUMBER`` in its environ. While that subprocess is alive its
+    worktree must not be swept, regardless of whether the branch has yet
+    surfaced as an open PR.
+    """
+    out: set[int] = set()
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return out
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            data = (entry / "environ").read_bytes()
+        except OSError, PermissionError:
+            continue
+        for chunk in data.split(b"\x00"):
+            if chunk.startswith(b"ISSUE_NUMBER="):
+                with contextlib.suppress(ValueError):
+                    out.add(int(chunk[len(b"ISSUE_NUMBER=") :]))
+                break
+    return out
+
+
 def remove_worktree(repo_root: Path, worktree_path: Path) -> bool:
     """Force-remove *worktree_path* from the git worktree registry. Returns True on success."""
     if _worktree_in_use(worktree_path):
@@ -171,6 +199,8 @@ def sweep_orphan_worktrees(
         )
         return 0
 
+    alive_issues = _alive_dispatch_issue_numbers()
+
     removed = 0
     for entry in _parse_worktree_list(result.stdout):
         wt_path = Path(entry.get("worktree", ""))
@@ -180,6 +210,14 @@ def sweep_orphan_worktrees(
         except ValueError:
             continue
         if not branch or branch in active_branches:
+            continue
+        meta = parse_agent_branch(branch)
+        if meta and int(meta.issue) in alive_issues:
+            logger.info(
+                "Skipping worktree removal — dispatcher alive for issue %s: %s",
+                meta.issue,
+                wt_path,
+            )
             continue
         if remove_worktree(repo_root, wt_path):
             removed += 1
