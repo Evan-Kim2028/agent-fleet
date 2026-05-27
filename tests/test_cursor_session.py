@@ -334,13 +334,23 @@ def test_runlog_llm_usage_accumulates_per_phase_then_rollup() -> None:
         "output_tokens": 25,
         "cache_read_tokens": 25,
         "cache_write_tokens": 1,
+        "total_tokens": 351,
     }
     assert rollup["by_phase"]["PLAN"]["calls"] == 1
+    assert rollup["by_phase"]["PLAN"]["total_tokens"] == 115
     assert rollup["by_phase"]["RESEARCH"]["input_tokens"] == 200
+    assert rollup["by_phase"]["RESEARCH"]["total_tokens"] == 236
 
     events = [e.event for e in sink.events]
     assert events.count("llm.usage") == 2
     assert events.count("llm.usage.task_rollup") == 1
+    # Second call is a no-op (idempotent).
+    assert log.task_usage_rollup(task_id=0) is None
+    assert [e.event for e in sink.events].count("llm.usage.task_rollup") == 1
+
+    usage_events = [e for e in sink.events if e.event == "llm.usage"]
+    assert usage_events[0].data["total_tokens"] == 115
+    assert usage_events[1].data["total_tokens"] == 236
 
 
 def test_session_send_hard_fails_when_mcp_required_but_unused(
