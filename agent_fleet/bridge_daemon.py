@@ -495,10 +495,12 @@ def launch_private_bridge(
     log_path = bridges_dir / f"{os.getpid()}-{ts}.log"
 
     try:
-        # survive_uncaught=False: private bridges should crash loudly with
-        # stderr written to log_path; the shared daemon needs survivor
-        # handlers, but for per-process bridges they hide real diagnostics.
-        proc = _spawn_bridge_subprocess(workspace, log_path, survive_uncaught=False)
+        # survive_uncaught=True: an unhandled EPIPE inside the vendored cursor
+        # SDK BashState (when a child shell command exits with stdin still
+        # open) otherwise crashes the entire bridge. The crash is unrelated to
+        # the agent run and recoverable; surviving it keeps the dispatcher
+        # alive. Diagnostics still land in log_path via stderr.
+        proc = _spawn_bridge_subprocess(workspace, log_path, survive_uncaught=True)
     except OSError as exc:
         logger.warning("private bridge spawn failed: %s", exc)
         return None
