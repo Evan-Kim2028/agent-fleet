@@ -168,6 +168,9 @@ class LocalGitOps:
         if result.returncode != 0:
             raise RuntimeError(f"git worktree add failed: {result.stderr.strip()}")
         self._active_worktrees.append(target)
+        from agent_fleet.pr_loop.worktree import claim_worktree_lock
+
+        claim_worktree_lock(target)
         return target
 
     def teardown_workspace(self, worktree: Path, *, forensic: bool = False) -> None:
@@ -184,6 +187,9 @@ class LocalGitOps:
             worktree.exists(),
             "".join(traceback.format_stack(limit=8)),
         )
+        from agent_fleet.pr_loop.worktree import release_worktree_lock
+
+        release_worktree_lock(worktree)
         self._run(["worktree", "remove", "--force", str(worktree)], cwd=self.repo_root)
         if worktree.exists():
             shutil.rmtree(worktree, ignore_errors=True)
