@@ -89,7 +89,22 @@ def _rule_text_for_row(row: dict[str, Any]) -> tuple[str, str] | None:
     status = str(row.get("status") or "")
     review = str(row.get("review_verdict") or "")
 
+    metrics = row.get("outcome_metrics")
+    if isinstance(metrics, dict) and metrics.get("bootstrap_failure"):
+        return (
+            "infra",
+            "Fix worktree_bootstrap_commands in .agent-fleet.yaml before dispatching tasks.",
+        )
     if status == "verify_failed" or "verify_failed" in status:
+        verify_failure = (
+            metrics.get("verify_failure") if isinstance(metrics, dict) else None
+        )
+        if isinstance(verify_failure, dict) and verify_failure.get("command"):
+            cmd = str(verify_failure["command"])[:120]
+            return (
+                "methodology",
+                f"Run verify before claiming completion; last failure: {cmd}",
+            )
         return (
             "methodology",
             "Run repo verify_commands before claiming completion.",

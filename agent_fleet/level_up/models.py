@@ -62,3 +62,4 @@ class ExperienceEntry:
     run_id: str | None = None
     repo_key: str | None = None
     persona: str | None = None
+    outcome_metrics: dict[str, Any] = field(default_factory=dict)

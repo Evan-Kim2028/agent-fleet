@@ -19,9 +19,11 @@ from agent_fleet.contracts.verify_result import VerifySeverity
 from agent_fleet.fleet_session import create_fleet_session
 from agent_fleet.hooks import FleetTask, ResumableGitOps
 from agent_fleet.implementer import implement
-from agent_fleet.level_up.record import record_runner_experience
-from agent_fleet.observability.context import bind_run
+from agent_fleet.level_up.paths import repo_key as level_up_repo_key
+from agent_fleet.level_up.record import record_runner_experience, review_verdict_from_runner_result
+from agent_fleet.observability.context import bind_run, get_run_log
 from agent_fleet.observability.log import RunLog
+from agent_fleet.observability.run_metrics import build_run_metrics
 from agent_fleet.orchestration.decompose import coerce_empty_decompose
 from agent_fleet.orchestration.equip import resolve_dispatch_equip
 from agent_fleet.phase_graph import (
@@ -123,6 +125,36 @@ class FleetRunResult:
     phases: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
     duration_seconds: float = 0.0
+
+
+def _run_end_kwargs(result: FleetRunResult, repo: RepoConfig | None) -> dict[str, Any]:
+    """Extra run.end payload: outcome_metrics for per-repo level-up analysis."""
+    run_log = get_run_log()
+    usage_rollup = (
+        run_log.usage_rollup_snapshot(task_id=result.task_id) if run_log is not None else None
+    )
+    repo_key_value = level_up_repo_key(
+        name=repo.name if repo else None,
+        repo_root=repo.repo_root if repo else None,
+    )
+    outcome_metrics = build_run_metrics(
+        status=result.outcome,
+        phases=result.phases,
+        error=result.error,
+        pr_number=result.pr_number,
+        review_verdict=review_verdict_from_runner_result(result),
+        usage_rollup=usage_rollup,
+        changed_files_count=len(result.changed_files),
+        duration_seconds=result.duration_seconds,
+        repo_key=repo_key_value,
+        issue_number=result.task_id,
+    )
+    payload: dict[str, Any] = {"outcome_metrics": outcome_metrics}
+    if result.error:
+        payload["error"] = result.error
+    if result.pr_number is not None:
+        payload["pr_number"] = result.pr_number
+    return payload
 
 
 def _spine_from_repo(repo: RepoConfig | None) -> SpineConfig:
@@ -433,7 +465,10 @@ class LocalFleetRunner:
                         phases=phases,
                         duration_seconds=round(time.monotonic() - start, 2),
                     )
-                    run_log.run_end(outcome=result.outcome)
+                    run_log.run_end(
+                        outcome=result.outcome,
+                        **_run_end_kwargs(result, find_repo_config(repo_root)),
+                    )
                     return result
 
                 if task_spec.decomposition_decision == DecompositionDecision.DECOMPOSE:
@@ -457,7 +492,10 @@ class LocalFleetRunner:
                             start=start,
                             orchestration=orchestration,
                         )
-                        run_log.run_end(outcome=result.outcome, error=result.error)
+                        run_log.run_end(
+                            outcome=result.outcome,
+                            **_run_end_kwargs(result, repo),
+                        )
                         return result
                     result = FleetRunResult(
                         run_id=run_id,
@@ -470,7 +508,10 @@ class LocalFleetRunner:
                         error="Task requires decomposition — dispatch child tasks separately",
                         duration_seconds=round(time.monotonic() - start, 2),
                     )
-                    run_log.run_end(outcome=result.outcome)
+                    run_log.run_end(
+                        outcome=result.outcome,
+                        **_run_end_kwargs(result, find_repo_config(repo_root)),
+                    )
                     return result
 
                 if not resume_mode:
@@ -605,7 +646,10 @@ class LocalFleetRunner:
                         error=verify_result.message if verify_result else "verify failed",
                         duration_seconds=round(time.monotonic() - start, 2),
                     )
-                    run_log.run_end(outcome=result.outcome, error=result.error)
+                    run_log.run_end(
+                        outcome=result.outcome,
+                        **_run_end_kwargs(result, find_repo_config(repo_root)),
+                    )
                     return result
 
                 changed_files = get_changed_files(worktree)
@@ -667,7 +711,10 @@ class LocalFleetRunner:
                         phases=phases,
                         duration_seconds=round(time.monotonic() - start, 2),
                     )
-                    run_log.run_end(outcome=result.outcome)
+                    run_log.run_end(
+                        outcome=result.outcome,
+                        **_run_end_kwargs(result, find_repo_config(repo_root)),
+                    )
                     return result
 
                 pr_number: int | None = None
@@ -762,6 +809,7 @@ class LocalFleetRunner:
                     outcome=result.outcome,
                     pr_number=pr_number,
                     jsonl=str(run_log.jsonl_path) if run_log.jsonl_path else None,
+                    **_run_end_kwargs(result, find_repo_config(repo_root)),
                 )
                 return result
             except Exception as exc:
@@ -776,7 +824,10 @@ class LocalFleetRunner:
                     error=str(exc),
                     duration_seconds=round(time.monotonic() - start, 2),
                 )
-                run_log.run_end(outcome="error", error=str(exc))
+                run_log.run_end(
+                    outcome="error",
+                    **_run_end_kwargs(result, find_repo_config(repo_root)),
+                )
                 return result
             finally:
                 if result is not None:

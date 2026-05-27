@@ -53,6 +53,7 @@ class RunLog:
         self._usage_duration_s: float = 0.0
         self._usage_by_phase: dict[str, dict[str, int]] = {}
         self._usage_rollup_emitted: bool = False
+        self._last_usage_rollup: dict[str, Any] | None = None
 
     @classmethod
     def create(
@@ -190,12 +191,9 @@ class RunLog:
         bucket["calls"] += 1
         self.emit("llm.usage", phase=phase, data=data)
 
-    def task_usage_rollup(self, *, task_id: int | None = None) -> dict[str, Any] | None:
-        """Emit a per-task usage summary; returns the totals payload (or None).
-        Idempotent: only emits once per RunLog lifetime."""
-        if self._usage_calls == 0 or self._usage_rollup_emitted:
+    def _usage_rollup_payload(self, *, task_id: int | None = None) -> dict[str, Any] | None:
+        if self._usage_calls == 0:
             return None
-        self._usage_rollup_emitted = True
         totals = dict(self._usage_totals)
         totals["total_tokens"] = sum(totals.values())
         by_phase: dict[str, dict[str, int]] = {}
@@ -203,12 +201,31 @@ class RunLog:
             entry = dict(bucket)
             entry["total_tokens"] = sum(entry[k] for k in self._USAGE_FIELDS)
             by_phase[phase_key] = entry
-        payload: dict[str, Any] = {
+        return {
             "task_id": task_id,
             "calls": self._usage_calls,
             "duration_s": round(self._usage_duration_s, 3),
             "totals": totals,
             "by_phase": by_phase,
         }
+
+    def usage_rollup_snapshot(self, *, task_id: int | None = None) -> dict[str, Any] | None:
+        """Return per-task token rollup without emitting (safe to call multiple times)."""
+        if self._last_usage_rollup is not None:
+            return dict(self._last_usage_rollup)
+        return self._usage_rollup_payload(task_id=task_id)
+
+    def task_usage_rollup(self, *, task_id: int | None = None) -> dict[str, Any] | None:
+        """Emit a per-task usage summary; returns the totals payload (or None).
+        Idempotent: only emits once per RunLog lifetime."""
+        if self._usage_calls == 0:
+            return None
+        if self._usage_rollup_emitted:
+            return self._last_usage_rollup
+        payload = self._usage_rollup_payload(task_id=task_id)
+        if payload is None:
+            return None
+        self._usage_rollup_emitted = True
+        self._last_usage_rollup = payload
         self.emit("llm.usage.task_rollup", data=payload)
         return payload

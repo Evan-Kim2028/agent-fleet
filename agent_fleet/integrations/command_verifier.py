@@ -7,6 +7,7 @@ import subprocess
 from typing import TYPE_CHECKING
 
 from agent_fleet.contracts.verify_result import VerifyResult, VerifySeverity
+from agent_fleet.observability.fleet_logger import emit_fleet_event
 from agent_fleet.verify_core import get_changed_files
 
 if TYPE_CHECKING:
@@ -62,6 +63,16 @@ class CommandVerifier:
                     "stderr_tail": proc.stderr[-2000:],
                     "exit_code": proc.returncode,
                 }
+            )
+            emit_fleet_event(
+                "worktree.bootstrap",
+                passed=proc.returncode == 0,
+                command=cmd,
+                exit_code=proc.returncode,
+                stderr_tail=proc.stderr[-500:],
+                stdout_tail=proc.stdout[-500:],
+                persona=persona,
+                task_id=task_id,
             )
             if proc.returncode != 0:
                 # Bootstrap prepares the worktree. It is deterministic on

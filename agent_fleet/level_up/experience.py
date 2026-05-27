@@ -94,6 +94,7 @@ def append_experience(
     equip_snapshot: dict[str, Any] | None = None,
     changed_files: list[str] | tuple[str, ...] | None = None,
     run_id: str | None = None,
+    outcome_metrics: dict[str, Any] | None = None,
 ) -> ExperienceEntry:
     """Append one experience row to persona experience.jsonl."""
     entry = ExperienceEntry(
@@ -108,6 +109,7 @@ def append_experience(
         run_id=run_id,
         repo_key=repo_key,
         persona=persona,
+        outcome_metrics=dict(outcome_metrics or {}),
     )
 
     record: dict[str, Any] = {
@@ -131,6 +133,8 @@ def append_experience(
         record["changed_files"] = list(entry.changed_files)
     if entry.run_id is not None:
         record["run_id"] = entry.run_id
+    if entry.outcome_metrics:
+        record["outcome_metrics"] = entry.outcome_metrics
 
     path = persona_dir(repo_key, persona) / "experience.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)

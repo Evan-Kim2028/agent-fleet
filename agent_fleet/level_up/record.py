@@ -11,6 +11,8 @@ from agent_fleet.level_up.experience import append_experience, compute_experienc
 from agent_fleet.level_up.journal import append_journal
 from agent_fleet.level_up.paths import FLEET_TIER
 from agent_fleet.level_up.paths import repo_key as level_up_repo_key
+from agent_fleet.observability.context import get_run_log
+from agent_fleet.observability.run_metrics import build_run_metrics
 from agent_fleet.repo import find_repo_config
 
 if TYPE_CHECKING:
@@ -103,9 +105,23 @@ def record_task_experience(
     level_up_cfg = repo.level_up if repo is not None else None
     journal_summaries = level_up_cfg.journal_task_summaries if level_up_cfg is not None else True
 
+    run_log = get_run_log()
+    usage_rollup = (
+        run_log.usage_rollup_snapshot(task_id=task_index) if run_log is not None else None
+    )
+    outcome_metrics = build_run_metrics(
+        status=status,
+        phases=phase_results,
+        review_verdict=review_verdict,
+        usage_rollup=usage_rollup,
+        changed_files_count=len(changed_files or ()),
+        repo_key=repo_key_value,
+    )
+
     run_complete_data: dict[str, Any] = {
         "status": status,
         "equip_snapshot": equip_snapshot,
+        "outcome_metrics": outcome_metrics,
     }
     if task_index is not None:
         run_complete_data["task_index"] = task_index
@@ -131,6 +147,7 @@ def record_task_experience(
         equip_snapshot=equip_snapshot,
         changed_files=changed_files,
         run_id=run_id,
+        outcome_metrics=outcome_metrics,
     )
     append_journal(
         "experience.appended",
@@ -168,6 +185,23 @@ def record_runner_experience(
     journal_summaries = level_up_cfg.journal_task_summaries if level_up_cfg is not None else True
     goal = title if journal_summaries else None
 
+    run_log = get_run_log()
+    usage_rollup = (
+        run_log.usage_rollup_snapshot(task_id=result.task_id) if run_log is not None else None
+    )
+    outcome_metrics = build_run_metrics(
+        status=result.outcome,
+        phases=result.phases,
+        error=result.error,
+        pr_number=result.pr_number,
+        review_verdict=review_verdict,
+        usage_rollup=usage_rollup,
+        changed_files_count=len(result.changed_files),
+        duration_seconds=result.duration_seconds,
+        repo_key=repo_key_value,
+        issue_number=result.task_id,
+    )
+
     append_journal(
         "run.complete",
         repo_key_value,
@@ -178,6 +212,7 @@ def record_runner_experience(
             "equip_snapshot": equip_snapshot,
             "goal": goal,
             "pipeline": "full",
+            "outcome_metrics": outcome_metrics,
         },
     )
     append_experience(
@@ -192,6 +227,7 @@ def record_runner_experience(
         equip_snapshot=equip_snapshot,
         changed_files=result.changed_files,
         run_id=result.run_id,
+        outcome_metrics=outcome_metrics,
     )
     append_journal(
         "experience.appended",

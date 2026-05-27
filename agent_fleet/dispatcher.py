@@ -23,7 +23,11 @@ from agent_fleet.dispatcher_task import (
 )
 from agent_fleet.handoff_context import apply_handoff_to_task
 from agent_fleet.hooks import FleetTask, FleetTaskResult
+from agent_fleet.level_up.paths import repo_key as level_up_repo_key
+from agent_fleet.level_up.record import review_verdict_from_runner_result
+from agent_fleet.observability.context import get_run_log
 from agent_fleet.observability.fleet_logger import FleetLogger
+from agent_fleet.observability.run_metrics import build_run_metrics
 from agent_fleet.personas import YamlPersonaResolver
 from agent_fleet.redispatch import dispatch_with_retry
 from agent_fleet.repo import RepoConfig, find_repo_config, merge_repo_into_fleet_config
@@ -387,12 +391,33 @@ class FleetDispatcher:
         status = "completed" if result.outcome in ok_outcomes else "error"
         if result.outcome in {"decompose_failed", "rejected", "decompose"}:
             status = result.outcome
+        run_log = get_run_log()
+        usage_rollup = (
+            run_log.usage_rollup_snapshot(task_id=task_index) if run_log is not None else None
+        )
+        repo_cfg = find_repo_config(workspace)
+        outcome_metrics = build_run_metrics(
+            status=status,
+            phases=result.phases,
+            error=result.error,
+            pr_number=result.pr_number,
+            review_verdict=review_verdict_from_runner_result(result),
+            usage_rollup=usage_rollup,
+            changed_files_count=len(result.changed_files or ()),
+            duration_seconds=round(time.monotonic() - start, 2),
+            repo_key=level_up_repo_key(
+                name=repo_cfg.name if repo_cfg else None,
+                repo_root=repo_cfg.repo_root if repo_cfg else workspace,
+            ),
+        )
         fleet_log.emit(
             "fleet.task.complete",
             task_index=task_index,
             persona=task.persona,
             status=status,
             duration_seconds=round(time.monotonic() - start, 2),
+            outcome_metrics=outcome_metrics,
+            error=result.error,
         )
         return FleetTaskResult(
             task_index=task_index,

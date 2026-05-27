@@ -70,6 +70,8 @@ def test_record_runner_experience_appends_row(
     assert row["review_verdict"] == "approve"
     assert row["goal"] == "Fix foo"
     assert row["equip_snapshot"]["base_loadout"] == "coder"
+    assert row["outcome_metrics"]["status"] == "completed"
+    assert row["outcome_metrics"]["review_verdict"] == "approve"
 
 
 def test_record_task_experience_respects_train_false(
