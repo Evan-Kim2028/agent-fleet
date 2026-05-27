@@ -1,0 +1,39 @@
+{
+  "title": "Example fleet DAG — research then implement",
+  "tasks": [
+    {
+      "id": "research-api",
+      "depends_on": [],
+      "complexity": "LOW",
+      "persona": "coder",
+      "pipeline": "simple",
+      "subtask_prompt": "Survey api/ for existing patterns. Return a short bullet list of conventions."
+    },
+    {
+      "id": "research-web",
+      "depends_on": [],
+      "complexity": "LOW",
+      "persona": "coder",
+      "pipeline": "simple",
+      "subtask_prompt": "Survey web/ for component patterns. Return a short bullet list."
+    },
+    {
+      "id": "implement-api",
+      "depends_on": ["research-api"],
+      "complexity": "MED",
+      "persona": "coder",
+      "pipeline": "code_review",
+      "allowed_paths": ["api/"],
+      "subtask_prompt": "Implement the API slice described in upstream research."
+    },
+    {
+      "id": "implement-web",
+      "depends_on": ["research-web", "implement-api"],
+      "complexity": "MED",
+      "persona": "coder",
+      "pipeline": "code_review",
+      "allowed_paths": ["web/"],
+      "subtask_prompt": "Wire the UI to the API contract from upstream outputs."
+    }
+  ]
+}

@@ -19,6 +19,7 @@ from agent_fleet._schema import load_schema
 class DecompositionDecision(enum.StrEnum):
     SINGLE = "single"
     DECOMPOSE = "decompose"
+    DAG = "dag"
     REJECTED = "rejected"
 
 
@@ -46,11 +47,14 @@ class TaskSpec:
     risk_tier: RiskTier
     critical_paths_touched: list[str]
     coordination_spec: dict[str, Any] | None
+    dag: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["decomposition_decision"] = self.decomposition_decision.value
         d["risk_tier"] = self.risk_tier.value
+        if d.get("dag") is None:
+            d.pop("dag", None)
         return d
 
     @classmethod
@@ -70,6 +74,7 @@ class TaskSpec:
             risk_tier=RiskTier(data["risk_tier"]),
             critical_paths_touched=list(data["critical_paths_touched"]),
             coordination_spec=data["coordination_spec"],
+            dag=data.get("dag"),
         )
 
 

@@ -100,7 +100,13 @@ def cmd_run(args: argparse.Namespace) -> int:
             persona_resolver=resolver,
         )
         print(json.dumps(result.__dict__, indent=2, default=str))
-        ok = {"completed", "completed_noop", "review_changes_requested", "decompose_partial"}
+        ok = {
+            "completed",
+            "completed_noop",
+            "review_changes_requested",
+            "decompose_partial",
+            "dag_partial",
+        }
         return 0 if result.outcome in ok else 1
 
     if args.max_redispatches is not None:
@@ -114,7 +120,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         pipeline=args.pipeline,
     )
     print(json.dumps([r.__dict__ for r in results], indent=2, default=str))
-    ok = {"completed", "merged", "decompose_partial"}
+    ok = {"completed", "merged", "decompose_partial", "dag_partial"}
     return 0 if results and results[0].status in ok else 1
 
 
@@ -686,6 +692,10 @@ def main(argv: list[str] | None = None) -> int:
     from agent_fleet.workstreams.cli import register_workstream_commands
 
     register_workstream_commands(sub)
+
+    from agent_fleet.orchestration.dag.cli import register_dag_commands
+
+    register_dag_commands(sub)
 
     args = parser.parse_args(argv)
     return args.func(args)

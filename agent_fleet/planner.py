@@ -256,4 +256,5 @@ def plan(
         risk_tier=RiskTier(data["risk_tier"]),
         critical_paths_touched=list(data["critical_paths_touched"]),
         coordination_spec=data["coordination_spec"],
+        dag=data.get("dag"),
     )
