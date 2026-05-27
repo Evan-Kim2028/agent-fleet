@@ -171,7 +171,7 @@ def list_open_fleet_prs(
         "--state",
         "open",
         "--json",
-        "number,headRefName,headRefOid,labels,isDraft,mergeable,mergeStateStatus,createdAt",
+        "number,headRefName,headRefOid,baseRefName,labels,isDraft,mergeable,mergeStateStatus,createdAt",
         "--limit",
         "50",
         cwd=cwd,
@@ -412,14 +412,17 @@ class MergeTreeResult:
     """True when main merges into the branch without conflicts."""
     conflict_files: tuple[str, ...]
     """File paths that have conflict markers (empty when clean)."""
+    git_error: bool = False
+    """True when git itself failed (bad ref, wrong cwd, version mismatch, etc.).
+    Callers must NOT treat this as a conflict."""
 
 
 def merge_tree_against(base: str, head: str, *, cwd: Path) -> MergeTreeResult:
     """Dry-run merge of *base* into *head* without touching the working tree.
 
     Uses ``git merge-tree --write-tree --name-only <head> <base>`` (git >= 2.38).
-    Exit code 1 means conflicts; exit code 0 means clean.  The ``--name-only``
-    flag makes stdout a list of conflict file names, one per line.
+    Exit code 0 means clean; exit code 1 means conflicts; any other exit code is
+    a git error (bad ref, missing binary, etc.) and must NOT be treated as conflict.
     """
     result = _git_run(
         ["git", "merge-tree", "--write-tree", "--name-only", head, base],
@@ -428,19 +431,46 @@ def merge_tree_against(base: str, head: str, *, cwd: Path) -> MergeTreeResult:
     )
     if result.returncode == 0:
         return MergeTreeResult(clean=True, conflict_files=())
-    # exit code 1 → conflicts; any other non-zero is also treated as conflict
-    conflict_files = tuple(line.strip() for line in result.stdout.splitlines() if line.strip())
-    return MergeTreeResult(clean=False, conflict_files=conflict_files)
+    if result.returncode == 1:
+        conflict_files = tuple(line.strip() for line in result.stdout.splitlines() if line.strip())
+        return MergeTreeResult(clean=False, conflict_files=conflict_files)
+    # exit code > 1 → git error; do not treat as conflict
+    logger.warning(
+        "merge-tree exited %d (git error, not conflict): %s",
+        result.returncode,
+        (result.stderr or "").strip()[:300],
+    )
+    return MergeTreeResult(clean=False, conflict_files=(), git_error=True)
+
+
+def is_pr_closed(pr_number: int, *, cwd: Path | None = None) -> bool:
+    """Return True if the PR is in a closed or merged state on GitHub."""
+    result = _gh("pr", "view", str(pr_number), "--json", "state", cwd=cwd, check=False)
+    if result.returncode != 0:
+        return False
+    try:
+        state = json.loads(result.stdout).get("state", "").upper()
+        return state in {"CLOSED", "MERGED"}
+    except Exception:
+        return False
 
 
 def close_pr(pr_number: int, *, cwd: Path | None = None) -> bool:
-    """Close a PR without deleting the branch.  Safe if already closed."""
+    """Close a PR without deleting the branch.  Safe if already closed.
+
+    Returns True when the PR is now closed (including already-closed).
+    Returns False on real errors (network, auth, etc.).
+    "Already closed" is idempotent; "not found" is treated as already-closed and
+    logged at WARNING so callers can retry safely.
+    """
     result = _gh("pr", "close", str(pr_number), cwd=cwd, check=False)
     if result.returncode == 0:
         return True
-    # "already closed" is not an error condition
     stderr_lower = (result.stderr or "").lower()
-    if "already closed" in stderr_lower or "not found" in stderr_lower:
+    if "already closed" in stderr_lower:
+        return True
+    if "not found" in stderr_lower:
+        logger.warning("close_pr #%s: PR not found (treating as already closed)", pr_number)
         return True
     logger.warning("close_pr #%s failed: %s", pr_number, (result.stderr or "").strip()[:300])
     return False

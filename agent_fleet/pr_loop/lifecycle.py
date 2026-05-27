@@ -672,8 +672,13 @@ def _detect_drift(
     worktree: Path,
     repo_root: Path,
     loop_config: PrLoopConfig,
+    default_branch: str = "main",
 ) -> LifecycleResult | None:
-    """Check whether origin/main has drifted under the PR branch.
+    """Check whether the default branch has drifted under the PR branch.
+
+    Args:
+        default_branch: The repo's base branch (e.g. "main", "master").  Used
+            instead of the hardcoded literal "main".
 
     Returns:
         ``None`` — no drift; caller continues normally.
@@ -685,9 +690,12 @@ def _detect_drift(
     if not loop_config.drift_check:
         return None
 
-    # Step 1: fetch origin/main
+    origin_base = f"origin/{default_branch}"
+
+    # Step 1: fetch origin/<default_branch> and the PR branch so we compare
+    # against the PR's actual remote head, not whatever is checked out locally.
     fetch = subprocess.run(
-        ["git", "fetch", "origin", "main"],
+        ["git", "fetch", "origin", default_branch, branch],
         cwd=worktree,
         capture_output=True,
         text=True,
@@ -696,15 +704,19 @@ def _detect_drift(
     )
     if fetch.returncode != 0:
         logger.warning(
-            "drift-check: git fetch origin main failed for PR #%s: %s",
+            "drift-check: git fetch failed for PR #%s: %s",
             pr_number,
             (fetch.stderr or "").strip()[:300],
         )
         return None  # can't check → skip drift gate, continue cycle
 
-    # Step 2: is origin/main already an ancestor of HEAD?
+    # Use origin/<branch> as the comparison head so we always check against the
+    # PR's remote tip, regardless of what is locally checked out.
+    pr_head_ref = f"origin/{branch}"
+
+    # Step 2: is origin/<default_branch> already an ancestor of the PR head?
     ancestor = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", "origin/main", "HEAD"],
+        ["git", "merge-base", "--is-ancestor", origin_base, pr_head_ref],
         cwd=worktree,
         capture_output=True,
         text=True,
@@ -712,50 +724,111 @@ def _detect_drift(
         timeout=30,
     )
     if ancestor.returncode == 0:
-        # origin/main is already reachable from HEAD — no drift
+        # origin/<default_branch> is already reachable from PR head — no drift
         return None
 
     # Step 3: dry-run merge to see if it's clean or conflicted
-    merge_result = github_ops.merge_tree_against("origin/main", "HEAD", cwd=worktree)
+    merge_result = github_ops.merge_tree_against(origin_base, pr_head_ref, cwd=worktree)
 
-    if merge_result.clean:
-        # Auto-mergeable: use the existing update-branch path
-        logger.info(
-            "drift-check: PR #%s is behind origin/main but auto-mergeable; "
-            "requesting update-branch",
+    if merge_result.git_error:
+        logger.warning(
+            "drift-check: merge-tree returned a git error for PR #%s; skipping drift gate",
             pr_number,
         )
+        return None
+
+    if merge_result.clean:
+        logger.info(
+            "drift-check: PR #%s is behind %s but auto-mergeable; requesting update-branch",
+            pr_number,
+            origin_base,
+        )
         github_ops.update_branch(pr_number, cwd=repo_root)
-        return LifecycleResult("behind", "main moved ahead; update-branch requested")
+        return LifecycleResult("behind", f"{default_branch} moved ahead; update-branch requested")
 
     # Step 4: unresolvable conflict
     conflict_files = merge_result.conflict_files
 
-    # Idempotency: skip all actions if drift comment already posted within 24 h
-    existing_pr_comments = github_ops.pr_comments(pr_number, cwd=repo_root)
-    if _marker_within_window(existing_pr_comments, _DRIFT_PR_MARKER):
+    # Idempotency: the real state-of-record is whether the PR is already closed.
+    # A comment marker alone is insufficient because the comment may exist while
+    # close_pr failed on a previous cycle.
+    if github_ops.is_pr_closed(pr_number, cwd=repo_root):
         logger.info(
-            "drift-check: PR #%s already has drift comment within 24h; skipping actions",
+            "drift-check: PR #%s is already closed; skipping destructive actions",
             pr_number,
         )
-        return LifecycleResult("drift", "main moved out from under PR (already actioned)")
+        return LifecycleResult(
+            "drift", f"{default_branch} moved out from under PR (already actioned)"
+        )
 
-    # Get the current main commit SHA for the comment
+    # Get the current base-branch commit SHA for the comment
     rev = subprocess.run(
-        ["git", "rev-parse", "--short", "origin/main"],
+        ["git", "rev-parse", "--short", origin_base],
         cwd=worktree,
         capture_output=True,
         text=True,
         check=False,
         timeout=30,
     )
-    main_sha = rev.stdout.strip() if rev.returncode == 0 else "unknown"
+    base_sha = rev.stdout.strip() if rev.returncode == 0 else "unknown"
 
     files_block = "\n".join(f"- `{f}`" for f in conflict_files) if conflict_files else "- (unknown)"
-    pr_comment_body = textwrap.dedent(f"""\
-        **Drift detected — unresolvable merge conflict with `main`.**
 
-        The PR's premise has changed: `origin/main` (at `{main_sha}`) introduced
+    # Sequence: close PR → reopen issue → post issue comment → post PR comment.
+    # The PR comment carries the _DRIFT_PR_MARKER which gates future retries.
+    # Posting it LAST means a partial failure on any earlier step leaves the
+    # marker un-posted, so the next cycle will retry the full sequence.
+    close_ok = github_ops.close_pr(pr_number, cwd=repo_root)
+    if not close_ok:
+        logger.warning(
+            "drift-check: close_pr #%s failed; aborting so next cycle can retry",
+            pr_number,
+        )
+        return LifecycleResult(
+            "drift", f"{default_branch} moved out from under PR (close failed, will retry)"
+        )
+
+    issue_number = _issue_number_from_branch(branch)
+    if issue_number is None:
+        logger.warning(
+            "drift-check: PR #%s branch %r has no parseable issue number; skipping issue reopen",
+            pr_number,
+            branch,
+        )
+    else:
+        reopen_ok = github_ops.reopen_issue(issue_number, cwd=repo_root)
+        if not reopen_ok:
+            logger.warning(
+                "drift-check: reopen_issue #%s failed; posting PR marker anyway",
+                issue_number,
+            )
+        else:
+            existing_issue_comments = github_ops.issue_comments(issue_number, cwd=repo_root)
+            if not _marker_within_window(existing_issue_comments, _DRIFT_ISSUE_MARKER):
+                replan_header = (
+                    f"**Replan needed — fleet PR #{pr_number} closed due to"
+                    f" merge conflict with `{default_branch}`.**"
+                )
+                issue_comment_body = textwrap.dedent(f"""\
+                    {replan_header}
+
+                    `{origin_base}` at `{base_sha}` introduced changes that conflict with the
+                    PR branch.  The conflicting files were:
+                    {files_block}
+
+                    Please replan this issue from scratch, taking the current state
+                    of `{default_branch}` into account.
+
+                    {_DRIFT_ISSUE_MARKER}
+                """)
+                github_ops.post_issue_comment(issue_comment_body, issue_number, cwd=repo_root)
+
+    # Post the PR comment with the drift marker last — its presence is the
+    # UI hint; the actual idempotency gate is the PR state check above.
+    pr_comment_body = textwrap.dedent(f"""\
+        **Drift detected — unresolvable merge conflict with `{default_branch}`.**
+
+        The PR's premise has changed: `{origin_base}` (at `{base_sha}`) introduced
         edits that conflict with this branch and cannot be auto-merged.
 
         **Conflicting files:**
@@ -766,37 +839,9 @@ def _detect_drift(
 
         {_DRIFT_PR_MARKER}
     """)
-
     github_ops.post_pr_comment(pr_comment_body, pr_number, cwd=repo_root)
-    github_ops.close_pr(pr_number, cwd=repo_root)
 
-    # Reopen + comment on the source issue (best-effort)
-    issue_number = _issue_number_from_branch(branch)
-    if issue_number is None:
-        logger.warning(
-            "drift-check: PR #%s branch %r has no parseable issue number; skipping issue reopen",
-            pr_number,
-            branch,
-        )
-    else:
-        github_ops.reopen_issue(issue_number, cwd=repo_root)
-        existing_issue_comments = github_ops.issue_comments(issue_number, cwd=repo_root)
-        if not _marker_within_window(existing_issue_comments, _DRIFT_ISSUE_MARKER):
-            issue_comment_body = textwrap.dedent(f"""\
-                **Replan needed — fleet PR #{pr_number} closed due to merge conflict with `main`.**
-
-                `origin/main` at `{main_sha}` introduced changes that conflict with the
-                PR branch.  The conflicting files were:
-                {files_block}
-
-                Please replan this issue from scratch, taking the current state of `main`
-                into account.
-
-                {_DRIFT_ISSUE_MARKER}
-            """)
-            github_ops.post_issue_comment(issue_comment_body, issue_number, cwd=repo_root)
-
-    return LifecycleResult("drift", "main moved out from under PR")
+    return LifecycleResult("drift", f"{default_branch} moved out from under PR")
 
 
 def run_pr_lifecycle(
@@ -809,6 +854,7 @@ def run_pr_lifecycle(
     worktree: Path | None = None,
     skip_review_wait: bool = False,
     persona: str | None = None,
+    base_ref_name: str = "",
 ) -> LifecycleResult:
     """Run address-review → CI wait/fix → merge for one PR."""
     fleet_config = fleet_config or load_fleet_config()
@@ -835,6 +881,7 @@ def run_pr_lifecycle(
                 skip_review_wait=skip_review_wait,
                 persona=persona,
                 fleet_log=fleet_log,
+                base_ref_name=base_ref_name,
             )
         except Exception as exc:
             fleet_log.emit("pr_loop.error", level="error", error=str(exc))
@@ -859,6 +906,7 @@ def _run_pr_lifecycle_body(
     skip_review_wait: bool,
     persona: str,
     fleet_log: FleetLogger,
+    base_ref_name: str = "",
 ) -> LifecycleResult:
     """Inner PR lifecycle implementation (expects bound FleetLogger)."""
     repo_root = repo.repo_root
@@ -883,17 +931,17 @@ def _run_pr_lifecycle_body(
             wt = resolve_worktree_path(branch, repo_root=repo_root, worktree_base=base)
             logger.info("Resolved worktree for %s → %s", branch, wt)
 
-    # Drift check: compare origin/main against the PR branch before anything else.
-    # We use repo_root as the git context (always valid) since the per-PR worktree
-    # may not be set up yet at this point in the cycle.
-    _wt_is_git = wt.exists() and ((wt / ".git").exists() or (wt / ".git").is_file())
-    _git_cwd = wt if _wt_is_git else repo_root
+    # Drift check: always run against repo_root (guaranteed to be a valid git
+    # context) and pass the PR head ref + base branch so _detect_drift fetches
+    # and compares the correct remote refs regardless of local checkout state.
+    default_branch = base_ref_name or repo.default_branch
     drift = _detect_drift(
         pr_number=pr_number,
         branch=branch,
-        worktree=_git_cwd,
+        worktree=repo_root,
         repo_root=repo_root,
         loop_config=loop_config,
+        default_branch=default_branch,
     )
     if drift is not None and drift.status == "drift":
         fleet_log.emit("pr_loop.drift", pr_number=pr_number, detail=drift.detail)
