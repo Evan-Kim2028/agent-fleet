@@ -28,6 +28,7 @@ from agent_fleet.hooks import FleetTask, FleetTaskResult
 from agent_fleet.level_up.paths import repo_key as level_up_repo_key
 from agent_fleet.level_up.record import review_verdict_from_runner_result
 from agent_fleet.observability.context import get_run_log
+from agent_fleet.observability.efficiency import changed_lines as _changed_lines
 from agent_fleet.observability.fleet_logger import FleetLogger
 from agent_fleet.observability.run_metrics import build_run_metrics
 from agent_fleet.personas import YamlPersonaResolver
@@ -671,6 +672,7 @@ class FleetDispatcher:
                     changed_files=changed_files,
                     task_workspace=task_workspace,
                     fleet_log=fleet_log,
+                    changed_lines=_changed_lines(run_workspace),
                 )
 
                 repo_for_publish = repo_config or git_repo

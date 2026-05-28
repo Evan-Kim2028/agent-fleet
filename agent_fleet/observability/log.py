@@ -140,14 +140,45 @@ class RunLog:
     def run_start(self, **data: object) -> None:
         self.emit("run.start", data=dict(data))
 
-    def run_end(self, *, outcome: str, **data: object) -> None:
+    def run_end(self, *, outcome: str, changed_lines: int = 0, **data: object) -> None:
         # Flush per-task token rollup before the run terminates so the
         # consolidated log carries totals even for ad-hoc `agent-fleet run`
         # paths that don't pass through the dispatcher.
         if self._usage_calls > 0:
-            self.task_usage_rollup(task_id=self.context.task_id if self.context else None)
+            self.task_usage_rollup(
+                task_id=self.context.task_id if self.context else None,
+                changed_lines=changed_lines,
+            )
         payload = {"outcome": outcome, **data}
         self.emit("run.end", data=payload)
+        rollup = self._last_usage_rollup
+        total_tokens = rollup["totals"]["total_tokens"] if rollup else 0
+        # Prefer the caller-supplied changed_lines when nonzero: the idempotency
+        # guard in task_usage_rollup may have fired before changed_lines was known
+        # (dispatcher path calls _peek_usage_rollup with changed_lines=0 first).
+        _cl = changed_lines if changed_lines > 0 else (
+            rollup.get("changed_lines", 0) if rollup else 0
+        )
+        tpl = round(total_tokens / max(_cl, 1))
+        by_phase = rollup.get("by_phase", {}) if rollup else {}
+        by_phase_str = ",".join(
+            f"{ph}:{v['total_tokens']}" for ph, v in sorted(by_phase.items())
+        )
+        self.emit(
+            "efficiency.headline",
+            data={
+                "run_id": self.run_id,
+                "total_tokens": total_tokens,
+                "changed_lines": _cl,
+                "tokens_per_changed_line": tpl,
+                "by_phase": by_phase_str,
+                "headline": (
+                    f"EFFICIENCY run={self.run_id} total_tokens={total_tokens}"
+                    f" changed_lines={_cl} tokens_per_changed_line={tpl}"
+                    f" by_phase={by_phase_str}"
+                ),
+            },
+        )
 
     def memory(self, **snapshot: object) -> None:
         self.emit("memory.snapshot", data=dict(snapshot))
@@ -199,7 +230,8 @@ class RunLog:
         self._usage_duration_s += duration_s
         for key in self._USAGE_FIELDS:
             self._usage_totals[key] += tokens[key]
-        phase_key = phase or (self.context.phase if self.context else None) or "unknown"
+        _ctx = get_run_context() or self.context
+        phase_key = phase or (_ctx.phase if _ctx else None) or "unknown"
         bucket = self._usage_by_phase.setdefault(
             phase_key, dict.fromkeys(self._USAGE_FIELDS, 0) | {"calls": 0}
         )
@@ -208,7 +240,9 @@ class RunLog:
         bucket["calls"] += 1
         self.emit("llm.usage", phase=phase, data=data)
 
-    def _usage_rollup_payload(self, *, task_id: int | None = None) -> dict[str, Any] | None:
+    def _usage_rollup_payload(
+        self, *, task_id: int | None = None, changed_lines: int = 0
+    ) -> dict[str, Any] | None:
         if self._usage_calls == 0:
             return None
         totals = dict(self._usage_totals)
@@ -218,12 +252,15 @@ class RunLog:
             entry = dict(bucket)
             entry["total_tokens"] = sum(entry[k] for k in self._USAGE_FIELDS)
             by_phase[phase_key] = entry
+        total_tokens = totals["total_tokens"]
         return {
             "task_id": task_id,
             "calls": self._usage_calls,
             "duration_s": round(self._usage_duration_s, 3),
             "totals": totals,
             "by_phase": by_phase,
+            "changed_lines": changed_lines,
+            "tokens_per_changed_line": round(total_tokens / max(changed_lines, 1)),
         }
 
     def usage_rollup_snapshot(self, *, task_id: int | None = None) -> dict[str, Any] | None:
@@ -232,14 +269,16 @@ class RunLog:
             return dict(self._last_usage_rollup)
         return self._usage_rollup_payload(task_id=task_id)
 
-    def task_usage_rollup(self, *, task_id: int | None = None) -> dict[str, Any] | None:
+    def task_usage_rollup(
+        self, *, task_id: int | None = None, changed_lines: int = 0
+    ) -> dict[str, Any] | None:
         """Emit a per-task usage summary; returns the totals payload (or None).
         Idempotent: only emits once per RunLog lifetime."""
         if self._usage_calls == 0:
             return None
         if self._usage_rollup_emitted:
             return self._last_usage_rollup
-        payload = self._usage_rollup_payload(task_id=task_id)
+        payload = self._usage_rollup_payload(task_id=task_id, changed_lines=changed_lines)
         if payload is None:
             return None
         self._usage_rollup_emitted = True

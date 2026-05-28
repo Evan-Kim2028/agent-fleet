@@ -23,6 +23,7 @@ from agent_fleet.implementer import implement
 from agent_fleet.level_up.paths import repo_key as level_up_repo_key
 from agent_fleet.level_up.record import record_runner_experience, review_verdict_from_runner_result
 from agent_fleet.observability.context import bind_run, get_run_log
+from agent_fleet.observability.efficiency import changed_lines as _changed_lines
 from agent_fleet.observability.log import RunLog
 from agent_fleet.observability.run_metrics import build_run_metrics
 from agent_fleet.orchestration.decompose import coerce_empty_decompose
@@ -447,6 +448,7 @@ class LocalFleetRunner:
                     fleet_cfg,
                     repo_cfg,
                     run_id=run_id,
+                    loadout_size=_runtime.loadout_size,
                 )
                 phases["EQUIP"] = {
                     "base_loadout": dispatch_equip.base_loadout,
@@ -477,6 +479,7 @@ class LocalFleetRunner:
                     )
                     run_log.run_end(
                         outcome=result.outcome,
+                        changed_lines=0,
                         **_run_end_kwargs(result, find_repo_config(repo_root)),
                     )
                     return result
@@ -504,6 +507,7 @@ class LocalFleetRunner:
                         )
                         run_log.run_end(
                             outcome=result.outcome,
+                            changed_lines=0,
                             **_run_end_kwargs(result, repo),
                         )
                         return result
@@ -520,6 +524,7 @@ class LocalFleetRunner:
                     )
                     run_log.run_end(
                         outcome=result.outcome,
+                        changed_lines=0,
                         **_run_end_kwargs(result, find_repo_config(repo_root)),
                     )
                     return result
@@ -609,6 +614,7 @@ class LocalFleetRunner:
                         )
                         run_log.run_end(
                             outcome=result.outcome,
+                            changed_lines=_changed_lines(worktree),
                             **_run_end_kwargs(result, find_repo_config(repo_root)),
                         )
                         return result
@@ -711,6 +717,7 @@ class LocalFleetRunner:
                     )
                     run_log.run_end(
                         outcome=result.outcome,
+                        changed_lines=_changed_lines(worktree),
                         **_run_end_kwargs(result, find_repo_config(repo_root)),
                     )
                     return result
@@ -776,6 +783,7 @@ class LocalFleetRunner:
                     )
                     run_log.run_end(
                         outcome=result.outcome,
+                        changed_lines=_changed_lines(worktree),
                         **_run_end_kwargs(result, find_repo_config(repo_root)),
                     )
                     return result
@@ -870,6 +878,7 @@ class LocalFleetRunner:
                 )
                 run_log.run_end(
                     outcome=result.outcome,
+                    changed_lines=_changed_lines(worktree),
                     pr_number=pr_number,
                     jsonl=str(run_log.jsonl_path) if run_log.jsonl_path else None,
                     **_run_end_kwargs(result, find_repo_config(repo_root)),
@@ -889,6 +898,7 @@ class LocalFleetRunner:
                 )
                 run_log.run_end(
                     outcome="error",
+                    changed_lines=_changed_lines(worktree),
                     **_run_end_kwargs(result, find_repo_config(repo_root)),
                 )
                 return result

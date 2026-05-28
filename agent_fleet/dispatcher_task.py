@@ -25,12 +25,17 @@ if TYPE_CHECKING:
     from agent_fleet.repo import RepoConfig
 
 
-def read_observed_total_tokens(task_index: int) -> int | None:
-    """Return total tokens observed for ``task_index`` from the run log, or None."""
+def read_observed_total_tokens(task_index: int, changed_lines: int = 0) -> int | None:
+    """Return total tokens observed for ``task_index`` from the run log, or None.
+
+    The dispatcher path never calls ``run_end``; this is the first (and only)
+    ``task_usage_rollup`` emit, so ``changed_lines`` must be threaded here for the
+    ``llm.usage.task_rollup`` event to carry a real tokens-per-changed-line.
+    """
     run_log = get_run_log()
     if run_log is None:
         return None
-    rollup = run_log.task_usage_rollup(task_id=task_index)
+    rollup = run_log.task_usage_rollup(task_id=task_index, changed_lines=changed_lines)
     if rollup is not None:
         totals = rollup.get("totals") or {}
         tok = totals.get("total_tokens")
@@ -228,6 +233,7 @@ def build_task_result(
     changed_files: list[str] | None,
     task_workspace: TaskWorkspace | None,
     fleet_log: FleetLogger,
+    changed_lines: int = 0,
 ) -> FleetTaskResult:
     from agent_fleet.hooks import FleetTaskResult
 
@@ -242,7 +248,7 @@ def build_task_result(
     stderr_tail = _stderr_from_phases(phase_results)
     files_modified = tuple(changed_files or ())
 
-    observed_total_tokens = read_observed_total_tokens(task_index)
+    observed_total_tokens = read_observed_total_tokens(task_index, changed_lines=changed_lines)
     usage_rollup = _peek_usage_rollup(task_index)
 
     result = FleetTaskResult(

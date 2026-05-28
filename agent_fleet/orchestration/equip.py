@@ -17,6 +17,7 @@ from agent_fleet.level_up.models import DispatchEquip
 from agent_fleet.level_up.overlay import compose_overlay_text, load_overlay
 from agent_fleet.level_up.paths import FLEET_TIER, repo_key
 from agent_fleet.skills_lib import (
+    MINIMAL_EXECUTE_SKILL_CORE,
     PR_LOOP_EXECUTE_SKILLS,
     SYSTEMATIC_DEBUGGING_SKILL,
     base_kit_skill_dirs,
@@ -61,6 +62,7 @@ def resolve_dispatch_equip(
     fleet_config: FleetConfig,
     repo: RepoConfig | None,
     run_id: str | None = None,
+    loadout_size: str | None = None,
 ) -> DispatchEquip:
     """Resolve dispatch equip: loadouts, overlays, dynamic skills, journaling."""
     persona = task.persona or "coder"
@@ -106,7 +108,14 @@ def resolve_dispatch_equip(
             ):
                 extra_execute.append(skill_id)
 
-    skill_slots_execute = [*loadout_execute, *extra_execute]
+    # Mirror compose_persona_body's minimal filter so the journaled equip matches
+    # the skills actually composed into the body (filter the loadout, keep extras).
+    filtered_execute = (
+        [s for s in loadout_execute if s in MINIMAL_EXECUTE_SKILL_CORE]
+        if loadout_size == "minimal"
+        else loadout_execute
+    )
+    skill_slots_execute = [*filtered_execute, *extra_execute]
     skill_slots_review = loadout_review_skill_ids(loadout)
     parent_run_id = task.equip.parent_run_id if task.equip else None
 
@@ -117,6 +126,7 @@ def resolve_dispatch_equip(
         extra_skills=extra_execute or None,
         level_up_generation=generation,
         skill_dirs=skill_dirs,
+        loadout_size=loadout_size,
     )
 
     equip = DispatchEquip(

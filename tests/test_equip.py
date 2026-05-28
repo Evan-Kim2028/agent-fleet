@@ -18,6 +18,7 @@ from agent_fleet.orchestration.equip import resolve_dispatch_equip
 from agent_fleet.personas import YamlPersonaResolver
 from agent_fleet.repo import load_repo_config
 from agent_fleet.skills_lib import (
+    MINIMAL_EXECUTE_SKILL_CORE,
     PR_LOOP_EXECUTE_SKILLS,
     SYSTEMATIC_DEBUGGING_SKILL,
     load_loadout,
@@ -205,3 +206,43 @@ def test_resolve_preserves_parent_run_id_from_task_equip(
 
 def test_level_up_root_default() -> None:
     assert LEVEL_UP_ROOT.name == "level_up"
+
+
+def test_minimal_loadout_size_reduces_compose_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_level_up_root(monkeypatch, tmp_path / "level_up")
+
+    repo_yaml = tmp_path / ".agent-fleet.yaml"
+    repo_yaml.write_text("name: minimal-test\n", encoding="utf-8")
+    repo = load_repo_config(repo_yaml)
+    fleet_config = load_fleet_config(ROOT / "fleet.example.yaml")
+    task = FleetTask(goal="Small fix", persona="coder", workspace=str(tmp_path))
+
+    minimal_equip = resolve_dispatch_equip(task, fleet_config, repo, loadout_size="minimal")
+    full_equip = resolve_dispatch_equip(task, fleet_config, repo, loadout_size="full")
+
+    # minimal must produce a shorter prompt than full
+    assert len(minimal_equip.compose_body) < len(full_equip.compose_body)
+
+    # a core skill must appear in minimal
+    assert "pstack/tdd" in minimal_equip.skill_slots_execute or "TDD" in minimal_equip.compose_body
+
+    # a dropped skill must NOT appear in minimal compose body
+    assert "principle-prove-it-works" not in minimal_equip.compose_body
+
+    # None and "full" must be byte-identical (no-op path)
+    none_equip = resolve_dispatch_equip(task, fleet_config, repo, loadout_size=None)
+    assert none_equip.compose_body == full_equip.compose_body
+
+    # standard must also be byte-identical to full/None
+    standard_equip = resolve_dispatch_equip(task, fleet_config, repo, loadout_size="standard")
+    assert standard_equip.compose_body == full_equip.compose_body
+
+    # verify the constant itself contains only the expected 4 skills
+    assert {
+        "pstack/tdd",
+        "cursor-team-kit/verify-this",
+        "pstack/figure-it-out",
+        "pstack/principle-fix-root-causes",
+    } == MINIMAL_EXECUTE_SKILL_CORE

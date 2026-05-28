@@ -10,6 +10,19 @@ _BASE_KIT_DIR = Path(__file__).resolve().parent / "base-kit"
 DEFAULT_QUALITY_REVIEW_SKILL = "thermo-nuclear-code-quality-review"
 # Injected on verify_failed when not already in loadout (pstack-first default).
 SYSTEMATIC_DEBUGGING_SKILL = "pstack/why"
+# Skills kept when loadout_size == "minimal" (complexity == LOW).
+# Dropped from coder loadout: pstack/principle-prove-it-works,
+# pstack/principle-boundary-discipline, pstack/principle-minimize-reader-load,
+# pstack/principle-never-block-on-the-human, pstack/principle-guard-the-context-window,
+# pstack/how.  These are style/meta principles optional for a small well-defined task.
+# Note: extra_skills (SYSTEMATIC_DEBUGGING_SKILL, PR_LOOP_EXECUTE_SKILLS) are appended
+# after this filter, so the actual minimal loadout may contain more than these four.
+MINIMAL_EXECUTE_SKILL_CORE: frozenset[str] = frozenset({
+    "pstack/tdd",
+    "cursor-team-kit/verify-this",
+    "pstack/figure-it-out",
+    "pstack/principle-fix-root-causes",
+})
 # Injected when repo pr_loop.enabled (CI fix / watcher workflows).
 PR_LOOP_EXECUTE_SKILLS: tuple[str, ...] = (
     "cursor-team-kit/fix-ci",
@@ -135,10 +148,13 @@ def compose_persona_body(
     stub_text: str | None = None,
     skill_dirs: list[Path] | None = None,
     level_up_generation: int = 0,
+    loadout_size: str | None = None,
 ) -> str:
     """Layer base-kit skills, persona stub, fleet/repo overlays into one prompt body."""
     dirs = skill_dirs or base_kit_skill_dirs()
     skill_ids = _loadout_execute_skill_ids(loadout)
+    if loadout_size == "minimal":
+        skill_ids = [s for s in skill_ids if s in MINIMAL_EXECUTE_SKILL_CORE]
     if extra_skills:
         skill_ids.extend(extra_skills)
 
