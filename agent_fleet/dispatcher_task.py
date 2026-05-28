@@ -6,6 +6,7 @@ import time
 from typing import TYPE_CHECKING
 
 from agent_fleet.code_review import publish_fleet_branch, run_code_review_with_auto_fix
+from agent_fleet.complexity import TokenCeilingExceeded
 from agent_fleet.fleet_session import create_fleet_session
 from agent_fleet.handoff_context import apply_handoff_to_task
 from agent_fleet.observability.context import get_run_log
@@ -141,6 +142,9 @@ def run_configured_pipeline(
     repo_config: RepoConfig | None,
     git_repo: RepoConfig | None,
     handoff: HandoffNote | None,
+    max_retries: int | None = None,
+    token_ceiling: int | None = None,
+    declared_complexity: str | None = None,
 ) -> tuple[list[dict[str, object]], str, int, list[str] | None]:
     effective_task = apply_handoff_to_task(task, handoff)
     pipeline_name = task.pipeline or task_config.default_pipeline
@@ -173,6 +177,9 @@ def run_configured_pipeline(
                 repo=repo_config or git_repo,
                 config=code_review_cfg,
                 fleet_config=task_config,
+                max_retries=max_retries,
+                token_ceiling=token_ceiling,
+                declared_complexity=declared_complexity,
             )
         return run_pipeline(
             backend=backend,
@@ -184,7 +191,11 @@ def run_configured_pipeline(
             repo=repo_config or git_repo,
             session=session,
             fleet_config=task_config,
+            token_ceiling=token_ceiling,
+            declared_complexity=declared_complexity,
         )
+    except TokenCeilingExceeded:
+        raise
     finally:
         if session is not None:
             session.dispose()

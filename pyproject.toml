@@ -45,6 +45,8 @@ include = ["agent_fleet*"]
 agent_fleet = [
     "personas/*.md",
     "personas/*.loadout.yaml",
+    "personas/*/loadout.md",
+    "personas/*/reference/*.md",
     "base-kit/**/*",
     "schemas/*.json",
     "orchestration/dag/data/*.tsx",

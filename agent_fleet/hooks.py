@@ -179,7 +179,7 @@ class Persona:
 
 @runtime_checkable
 class PersonaResolver(Protocol):
-    def load(self, name: str) -> Persona: ...
+    def load(self, name: str, *, loadout_size: str | None = None) -> Persona: ...
     def list_personas(self) -> list[str]: ...
 
 
@@ -248,6 +248,7 @@ class FleetTask:
     pipeline: str | None = None
     title: str | None = None
     equip: DispatchEquip | None = None
+    complexity: str | None = None  # LOW | MED | HIGH; None → MED default
 
 
 @dataclass(frozen=True)
@@ -269,3 +270,7 @@ class FleetTaskResult:
     pr_loop_status: str | None = None
     stderr: str = ""
     files_modified: tuple[str, ...] = ()
+    # Populated when status == "complexity_underestimated"
+    declared_complexity: str | None = None
+    observed_total_tokens: int | None = None
+    ceiling: int | None = None

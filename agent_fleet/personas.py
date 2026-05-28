@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
@@ -21,6 +22,97 @@ from agent_fleet.skills_lib import (
 
 _DEFAULT_ALLOWED_TOOLS = ["read_file", "write_file", "run_command"]
 _PACKAGE_PERSONAS = Path(__file__).resolve().parent / "personas"
+_REFERENCE_DELIMITER = "\n\n---\n\n"
+_logger = logging.getLogger(__name__)
+
+
+def load_persona_md(
+    name: str,
+    *,
+    personas_dir: Path | None = None,
+    loadout_size: Literal["minimal", "standard", "full"] = "standard",
+) -> str:
+    """Return the markdown prompt for *name* honoring *loadout_size*.
+
+    New-layout personas live in ``personas/<name>/loadout.md`` with an optional
+    ``reference/`` subdirectory.  Legacy flat personas are ``personas/<name>.md``.
+
+    Sizes:
+    - ``minimal``: loadout.md only.
+    - ``standard``: loadout.md + reference/INDEX.md (agent decides what else to fetch).
+    - ``full``: loadout.md + reference/INDEX.md + first paragraph of each reference doc.
+
+    Legacy flat personas return the flat file for all sizes.  A warning is logged
+    when ``loadout_size != "minimal"`` so unmigrated personas are visible.
+    """
+    bases: list[Path] = []
+    if personas_dir is not None:
+        bases.append(personas_dir)
+    if personas_dir is None or personas_dir.resolve() != _PACKAGE_PERSONAS.resolve():
+        bases.append(_PACKAGE_PERSONAS)
+
+    for base in bases:
+        persona_dir = base / name
+        if persona_dir.is_dir():
+            loadout_path = persona_dir / "loadout.md"
+            if loadout_path.is_file():
+                return _load_directory_persona(persona_dir, loadout_path, loadout_size)
+
+    # Legacy flat layout
+    for base in bases:
+        flat_path = base / f"{name}.md"
+        if flat_path.is_file():
+            if loadout_size != "minimal":
+                _logger.warning(
+                    "persona %r is a legacy flat file; loadout_size=%r ignored "
+                    "(migrate to personas/%s/ to enable reference docs)",
+                    name,
+                    loadout_size,
+                    name,
+                )
+            return flat_path.read_text(encoding="utf-8")
+
+    raise FileNotFoundError(
+        f"Persona {name!r} not found in any of: {[str(b) for b in bases]}"
+    )
+
+
+def _load_directory_persona(
+    persona_dir: Path,
+    loadout_path: Path,
+    loadout_size: Literal["minimal", "standard", "full"],
+) -> str:
+    """Assemble persona markdown from directory layout."""
+    parts: list[str] = [loadout_path.read_text(encoding="utf-8")]
+
+    if loadout_size == "minimal":
+        return parts[0]
+
+    reference_dir = persona_dir / "reference"
+    index_path = reference_dir / "INDEX.md"
+    if index_path.is_file():
+        parts.append(index_path.read_text(encoding="utf-8"))
+
+    if loadout_size == "full" and reference_dir.is_dir():
+        for ref_path in sorted(reference_dir.glob("*.md")):
+            if ref_path.name == "INDEX.md":
+                continue
+            first_para = _first_paragraph(ref_path.read_text(encoding="utf-8"))
+            if first_para:
+                header = f"## {ref_path.stem} (excerpt)"
+                parts.append(f"{header}\n\n{first_para}")
+
+    return _REFERENCE_DELIMITER.join(parts)
+
+
+def _first_paragraph(text: str) -> str:
+    """Return the first non-empty paragraph of *text*."""
+    paragraphs = text.split("\n\n")
+    for para in paragraphs:
+        stripped = para.strip()
+        if stripped:
+            return stripped
+    return ""
 
 
 def _persona_search_dirs(cfg: FleetConfig) -> tuple[Path, ...]:
@@ -148,7 +240,13 @@ class YamlPersonaResolver:
                 names.add(path.stem.replace(".loadout", ""))
         return sorted(names)
 
-    def load(self, name: str) -> Persona:
+    def load(self, name: str, *, loadout_size: str | None = None) -> Persona:  # noqa: ARG002
+        """Load a persona by name.
+
+        *loadout_size* is accepted for forward-compatibility with complexity-
+        driven runtime derivation.  The actual loadout selection logic is
+        unchanged and will be updated by a parallel subagent.
+        """
         spec = self._config.personas.get(name)
         if spec is None:
             spec = PersonaSpec(prompt=f"{name}.md")

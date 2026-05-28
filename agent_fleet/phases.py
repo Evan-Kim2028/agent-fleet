@@ -6,7 +6,9 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.agent_mode import parse_agent_mode
+from agent_fleet.complexity import TokenCeilingExceeded
 from agent_fleet.contracts.review import ReviewVerdict
+from agent_fleet.observability.context import get_run_log
 from agent_fleet.personas import read_persona_body
 from agent_fleet.pr_review.runner import run_pr_review
 from agent_fleet.prompts.agent import build_agent_prompt
@@ -27,6 +29,25 @@ if TYPE_CHECKING:
     from agent_fleet.hooks import FleetTask, LLMBackend, LLMSession, Persona, PersonaResolver
     from agent_fleet.level_up.models import DispatchEquip
     from agent_fleet.repo import RepoConfig
+
+
+def _check_token_ceiling(
+    *,
+    token_ceiling: int,
+    declared_complexity: str,
+) -> None:
+    """Raise ``TokenCeilingExceeded`` if the bound RunLog has exceeded *token_ceiling*."""
+    run_log = get_run_log()
+    if run_log is None:
+        return
+    totals = dict(run_log._usage_totals)
+    total = sum(totals.values())
+    if total > token_ceiling:
+        raise TokenCeilingExceeded(
+            declared_complexity=declared_complexity,
+            observed_total_tokens=total,
+            ceiling=token_ceiling,
+        )
 
 
 def _review_skill_prompt_append(task: FleetTask) -> str:
@@ -546,10 +567,16 @@ def run_pipeline(
     repo: RepoConfig | None = None,
     session: LLMSession | None = None,
     fleet_config: FleetConfig | None = None,
+    token_ceiling: int | None = None,
+    declared_complexity: str | None = None,
 ) -> tuple[list[dict[str, Any]], str, int, list[str]]:
     """Run ordered phases.
 
     Returns (phase_results, final_summary, exit_code, changed_files).
+
+    If *token_ceiling* is set and cumulative token usage exceeds it after any
+    phase, ``TokenCeilingExceeded`` is raised.  The caller is responsible for
+    converting this into the appropriate task result.
     """
     results: list[dict[str, Any]] = []
     summary = ""
@@ -557,6 +584,7 @@ def run_pipeline(
     changed_files: list[str] = []
     implementer_persona = resolver.load(task.persona)
     use_hardened_review = "review" in phases
+    _complexity_label = declared_complexity or "MED"
 
     for phase in phases:
         if phase == "execute":
@@ -572,6 +600,10 @@ def run_pipeline(
             summary = phase_result["stdout"]
             exit_code = phase_result["exit_code"]
             changed_files = collect_changed_files(workspace)
+            if token_ceiling is not None:
+                _check_token_ceiling(
+                    token_ceiling=token_ceiling, declared_complexity=_complexity_label
+                )
             if exit_code != 0:
                 break
 
@@ -608,6 +640,10 @@ def run_pipeline(
             summary = phase_result.get("summary") or summary
             exit_code = phase_result["exit_code"]
             changed_files = phase_result.get("changed_files") or changed_files
+            if token_ceiling is not None:
+                _check_token_ceiling(
+                    token_ceiling=token_ceiling, declared_complexity=_complexity_label
+                )
             continue
 
         if phase == "review":
@@ -639,6 +675,10 @@ def run_pipeline(
             results.append(phase_result)
             summary = phase_result.get("summary") or phase_result.get("stdout") or summary
             exit_code = phase_result["exit_code"]
+            if token_ceiling is not None:
+                _check_token_ceiling(
+                    token_ceiling=token_ceiling, declared_complexity=_complexity_label
+                )
             if exit_code != 0:
                 break
             continue

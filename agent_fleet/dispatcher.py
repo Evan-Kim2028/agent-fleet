@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 from agent_fleet.admission import AdmissionController, ResourceTier
 from agent_fleet.backends import make_backend
+from agent_fleet.complexity import TokenCeilingExceeded, derive_runtime
 from agent_fleet.config import FleetConfig, load_fleet_config
 from agent_fleet.dispatcher_task import (
     build_task_result,
@@ -60,6 +61,7 @@ def _normalize_tasks(
     workspace: str | None,
     pipeline: str | None,
     tasks: list[dict[str, object]] | None,
+    complexity: str | None = None,
 ) -> tuple[list[FleetTask], list[str | None]]:
     base_branches: list[str | None] = []
     if tasks:
@@ -71,6 +73,7 @@ def _normalize_tasks(
             if not task_goal:
                 continue
             base_branches.append(_optional_entry_str(entry.get("base_branch"), None))
+            entry_complexity = _optional_entry_str(entry.get("complexity"), complexity)
             normalized.append(
                 FleetTask(
                     goal=task_goal,
@@ -78,6 +81,7 @@ def _normalize_tasks(
                     persona=str(entry.get("persona") or persona or "coder"),
                     workspace=_optional_entry_str(entry.get("workspace"), workspace),
                     pipeline=_optional_entry_str(entry.get("pipeline"), pipeline),
+                    complexity=entry_complexity,
                 )
             )
         if normalized:
@@ -90,6 +94,7 @@ def _normalize_tasks(
                 persona=str(persona or "coder"),
                 workspace=workspace,
                 pipeline=pipeline,
+                complexity=complexity,
             )
         ], [None]
     raise ValueError("Provide either 'goal' (single task) or 'tasks' (batch).")
@@ -381,6 +386,7 @@ class FleetDispatcher:
             backend=self.backend,
             persona_resolver=self.resolver,
             fleet_config=config,
+            task_complexity=task.complexity,
         )
         ok_outcomes = {
             "completed",
@@ -511,6 +517,27 @@ class FleetDispatcher:
 
                 repo_config = find_repo_config(workspace)
                 git_repo = self._isolation_repo(workspace)
+
+                # Derive runtime parameters from complexity.  If the task also
+                # carries an explicit pipeline override, warn and discard it.
+                runtime = derive_runtime(task.complexity)
+                if task.complexity is not None and task.pipeline is not None:
+                    logger.warning(
+                        "Task has both complexity=%r and pipeline=%r; "
+                        "explicit pipeline is ignored — derived pipeline %r is used instead.",
+                        task.complexity,
+                        task.pipeline,
+                        runtime.pipeline,
+                    )
+                    fleet_log.emit(
+                        "complexity.pipeline_override_ignored",
+                        complexity=task.complexity,
+                        ignored_pipeline=task.pipeline,
+                        derived_pipeline=runtime.pipeline,
+                    )
+                if task.complexity is not None:
+                    task = replace(task, pipeline=runtime.pipeline)
+
                 phases = self._resolve_pipeline(task)
 
                 if phases == ["full"]:
@@ -592,6 +619,9 @@ class FleetDispatcher:
                     repo_config=repo_config,
                     git_repo=git_repo,
                     handoff=handoff,
+                    max_retries=runtime.retries,
+                    token_ceiling=runtime.token_ceiling,
+                    declared_complexity=task.complexity,
                 )
                 phase_results.extend(pipeline_results)
 
@@ -656,6 +686,34 @@ class FleetDispatcher:
                     )
                     task_workspace.teardown(keep=keep_worktree)
                 return result
+            except TokenCeilingExceeded as exc:
+                logger.warning(
+                    "Fleet task %s: token ceiling exceeded (%s > %s, complexity=%s)",
+                    task_index,
+                    exc.observed_total_tokens,
+                    exc.ceiling,
+                    exc.declared_complexity,
+                )
+                if task_workspace is not None:
+                    task_workspace.teardown(keep=False)
+                fleet_log.emit(
+                    "complexity.ceiling_exceeded",
+                    declared_complexity=exc.declared_complexity,
+                    observed_total_tokens=exc.observed_total_tokens,
+                    ceiling=exc.ceiling,
+                )
+                return FleetTaskResult(
+                    task_index=task_index,
+                    persona=task.persona,
+                    goal=task.goal,
+                    status="complexity_underestimated",
+                    summary=None,
+                    error=str(exc),
+                    duration_seconds=round(time.monotonic() - start, 2),
+                    declared_complexity=exc.declared_complexity,
+                    observed_total_tokens=exc.observed_total_tokens,
+                    ceiling=exc.ceiling,
+                )
             except Exception as exc:
                 logger.exception("Fleet task %s failed", task_index)
                 if task_workspace is not None:
@@ -694,6 +752,7 @@ class FleetDispatcher:
         workspace: str | None = None,
         pipeline: str | None = None,
         tasks: list[dict[str, object]] | None = None,
+        complexity: str | None = None,
     ) -> list[FleetTaskResult]:
         normalized, base_branches = _normalize_tasks(
             goal=goal,
@@ -702,6 +761,7 @@ class FleetDispatcher:
             workspace=workspace,
             pipeline=pipeline,
             tasks=tasks,
+            complexity=complexity,
         )
         if len(normalized) > self.config.max_parallel:
             raise ValueError(
@@ -776,6 +836,7 @@ def dispatch_tasks(
     tasks: list[dict[str, object]] | None = None,
     config_path: str | None = None,
     progress_callback: Callable[..., None] | None = None,
+    complexity: str | None = None,
 ) -> list[FleetTaskResult]:
     config = load_fleet_config(config_path) if config_path else load_fleet_config()
     dispatcher = FleetDispatcher(config=config, progress_callback=progress_callback)
@@ -786,4 +847,5 @@ def dispatch_tasks(
         workspace=workspace,
         pipeline=pipeline,
         tasks=tasks,
+        complexity=complexity,
     )

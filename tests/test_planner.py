@@ -14,7 +14,7 @@ class _FakePersonaResolver:
     def list_personas(self) -> list[str]:
         return ["data", "backend", "frontend"]
 
-    def load(self, name: str):  # noqa: ANN202
+    def load(self, name: str, *, loadout_size: str | None = None):  # noqa: ANN202
         raise NotImplementedError
 
 

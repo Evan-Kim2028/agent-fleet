@@ -63,7 +63,7 @@ class _StubPersonaResolver:
     def __init__(self, persona: Persona) -> None:
         self._persona = persona
 
-    def load(self, name: str) -> Persona:  # noqa: ARG002
+    def load(self, name: str, *, loadout_size: str | None = None) -> Persona:  # noqa: ARG002
         return self._persona
 
     def list_personas(self) -> list[str]:

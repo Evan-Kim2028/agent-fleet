@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.capacity import is_visual_audit_dispatch
+from agent_fleet.complexity import derive_runtime, is_actionable_stderr
 from agent_fleet.config import load_fleet_config
 from agent_fleet.contracts.review import ReviewResult, ReviewVerdict
 from agent_fleet.contracts.task_spec import DecompositionDecision, TaskSpec
@@ -322,6 +323,7 @@ class LocalFleetRunner:
         issue_labels: list[str] | None = None,
         experience_source: str = "full_pipeline",
         pr_loop_round: int | None = None,
+        task_complexity: str | None = None,
     ) -> FleetRunResult:
         start = time.monotonic()
         run_id = str(uuid.uuid4())[:8]
@@ -341,6 +343,13 @@ class LocalFleetRunner:
             title=title,
             body=body,
         )
+        # Derive runtime parameters from complexity.  Falls back to the
+        # FleetRunConfig value when no complexity is declared.
+        _runtime = derive_runtime(task_complexity)
+        effective_max_retries = (
+            _runtime.retries if task_complexity is not None else self._config.max_verify_retries
+        )
+
         run_log = RunLog.create(
             run_id=run_id,
             issue_number=issue_number or task_id,
@@ -567,7 +576,7 @@ class LocalFleetRunner:
                 assert worktree is not None
                 verify_attempts = 0
                 verify_result = None
-                while verify_attempts <= self._config.max_verify_retries:
+                while verify_attempts <= effective_max_retries:
                     with run_log.phase("VERIFY", attempt=verify_attempts + 1):
                         logger.info("[%s] VERIFY (attempt %d)", run_id, verify_attempts + 1)
                         changed = self._git_ops.changed_files(worktree)
@@ -583,8 +592,22 @@ class LocalFleetRunner:
                     if verify_result.severity == VerifySeverity.FATAL:
                         break
                     verify_attempts += 1
-                    if verify_attempts > self._config.max_verify_retries:
+                    if verify_attempts > effective_max_retries:
                         break
+                    # LOW-complexity retry gate: only retry when stderr is
+                    # non-empty AND mentions a file the agent wrote.
+                    if task_complexity == "LOW":
+                        written = tuple(str(f) for f in changed)
+                        if not is_actionable_stderr(verify_result.message, written):
+                            logger.info(
+                                "[%s] LOW complexity: skipping fix retry (stderr not actionable)",
+                                run_id,
+                            )
+                            run_log.emit(
+                                "complexity.low_retry_suppressed",
+                                data={"reason": "stderr not actionable"},
+                            )
+                            break
                     with run_log.phase("FIX", attempt=verify_attempts):
                         if notes is None:
                             logger.info("[%s] RESEARCH (resume retry)", run_id)
@@ -927,6 +950,7 @@ def run_full_pipeline(
     backend: LLMBackend,
     persona_resolver: PersonaResolver,
     fleet_config: FleetConfig | None = None,
+    task_complexity: str | None = None,
 ) -> FleetRunResult:
     """Convenience entry: discover repo config and run full pipeline."""
     from agent_fleet.config import load_fleet_config
@@ -955,4 +979,5 @@ def run_full_pipeline(
         repo_root=ws,
         base_branch=repo.default_branch,
         experience_source="cli",
+        task_complexity=task_complexity,
     )

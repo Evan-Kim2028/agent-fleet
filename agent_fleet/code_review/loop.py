@@ -80,6 +80,9 @@ def run_code_review_with_auto_fix(
     config: CodeReviewConfig,
     reviewer_persona: str = "reviewer",
     fleet_config: FleetConfig | None = None,
+    max_retries: int | None = None,
+    token_ceiling: int | None = None,
+    declared_complexity: str | None = None,
 ) -> tuple[list[dict[str, Any]], str, int, list[str]]:
     """Run code_review pipeline with optional fix → re-check loops."""
     if not config.auto_fix or phases != ["execute", "review"]:
@@ -93,6 +96,8 @@ def run_code_review_with_auto_fix(
             reviewer_persona=reviewer_persona,
             repo=repo,
             fleet_config=fleet_config,
+            token_ceiling=token_ceiling,
+            declared_complexity=declared_complexity,
         )
 
     phase_results, summary, exit_code, changed_files = run_pipeline(
@@ -105,10 +110,13 @@ def run_code_review_with_auto_fix(
         reviewer_persona=reviewer_persona,
         repo=repo,
         fleet_config=fleet_config,
+        token_ceiling=token_ceiling,
+        declared_complexity=declared_complexity,
     )
 
+    effective_max_fix = max_retries if max_retries is not None else config.max_fix_attempts
     fix_persona = config.fix_persona or "coder"
-    for attempt in range(1, config.max_fix_attempts + 1):
+    for attempt in range(1, effective_max_fix + 1):
         status, _error = resolve_pipeline_outcome(phase_results, exit_code)
         if status == "completed":
             break
