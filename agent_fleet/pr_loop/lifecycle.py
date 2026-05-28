@@ -28,7 +28,7 @@ from agent_fleet.pr_loop.review_parse import (
 )
 from agent_fleet.prompts.agent import build_agent_prompt
 from agent_fleet.repo import RepoConfig, merge_repo_into_fleet_config
-from agent_fleet.scope import files_outside_allowed_paths
+from agent_fleet.scope import effective_allowed_paths, files_outside_allowed_paths
 from agent_fleet.state import (
     STATE_FILENAME,
     get_pr_state,
@@ -242,10 +242,10 @@ def _file_scope_violation_followup(
     )
 
 
-def _commit_preflight_commands(repo: RepoConfig) -> list[str]:
+def _commit_preflight_commands(repo: RepoConfig, persona: str | None = None) -> list[str]:
     if repo.commit_preflight_commands:
         return list(repo.commit_preflight_commands)
-    return list(repo.verify_commands)
+    return repo.verify_commands_for(persona)
 
 
 def _commit_push(
@@ -254,13 +254,15 @@ def _commit_push(
     message: str,
     branch: str,
     repo: RepoConfig,
+    persona: str | None = None,
 ) -> CommitPushResult:
+    resolved_persona = persona or persona_from_branch(branch, repo.default_persona)
     return github_ops.commit_and_push(
         worktree,
         message,
         branch,
         exclude=(STATE_FILENAME,),
-        preflight_commands=_commit_preflight_commands(repo),
+        preflight_commands=_commit_preflight_commands(repo, resolved_persona),
     )
 
 
@@ -311,7 +313,7 @@ def address_review_findings(
     if repo.verify_commands:
         verify_block = "\n".join(f"- `{cmd}`" for cmd in repo.verify_commands)
     preflight_block = ""
-    preflight_cmds = _commit_preflight_commands(repo)
+    preflight_cmds = _commit_preflight_commands(repo, fix_persona_name)
     if preflight_cmds and preflight_cmds != repo.verify_commands:
         preflight_block = "\n".join(f"- `{cmd}`" for cmd in preflight_cmds)
 
@@ -375,6 +377,7 @@ def address_review_findings(
             "Address every blocking finding in the review comment below."
         ),
         context=f"branch={branch}",
+        allowed_paths=effective_allowed_paths((), persona_obj.allowed_paths),
         extra_sections=extra_sections,
     ).full
 
@@ -421,6 +424,7 @@ def address_review_findings(
         message=message,
         branch=branch,
         repo=repo,
+        persona=fix_persona_name,
     )
     if not push_result.ok:
         detail = push_result.detail or f"Commit/push failed ({push_result.phase})"
@@ -518,6 +522,7 @@ def attempt_ci_fix(
         task_heading="Task",
         task_body=task_body,
         context=f"branch={branch}; ci_fix",
+        allowed_paths=effective_allowed_paths((), persona_obj.allowed_paths),
         extra_sections=extra_sections,
     ).full
     logger.info(
@@ -543,7 +548,9 @@ def attempt_ci_fix(
     message = (
         f"fix(fleet): CI failures on PR #{pr_number}\n\n{_AGENT_FOOTER} persona={fix_persona_name}"
     )
-    return _commit_push(worktree=worktree, message=message, branch=branch, repo=repo)
+    return _commit_push(
+        worktree=worktree, message=message, branch=branch, repo=repo, persona=fix_persona_name
+    )
 
 
 def tiered_merge_allowed(
