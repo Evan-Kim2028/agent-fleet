@@ -19,6 +19,7 @@ from agent_fleet.dispatcher_task import (
     build_task_result,
     maybe_publish_and_pr_loop,
     prepare_task_workspace_if_needed,
+    read_observed_total_tokens,
     record_completed_task_experience,
     run_configured_pipeline,
 )
@@ -654,8 +655,10 @@ class FleetDispatcher:
                                 f"Agent modified {_n} file(s) outside allowed_paths: {_first3}"
                             ),
                             duration_seconds=round(time.monotonic() - start, 2),
+                            changed_files=list(changed_files or ()),
                             files_modified=tuple(changed_files or ()),
                             declared_complexity=task.complexity,
+                            observed_total_tokens=read_observed_total_tokens(task_index),
                         )
 
                 result = build_task_result(

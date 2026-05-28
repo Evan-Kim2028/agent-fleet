@@ -25,6 +25,25 @@ if TYPE_CHECKING:
     from agent_fleet.repo import RepoConfig
 
 
+def read_observed_total_tokens(task_index: int) -> int | None:
+    """Return total tokens observed for ``task_index`` from the run log, or None."""
+    run_log = get_run_log()
+    if run_log is None:
+        return None
+    rollup = run_log.task_usage_rollup(task_id=task_index)
+    if rollup is not None:
+        totals = rollup.get("totals") or {}
+        tok = totals.get("total_tokens")
+        if tok is not None:
+            return int(tok)
+    return sum(run_log._usage_totals.values()) or None
+
+
+def _peek_usage_rollup(task_index: int) -> dict | None:
+    run_log = get_run_log()
+    return run_log.task_usage_rollup(task_id=task_index) if run_log is not None else None
+
+
 def _resolve_pr_base_ref(pr_number: int, workspace: object | None) -> str:
     """Fetch baseRefName via `gh pr view`; log + return "" on any failure so the
     caller falls back to repo.default_branch with a visible warning rather than
@@ -223,18 +242,8 @@ def build_task_result(
     stderr_tail = _stderr_from_phases(phase_results)
     files_modified = tuple(changed_files or ())
 
-    run_log = get_run_log()
-    usage_rollup = None
-    if run_log is not None:
-        usage_rollup = run_log.task_usage_rollup(task_id=task_index)
-    observed_total_tokens: int | None = None
-    if usage_rollup is not None:
-        totals = usage_rollup.get("totals") or {}
-        _tok = totals.get("total_tokens")
-        if _tok is not None:
-            observed_total_tokens = int(_tok)
-        elif run_log is not None:
-            observed_total_tokens = sum(run_log._usage_totals.values()) or None
+    observed_total_tokens = read_observed_total_tokens(task_index)
+    usage_rollup = _peek_usage_rollup(task_index)
 
     result = FleetTaskResult(
         task_index=task_index,
