@@ -10,7 +10,8 @@ from typing import TYPE_CHECKING, Any
 from agent_fleet.agent_mode import parse_agent_mode
 from agent_fleet.complexity import observe_token_ceiling
 from agent_fleet.contracts.review import ReviewVerdict
-from agent_fleet.observability.context import get_run_log
+from agent_fleet.observability.context import bind_phase, get_run_log
+from agent_fleet.observability.efficiency import changed_lines
 from agent_fleet.personas import read_persona_body
 from agent_fleet.pr_review.runner import run_pr_review
 from agent_fleet.prompts.agent import build_agent_prompt
@@ -642,6 +643,39 @@ def collect_changed_files(workspace: Path) -> list[str]:
     return get_working_tree_changes(workspace)
 
 
+REVIEW_SKIP_LINES_THRESHOLD: int = 50
+
+
+def review_skip_reason(*, n_changed: int, verify_results: list[dict[str, Any]]) -> str | None:
+    """Reason to skip the advisory review, or None to run it.
+
+    Skip only when an objective verify gate ran green and the changed-line delta
+    is below the threshold. With no verify gate there is nothing green to lean
+    on, so the review runs. Shared by the first pass (run_pipeline) and the
+    post-fix re-review so both gate identically.
+    """
+    if not (verify_results and verify_results[-1].get("passed")):
+        return None
+    if n_changed >= REVIEW_SKIP_LINES_THRESHOLD:
+        return None
+    return f"green gates, {n_changed} changed lines < {REVIEW_SKIP_LINES_THRESHOLD}"
+
+
+def build_review_skip_result(reason: str) -> dict[str, Any]:
+    """The synthetic review phase result recorded when the review is gated out."""
+    return {
+        "phase": "review",
+        "verdict": "approve",
+        "skipped": True,
+        "reason": f"review skipped: {reason}",
+        "passed": True,
+        "exit_code": 0,
+        "summary": f"review skipped: {reason}",
+        "stdout": "",
+        "stderr": "",
+    }
+
+
 def run_pipeline(
     *,
     backend: LLMBackend,
@@ -670,20 +704,22 @@ def run_pipeline(
     summary = ""
     exit_code = 0
     changed_files: list[str] = []
+    verify_results: list[dict[str, Any]] = []
     implementer_persona = resolver.load(task.persona)
     use_hardened_review = "review" in phases
     _complexity_label = declared_complexity or "MED"
 
     for phase in phases:
         if phase == "execute":
-            phase_result = run_execute_phase(
-                backend=backend,
-                resolver=resolver,
-                task=task,
-                workspace=workspace,
-                timeout_s=timeout_s,
-                session=session,
-            )
+            with bind_phase(phase):
+                phase_result = run_execute_phase(
+                    backend=backend,
+                    resolver=resolver,
+                    task=task,
+                    workspace=workspace,
+                    timeout_s=timeout_s,
+                    session=session,
+                )
             results.append(phase_result)
             summary = phase_result["stdout"]
             exit_code = phase_result["exit_code"]
@@ -728,11 +764,12 @@ def run_pipeline(
             continue
 
         if phase == "analyze":
-            phase_result = run_analyze_phase(
-                backend=backend,
-                workspace=workspace,
-                repo=repo,
-            )
+            with bind_phase(phase):
+                phase_result = run_analyze_phase(
+                    backend=backend,
+                    workspace=workspace,
+                    repo=repo,
+                )
             results.append(phase_result)
             summary = phase_result.get("summary") or summary
             exit_code = phase_result["exit_code"]
@@ -746,31 +783,49 @@ def run_pipeline(
             continue
 
         if phase == "review":
-            if use_hardened_review:
-                phase_result = run_structured_review_phase(
-                    backend=backend,
-                    resolver=resolver,
-                    task=task,
-                    workspace=workspace,
-                    timeout_s=timeout_s,
-                    changed_files=changed_files,
-                    implementation_summary=summary,
-                    reviewer_persona=reviewer_persona,
-                    repo=repo,
-                )
-            else:
-                phase_result = _legacy_review_phase(
-                    backend=backend,
-                    resolver=resolver,
-                    task=task,
-                    workspace=workspace,
-                    timeout_s=timeout_s,
-                    implementation_summary=summary,
-                    reviewer_persona=reviewer_persona,
-                    session=session,
-                    fleet_config=fleet_config,
-                    repo=repo,
-                )
+            n_changed = changed_lines(workspace)
+            skip_reason = review_skip_reason(n_changed=n_changed, verify_results=verify_results)
+            if skip_reason is not None:
+                skip_result = build_review_skip_result(skip_reason)
+                results.append(skip_result)
+                summary = skip_result["summary"]
+                run_log = get_run_log()
+                if run_log is not None:
+                    run_log.emit(
+                        "review.gate.skipped",
+                        data={
+                            "changed_lines": n_changed,
+                            "threshold": REVIEW_SKIP_LINES_THRESHOLD,
+                            "pass": "first",
+                        },
+                    )
+                continue
+            with bind_phase(phase):
+                if use_hardened_review:
+                    phase_result = run_structured_review_phase(
+                        backend=backend,
+                        resolver=resolver,
+                        task=task,
+                        workspace=workspace,
+                        timeout_s=timeout_s,
+                        changed_files=changed_files,
+                        implementation_summary=summary,
+                        reviewer_persona=reviewer_persona,
+                        repo=repo,
+                    )
+                else:
+                    phase_result = _legacy_review_phase(
+                        backend=backend,
+                        resolver=resolver,
+                        task=task,
+                        workspace=workspace,
+                        timeout_s=timeout_s,
+                        implementation_summary=summary,
+                        reviewer_persona=reviewer_persona,
+                        session=session,
+                        fleet_config=fleet_config,
+                        repo=repo,
+                    )
             results.append(phase_result)
             summary = phase_result.get("summary") or phase_result.get("stdout") or summary
             if token_ceiling is not None:

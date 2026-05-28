@@ -5,11 +5,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.code_review.fix import run_fix_phase
-from agent_fleet.observability.context import get_run_log
+from agent_fleet.observability.context import bind_phase, get_run_log
 from agent_fleet.observability.efficiency import changed_lines
 from agent_fleet.phases import (
+    REVIEW_SKIP_LINES_THRESHOLD,
+    build_review_skip_result,
     collect_changed_files,
     resolve_pipeline_outcome,
+    review_skip_reason,
     run_pipeline,
     run_scope_phase,
     run_structured_review_phase,
@@ -25,8 +28,6 @@ if TYPE_CHECKING:
     from agent_fleet.hooks import FleetTask, LLMBackend
     from agent_fleet.personas import YamlPersonaResolver
     from agent_fleet.repo import RepoConfig
-
-_REVIEW_SKIP_LINES_THRESHOLD: int = 50
 
 
 def _rerun_quality_gates(
@@ -63,47 +64,36 @@ def _rerun_quality_gates(
     if verify_results and not verify_results[-1]["passed"]:
         return results, summary, 1, changed_files
 
-    # Skip the advisory re-review only when an objective gate actually ran green
-    # and the fix delta is tiny. With no verify gate there is nothing green to
-    # lean on, so fall through and run the review. The first review pass (before
-    # the fix loop) already covered the full diff.
-    gates_green = bool(verify_results) and verify_results[-1]["passed"]
+    # Skip the advisory re-review only when an objective gate ran green and the
+    # fix delta is tiny. Same gate as the first pass in run_pipeline.
     n_changed = changed_lines(workspace)
-    if gates_green and n_changed < _REVIEW_SKIP_LINES_THRESHOLD:
-        reason = (
-            f"review skipped: green gates, {n_changed} changed lines"
-            f" < {_REVIEW_SKIP_LINES_THRESHOLD}"
-        )
-        results.append({
-            "phase": "review",
-            "verdict": "approve",
-            "skipped": True,
-            "reason": reason,
-            "passed": True,
-            "exit_code": 0,
-            "summary": f"review skipped: green gates, {n_changed} lines",
-            "stdout": "",
-            "stderr": "",
-        })
+    skip_reason = review_skip_reason(n_changed=n_changed, verify_results=verify_results)
+    if skip_reason is not None:
+        results.append(build_review_skip_result(skip_reason))
         run_log = get_run_log()
         if run_log is not None:
             run_log.emit(
                 "review.gate.skipped",
-                data={"changed_lines": n_changed, "threshold": _REVIEW_SKIP_LINES_THRESHOLD},
+                data={
+                    "changed_lines": n_changed,
+                    "threshold": REVIEW_SKIP_LINES_THRESHOLD,
+                    "pass": "rereview",
+                },
             )
         return results, summary, 0, changed_files
 
-    review_result = run_structured_review_phase(
-        backend=backend,
-        resolver=resolver,
-        task=task,
-        workspace=workspace,
-        timeout_s=timeout_s,
-        changed_files=changed_files,
-        implementation_summary=summary,
-        reviewer_persona=reviewer_persona,
-        repo=repo,
-    )
+    with bind_phase("review"):
+        review_result = run_structured_review_phase(
+            backend=backend,
+            resolver=resolver,
+            task=task,
+            workspace=workspace,
+            timeout_s=timeout_s,
+            changed_files=changed_files,
+            implementation_summary=summary,
+            reviewer_persona=reviewer_persona,
+            repo=repo,
+        )
     results.append(review_result)
     summary = review_result.get("summary") or review_result.get("stdout") or summary
     # Objective gates passed above. Review is advisory unless blocking.
@@ -168,18 +158,19 @@ def run_code_review_with_auto_fix(
         if status not in {"review_changes_requested", "verify_failed"}:
             break
 
-        fix_result = run_fix_phase(
-            backend=backend,
-            resolver=resolver,
-            task=task,
-            workspace=workspace,
-            timeout_s=timeout_s,
-            phase_results=phase_results,
-            repo=repo,
-            fix_persona=fix_persona,
-            attempt=attempt,
-            fleet_config=fleet_config,
-        )
+        with bind_phase("fix"):
+            fix_result = run_fix_phase(
+                backend=backend,
+                resolver=resolver,
+                task=task,
+                workspace=workspace,
+                timeout_s=timeout_s,
+                phase_results=phase_results,
+                repo=repo,
+                fix_persona=fix_persona,
+                attempt=attempt,
+                fleet_config=fleet_config,
+            )
         phase_results.append(fix_result)
         if fix_result["exit_code"] != 0:
             exit_code = 1
