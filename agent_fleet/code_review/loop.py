@@ -13,6 +13,7 @@ from agent_fleet.phases import (
     run_structured_review_phase,
     run_verify_phases,
 )
+from agent_fleet.scope import effective_allowed_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -47,7 +48,11 @@ def _rerun_quality_gates(
         return results, summary, 1, changed_files
 
     verify_results = run_verify_phases(
-        workspace=workspace, repo=repo, timeout_s=timeout_s, persona=persona.name
+        workspace=workspace,
+        repo=repo,
+        timeout_s=timeout_s,
+        persona=persona.name,
+        allowed_paths=effective_allowed_paths(task.allowed_paths, persona.allowed_paths),
     )
     results.extend(verify_results)
     if verify_results and not verify_results[-1]["passed"]:

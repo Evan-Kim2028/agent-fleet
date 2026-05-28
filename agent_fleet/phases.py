@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import shlex
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -20,6 +21,7 @@ from agent_fleet.skills_lib import base_kit_skill_dirs, resolve_skill_path
 from agent_fleet.verify_core import (
     get_working_tree_changes,
     get_working_tree_diff,
+    revert_paths,
     run_shell_verify,
 )
 
@@ -355,6 +357,7 @@ def run_verify_phases(
     repo: RepoConfig | None,
     timeout_s: int,
     persona: str | None = None,
+    allowed_paths: tuple[str, ...] = (),
 ) -> list[dict[str, Any]]:
     if repo is None:
         return []
@@ -365,16 +368,59 @@ def run_verify_phases(
     results: list[dict[str, Any]] = []
     for command in commands:
         outcome = run_shell_verify(workspace, command, timeout_s=timeout_s)
-        # Auto-apply `ruff check --fix` once before counting a lint command as
-        # failed, so the fix loop does not waste attempts on auto-fixable lint
-        # (I001 import sorting, unused imports, etc.).
         if not outcome["passed"] and "ruff check" in command and "--fix" not in command:
-            run_shell_verify(workspace, f"{command} --fix", timeout_s=timeout_s)
-            outcome = run_shell_verify(workspace, command, timeout_s=timeout_s)
+            outcome = _autofix_and_regate_lint(
+                workspace=workspace,
+                command=command,
+                timeout_s=timeout_s,
+                allowed_paths=allowed_paths,
+            )
         results.append({"phase": "verify", **outcome})
         if not outcome["passed"]:
             break
     return results
+
+
+def _autofix_and_regate_lint(
+    *,
+    workspace: Path,
+    command: str,
+    timeout_s: int,
+    allowed_paths: tuple[str, ...],
+) -> dict[str, Any]:
+    """Auto-fix a failing ruff command, then gate only on files this task changed.
+
+    Two scope guards work together so a scoped task is never failed — or
+    flagged for a scope violation — by lint it did not create:
+
+    1. ``ruff --fix`` is applied once (I001, unused imports, etc.), then any
+       fix that strayed outside ``allowed_paths`` is reverted, so the auto-fix
+       cannot manufacture a scope violation.
+    2. The pass/fail decision is re-run against only the task's own changed,
+       in-lane ``.py`` files. Pre-existing debt elsewhere in the lane (or repo)
+       is invisible to the gate.
+    """
+    before = set(get_working_tree_changes(workspace))
+    run_shell_verify(workspace, f"{command} --fix", timeout_s=timeout_s)
+    if allowed_paths:
+        fixed = sorted(set(get_working_tree_changes(workspace)) - before)
+        revert_paths(workspace, files_outside_allowed_paths(allowed_paths, fixed))
+
+    changed = get_working_tree_changes(workspace)
+    out_of_lane = (
+        set(files_outside_allowed_paths(allowed_paths, changed)) if allowed_paths else set()
+    )
+    targets = [
+        f
+        for f in changed
+        if f not in out_of_lane and f.endswith(".py") and (workspace / f).exists()
+    ]
+    if not targets:
+        return run_shell_verify(workspace, command, timeout_s=timeout_s)
+
+    head = command.split(" check ", 1)[0] + " check"
+    diff_command = f"{head} {' '.join(shlex.quote(t) for t in targets)}"
+    return run_shell_verify(workspace, diff_command, timeout_s=timeout_s)
 
 
 def run_pr_analyzer_review_phase(
@@ -647,6 +693,9 @@ def run_pipeline(
                     repo=repo,
                     timeout_s=timeout_s,
                     persona=implementer_persona.name,
+                    allowed_paths=effective_allowed_paths(
+                        task.allowed_paths, implementer_persona.allowed_paths
+                    ),
                 )
                 results.extend(verify_results)
                 if verify_results and not verify_results[-1]["passed"]:
@@ -659,6 +708,9 @@ def run_pipeline(
                     repo=repo,
                     timeout_s=timeout_s,
                     persona=implementer_persona.name,
+                    allowed_paths=effective_allowed_paths(
+                        task.allowed_paths, implementer_persona.allowed_paths
+                    ),
                 )
                 results.extend(verify_results)
                 if verify_results and not verify_results[-1]["passed"]:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 import re
 import subprocess
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -139,6 +139,25 @@ def get_working_tree_changes(workspace: Path) -> list[str]:
         if path:
             files.add(path)
     return sorted(files)
+
+
+def revert_paths(workspace: Path, paths: Sequence[str]) -> None:
+    """Restore *paths* to their committed state, discarding working-tree edits.
+
+    Used to undo side effects (e.g. a repo-wide ``ruff --fix``) that strayed
+    outside a task's lane, so an auto-fix can never manufacture a scope
+    violation.
+    """
+    targets = [p for p in paths if p]
+    if not targets or not is_git_repo(workspace):
+        return
+    subprocess.run(
+        ["git", "checkout", "--", *targets],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def get_working_tree_diff(workspace: Path, *, max_chars: int = 120_000) -> str:

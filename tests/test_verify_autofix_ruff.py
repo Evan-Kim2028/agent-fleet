@@ -207,3 +207,88 @@ def test_run_verify_phases_autofixes_inline_lint(tmp_path: Path) -> None:
 
     results = run_verify_phases(workspace=tmp_path, repo=repo, timeout_s=120)
     assert results and results[-1]["passed"], results[-1].get("detail")
+
+
+def test_run_verify_phases_autofix_reverts_out_of_lane_edits(tmp_path: Path) -> None:
+    """A repo-wide --fix must not leave edits on files outside the task's lane."""
+    _git_init(tmp_path)
+    lane = tmp_path / "lane"
+    lane.mkdir()
+    # Out-of-lane file with auto-fixable lint (I001) committed clean.
+    out = tmp_path / "other.py"
+    out.write_text("import os\nimport abc\nimport sys\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=str(tmp_path), check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "seed"], cwd=str(tmp_path), check=True, capture_output=True
+    )
+
+    ruff = "uv run ruff check" if shutil.which("uv") else "ruff check"
+    repo = RepoConfig(repo_root=tmp_path)
+    # Repo-wide lint over a tree whose only debt lives outside the task's lane.
+    repo.verify_commands = [f"{ruff} ."]
+
+    run_verify_phases(
+        workspace=tmp_path,
+        repo=repo,
+        timeout_s=120,
+        allowed_paths=("lane/",),
+    )
+
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=str(tmp_path),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "other.py" not in status.stdout, (
+        f"auto-fix escaped the lane and edited other.py: {status.stdout!r}"
+    )
+
+
+def test_run_verify_phases_ignores_pre_existing_debt_outside_diff(tmp_path: Path) -> None:
+    """Lint passes when the task's own file is clean, even if a sibling has debt."""
+    _git_init(tmp_path)
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "clean.py").write_text("x = 1\n", encoding="utf-8")
+    # Sibling debt (F821) the task never touches; committed into the lane.
+    (pkg / "legacy.py").write_text("y = undefined_name\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=str(tmp_path), check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "seed"], cwd=str(tmp_path), check=True, capture_output=True
+    )
+    # The task's own change: a fresh, clean file in the lane.
+    (pkg / "feature.py").write_text("z = 2\n", encoding="utf-8")
+
+    ruff = "uv run ruff check" if shutil.which("uv") else "ruff check"
+    repo = RepoConfig(repo_root=tmp_path)
+    repo.verify_commands = [f"{ruff} pkg"]
+
+    results = run_verify_phases(
+        workspace=tmp_path, repo=repo, timeout_s=120, allowed_paths=("pkg/",)
+    )
+    assert results and results[-1]["passed"], results[-1].get("detail")
+
+
+def test_run_verify_phases_catches_debt_in_changed_file(tmp_path: Path) -> None:
+    """Non-auto-fixable debt the task introduces in its own file still fails."""
+    _git_init(tmp_path)
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "clean.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=str(tmp_path), check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "seed"], cwd=str(tmp_path), check=True, capture_output=True
+    )
+    # The task's own change introduces non-auto-fixable debt (F821).
+    (pkg / "feature.py").write_text("z = undefined_name\n", encoding="utf-8")
+
+    ruff = "uv run ruff check" if shutil.which("uv") else "ruff check"
+    repo = RepoConfig(repo_root=tmp_path)
+    repo.verify_commands = [f"{ruff} pkg"]
+
+    results = run_verify_phases(
+        workspace=tmp_path, repo=repo, timeout_s=120, allowed_paths=("pkg/",)
+    )
+    assert results and not results[-1]["passed"]
