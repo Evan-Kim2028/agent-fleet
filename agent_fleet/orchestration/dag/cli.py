@@ -205,8 +205,6 @@ def register_dag_commands(sub: argparse._SubParsersAction) -> None:
         "dag",
         help="Run dependency-graph task batches (cookbook-compatible DAG JSON)",
     )
-    dag.add_argument("--workspace", help="Repo path (default: cwd)")
-    dag.add_argument("--config", help="Path to fleet.yaml")
     dag_sub = dag.add_subparsers(dest="dag_command", required=True)
 
     validate_p = dag_sub.add_parser("validate", help="Validate DAG JSON and print ranks")

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -311,3 +312,29 @@ def test_resolve_canvas_path() -> None:
     )
     assert path.name == "my-dag.canvas.tsx"
     assert path.suffix == ".tsx"
+
+
+def _dag_parser() -> argparse.ArgumentParser:
+    from agent_fleet.orchestration.dag.cli import register_dag_commands
+
+    parser = argparse.ArgumentParser(prog="agent-fleet")
+    sub = parser.add_subparsers(dest="command", required=True)
+    register_dag_commands(sub)
+    return parser
+
+
+def test_dag_run_workspace_after_subcommand_resolves() -> None:
+    """--workspace after `run` binds to the run namespace (the correct form)."""
+    args = _dag_parser().parse_args(["dag", "run", "--file", "x.json", "--workspace", "/tmp/repo"])
+    assert args.workspace == "/tmp/repo"
+
+
+def test_dag_run_workspace_before_subcommand_is_rejected() -> None:
+    """--workspace before `run` must fail loudly, not silently fall back to cwd.
+
+    Regression: it was defined on both the `dag` parent and the `run` subparser,
+    so the subparser's None default clobbered the parent value and the run
+    silently targeted cwd (wrong repo → coder fallback → out-of-lane wander).
+    """
+    with pytest.raises(SystemExit):
+        _dag_parser().parse_args(["dag", "--workspace", "/tmp/repo", "run", "--file", "x.json"])
