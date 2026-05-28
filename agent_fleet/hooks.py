@@ -249,6 +249,7 @@ class FleetTask:
     title: str | None = None
     equip: DispatchEquip | None = None
     complexity: str | None = None  # LOW | MED | HIGH; None → MED default
+    allowed_paths: tuple[str, ...] = ()  # If non-empty, agent may only modify these prefixes
 
 
 @dataclass(frozen=True)

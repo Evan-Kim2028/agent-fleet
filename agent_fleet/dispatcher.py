@@ -387,6 +387,7 @@ class FleetDispatcher:
             persona_resolver=self.resolver,
             fleet_config=config,
             task_complexity=task.complexity,
+            allowed_paths=task.allowed_paths,
         )
         ok_outcomes = {
             "completed",
@@ -395,7 +396,7 @@ class FleetDispatcher:
             "decompose_partial",
         }
         status = "completed" if result.outcome in ok_outcomes else "error"
-        if result.outcome in {"decompose_failed", "rejected", "decompose"}:
+        if result.outcome in {"decompose_failed", "rejected", "decompose", "scope_violation"}:
             status = result.outcome
         run_log = get_run_log()
         usage_rollup = (
@@ -624,6 +625,38 @@ class FleetDispatcher:
                     declared_complexity=task.complexity,
                 )
                 phase_results.extend(pipeline_results)
+
+                # --- allowed_paths enforcement (task-level, not persona-level) ---
+                if task.allowed_paths and changed_files:
+                    _out_of_scope = [
+                        p
+                        for p in changed_files
+                        if not any(p.startswith(ap) for ap in task.allowed_paths)
+                    ]
+                    if _out_of_scope:
+                        _n = len(_out_of_scope)
+                        fleet_log.emit(
+                            "scope.violation",
+                            data={
+                                "allowed": list(task.allowed_paths),
+                                "offending": _out_of_scope,
+                                "count": _n,
+                            },
+                        )
+                        _first3 = _out_of_scope[:3]
+                        return FleetTaskResult(
+                            task_index=task_index,
+                            persona=task.persona,
+                            goal=task.goal,
+                            status="scope_violation",
+                            summary=None,
+                            error=(
+                                f"Agent modified {_n} file(s) outside allowed_paths: {_first3}"
+                            ),
+                            duration_seconds=round(time.monotonic() - start, 2),
+                            files_modified=tuple(changed_files or ()),
+                            declared_complexity=task.complexity,
+                        )
 
                 result = build_task_result(
                     task_index=task_index,

@@ -223,6 +223,19 @@ def build_task_result(
     stderr_tail = _stderr_from_phases(phase_results)
     files_modified = tuple(changed_files or ())
 
+    run_log = get_run_log()
+    usage_rollup = None
+    if run_log is not None:
+        usage_rollup = run_log.task_usage_rollup(task_id=task_index)
+    observed_total_tokens: int | None = None
+    if usage_rollup is not None:
+        totals = usage_rollup.get("totals") or {}
+        _tok = totals.get("total_tokens")
+        if _tok is not None:
+            observed_total_tokens = int(_tok)
+        elif run_log is not None:
+            observed_total_tokens = sum(run_log._usage_totals.values()) or None
+
     result = FleetTaskResult(
         task_index=task_index,
         persona=task.persona,
@@ -238,11 +251,9 @@ def build_task_result(
         branch_name=task_workspace.branch_name if task_workspace else None,
         stderr=stderr_tail,
         files_modified=files_modified,
+        declared_complexity=task.complexity,
+        observed_total_tokens=observed_total_tokens,
     )
-    run_log = get_run_log()
-    usage_rollup = None
-    if run_log is not None:
-        usage_rollup = run_log.task_usage_rollup(task_id=task_index)
     review_verdict = None
     for item in reversed(phase_results):
         if item.get("phase") == "review" and item.get("verdict"):

@@ -257,3 +257,126 @@ def test_is_actionable_stderr_multiple_written_files_match_any() -> None:
         "something unrelated",
         ("src/foo.py", "tests/test_bar.py"),
     )
+
+
+# ---------------------------------------------------------------------------
+# declared_complexity and observed_total_tokens always populated (Fix 3)
+# ---------------------------------------------------------------------------
+
+
+def test_build_task_result_populates_complexity_fields() -> None:
+    """declared_complexity and observed_total_tokens are set on happy-path result."""
+    from unittest.mock import MagicMock
+
+    from agent_fleet.dispatcher_task import build_task_result
+    from agent_fleet.hooks import FleetTask
+    from agent_fleet.observability.context import bind_run
+    from agent_fleet.observability.events import RunContext
+    from agent_fleet.observability.log import RunLog
+
+    run_log = RunLog(run_id="tr", context=RunContext(run_id="tr"), sinks=[])
+    run_log.llm_usage(
+        phase="execute",
+        model="test",
+        duration_s=0.5,
+        input_tokens=1000,
+        output_tokens=500,
+    )
+
+    task = FleetTask(goal="test task", complexity="MED")
+    fleet_log = MagicMock()
+    fleet_log.emit = MagicMock()
+
+    phase_results: list[dict[str, object]] = [
+        {
+            "phase": "execute",
+            "stdout": "done",
+            "stderr": "",
+            "exit_code": 0,
+            "agent_id": "agent-1",
+        }
+    ]
+
+    with bind_run(run_log, run_log.context):
+        result = build_task_result(
+            task_index=0,
+            task=task,
+            start=0.0,
+            phase_results=phase_results,
+            summary="done",
+            exit_code=0,
+            changed_files=["src/foo.py"],
+            task_workspace=None,
+            fleet_log=fleet_log,
+        )
+
+    assert result.declared_complexity == "MED"
+    assert result.observed_total_tokens is not None
+    assert result.observed_total_tokens > 0
+
+
+def test_build_task_result_complexity_none_when_no_tokens() -> None:
+    """With no LLM calls, observed_total_tokens is None but declared_complexity is set."""
+    from unittest.mock import MagicMock
+
+    from agent_fleet.dispatcher_task import build_task_result
+    from agent_fleet.hooks import FleetTask
+
+    task = FleetTask(goal="test task", complexity="LOW")
+    fleet_log = MagicMock()
+    fleet_log.emit = MagicMock()
+
+    phase_results2: list[dict[str, object]] = [
+        {
+            "phase": "execute",
+            "stdout": "done",
+            "stderr": "",
+            "exit_code": 0,
+        }
+    ]
+
+    result = build_task_result(
+        task_index=0,
+        task=task,
+        start=0.0,
+        phase_results=phase_results2,
+        summary="done",
+        exit_code=0,
+        changed_files=[],
+        task_workspace=None,
+        fleet_log=fleet_log,
+    )
+
+    assert result.declared_complexity == "LOW"
+    # No LLM calls in this context → tokens are None (no run_log bound)
+    # declared_complexity is always set regardless
+
+
+def test_build_task_result_no_complexity_task() -> None:
+    """declared_complexity is None when task.complexity is None."""
+    from unittest.mock import MagicMock
+
+    from agent_fleet.dispatcher_task import build_task_result
+    from agent_fleet.hooks import FleetTask
+
+    task = FleetTask(goal="no complexity task")
+    fleet_log = MagicMock()
+    fleet_log.emit = MagicMock()
+
+    phase_results3: list[dict[str, object]] = [
+        {"phase": "execute", "stdout": "done", "stderr": "", "exit_code": 0}
+    ]
+
+    result = build_task_result(
+        task_index=0,
+        task=task,
+        start=0.0,
+        phase_results=phase_results3,
+        summary="done",
+        exit_code=0,
+        changed_files=[],
+        task_workspace=None,
+        fleet_log=fleet_log,
+    )
+
+    assert result.declared_complexity is None

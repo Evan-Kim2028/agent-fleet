@@ -324,6 +324,7 @@ class LocalFleetRunner:
         experience_source: str = "full_pipeline",
         pr_loop_round: int | None = None,
         task_complexity: str | None = None,
+        allowed_paths: tuple[str, ...] = (),
     ) -> FleetRunResult:
         start = time.monotonic()
         run_id = str(uuid.uuid4())[:8]
@@ -572,6 +573,45 @@ class LocalFleetRunner:
                             compose_body=dispatch_equip.compose_body,
                         )
                     phases["IMPLEMENT"] = {"branch": branch_name, "worktree": str(worktree)}
+
+                # --- allowed_paths enforcement ---
+                if allowed_paths:
+                    assert worktree is not None
+                    _all_changed = self._git_ops.changed_files(worktree)
+                    _out_of_scope = [
+                        p
+                        for p in _all_changed
+                        if not any(str(p).startswith(ap) for ap in allowed_paths)
+                    ]
+                    if _out_of_scope:
+                        _n = len(_out_of_scope)
+                        run_log.emit(
+                            "scope.violation",
+                            data={
+                                "allowed": list(allowed_paths),
+                                "offending": [str(p) for p in _out_of_scope],
+                                "count": _n,
+                            },
+                        )
+                        _first3 = [str(p) for p in _out_of_scope[:3]]
+                        result = FleetRunResult(
+                            run_id=run_id,
+                            task_id=task_id,
+                            persona=persona,
+                            outcome="scope_violation",
+                            task_spec=task_spec.to_dict() if task_spec else None,
+                            changed_files=[str(p) for p in _all_changed],
+                            phases=phases,
+                            error=(
+                                f"Agent modified {_n} file(s) outside allowed_paths: {_first3}"
+                            ),
+                            duration_seconds=round(time.monotonic() - start, 2),
+                        )
+                        run_log.run_end(
+                            outcome=result.outcome,
+                            **_run_end_kwargs(result, find_repo_config(repo_root)),
+                        )
+                        return result
 
                 assert worktree is not None
                 verify_attempts = 0
@@ -951,6 +991,7 @@ def run_full_pipeline(
     persona_resolver: PersonaResolver,
     fleet_config: FleetConfig | None = None,
     task_complexity: str | None = None,
+    allowed_paths: tuple[str, ...] = (),
 ) -> FleetRunResult:
     """Convenience entry: discover repo config and run full pipeline."""
     from agent_fleet.config import load_fleet_config
@@ -980,4 +1021,5 @@ def run_full_pipeline(
         base_branch=repo.default_branch,
         experience_source="cli",
         task_complexity=task_complexity,
+        allowed_paths=allowed_paths,
     )

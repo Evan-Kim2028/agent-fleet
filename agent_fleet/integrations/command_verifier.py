@@ -120,6 +120,65 @@ class CommandVerifier:
                 }
             )
             if proc.returncode != 0:
+                # Auto-apply `ruff check --fix` once before counting this as a
+                # failure. This prevents the fix loop from burning attempts on
+                # import-sorting (I001) and other auto-fixable lint issues.
+                # Scope is intentionally narrow — only `ruff check` triggers it.
+                if "ruff check" in cmd and "--fix" not in cmd:
+                    fix_cmd = cmd + " --fix"
+                    subprocess.run(
+                        fix_cmd,
+                        shell=True,
+                        cwd=str(worktree),
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        env=verify_env,
+                    )
+                    rerun_proc = subprocess.run(
+                        cmd,
+                        shell=True,
+                        cwd=str(worktree),
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        env=verify_env,
+                    )
+                    # Count files changed by ruff --fix via git diff --name-only
+                    _files_changed_count = 0
+                    try:
+                        _diff = subprocess.run(
+                            ["git", "diff", "--name-only"],
+                            cwd=str(worktree),
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
+                        _files_changed_count = len(
+                            [ln for ln in _diff.stdout.splitlines() if ln.strip()]
+                        )
+                    except Exception:
+                        pass
+                    emit_fleet_event(
+                        "verify.autofix.applied",
+                        data={
+                            "command": cmd,
+                            "before_exit": proc.returncode,
+                            "after_exit": rerun_proc.returncode,
+                            "files_changed_count": _files_changed_count,
+                        },
+                    )
+                    checks[-1] = {
+                        "name": cmd,
+                        "passed": rerun_proc.returncode == 0,
+                        "stdout_tail": rerun_proc.stdout[-2000:],
+                        "stderr_tail": rerun_proc.stderr[-2000:],
+                        "exit_code": rerun_proc.returncode,
+                        "autofix_applied": True,
+                    }
+                    if rerun_proc.returncode == 0:
+                        continue
+                    proc = rerun_proc
                 return VerifyResult(
                     severity=VerifySeverity.RETRY,
                     checks=checks,
