@@ -354,13 +354,23 @@ def run_verify_phases(
     workspace: Path,
     repo: RepoConfig | None,
     timeout_s: int,
+    persona: str | None = None,
 ) -> list[dict[str, Any]]:
-    if repo is None or not repo.verify_commands:
+    if repo is None:
+        return []
+    commands = repo.verify_commands_for(persona)
+    if not commands:
         return []
 
     results: list[dict[str, Any]] = []
-    for command in repo.verify_commands:
+    for command in commands:
         outcome = run_shell_verify(workspace, command, timeout_s=timeout_s)
+        # Auto-apply `ruff check --fix` once before counting a lint command as
+        # failed, so the fix loop does not waste attempts on auto-fixable lint
+        # (I001 import sorting, unused imports, etc.).
+        if not outcome["passed"] and "ruff check" in command and "--fix" not in command:
+            run_shell_verify(workspace, f"{command} --fix", timeout_s=timeout_s)
+            outcome = run_shell_verify(workspace, command, timeout_s=timeout_s)
         results.append({"phase": "verify", **outcome})
         if not outcome["passed"]:
             break
@@ -636,17 +646,19 @@ def run_pipeline(
                     workspace=workspace,
                     repo=repo,
                     timeout_s=timeout_s,
+                    persona=implementer_persona.name,
                 )
                 results.extend(verify_results)
                 if verify_results and not verify_results[-1]["passed"]:
                     exit_code = 1
                     summary = verify_results[-1].get("detail") or "Verify failed"
                     break
-            elif repo is not None and repo.verify_commands:
+            elif repo is not None and repo.verify_commands_for(implementer_persona.name):
                 verify_results = run_verify_phases(
                     workspace=workspace,
                     repo=repo,
                     timeout_s=timeout_s,
+                    persona=implementer_persona.name,
                 )
                 results.extend(verify_results)
                 if verify_results and not verify_results[-1]["passed"]:

@@ -1,8 +1,9 @@
-# ruff: noqa: TC002, TC003
+# ruff: noqa: TC002
 """Tests for auto-apply ruff check --fix in CommandVerifier (v0.8.4)."""
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import textwrap
 from pathlib import Path
@@ -11,6 +12,7 @@ import pytest
 
 from agent_fleet.contracts.verify_result import VerifySeverity
 from agent_fleet.integrations.command_verifier import CommandVerifier
+from agent_fleet.phases import run_verify_phases
 from agent_fleet.repo import RepoConfig
 
 
@@ -160,3 +162,48 @@ def test_no_autofix_for_non_ruff_commands(
     assert result.severity == VerifySeverity.RETRY
     autofix_events = [e for e in emitted_events if e["event"] == "verify.autofix.applied"]
     assert len(autofix_events) == 0, "Non-ruff commands should not trigger autofix"
+
+
+def test_verify_commands_for_persona_scoping() -> None:
+    repo = RepoConfig(repo_root=Path("/tmp"))
+    repo.verify_commands = ["ruff check ."]
+    repo.persona_verify_commands = {"lakestore": ("ruff check packages/lakestore",)}
+
+    assert repo.verify_commands_for("lakestore") == ["ruff check packages/lakestore"]
+    # Personas without a scoped set fall back to the repo-wide commands.
+    assert repo.verify_commands_for("gold") == ["ruff check ."]
+    assert repo.verify_commands_for(None) == ["ruff check ."]
+
+
+def test_run_verify_phases_persona_scope_skips_out_of_lane_debt(tmp_path: Path) -> None:
+    """A scoped persona must not fail on pre-existing lint debt outside its lane."""
+    lane = tmp_path / "lane"
+    lane.mkdir()
+    (lane / "clean.py").write_text("x = 1\n", encoding="utf-8")
+    # Pre-existing, non-auto-fixable debt (F821) the persona neither owns nor can touch.
+    (tmp_path / "other.py").write_text("x = undefined_name\n", encoding="utf-8")
+
+    ruff = "uv run ruff check" if shutil.which("uv") else "ruff check"
+    repo = RepoConfig(repo_root=tmp_path)
+    repo.verify_commands = [f"{ruff} ."]
+    repo.persona_verify_commands = {"lakestore": (f"{ruff} lane",)}
+
+    scoped = run_verify_phases(
+        workspace=tmp_path, repo=repo, timeout_s=120, persona="lakestore"
+    )
+    assert scoped and scoped[-1]["passed"], scoped[-1].get("detail")
+
+    repo_wide = run_verify_phases(workspace=tmp_path, repo=repo, timeout_s=120, persona="gold")
+    assert repo_wide and not repo_wide[-1]["passed"]
+
+
+def test_run_verify_phases_autofixes_inline_lint(tmp_path: Path) -> None:
+    """Auto-fixable lint inside the lane is fixed once rather than failing the phase."""
+    (tmp_path / "bad.py").write_text("import os\nimport abc\nimport sys\n", encoding="utf-8")
+
+    ruff = "uv run ruff check" if shutil.which("uv") else "ruff check"
+    repo = RepoConfig(repo_root=tmp_path)
+    repo.verify_commands = [f"{ruff} --select I bad.py"]
+
+    results = run_verify_phases(workspace=tmp_path, repo=repo, timeout_s=120)
+    assert results and results[-1]["passed"], results[-1].get("detail")

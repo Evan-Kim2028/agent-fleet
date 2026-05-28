@@ -45,6 +45,7 @@ class RepoConfig:
     use_worktree: bool = False
     worktree_base: Path | None = None
     verify_commands: list[str] = field(default_factory=list)
+    persona_verify_commands: dict[str, tuple[str, ...]] = field(default_factory=dict)
     worktree_bootstrap_commands: list[str] = field(default_factory=list)
     commit_preflight_commands: list[str] = field(default_factory=list)
     test_command: str | None = None
@@ -67,6 +68,17 @@ class RepoConfig:
     @property
     def display_name(self) -> str:
         return self.name or self.repo_root.name
+
+    def verify_commands_for(self, persona: str | None) -> list[str]:
+        """Per-persona verify commands when declared, else the repo-wide set.
+
+        Lets a monorepo scope lint/test to a persona's lane (e.g. ``ruff check
+        packages/lakestore``) instead of failing a scoped task on pre-existing
+        debt elsewhere in the tree.
+        """
+        if persona and persona in self.persona_verify_commands:
+            return list(self.persona_verify_commands[persona])
+        return list(self.verify_commands)
 
 
 def find_repo_config(start: Path | str | None = None) -> RepoConfig | None:
@@ -119,6 +131,10 @@ def load_repo_config(
         state_root = repo_root
 
     verify_commands = list(raw.get("verify_commands") or [])
+    persona_verify_commands = {
+        str(persona): tuple(str(cmd) for cmd in (cmds or []))
+        for persona, cmds in (raw.get("persona_verify_commands") or {}).items()
+    }
     worktree_bootstrap_commands = list(raw.get("worktree_bootstrap_commands") or [])
     commit_preflight_commands = list(raw.get("commit_preflight_commands") or [])
     test_command = raw.get("test_command")
@@ -181,6 +197,7 @@ def load_repo_config(
         use_worktree=bool(raw.get("use_worktree", False)),
         worktree_base=worktree_base,
         verify_commands=verify_commands,
+        persona_verify_commands=persona_verify_commands,
         worktree_bootstrap_commands=worktree_bootstrap_commands,
         commit_preflight_commands=commit_preflight_commands,
         test_command=test_command,
