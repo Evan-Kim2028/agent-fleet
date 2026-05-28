@@ -24,6 +24,22 @@ def path_allowed_by_prefix(changed: str, prefix: str) -> bool:
     return changed_n.startswith(prefix_n)
 
 
+def effective_allowed_paths(
+    task_allowed: tuple[str, ...] | list[str],
+    persona_allowed: tuple[str, ...] | list[str],
+) -> tuple[str, ...]:
+    """Return the scope to show the agent and enforce post-execute.
+
+    A non-empty task scope always wins — DAG specs and issue payloads carry the
+    tight per-task allowlist that ``scope_violation`` enforces. Falls back to
+    the broader persona allowlist (which may be empty = unrestricted) when the
+    task supplies none.
+    """
+    if task_allowed:
+        return tuple(task_allowed)
+    return tuple(persona_allowed)
+
+
 def files_outside_allowed_paths(
     allowed_paths: tuple[str, ...] | list[str],
     changed_files: list[str],

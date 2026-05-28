@@ -11,6 +11,7 @@ from agent_fleet.hooks import FleetTask
 from agent_fleet.orchestration.equip import resolve_dispatch_equip
 from agent_fleet.prompts.agent import build_agent_prompt
 from agent_fleet.repo import merge_repo_into_fleet_config
+from agent_fleet.scope import effective_allowed_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -139,7 +140,7 @@ def run_fix_phase(
         task_body="You are fixing issues found during an automated code review pipeline.",
         context=task.context.strip() or "(none)",
         extra_instructions=persona.extra_instructions,
-        allowed_paths=persona.allowed_paths,
+        allowed_paths=effective_allowed_paths(task.allowed_paths, persona.allowed_paths),
         extra_sections=[
             ("Original task", task.goal.strip()),
             ("Review feedback", review_block or "(none)"),

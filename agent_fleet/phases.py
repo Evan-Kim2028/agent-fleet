@@ -15,7 +15,7 @@ from agent_fleet.pr_review.runner import run_pr_review
 from agent_fleet.prompts.agent import build_agent_prompt
 from agent_fleet.reviewer import aggregate_verdict
 from agent_fleet.reviewer import review as structured_review
-from agent_fleet.scope import files_outside_allowed_paths
+from agent_fleet.scope import effective_allowed_paths, files_outside_allowed_paths
 from agent_fleet.skills_lib import base_kit_skill_dirs, resolve_skill_path
 from agent_fleet.verify_core import (
     get_working_tree_changes,
@@ -122,7 +122,7 @@ def _build_execute_prompt(persona: Persona, task: FleetTask) -> str:
         task_body=task.goal,
         context=task.context,
         extra_instructions=persona.extra_instructions,
-        allowed_paths=persona.allowed_paths,
+        allowed_paths=effective_allowed_paths(task.allowed_paths, persona.allowed_paths),
         closing_instruction=(
             "Execute this task in the workspace. Return a concise summary of what you "
             "did, files changed, and any follow-up needed."
@@ -149,7 +149,7 @@ def _build_legacy_review_prompt(
         task_body=task.goal,
         context=review_context,
         extra_instructions=persona.extra_instructions,
-        allowed_paths=persona.allowed_paths,
+        allowed_paths=effective_allowed_paths(task.allowed_paths, persona.allowed_paths),
         extra_sections=[
             (
                 "Implementation Summary",
