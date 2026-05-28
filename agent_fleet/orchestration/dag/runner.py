@@ -125,6 +125,7 @@ def fleet_task_from_dag_node(
         persona=persona,
         workspace=parent_task.workspace,
         pipeline=pipeline,
+        complexity=task.complexity,
         title=title,
         equip=child_equip,
     )
