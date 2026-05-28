@@ -16,6 +16,10 @@ class CodeReviewConfig:
     fix_persona: str | None = None
     auto_push: bool = False
     auto_pr_loop: bool = False
+    # Subjective LLM review is advisory by default: its verdict is recorded but
+    # does not block or fire the fix loop. Only objective gates (scope, verify)
+    # block. Set true to let a REQUEST_CHANGES/BLOCK verdict gate the pipeline.
+    review_blocking: bool = False
 
 
 def resolve_code_review_config(
@@ -49,4 +53,5 @@ def resolve_code_review_config(
         fix_persona=str(fix_persona) if fix_persona else None,
         auto_push=bool(section.get("auto_push", inherited.auto_push)),
         auto_pr_loop=bool(section.get("auto_pr_loop", inherited.auto_pr_loop)),
+        review_blocking=bool(section.get("review_blocking", inherited.review_blocking)),
     )

@@ -367,18 +367,38 @@ def run_verify_phases(
 
     results: list[dict[str, Any]] = []
     for command in commands:
-        outcome = run_shell_verify(workspace, command, timeout_s=timeout_s)
-        if not outcome["passed"] and "ruff check" in command and "--fix" not in command:
-            outcome = _autofix_and_regate_lint(
-                workspace=workspace,
-                command=command,
-                timeout_s=timeout_s,
-                allowed_paths=allowed_paths,
-            )
+        outcome = run_scoped_lint_command(
+            workspace, command, timeout_s=timeout_s, allowed_paths=allowed_paths
+        )
         results.append({"phase": "verify", **outcome})
         if not outcome["passed"]:
             break
     return results
+
+
+def run_scoped_lint_command(
+    workspace: Path,
+    command: str,
+    *,
+    timeout_s: int,
+    allowed_paths: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Run one verify command, auto-fixing and re-gating ruff to the task's lane.
+
+    The single objective lint gate shared by dispatch verify and the pr_loop
+    commit preflight: a failing ``ruff check`` is auto-fixed once and then
+    re-judged only on the task's own in-lane changed files, so pre-existing
+    out-of-lane debt never fails the gate. Non-ruff commands run unchanged.
+    """
+    outcome = run_shell_verify(workspace, command, timeout_s=timeout_s)
+    if not outcome["passed"] and "ruff check" in command and "--fix" not in command:
+        outcome = _autofix_and_regate_lint(
+            workspace=workspace,
+            command=command,
+            timeout_s=timeout_s,
+            allowed_paths=allowed_paths,
+        )
+    return outcome
 
 
 def _autofix_and_regate_lint(
@@ -636,6 +656,7 @@ def run_pipeline(
     fleet_config: FleetConfig | None = None,
     token_ceiling: int | None = None,
     declared_complexity: str | None = None,
+    review_blocking: bool = False,
 ) -> tuple[list[dict[str, Any]], str, int, list[str]]:
     """Run ordered phases.
 
@@ -676,47 +697,34 @@ def run_pipeline(
             if exit_code != 0:
                 break
 
-            if use_hardened_review:
-                scope_result = run_scope_phase(
-                    persona=implementer_persona,
-                    changed_files=changed_files,
-                    task=task,
-                )
-                results.append(scope_result)
-                if scope_result["exit_code"] != 0:
-                    exit_code = 1
-                    summary = f"Scope violation: {scope_result['violating_files']}"
-                    break
+            # Objective gates run for every pipeline, not just the hardened
+            # review path: scope keeps the diff in lane, verify is the deterministic
+            # quality gate. Subjective review is the only pipeline-gated phase.
+            scope_result = run_scope_phase(
+                persona=implementer_persona,
+                changed_files=changed_files,
+                task=task,
+            )
+            results.append(scope_result)
+            if scope_result["exit_code"] != 0:
+                exit_code = 1
+                summary = f"Scope violation: {scope_result['violating_files']}"
+                break
 
-                verify_results = run_verify_phases(
-                    workspace=workspace,
-                    repo=repo,
-                    timeout_s=timeout_s,
-                    persona=implementer_persona.name,
-                    allowed_paths=effective_allowed_paths(
-                        task.allowed_paths, implementer_persona.allowed_paths
-                    ),
-                )
-                results.extend(verify_results)
-                if verify_results and not verify_results[-1]["passed"]:
-                    exit_code = 1
-                    summary = verify_results[-1].get("detail") or "Verify failed"
-                    break
-            elif repo is not None and repo.verify_commands_for(implementer_persona.name):
-                verify_results = run_verify_phases(
-                    workspace=workspace,
-                    repo=repo,
-                    timeout_s=timeout_s,
-                    persona=implementer_persona.name,
-                    allowed_paths=effective_allowed_paths(
-                        task.allowed_paths, implementer_persona.allowed_paths
-                    ),
-                )
-                results.extend(verify_results)
-                if verify_results and not verify_results[-1]["passed"]:
-                    exit_code = 1
-                    summary = verify_results[-1].get("detail") or "Verify failed"
-                    break
+            verify_results = run_verify_phases(
+                workspace=workspace,
+                repo=repo,
+                timeout_s=timeout_s,
+                persona=implementer_persona.name,
+                allowed_paths=effective_allowed_paths(
+                    task.allowed_paths, implementer_persona.allowed_paths
+                ),
+            )
+            results.extend(verify_results)
+            if verify_results and not verify_results[-1]["passed"]:
+                exit_code = 1
+                summary = verify_results[-1].get("detail") or "Verify failed"
+                break
             continue
 
         if phase == "analyze":
@@ -765,15 +773,19 @@ def run_pipeline(
                 )
             results.append(phase_result)
             summary = phase_result.get("summary") or phase_result.get("stdout") or summary
-            exit_code = phase_result["exit_code"]
             if token_ceiling is not None:
                 ceiling_phase = _record_token_ceiling_metric(
                     token_ceiling=token_ceiling, declared_complexity=_complexity_label
                 )
                 if ceiling_phase is not None:
                     results.append(ceiling_phase)
-            if exit_code != 0:
-                break
+            # Review is advisory by default: the verdict is recorded above for
+            # surfacing, but only a blocking review adopts its exit code and
+            # halts the pipeline. Objective gates (scope, verify) already ran.
+            if review_blocking:
+                exit_code = phase_result["exit_code"]
+                if exit_code != 0:
+                    break
             continue
 
         results.append({"phase": phase, "error": f"Unknown phase: {phase}"})

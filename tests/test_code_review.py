@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -124,6 +125,59 @@ def test_resolve_pipeline_outcome_review_blocked() -> None:
         1,
     )
     assert status == "review_blocked"
+
+
+class _StubPersona:
+    name = "coder"
+    allowed_paths: tuple[str, ...] = ()
+
+
+class _StubResolver:
+    def load(self, _name: str) -> _StubPersona:
+        return _StubPersona()
+
+
+def _run_review_pipeline(monkeypatch: pytest.MonkeyPatch, *, review_blocking: bool) -> int:
+    """Drive run_pipeline with a passing execute/scope and a REQUEST_CHANGES review."""
+    import agent_fleet.phases as ph
+    from agent_fleet.hooks import FleetTask
+
+    monkeypatch.setattr(
+        ph, "run_execute_phase", lambda **_k: {"phase": "execute", "stdout": "", "exit_code": 0}
+    )
+    monkeypatch.setattr(ph, "collect_changed_files", lambda _ws: [])
+    monkeypatch.setattr(
+        ph,
+        "run_structured_review_phase",
+        lambda **_k: {
+            "phase": "review",
+            "verdict": ReviewVerdict.REQUEST_CHANGES.value,
+            "summary": "speculative concern",
+            "exit_code": 1,
+            "passed": False,
+        },
+    )
+
+    _results, _summary, exit_code, _changed = ph.run_pipeline(
+        backend=cast("Any", object()),
+        resolver=cast("Any", _StubResolver()),
+        task=FleetTask(goal="x", persona="coder"),
+        workspace=Path("/tmp"),
+        timeout_s=10,
+        phases=["execute", "review"],
+        repo=None,
+        review_blocking=review_blocking,
+    )
+    return exit_code
+
+
+def test_review_advisory_does_not_block_green_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run-8 guard: a REQUEST_CHANGES review must not red an otherwise-green pipeline."""
+    assert _run_review_pipeline(monkeypatch, review_blocking=False) == 0
+
+
+def test_review_blocking_opt_in_still_gates(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _run_review_pipeline(monkeypatch, review_blocking=True) == 1
 
 
 def test_aggregate_verdict() -> None:

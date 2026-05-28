@@ -35,6 +35,7 @@ def _rerun_quality_gates(
     repo: RepoConfig | None,
     implementation_summary: str,
     reviewer_persona: str = "reviewer",
+    review_blocking: bool = False,
 ) -> tuple[list[dict[str, Any]], str, int, list[str]]:
     """Re-run scope, verify, and review after a fix attempt."""
     results: list[dict[str, Any]] = []
@@ -71,7 +72,8 @@ def _rerun_quality_gates(
     )
     results.append(review_result)
     summary = review_result.get("summary") or review_result.get("stdout") or summary
-    exit_code = review_result["exit_code"]
+    # Objective gates passed above. Review is advisory unless blocking.
+    exit_code = review_result["exit_code"] if review_blocking else 0
     return results, summary, exit_code, changed_files
 
 
@@ -105,6 +107,7 @@ def run_code_review_with_auto_fix(
             fleet_config=fleet_config,
             token_ceiling=token_ceiling,
             declared_complexity=declared_complexity,
+            review_blocking=config.review_blocking,
         )
 
     phase_results, summary, exit_code, changed_files = run_pipeline(
@@ -119,6 +122,7 @@ def run_code_review_with_auto_fix(
         fleet_config=fleet_config,
         token_ceiling=token_ceiling,
         declared_complexity=declared_complexity,
+        review_blocking=config.review_blocking,
     )
 
     effective_max_fix = max_retries if max_retries is not None else config.max_fix_attempts
@@ -156,6 +160,7 @@ def run_code_review_with_auto_fix(
             repo=repo,
             implementation_summary=summary,
             reviewer_persona=reviewer_persona,
+            review_blocking=config.review_blocking,
         )
         phase_results.extend(gate_results)
 

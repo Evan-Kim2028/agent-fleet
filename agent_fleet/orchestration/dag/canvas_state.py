@@ -12,7 +12,7 @@ from agent_fleet.orchestration.dag.schema import DagSpec, DagTask
 _DEFAULT_MODELS: dict[str, str] = {
     "HIGH": "composer-2.5",
     "MED": "composer-2.5",
-    "LOW": "composer-2.5-fast",
+    "LOW": "composer-2.5",
 }
 
 _CANVAS_STATUS = frozenset({"PENDING", "RUNNING", "FINISHED", "ERROR"})

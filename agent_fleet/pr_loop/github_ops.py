@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_fleet.integrations.github_cli import gh as _gh
+from agent_fleet.phases import run_scoped_lint_command
 
 logger = logging.getLogger(__name__)
 
@@ -121,19 +122,14 @@ def run_commit_preflight(
             combined = "\n".join(part for part in (pc.stdout, pc.stderr) if part).strip()
             errors.append(combined[:4000] or "pre-commit failed")
 
+    allowed_paths = tuple(changed_files)
     for command in commands:
-        result = subprocess.run(
-            command,
-            shell=True,
-            cwd=worktree,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=600,
+        outcome = run_scoped_lint_command(
+            worktree, command, timeout_s=600, allowed_paths=allowed_paths
         )
-        if result.returncode != 0:
-            combined = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
-            errors.append(f"$ {command}\n{combined[:2000]}")
+        if not outcome["passed"]:
+            detail = outcome.get("detail") or outcome.get("stderr") or outcome.get("stdout") or ""
+            errors.append(f"$ {command}\n{str(detail)[:2000]}")
 
     if errors:
         return False, "\n\n---\n\n".join(errors)
