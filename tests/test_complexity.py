@@ -9,10 +9,10 @@ import pytest
 
 from agent_fleet.complexity import (
     RuntimeConfig,
-    TokenCeilingExceeded,
     coerce_complexity,
     derive_runtime,
     is_actionable_stderr,
+    observe_token_ceiling,
 )
 from agent_fleet.hooks import FleetTask
 from agent_fleet.observability.context import bind_run
@@ -85,7 +85,7 @@ def test_fleet_task_complexity_defaults_none() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Token ceiling abort
+# Token ceiling metric (no mid-run abort)
 # ---------------------------------------------------------------------------
 
 
@@ -98,19 +98,34 @@ def _make_run_log(run_id: str = "test-run") -> RunLog:
     )
 
 
-def test_token_ceiling_abort_fires() -> None:
-    """When cumulative tokens exceed the ceiling, run_pipeline raises TokenCeilingExceeded."""
+def test_observe_token_ceiling_returns_breach() -> None:
+    run_log = _make_run_log()
+    run_log.llm_usage(
+        phase="execute",
+        model="test",
+        duration_s=0.1,
+        input_tokens=600_000,
+        output_tokens=500_000,
+    )
+    with bind_run(run_log, run_log.context):
+        breach = observe_token_ceiling(token_ceiling=1_000_000, declared_complexity="LOW")
+    assert breach is not None
+    assert breach.observed_total_tokens == 1_100_000
+    assert breach.over_by == 100_000
+    assert breach.to_dict()["efficiency_ratio"] == 1.1
+
+
+def test_token_ceiling_metric_does_not_abort_pipeline() -> None:
+    """Over ceiling after execute: record metric, do not raise."""
     from agent_fleet.phases import run_pipeline
 
-    # Build a RunLog with already-accumulated tokens above the ceiling.
     run_log = _make_run_log()
-    # Inject usage that exceeds a LOW ceiling (1_000_000).
     run_log.llm_usage(
         phase="execute",
         model="test",
         duration_s=0.1,
         input_tokens=500_001,
-        output_tokens=500_001,  # total = 1_000_002 > 1_000_000
+        output_tokens=500_001,
     )
 
     backend = MagicMock()
@@ -132,8 +147,8 @@ def test_token_ceiling_abort_fires() -> None:
     task = FleetTask(goal="test task", complexity="LOW")
     workspace = Path("/tmp")
 
-    with bind_run(run_log, run_log.context), pytest.raises(TokenCeilingExceeded) as exc_info:
-        run_pipeline(
+    with bind_run(run_log, run_log.context):
+        phase_results, _summary, exit_code, _changed = run_pipeline(
             backend=backend,
             resolver=resolver,
             task=task,
@@ -144,9 +159,11 @@ def test_token_ceiling_abort_fires() -> None:
             declared_complexity="LOW",
         )
 
-    assert exc_info.value.declared_complexity == "LOW"
-    assert exc_info.value.observed_total_tokens > 1_000_000
-    assert exc_info.value.ceiling == 1_000_000
+    assert exit_code == 0
+    complexity_phases = [p for p in phase_results if p.get("phase") == "complexity"]
+    assert len(complexity_phases) == 1
+    assert complexity_phases[0]["metric_only"] is True
+    assert complexity_phases[0]["observed_total_tokens"] > 1_000_000
 
 
 def test_token_ceiling_no_abort_when_under() -> None:

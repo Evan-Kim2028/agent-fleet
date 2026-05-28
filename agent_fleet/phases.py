@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.agent_mode import parse_agent_mode
-from agent_fleet.complexity import TokenCeilingExceeded
+from agent_fleet.complexity import observe_token_ceiling
 from agent_fleet.contracts.review import ReviewVerdict
 from agent_fleet.observability.context import get_run_log
 from agent_fleet.personas import read_persona_body
@@ -22,6 +23,8 @@ from agent_fleet.verify_core import (
     run_shell_verify,
 )
 
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -31,23 +34,28 @@ if TYPE_CHECKING:
     from agent_fleet.repo import RepoConfig
 
 
-def _check_token_ceiling(
+def _record_token_ceiling_metric(
     *,
     token_ceiling: int,
     declared_complexity: str,
-) -> None:
-    """Raise ``TokenCeilingExceeded`` if the bound RunLog has exceeded *token_ceiling*."""
+) -> dict[str, Any] | None:
+    """Emit ``complexity.ceiling_metric`` when over budget; never aborts the pipeline."""
+    breach = observe_token_ceiling(
+        token_ceiling=token_ceiling,
+        declared_complexity=declared_complexity,
+    )
+    if breach is None:
+        return None
     run_log = get_run_log()
-    if run_log is None:
-        return
-    totals = dict(run_log._usage_totals)
-    total = sum(totals.values())
-    if total > token_ceiling:
-        raise TokenCeilingExceeded(
-            declared_complexity=declared_complexity,
-            observed_total_tokens=total,
-            ceiling=token_ceiling,
-        )
+    if run_log is not None:
+        run_log.emit("complexity.ceiling_metric", data=breach.to_dict())
+    logger.warning(
+        "Token ceiling metric: %s tokens > %s ceiling (complexity=%s); continuing pipeline",
+        breach.observed_total_tokens,
+        breach.ceiling,
+        breach.declared_complexity,
+    )
+    return {"phase": "complexity", "metric_only": True, **breach.to_dict()}
 
 
 def _review_skill_prompt_append(task: FleetTask) -> str:
@@ -574,9 +582,9 @@ def run_pipeline(
 
     Returns (phase_results, final_summary, exit_code, changed_files).
 
-    If *token_ceiling* is set and cumulative token usage exceeds it after any
-    phase, ``TokenCeilingExceeded`` is raised.  The caller is responsible for
-    converting this into the appropriate task result.
+    If *token_ceiling* is set and cumulative token usage exceeds it after a
+    phase, a ``complexity.ceiling_metric`` event is emitted and the pipeline
+    continues (verify/review still run when configured).
     """
     results: list[dict[str, Any]] = []
     summary = ""
@@ -601,9 +609,11 @@ def run_pipeline(
             exit_code = phase_result["exit_code"]
             changed_files = collect_changed_files(workspace)
             if token_ceiling is not None:
-                _check_token_ceiling(
+                ceiling_phase = _record_token_ceiling_metric(
                     token_ceiling=token_ceiling, declared_complexity=_complexity_label
                 )
+                if ceiling_phase is not None:
+                    results.append(ceiling_phase)
             if exit_code != 0:
                 break
 
@@ -628,6 +638,17 @@ def run_pipeline(
                     exit_code = 1
                     summary = verify_results[-1].get("detail") or "Verify failed"
                     break
+            elif repo is not None and repo.verify_commands:
+                verify_results = run_verify_phases(
+                    workspace=workspace,
+                    repo=repo,
+                    timeout_s=timeout_s,
+                )
+                results.extend(verify_results)
+                if verify_results and not verify_results[-1]["passed"]:
+                    exit_code = 1
+                    summary = verify_results[-1].get("detail") or "Verify failed"
+                    break
             continue
 
         if phase == "analyze":
@@ -641,9 +662,11 @@ def run_pipeline(
             exit_code = phase_result["exit_code"]
             changed_files = phase_result.get("changed_files") or changed_files
             if token_ceiling is not None:
-                _check_token_ceiling(
+                ceiling_phase = _record_token_ceiling_metric(
                     token_ceiling=token_ceiling, declared_complexity=_complexity_label
                 )
+                if ceiling_phase is not None:
+                    results.append(ceiling_phase)
             continue
 
         if phase == "review":
@@ -676,9 +699,11 @@ def run_pipeline(
             summary = phase_result.get("summary") or phase_result.get("stdout") or summary
             exit_code = phase_result["exit_code"]
             if token_ceiling is not None:
-                _check_token_ceiling(
+                ceiling_phase = _record_token_ceiling_metric(
                     token_ceiling=token_ceiling, declared_complexity=_complexity_label
                 )
+                if ceiling_phase is not None:
+                    results.append(ceiling_phase)
             if exit_code != 0:
                 break
             continue

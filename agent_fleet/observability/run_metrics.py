@@ -153,6 +153,26 @@ def count_verify_fix_loops(
     return verify_attempts, fix_attempts
 
 
+def extract_complexity_ceiling(
+    phases: list[dict[str, Any]] | dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return complexity ceiling breach recorded as a phase metric, if any."""
+    for _name, item in _iter_phase_entries(phases):
+        if item.get("phase") == "complexity" and item.get("metric_only"):
+            return {
+                k: item[k]
+                for k in (
+                    "declared_complexity",
+                    "observed_total_tokens",
+                    "ceiling",
+                    "over_by",
+                    "efficiency_ratio",
+                )
+                if k in item
+            }
+    return None
+
+
 def build_cost_alerts(
     *,
     usage_rollup: dict[str, Any] | None,
@@ -246,10 +266,18 @@ def build_run_metrics(
             "by_phase": usage_rollup.get("by_phase"),
         }
 
+    complexity_ceiling = extract_complexity_ceiling(phases)
+    if complexity_ceiling:
+        metrics["complexity_ceiling"] = complexity_ceiling
+
     alerts = build_cost_alerts(
         usage_rollup=usage_rollup,
         verify_attempts=verify_attempts,
     )
+    if complexity_ceiling:
+        alerts = list(alerts) if alerts else []
+        if "complexity_ceiling_exceeded" not in alerts:
+            alerts.append("complexity_ceiling_exceeded")
     if alerts:
         metrics["cost_alerts"] = alerts
     return metrics

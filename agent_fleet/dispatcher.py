@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 from agent_fleet.admission import AdmissionController, ResourceTier
 from agent_fleet.backends import make_backend
-from agent_fleet.complexity import TokenCeilingExceeded, derive_runtime
+from agent_fleet.complexity import derive_runtime
 from agent_fleet.config import FleetConfig, load_fleet_config
 from agent_fleet.dispatcher_task import (
     build_task_result,
@@ -686,34 +686,6 @@ class FleetDispatcher:
                     )
                     task_workspace.teardown(keep=keep_worktree)
                 return result
-            except TokenCeilingExceeded as exc:
-                logger.warning(
-                    "Fleet task %s: token ceiling exceeded (%s > %s, complexity=%s)",
-                    task_index,
-                    exc.observed_total_tokens,
-                    exc.ceiling,
-                    exc.declared_complexity,
-                )
-                if task_workspace is not None:
-                    task_workspace.teardown(keep=False)
-                fleet_log.emit(
-                    "complexity.ceiling_exceeded",
-                    declared_complexity=exc.declared_complexity,
-                    observed_total_tokens=exc.observed_total_tokens,
-                    ceiling=exc.ceiling,
-                )
-                return FleetTaskResult(
-                    task_index=task_index,
-                    persona=task.persona,
-                    goal=task.goal,
-                    status="complexity_underestimated",
-                    summary=None,
-                    error=str(exc),
-                    duration_seconds=round(time.monotonic() - start, 2),
-                    declared_complexity=exc.declared_complexity,
-                    observed_total_tokens=exc.observed_total_tokens,
-                    ceiling=exc.ceiling,
-                )
             except Exception as exc:
                 logger.exception("Fleet task %s failed", task_index)
                 if task_workspace is not None:

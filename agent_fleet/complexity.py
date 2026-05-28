@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 logger = logging.getLogger(__name__)
 
@@ -17,14 +17,27 @@ Complexity = Literal["LOW", "MED", "HIGH"]
 _VALID: frozenset[str] = frozenset({"LOW", "MED", "HIGH"})
 
 
-class TokenCeilingExceeded(Exception):
-    """Raised when cumulative token usage exceeds the complexity ceiling.
+@dataclass(frozen=True)
+class TokenCeilingBreach:
+    """Observed token usage above the declared complexity ceiling (metric only)."""
 
-    Attributes:
-        declared_complexity: The complexity level declared on the task.
-        observed_total_tokens: Cumulative tokens at the point of abort.
-        ceiling: The token ceiling that was breached.
-    """
+    declared_complexity: str
+    observed_total_tokens: int
+    ceiling: int
+    over_by: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "declared_complexity": self.declared_complexity,
+            "observed_total_tokens": self.observed_total_tokens,
+            "ceiling": self.ceiling,
+            "over_by": self.over_by,
+            "efficiency_ratio": round(self.observed_total_tokens / self.ceiling, 3),
+        }
+
+
+class TokenCeilingExceeded(Exception):
+    """Legacy exception; ceilings are recorded as metrics, not raised mid-run."""
 
     def __init__(
         self,
@@ -40,6 +53,29 @@ class TokenCeilingExceeded(Exception):
             f"Token ceiling exceeded: {observed_total_tokens} > {ceiling} "
             f"(complexity={declared_complexity})"
         )
+
+
+def observe_token_ceiling(
+    *,
+    token_ceiling: int,
+    declared_complexity: str,
+) -> TokenCeilingBreach | None:
+    """Return breach details when usage exceeds *token_ceiling*; does not abort the run."""
+    from agent_fleet.observability.context import get_run_log
+
+    run_log = get_run_log()
+    if run_log is None:
+        return None
+    totals = dict(run_log._usage_totals)
+    observed = sum(totals.values())
+    if observed <= token_ceiling:
+        return None
+    return TokenCeilingBreach(
+        declared_complexity=declared_complexity,
+        observed_total_tokens=observed,
+        ceiling=token_ceiling,
+        over_by=observed - token_ceiling,
+    )
 
 
 @dataclass(frozen=True)

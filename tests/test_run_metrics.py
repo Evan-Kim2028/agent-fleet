@@ -5,6 +5,7 @@ from __future__ import annotations
 from agent_fleet.observability.run_metrics import (
     build_run_metrics,
     count_verify_fix_loops,
+    extract_complexity_ceiling,
     extract_verify_failure,
 )
 
@@ -55,6 +56,23 @@ def test_count_verify_fix_loops_runner_style() -> None:
     assert fix_attempts == 2
 
 
+def test_extract_complexity_ceiling_from_phase_metric() -> None:
+    phases = [
+        {
+            "phase": "complexity",
+            "metric_only": True,
+            "declared_complexity": "LOW",
+            "observed_total_tokens": 1_323_426,
+            "ceiling": 1_000_000,
+            "over_by": 323_426,
+            "efficiency_ratio": 1.323,
+        }
+    ]
+    breach = extract_complexity_ceiling(phases)
+    assert breach is not None
+    assert breach["efficiency_ratio"] == 1.323
+
+
 def test_build_run_metrics_cost_alerts() -> None:
     metrics = build_run_metrics(
         status="verify_failed",
@@ -71,3 +89,22 @@ def test_build_run_metrics_cost_alerts() -> None:
     assert "cost_alerts" in metrics
     assert "verify_retries_high" in metrics["cost_alerts"]
     assert "fix_phase_token_ratio_high" in metrics["cost_alerts"]
+
+
+def test_build_run_metrics_includes_complexity_ceiling() -> None:
+    metrics = build_run_metrics(
+        status="completed",
+        phases=[
+            {
+                "phase": "complexity",
+                "metric_only": True,
+                "declared_complexity": "LOW",
+                "observed_total_tokens": 1_500_000,
+                "ceiling": 1_000_000,
+                "over_by": 500_000,
+                "efficiency_ratio": 1.5,
+            }
+        ],
+    )
+    assert metrics["complexity_ceiling"]["over_by"] == 500_000
+    assert "complexity_ceiling_exceeded" in metrics["cost_alerts"]
