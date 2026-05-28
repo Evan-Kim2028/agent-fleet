@@ -333,13 +333,16 @@ def run_scope_phase(
     *,
     persona: Persona,
     changed_files: list[str],
+    task: FleetTask | None = None,
 ) -> dict[str, Any]:
-    violating = files_outside_allowed_paths(persona.allowed_paths, changed_files)
+    task_paths = task.allowed_paths if task is not None else ()
+    allowed = effective_allowed_paths(task_paths, persona.allowed_paths)
+    violating = files_outside_allowed_paths(allowed, changed_files)
     return {
         "phase": "scope",
         "persona": persona.name,
         "changed_files": changed_files,
-        "allowed_paths": list(persona.allowed_paths),
+        "allowed_paths": list(allowed),
         "violating_files": list(violating),
         "passed": not violating,
         "exit_code": 0 if not violating else 1,
@@ -621,6 +624,7 @@ def run_pipeline(
                 scope_result = run_scope_phase(
                     persona=implementer_persona,
                     changed_files=changed_files,
+                    task=task,
                 )
                 results.append(scope_result)
                 if scope_result["exit_code"] != 0:

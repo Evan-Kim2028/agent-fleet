@@ -41,7 +41,7 @@ def _rerun_quality_gates(
     changed_files = collect_changed_files(workspace)
     summary = implementation_summary
 
-    scope_result = run_scope_phase(persona=persona, changed_files=changed_files)
+    scope_result = run_scope_phase(persona=persona, changed_files=changed_files, task=task)
     results.append(scope_result)
     if scope_result["exit_code"] != 0:
         return results, summary, 1, changed_files

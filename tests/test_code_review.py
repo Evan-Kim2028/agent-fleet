@@ -9,7 +9,11 @@ import pytest
 from agent_fleet.contracts.review import ReviewResult, ReviewVerdict
 from agent_fleet.phases import resolve_pipeline_outcome, run_scope_phase
 from agent_fleet.reviewer import aggregate_verdict
-from agent_fleet.scope import files_outside_allowed_paths, path_allowed_by_prefix
+from agent_fleet.scope import (
+    effective_allowed_paths,
+    files_outside_allowed_paths,
+    path_allowed_by_prefix,
+)
 from agent_fleet.verify_core import get_working_tree_changes, get_working_tree_diff, is_git_repo
 
 
@@ -62,6 +66,37 @@ def test_run_scope_phase_fails() -> None:
     result = run_scope_phase(
         persona=persona,
         changed_files=["infra/x.yaml"],
+    )
+    assert result["passed"] is False
+    assert result["exit_code"] == 1
+
+
+def test_effective_allowed_paths_task_wins_over_persona() -> None:
+    assert effective_allowed_paths(("tests/",), ("src/",)) == ("tests/",)
+    assert effective_allowed_paths((), ("src/",)) == ("src/",)
+    assert effective_allowed_paths(("tests/",), ()) == ("tests/",)
+    assert effective_allowed_paths((), ()) == ()
+
+
+def test_run_scope_phase_task_scope_overrides_unrestricted_persona() -> None:
+    from agent_fleet.hooks import FleetTask, Persona
+
+    persona = Persona(
+        name="lakestore",
+        prompt_path=Path("lakestore.md"),
+        allowed_tools=[],
+        capabilities={},
+        allowed_paths=(),
+    )
+    task = FleetTask(
+        goal="tripwire",
+        persona="lakestore",
+        allowed_paths=("tests/", "packages/lakestore/"),
+    )
+    result = run_scope_phase(
+        persona=persona,
+        changed_files=["pipelines/pokemontcg_pipe/src/pipe/gold/build_sales.py"],
+        task=task,
     )
     assert result["passed"] is False
     assert result["exit_code"] == 1
