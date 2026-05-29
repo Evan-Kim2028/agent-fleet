@@ -26,12 +26,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TYPE_CHECKING, Protocol, cast
 
 from agent_fleet.hooks import FleetTask
+from agent_fleet.orchestration.primitives import effective_capacity
 from agent_fleet.orchestration.program.models import (
     AgentResult,
     ProgramExecutionError,
     ProgramRunSummary,
 )
-from agent_fleet.orchestration.primitives import effective_capacity
 from agent_fleet.orchestration.program.validate import (
     SAFE_BUILTINS,
     validate_workflow_program,

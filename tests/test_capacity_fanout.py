@@ -15,8 +15,8 @@ from agent_fleet.hooks import FleetTask, FleetTaskResult
 from agent_fleet.orchestration import primitives
 from agent_fleet.orchestration.dag.runner import dispatch_dag
 from agent_fleet.orchestration.dag.schema import DagSpec, DagTask
-from agent_fleet.orchestration.program import run_workflow_program
 from agent_fleet.orchestration.primitives import effective_capacity
+from agent_fleet.orchestration.program import run_workflow_program
 
 if TYPE_CHECKING:
     from agent_fleet.hooks import PersonaResolver
@@ -157,8 +157,8 @@ def test_effective_capacity_no_config_uses_fallback() -> None:
 def test_ram_mirror_drift_guard() -> None:
     dispatcher = FleetDispatcher()
     assert (
-        primitives._RAM_GB_PER_AGENT
-        == dispatcher._admission._tiers["agent"].ram_gb
+        dispatcher._admission._tiers["agent"].ram_gb
+        == primitives._RAM_GB_PER_AGENT
     )
 
 
@@ -212,7 +212,8 @@ def _negative_control_unbounded_once() -> tuple[int, int]:
     try:
         with ThreadPoolExecutor(max_workers=8) as pool:
             futures = [
-                pool.submit(dispatcher._execute_task, i, task) for i, task in enumerate(parent_tasks)
+                pool.submit(dispatcher._execute_task, i, task)
+                for i, task in enumerate(parent_tasks)
             ]
             for future in as_completed(futures):
                 results.append(future.result())
@@ -243,7 +244,7 @@ def _run_nested_program_once(*, max_parallel: int) -> tuple[int, int]:
     dispatcher = _AdmissionDispatcher(config=_config(max_parallel=max_parallel))
     token = _hold_parent_token(dispatcher)
     try:
-        summary = run_workflow_program(
+        run_workflow_program(
             _PARALLEL_EIGHT,
             dispatcher=dispatcher,
             default_persona="coder",
