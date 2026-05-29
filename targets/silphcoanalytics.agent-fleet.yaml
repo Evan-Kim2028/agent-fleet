@@ -8,14 +8,15 @@ default_branch: main
 use_worktree: true
 
 worktree_bootstrap_commands:
-  - bash /home/evan/Documents/agent_fleet/scripts/worktree-bootstrap.sh
+  - bash scripts/fleet-worktree-bootstrap.sh
 
 personas_dir: agents/personas
 worktree_base: /tmp/agent-worktrees
 
 verify_commands:
+  - bash scripts/fleet-worktree-bootstrap.sh
   - uv run --directory agents python agents/verify.py ..
-  - bash -lc 'cd api && .venv/bin/ruff check .'
+  - uv run --directory api ruff check .
 
 persona_scope_allowlist:
   backend:
