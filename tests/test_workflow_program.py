@@ -25,6 +25,7 @@ class _FakeDispatcher:
         same_workspace_tasks: int = 1,
         handoff: object = None,  # noqa: ARG002
         base_branch: object = None,  # noqa: ARG002
+        depth: int = 1,  # noqa: ARG002
     ) -> FleetTaskResult:
         self.calls.append((idx, task.goal[:40], batch_size, same_workspace_tasks))
         time.sleep(0.01)

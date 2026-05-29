@@ -165,15 +165,15 @@ class ProgramContext:
         max_agents: int,
         timeout_s: float | None,
         fleet_log: _FleetLogLike | None,
+        child_depth: int = 1,
     ) -> None:
         self._dispatcher = dispatcher
         self._persona_resolver = persona_resolver
         self._default_persona = default_persona
         self._default_pipeline = default_pipeline
         self._max_parallel = max(1, max_parallel)
-        self._capacity = effective_capacity(
-            dispatcher, fallback=self._max_parallel, reserved=1
-        )
+        self._child_depth = child_depth
+        self._capacity = effective_capacity(dispatcher, fallback=self._max_parallel)
         self._max_agents = max(1, max_agents)
         self._fleet_log = fleet_log
         self._lock = threading.Lock()
@@ -243,7 +243,7 @@ class ProgramContext:
             batch = 2 if isolate else 1
             self._emit("program.agent.start", idx=idx, persona=task.persona, isolate=isolate)
             result = self._dispatcher._execute_task(
-                idx, task, batch_size=batch, same_workspace_tasks=batch
+                idx, task, batch_size=batch, same_workspace_tasks=batch, depth=self._child_depth
             )
         finally:
             with self._lock:
@@ -382,6 +382,7 @@ def run_workflow_program(
     max_agents: int = 64,
     timeout_s: float | None = None,
     fleet_log: _FleetLogLike | None = None,
+    child_depth: int = 1,
 ) -> ProgramRunSummary:
     """Validate, then run an orchestration program, returning a bounded summary.
 
@@ -406,6 +407,7 @@ def run_workflow_program(
         max_agents=max_agents,
         timeout_s=timeout_s,
         fleet_log=fleet_log,
+        child_depth=child_depth,
     )
     namespace = context.build_namespace()
     start = time.monotonic()

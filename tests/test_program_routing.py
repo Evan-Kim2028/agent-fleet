@@ -22,6 +22,7 @@ tests/test_dag.py (handle_preflight_decision) and tests/test_orchestration.py.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 from unittest.mock import patch
 
 from agent_fleet.contracts.task_spec import DecompositionDecision, RiskTier, Scope, TaskSpec
@@ -43,6 +44,7 @@ class _FakeDispatcher:
         same_workspace_tasks: int = 1,  # noqa: ARG002
         handoff: object = None,  # noqa: ARG002
         base_branch: object = None,  # noqa: ARG002
+        depth: int = 1,  # noqa: ARG002
     ) -> FleetTaskResult:
         self.calls.append((task.goal[:40], idx))
         return FleetTaskResult(
@@ -167,7 +169,7 @@ def test_run_workflow_program_called_via_patch() -> None:
     """Assert run_workflow_program is reached for a PROGRAM spec by patching it."""
     from agent_fleet.orchestration import program as prog_module
 
-    real_run = prog_module.run_workflow_program
+    real_run: Any = prog_module.run_workflow_program
     captured: list[str] = []
 
     def _spy(source: str, **kwargs: object) -> object:

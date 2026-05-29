@@ -21,4 +21,5 @@ class _DispatcherLike(Protocol):
         same_workspace_tasks: int = ...,
         handoff: HandoffNote | None = ...,
         base_branch: str | None = ...,
+        depth: int = ...,
     ) -> FleetTaskResult: ...

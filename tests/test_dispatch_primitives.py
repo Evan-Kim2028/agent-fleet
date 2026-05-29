@@ -23,6 +23,7 @@ class RecordingDispatcher:
         same_workspace_tasks: int = 1,
         handoff: object = None,  # noqa: ARG002
         base_branch: str | None = None,  # noqa: ARG002
+        depth: int = 1,  # noqa: ARG002
     ) -> FleetTaskResult:
         self.calls.append((task_index, batch_size, same_workspace_tasks))
         if self.max_delay:

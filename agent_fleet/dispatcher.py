@@ -11,7 +11,12 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from agent_fleet.admission import AdmissionController, ResourceTier
+from agent_fleet.admission import (
+    AdmissionController,
+    AdmissionDenied,
+    AdmissionGate,
+    ResourceTier,
+)
 from agent_fleet.backends import make_backend
 from agent_fleet.complexity import derive_runtime
 from agent_fleet.config import FleetConfig, load_fleet_config
@@ -150,7 +155,7 @@ class FleetDispatcher:
                 "agent": ResourceTier("agent", ram_gb=4, max_concurrent=self.config.max_parallel),
             },
         )
-        self._admission_lock = threading.Lock()
+        self._gate = AdmissionGate(self._admission, tier="agent")
         self._worktree_lock = threading.Lock()
 
     def _workspace_key(self, task: FleetTask) -> str:
@@ -212,8 +217,15 @@ class FleetDispatcher:
         start: float,
         fleet_log: FleetLogger,
         handoff: HandoffNote | None,
+        depth: int = 0,
     ) -> tuple[FleetTaskResult | None, FleetTask]:
-        """Run plan preflight; return (early_result, task_to_run)."""
+        """Run plan preflight; return (early_result, task_to_run).
+
+        ``depth`` is this task's own admission-nesting level. Children fanned out
+        below run at ``depth + 1`` so the AdmissionGate can tell ancestor-held
+        slots from sibling-held ones.
+        """
+        child_depth = depth + 1
         from agent_fleet.fleet_session import create_fleet_session
         from agent_fleet.orchestration.dag.runner import dispatch_dag
         from agent_fleet.orchestration.dag.schema import dag_spec_from_dict
@@ -295,6 +307,7 @@ class FleetDispatcher:
                 acceptance_criteria=task_spec.acceptance_criteria,
                 fleet_log=fleet_log,
                 foundry=foundry,
+                child_depth=child_depth,
             )
             fleet_log.emit(
                 "orchestration.dag",
@@ -341,6 +354,7 @@ class FleetDispatcher:
                 fallback_persona=task.persona or task_config.default_persona,
                 parent_run_id=fleet_log.run_id,
                 foundry=foundry,
+                child_depth=child_depth,
             )
             fleet_log.emit(
                 "orchestration.decompose",
@@ -377,6 +391,7 @@ class FleetDispatcher:
                 dispatcher=self,
                 persona_resolver=resolver,
                 fleet_log=fleet_log,
+                child_depth=child_depth,
             )
             status = "completed" if program_summary.ok else "error"
             result_text = str(program_summary.result)
@@ -520,6 +535,7 @@ class FleetDispatcher:
         same_workspace_tasks: int = 1,
         handoff: HandoffNote | None = None,
         base_branch: str | None = None,
+        depth: int = 0,
     ) -> FleetTaskResult:
         start = time.monotonic()
         fleet_log = FleetLogger.for_dispatch(
@@ -555,10 +571,12 @@ class FleetDispatcher:
 
             token = None
             task_workspace = None
-            with self._admission_lock:
-                token = self._admission.try_admit("agent")
-            if token is None:
-                fleet_log.emit("admission.denied", reason="max_parallel")
+            try:
+                token = self._gate.acquire_token(depth=depth)
+            except AdmissionDenied:
+                fleet_log.emit(
+                    "admission.denied", reason="nesting_depth_exceeds_capacity", depth=depth
+                )
                 return FleetTaskResult(
                     task_index=task_index,
                     persona=task.persona,
@@ -652,6 +670,7 @@ class FleetDispatcher:
                     start=start,
                     fleet_log=fleet_log,
                     handoff=handoff,
+                    depth=depth,
                 )
                 if preflight_result is not None:
                     return preflight_result
@@ -824,8 +843,7 @@ class FleetDispatcher:
                 )
             finally:
                 if token is not None:
-                    with self._admission_lock:
-                        self._admission.release(token)
+                    self._gate.release(token)
 
     def dispatch(
         self,

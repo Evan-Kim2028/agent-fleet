@@ -222,8 +222,12 @@ def dispatch_task_spec_children(
     max_parallel: int | None = None,
     parent_run_id: str | None = None,
     foundry: PersonaFoundry | None = None,
+    child_depth: int = 1,
 ) -> tuple[list[FleetTaskResult], str, str | None, str]:
     """Fan out child tasks through the fleet dispatcher.
+
+    ``child_depth`` is the admission-nesting level for the children (1 beneath a
+    single token-holding parent); the AdmissionGate uses it to queue overflow.
 
     Returns (child_results, aggregate_status, error, summary).
     """
@@ -250,7 +254,7 @@ def dispatch_task_spec_children(
     limit_raw = max_parallel or dispatcher.config.max_parallel
     limit = min(
         limit_raw,
-        effective_capacity(dispatcher, fallback=limit_raw, reserved=1),
+        effective_capacity(dispatcher, fallback=limit_raw),
     )
     if len(children) > limit:
         logger.info(
@@ -260,7 +264,7 @@ def dispatch_task_spec_children(
         )
 
     primitives = DispatchPrimitives(dispatcher, max_parallel=limit)
-    all_results = primitives.run_many(children)
+    all_results = primitives.run_many(children, depth=child_depth)
 
     status, error, summary = aggregate_child_results(all_results)
     return all_results, status, error, summary

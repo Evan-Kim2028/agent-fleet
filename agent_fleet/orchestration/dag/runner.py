@@ -158,8 +158,14 @@ def dispatch_dag(
     fleet_log: FleetLogger | None = None,
     canvas_writer: DagCanvasWriter | None = None,
     foundry: PersonaFoundry | None = None,
+    child_depth: int = 1,
 ) -> DagRunSummary:
-    """Run DAG tasks rank-by-rank through the fleet dispatcher."""
+    """Run DAG tasks rank-by-rank through the fleet dispatcher.
+
+    ``child_depth`` is the admission-nesting level for the dispatched nodes
+    (1 when run beneath a single token-holding parent). The AdmissionGate uses
+    it to queue overflow instead of denying.
+    """
     validate_dag_graph(spec)
     ranks = topo_sort_ranks(spec.tasks)
     rank_ids = [[task.id for task in rank] for rank in ranks]
@@ -190,8 +196,8 @@ def dispatch_dag(
     # independent chains never wait on each other and wall-clock tracks the
     # critical path. All mutable state below is touched only on this thread in
     # the drain loop, so no lock is needed. same_workspace_tasks stays 1: DAG
-    # nodes compose edits into the single parent workspace. Concurrency is
-    # bounded to admission capacity minus the parent's held slot; overflow queues.
+    # nodes compose edits into the single parent workspace. The pool size is just
+    # a worker hint; the AdmissionGate is the real bound and queues any overflow.
     by_id = {task.id: task for task in spec.tasks}
     remaining_deps = {task.id: len(task.depends_on) for task in spec.tasks}
     dependents: dict[str, list[str]] = {task.id: [] for task in spec.tasks}
@@ -205,7 +211,7 @@ def dispatch_dag(
         1,
         min(
             n_total,
-            effective_capacity(dispatcher, fallback=n_total, reserved=1),
+            effective_capacity(dispatcher, fallback=n_total),
         ),
     )
     primitives = DispatchPrimitives(dispatcher, max_parallel=inflight)
@@ -272,6 +278,7 @@ def dispatch_dag(
                         dispatch_index,
                         fleet_task,
                         batch_size=n_total,
+                        depth=child_depth,
                     )
                 ] = dag_task
                 dispatch_index += 1
