@@ -275,4 +275,5 @@ def plan(
         critical_paths_touched=list(data["critical_paths_touched"]),
         coordination_spec=data["coordination_spec"],
         dag=data.get("dag"),
+        program=data.get("program"),
     )

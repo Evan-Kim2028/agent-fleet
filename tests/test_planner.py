@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 
 import pytest
@@ -119,3 +120,41 @@ def test_plan_still_retries_on_unparseable_prose() -> None:
     # The old behaviour: retry 3 times (initial + 2 retries) on parse failure.
     assert len(session.sends) == 3
     assert "No JSON object found" in str(excinfo.value)
+
+
+def test_plan_preserves_program_source_for_program_decision() -> None:
+    """Regression: plan() must thread the LLM's ``program`` source into the
+    returned TaskSpec. A v0.9.0 oversight dropped it, leaving the program
+    dispatch branch (dispatcher gates on ``task_spec.program``) permanently dead
+    even though the prompt asks the model to emit it."""
+    program_src = "phase('go')\nr = agent('do the thing')\nreturn r.summary"
+    spec_json = json.dumps(
+        {
+            "issue_number": 7,
+            "decomposition_decision": "program",
+            "decomposition_reason": "dynamic orchestration with runtime fan-out",
+            "child_issues_proposed": [],
+            "scope": {"allowed_paths": ["src/"], "forbidden_paths": []},
+            "research_plan": [],
+            "acceptance_criteria": ["the program runs end to end"],
+            "risk_tier": "low",
+            "critical_paths_touched": [],
+            "coordination_spec": None,
+            "program": program_src,
+        }
+    )
+    session = _FakeSession(
+        result=CursorLLMResult(stdout=spec_json, stderr="", exit_code=0, duration_s=0.1)
+    )
+
+    spec = plan(
+        issue_number=7,
+        issue_title="t",
+        issue_body="b",
+        backend=_FakeBackend(),  # type: ignore[arg-type]
+        persona_resolver=_FakePersonaResolver(),  # type: ignore[arg-type]
+        session=session,  # type: ignore[arg-type]
+    )
+
+    assert spec.decomposition_decision.value == "program"
+    assert spec.program == program_src
