@@ -87,6 +87,9 @@ class AgentRecord:
     started: bool
     done: bool
     error: str | None
+    # The output text the run propagated downstream. Richer than summary (it
+    # folds in stdout); resume replays it as the reused task's upstream context.
+    output: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -132,6 +135,7 @@ class _AgentMutable:
     started: bool = False
     done: bool = False
     error: str | None = None
+    output: str | None = None
     # seq of the last terminal-state write; used to deduplicate replayed events.
     _terminal_seq: int = -1
 
@@ -147,6 +151,7 @@ class _AgentMutable:
             started=self.started,
             done=self.done,
             error=self.error,
+            output=self.output,
         )
 
 
@@ -209,6 +214,8 @@ def fold_journal(events: Iterable[RunEvent]) -> RunState:
                     a.status = str(p.get("status", "completed"))
                     raw_summary = p.get("summary")
                     a.summary = str(raw_summary) if raw_summary is not None else None
+                    raw_output = p.get("output")
+                    a.output = str(raw_output) if raw_output is not None else None
                     raw_tokens = p.get("observed_total_tokens")
                     a.observed_total_tokens = (
                         int(str(raw_tokens)) if raw_tokens is not None else None
@@ -283,10 +290,13 @@ class RunJournal:
     no interleaved writes.
     """
 
-    def __init__(self, path: str | Path, run_id: str) -> None:
+    def __init__(self, path: str | Path, run_id: str, *, start_seq: int = 0) -> None:
         self._path = Path(path)
         self.run_id = run_id
-        self._seq = 0
+        # start_seq lets a resumed run continue the seq counter past the events
+        # already on disk, so seq stays globally unique within a run across a
+        # restart and last-writer-wins stays well-defined.
+        self._seq = start_seq
         self._lock = threading.Lock()
         self._events: list[RunEvent] = []
         self._fh = self._path.open("a", encoding="utf-8")
@@ -351,6 +361,7 @@ class RunJournal:
         status: str = "completed",
         summary: str | None = None,
         observed_total_tokens: int | None = None,
+        output: str | None = None,
     ) -> RunEvent:
         return self.append(
             RunEventKind.agent_completed,
@@ -359,6 +370,7 @@ class RunJournal:
             status=status,
             summary=summary,
             observed_total_tokens=observed_total_tokens,
+            output=output,
         )
 
     def agent_failed(

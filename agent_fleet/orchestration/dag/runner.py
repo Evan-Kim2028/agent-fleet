@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from agent_fleet.hooks import PersonaResolver
     from agent_fleet.observability.fleet_logger import FleetLogger
     from agent_fleet.orchestration.dag.canvas_writer import DagCanvasWriter
+    from agent_fleet.orchestration.journal import RunJournal, RunState
     from agent_fleet.persona_foundry import PersonaFoundry
 
 logger = logging.getLogger(__name__)
@@ -159,12 +160,20 @@ def dispatch_dag(
     canvas_writer: DagCanvasWriter | None = None,
     foundry: PersonaFoundry | None = None,
     child_depth: int = 1,
+    journal: RunJournal | None = None,
+    resume_state: RunState | None = None,
 ) -> DagRunSummary:
     """Run DAG tasks rank-by-rank through the fleet dispatcher.
 
     ``child_depth`` is the admission-nesting level for the dispatched nodes
     (1 when run beneath a single token-holding parent). The AdmissionGate uses
     it to queue overflow instead of denying.
+
+    ``journal`` (when given) records run/agent lifecycle events durably so the
+    run can be resumed after a crash. ``resume_state`` (the folded journal of a
+    prior run) makes the dispatch idempotent: tasks already finished are replayed
+    from their recorded result instead of re-dispatched, so a resumed run
+    converges to the same end state as one that never crashed.
     """
     validate_dag_graph(spec)
     ranks = topo_sort_ranks(spec.tasks)
@@ -186,6 +195,9 @@ def dispatch_dag(
             rank_count=len(ranks),
         )
 
+    if journal is not None and resume_state is None:
+        journal.run_started()
+
     all_results: list[FleetTaskResult] = []
     upstream_outputs: dict[str, str] = {}
     failed_ids: set[str] = set()
@@ -204,6 +216,32 @@ def dispatch_dag(
     for task in spec.tasks:
         for dep in task.depends_on:
             dependents[dep].append(task.id)
+
+    # Stable per-spec task identity for the journal: dispatch order is timing
+    # dependent and not reproducible across runs, so resume keys on the task's
+    # fixed position in spec.tasks, not on the volatile dispatch_index.
+    stable_index = {task.id: i for i, task in enumerate(spec.tasks)}
+    done_outputs: dict[str, str] = {}
+    done_results: dict[str, FleetTaskResult] = {}
+    if resume_state is not None:
+        completed = resume_state.completed_task_indices
+        for task in spec.tasks:
+            i = stable_index[task.id]
+            rec = resume_state.agent_by_index(i)
+            if rec is None or i not in completed:
+                continue
+            done_outputs[task.id] = rec.output if rec.output is not None else (rec.summary or "")
+            done_results[task.id] = FleetTaskResult(
+                task_index=i,
+                persona=rec.persona or task.persona or fallback_persona,
+                goal=f"{spec.title} — {task.id}",
+                status=rec.status,
+                summary=rec.summary or "",
+                error=rec.error,
+                duration_seconds=0.0,
+                observed_total_tokens=rec.observed_total_tokens,
+            )
+    done_ids = set(done_outputs)
 
     dispatch_index = 0
     n_total = len(spec.tasks)
@@ -237,6 +275,19 @@ def dispatch_dag(
             )
         )
 
+    def _replay_done(dag_task: DagTask) -> None:
+        result = done_results[dag_task.id]
+        all_results.append(result)
+        upstream_outputs[dag_task.id] = done_outputs[dag_task.id]
+        if canvas_state is not None:
+            set_task_status(
+                canvas_state,
+                dag_task.id,
+                status=fleet_status_to_canvas(result.status),
+                result_text=done_outputs[dag_task.id] or None,
+                duration_ms=0,
+            )
+
     def _release(done_id: str) -> list[DagTask]:
         freed: list[DagTask] = []
         for child_id in dependents[done_id]:
@@ -257,6 +308,10 @@ def dispatch_dag(
                     skip_ids.update(transitive_dependents(spec, {dag_task.id}))
                     _launch(_release(dag_task.id))
                     continue
+                if dag_task.id in done_ids:
+                    _replay_done(dag_task)
+                    _launch(_release(dag_task.id))
+                    continue
                 fleet_task = fleet_task_from_dag_node(
                     task=dag_task,
                     spec=spec,
@@ -270,6 +325,12 @@ def dispatch_dag(
                     acceptance_criteria=acceptance_criteria,
                     foundry=foundry,
                 )
+                if journal is not None:
+                    journal.agent_started(
+                        stable_index[dag_task.id],
+                        persona=fleet_task.persona,
+                        goal=fleet_task.goal,
+                    )
                 if canvas_state is not None:
                     set_task_status(canvas_state, dag_task.id, status="RUNNING")
                 futures[
@@ -297,6 +358,18 @@ def dispatch_dag(
                 dag_task = futures.pop(future)
                 result = future.result()
                 all_results.append(result)
+                if journal is not None:
+                    i = stable_index[dag_task.id]
+                    if is_failure(result.status):
+                        journal.agent_failed(i, error=result.error or result.status)
+                    else:
+                        journal.agent_completed(
+                            i,
+                            status=result.status,
+                            summary=result.summary,
+                            observed_total_tokens=result.observed_total_tokens,
+                            output=_result_output(result),
+                        )
                 if fleet_log is not None:
                     fleet_log.emit(
                         "orchestration.dag.task_finish",
@@ -331,6 +404,9 @@ def dispatch_dag(
         finalize_run_state(canvas_state, outcome=outcome, message=error or summary)
         canvas_writer.schedule(canvas_state)
         canvas_writer.flush()
+
+    if journal is not None:
+        journal.run_completed(status=status)
 
     if fleet_log is not None:
         fleet_log.emit(
