@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 _SCHEMA_SUMMARY = """\
 Required fields (all must be present):
   issue_number          integer >= 1
-  decomposition_decision  "single" | "decompose" | "rejected"
+  decomposition_decision  "single" | "decompose" | "rejected" | "program"
   cross_cutting_acknowledged  optional bool. Set true ONLY when you choose
                         "single" despite allowed_paths spanning persona
                         boundaries (e.g. backend/+frontend/) AND the work is
@@ -37,7 +37,10 @@ Required fields (all must be present):
   decomposition_reason  string
   child_issues_proposed array of {title: str, body: str, persona: str,
                                   allowed_paths?: [str, ...]}
-                        (persona: "backend"|"frontend"|"data"|"pokemon_analyst"|"security_qa")
+                        (persona: one of the available personas listed above,
+                        OR a novel lowercase hyphenated role name such as
+                        "data-validator" or "infra-automation" which will be
+                        synthesized on demand by PersonaFoundry)
                         allowed_paths scopes each sibling's edits when the
                         runner dispatches cooperative children.
   scope                 {allowed_paths: [str, ...], forbidden_paths: [str, ...]}
@@ -58,6 +61,21 @@ Required fields (all must be present):
                         The brief is the contract each sibling persona codes
                         against so they can land in parallel without waiting on
                         each other's PR.
+
+When to choose "program":
+  Choose "program" for tasks best solved by dynamically orchestrating many
+  subagents with routing, fan-out, branching, and convergence that a static
+  DECOMPOSE or DAG cannot express. When decomposition_decision is "program",
+  place the Python source in the top-level "program" field. The program may
+  call five injected primitives: agent(prompt, *, persona=None, context="",
+  complexity=None, pipeline=None, allowed_paths=(), title=None, schema=None)
+  dispatches one subagent and returns an AgentResult (.ok, .summary, .data);
+  parallel(thunks) runs a list of callables concurrently and returns results
+  in order; pipeline(items, *stages) passes each item through stages where
+  each stage receives (prev, original, index); phase(title) marks a named
+  execution phase; log(message) appends a message to the run log. The program
+  ends with a top-level "return <final_answer>" and only that return value
+  crosses back to the parent -- subagent transcripts remain isolated.
 """
 
 

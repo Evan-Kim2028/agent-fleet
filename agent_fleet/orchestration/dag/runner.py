@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from agent_fleet.hooks import PersonaResolver
     from agent_fleet.observability.fleet_logger import FleetLogger
     from agent_fleet.orchestration.dag.canvas_writer import DagCanvasWriter
+    from agent_fleet.persona_foundry import PersonaFoundry
 
 logger = logging.getLogger(__name__)
 
@@ -85,17 +86,21 @@ def fleet_task_from_dag_node(
     parent_run_id: str | None,
     max_chars_per_parent: int,
     acceptance_criteria: list[str] | None = None,
+    foundry: PersonaFoundry | None = None,
 ) -> FleetTask:
     known = set(persona_resolver.list_personas())
     persona = task.persona or parent_task.persona or fallback_persona
     if persona not in known:
-        logger.warning(
-            "DAG node %r persona %r not in fleet; using %r",
-            task.id,
-            persona,
-            fallback_persona,
-        )
-        persona = fallback_persona
+        if foundry is not None:
+            persona = foundry.resolve_or_generate(persona, known, fallback_persona)
+        else:
+            logger.warning(
+                "DAG node %r persona %r not in fleet; using %r",
+                task.id,
+                persona,
+                fallback_persona,
+            )
+            persona = fallback_persona
 
     pipeline = task.pipeline or parent_task.pipeline or default_pipeline
     context = build_dag_task_context(
@@ -178,6 +183,7 @@ def dispatch_dag(
     acceptance_criteria: list[str] | None = None,
     fleet_log: FleetLogger | None = None,
     canvas_writer: DagCanvasWriter | None = None,
+    foundry: PersonaFoundry | None = None,
 ) -> DagRunSummary:
     """Run DAG tasks rank-by-rank through the fleet dispatcher."""
     validate_dag_graph(spec)
@@ -205,125 +211,130 @@ def dispatch_dag(
     failed_ids: set[str] = set()
     skip_ids: set[str] = set()
 
-    for rank_index, rank in enumerate(ranks):
-        runnable = [task for task in rank if task.id not in skip_ids]
-        skipped_in_rank = [task for task in rank if task.id in skip_ids]
-        for task in skipped_in_rank:
-            if canvas_state is not None:
-                set_task_status(
-                    canvas_state,
-                    task.id,
-                    status="ERROR",
-                    error_message="Skipped: upstream task failed",
-                    duration_ms=0,
+    # Dependency-driven dispatch: each task starts the moment its own
+    # dependencies finish, not when its whole topological rank does, so
+    # independent chains never wait on each other and wall-clock tracks the
+    # critical path. All mutable state below is touched only on this thread in
+    # the drain loop, so no lock is needed. same_workspace_tasks stays 1: DAG
+    # nodes compose edits into the single parent workspace, as before.
+    by_id = {task.id: task for task in spec.tasks}
+    remaining_deps = {task.id: len(task.depends_on) for task in spec.tasks}
+    dependents: dict[str, list[str]] = {task.id: [] for task in spec.tasks}
+    for task in spec.tasks:
+        for dep in task.depends_on:
+            dependents[dep].append(task.id)
+
+    dispatch_index = 0
+    n_total = len(spec.tasks)
+
+    def _emit_skip(dag_task: DagTask) -> None:
+        if canvas_state is not None:
+            set_task_status(
+                canvas_state,
+                dag_task.id,
+                status="ERROR",
+                error_message="Skipped: upstream task failed",
+                duration_ms=0,
+            )
+        all_results.append(
+            FleetTaskResult(
+                task_index=len(all_results),
+                persona=dag_task.persona or fallback_persona,
+                goal=f"{spec.title} — {dag_task.id}",
+                status="skipped",
+                summary="Skipped due to upstream failure",
+                error=None,
+                duration_seconds=0.0,
+            )
+        )
+
+    def _release(done_id: str) -> list[DagTask]:
+        freed: list[DagTask] = []
+        for child_id in dependents[done_id]:
+            remaining_deps[child_id] -= 1
+            if remaining_deps[child_id] == 0:
+                freed.append(by_id[child_id])
+        freed.sort(key=lambda task: task.id)
+        return freed
+
+    with ThreadPoolExecutor(max_workers=max(1, n_total)) as pool:
+        futures: dict[Future[FleetTaskResult], DagTask] = {}
+
+        def _launch(ready: list[DagTask]) -> None:
+            nonlocal dispatch_index
+            for dag_task in ready:
+                if dag_task.id in skip_ids:
+                    _emit_skip(dag_task)
+                    skip_ids.update(transitive_dependents(spec, {dag_task.id}))
+                    _launch(_release(dag_task.id))
+                    continue
+                fleet_task = fleet_task_from_dag_node(
+                    task=dag_task,
+                    spec=spec,
+                    parent_task=parent_task,
+                    upstream_outputs=upstream_outputs,
+                    default_pipeline=default_pipeline,
+                    fallback_persona=fallback_persona,
+                    persona_resolver=persona_resolver,
+                    parent_run_id=parent_run_id,
+                    max_chars_per_parent=max_chars_per_parent,
+                    acceptance_criteria=acceptance_criteria,
+                    foundry=foundry,
                 )
-            all_results.append(
-                FleetTaskResult(
-                    task_index=len(all_results),
-                    persona=task.persona or fallback_persona,
-                    goal=f"{spec.title} — {task.id}",
-                    status="skipped",
-                    summary="Skipped due to upstream failure",
-                    error=None,
-                    duration_seconds=0.0,
-                )
-            )
-        if skipped_in_rank:
-            _sync_canvas()
-
-        if not runnable:
-            continue
-
-        if fleet_log is not None:
-            fleet_log.emit(
-                "orchestration.dag.rank_start",
-                rank=rank_index,
-                tasks=[task.id for task in runnable],
-            )
-
-        for dag_task in runnable:
-            if canvas_state is not None:
-                set_task_status(canvas_state, dag_task.id, status="RUNNING")
-        _sync_canvas()
-
-        fleet_tasks: list[tuple[DagTask, FleetTask]] = []
-        for dag_task in runnable:
-            fleet_tasks.append(
-                (
-                    dag_task,
-                    fleet_task_from_dag_node(
-                        task=dag_task,
-                        spec=spec,
-                        parent_task=parent_task,
-                        upstream_outputs=upstream_outputs,
-                        default_pipeline=default_pipeline,
-                        fallback_persona=fallback_persona,
-                        persona_resolver=persona_resolver,
-                        parent_run_id=parent_run_id,
-                        max_chars_per_parent=max_chars_per_parent,
-                        acceptance_criteria=acceptance_criteria,
-                    ),
-                )
-            )
-
-        rank_results: list[FleetTaskResult | None] = [None] * len(fleet_tasks)
-        if len(fleet_tasks) == 1:
-            dag_task, fleet_task = fleet_tasks[0]
-            result = dispatcher._execute_task(
-                len(all_results),
-                fleet_task,
-                batch_size=1,
-                same_workspace_tasks=1,
-            )
-            rank_results[0] = result
-        else:
-            with ThreadPoolExecutor(max_workers=len(fleet_tasks)) as pool:
-                futures = {
+                if canvas_state is not None:
+                    set_task_status(canvas_state, dag_task.id, status="RUNNING")
+                futures[
                     pool.submit(
                         dispatcher._execute_task,
-                        len(all_results) + idx,
+                        dispatch_index,
                         fleet_task,
-                        batch_size=len(fleet_tasks),
+                        batch_size=n_total,
                         same_workspace_tasks=1,
-                    ): (idx, dag_task)
-                    for idx, (dag_task, fleet_task) in enumerate(fleet_tasks)
-                }
-                for future in as_completed(futures):
-                    idx, dag_task = futures[future]
-                    rank_results[idx] = future.result()
+                    )
+                ] = dag_task
+                dispatch_index += 1
 
-        for (dag_task, _), result in zip(fleet_tasks, rank_results, strict=True):
-            assert result is not None
-            all_results.append(result)
-            if fleet_log is not None:
-                fleet_log.emit(
-                    "orchestration.dag.task_finish",
-                    id=dag_task.id,
-                    status=result.status,
-                    duration_s=result.duration_seconds,
-                )
-            if canvas_state is not None:
-                output = _result_output(result)
-                canvas_status = fleet_status_to_canvas(result.status)
-                set_task_status(
-                    canvas_state,
-                    dag_task.id,
-                    status=canvas_status,
-                    result_text=output if canvas_status == "FINISHED" else None,
-                    error_message=(
-                        (result.error or result.status) if canvas_status == "ERROR" else None
-                    ),
-                    duration_ms=int(result.duration_seconds * 1000),
-                )
-            if _is_success(result.status):
-                upstream_outputs[dag_task.id] = _result_output(result)
-            elif _is_failure(result.status):
-                failed_ids.add(dag_task.id)
-
+        _launch(
+            sorted(
+                (task for task in spec.tasks if remaining_deps[task.id] == 0),
+                key=lambda task: task.id,
+            )
+        )
         _sync_canvas()
 
-        if failed_ids:
-            skip_ids |= transitive_dependents(spec, failed_ids)
+        while futures:
+            done, _ = wait(list(futures), return_when=FIRST_COMPLETED)
+            for future in done:
+                dag_task = futures.pop(future)
+                result = future.result()
+                all_results.append(result)
+                if fleet_log is not None:
+                    fleet_log.emit(
+                        "orchestration.dag.task_finish",
+                        id=dag_task.id,
+                        status=result.status,
+                        duration_s=result.duration_seconds,
+                    )
+                if canvas_state is not None:
+                    output = _result_output(result)
+                    canvas_status = fleet_status_to_canvas(result.status)
+                    set_task_status(
+                        canvas_state,
+                        dag_task.id,
+                        status=canvas_status,
+                        result_text=output if canvas_status == "FINISHED" else None,
+                        error_message=(
+                            (result.error or result.status) if canvas_status == "ERROR" else None
+                        ),
+                        duration_ms=int(result.duration_seconds * 1000),
+                    )
+                if _is_success(result.status):
+                    upstream_outputs[dag_task.id] = _result_output(result)
+                elif _is_failure(result.status):
+                    failed_ids.add(dag_task.id)
+                    skip_ids.update(transitive_dependents(spec, failed_ids))
+                _launch(_release(dag_task.id))
+            _sync_canvas()
 
     status, error, summary = aggregate_dag_results(all_results)
     if canvas_state is not None and canvas_writer is not None:

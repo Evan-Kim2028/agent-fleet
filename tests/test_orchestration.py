@@ -57,6 +57,18 @@ def test_orchestration_config_disabled() -> None:
     cfg = resolve_orchestration_config({"orchestration": False})
     assert cfg.enabled is False
     assert cfg.auto_dispatch_children is False
+    assert cfg.auto_dispatch_dag is False
+    assert cfg.auto_dispatch_program is False
+
+
+def test_orchestration_config_from_dict_enabled_false() -> None:
+    from agent_fleet.orchestration.config import OrchestrationConfig
+
+    cfg = OrchestrationConfig.from_dict({"enabled": False})
+    assert cfg.enabled is False
+    assert cfg.auto_dispatch_children is False
+    assert cfg.auto_dispatch_dag is False
+    assert cfg.auto_dispatch_program is False
 
 
 def test_orchestration_config_from_repo_example() -> None:

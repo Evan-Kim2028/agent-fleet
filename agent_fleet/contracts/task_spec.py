@@ -21,6 +21,7 @@ class DecompositionDecision(enum.StrEnum):
     DECOMPOSE = "decompose"
     DAG = "dag"
     REJECTED = "rejected"
+    PROGRAM = "program"
 
 
 class RiskTier(enum.StrEnum):
@@ -48,6 +49,7 @@ class TaskSpec:
     critical_paths_touched: list[str]
     coordination_spec: dict[str, Any] | None
     dag: dict[str, Any] | None = None
+    program: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -55,6 +57,8 @@ class TaskSpec:
         d["risk_tier"] = self.risk_tier.value
         if d.get("dag") is None:
             d.pop("dag", None)
+        if d.get("program") is None:
+            d.pop("program", None)
         return d
 
     @classmethod
@@ -75,6 +79,7 @@ class TaskSpec:
             critical_paths_touched=list(data["critical_paths_touched"]),
             coordination_spec=data["coordination_spec"],
             dag=data.get("dag"),
+            program=data.get("program"),
         )
 
 

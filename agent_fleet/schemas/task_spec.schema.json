@@ -19,7 +19,7 @@
     "issue_number": {"type": "integer", "minimum": 1},
     "decomposition_decision": {
       "type": "string",
-      "enum": ["single", "decompose", "dag", "rejected"]
+      "enum": ["single", "decompose", "dag", "rejected", "program"]
     },
     "decomposition_reason": {"type": "string"},
     "cross_cutting_acknowledged": {
@@ -105,6 +105,10 @@
           }
         }
       ]
+    },
+    "program": {
+      "type": ["string", "null"],
+      "description": "Python orchestration program source (set only when decomposition_decision is 'program')"
     },
     "dag": {
       "type": "object",

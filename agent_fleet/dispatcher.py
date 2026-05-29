@@ -274,6 +274,14 @@ class FleetDispatcher:
             and orchestration.auto_dispatch_dag
             and task_spec.dag
         ):
+            from agent_fleet.persona_foundry import PersonaFoundry
+
+            foundry = PersonaFoundry(
+                personas_dir=task_config.personas_dir,
+                backend=self.backend,
+                model=task_config.default_model,
+                fleet_log=fleet_log,
+            )
             dag_spec = dag_spec_from_dict(task_spec.dag)
             dag_summary = dispatch_dag(
                 spec=dag_spec,
@@ -286,6 +294,7 @@ class FleetDispatcher:
                 max_chars_per_parent=orchestration.dag_upstream_context_chars,
                 acceptance_criteria=task_spec.acceptance_criteria,
                 fleet_log=fleet_log,
+                foundry=foundry,
             )
             fleet_log.emit(
                 "orchestration.dag",
@@ -315,6 +324,14 @@ class FleetDispatcher:
             task_spec.decomposition_decision.value == "decompose"
             and orchestration.auto_dispatch_children
         ):
+            from agent_fleet.persona_foundry import PersonaFoundry
+
+            foundry = PersonaFoundry(
+                personas_dir=task_config.personas_dir,
+                backend=self.backend,
+                model=task_config.default_model,
+                fleet_log=fleet_log,
+            )
             child_results, status, error, summary = dispatch_task_spec_children(
                 task_spec=task_spec,
                 parent_task=task,
@@ -323,6 +340,7 @@ class FleetDispatcher:
                 persona_resolver=resolver,
                 fallback_persona=task.persona or task_config.default_persona,
                 parent_run_id=fleet_log.run_id,
+                foundry=foundry,
             )
             fleet_log.emit(
                 "orchestration.decompose",
@@ -341,6 +359,46 @@ class FleetDispatcher:
                     phases={
                         "plan": task_spec.to_dict(),
                         "decompose_dispatch": [r.__dict__ for r in child_results],
+                    },
+                    task_spec=task_spec.to_dict(),
+                ),
+                task,
+            )
+
+        if (
+            task_spec.decomposition_decision.value == "program"
+            and orchestration.auto_dispatch_program
+            and task_spec.program
+        ):
+            from agent_fleet.orchestration.program import run_workflow_program
+
+            program_summary = run_workflow_program(
+                task_spec.program,
+                dispatcher=self,
+                persona_resolver=resolver,
+                fleet_log=fleet_log,
+            )
+            status = "completed" if program_summary.ok else "error"
+            result_text = str(program_summary.result)
+            if len(result_text) > 1900:
+                result_text = result_text[:1900] + "..."
+            fleet_log.emit(
+                "orchestration.program",
+                status=program_summary.status,
+                agents=program_summary.agents_dispatched,
+            )
+            return (
+                FleetTaskResult(
+                    task_index=task_index,
+                    persona=task.persona,
+                    goal=task.goal,
+                    status=status,
+                    summary=f"Program completed: {result_text}",
+                    error=program_summary.error,
+                    duration_seconds=round(time.monotonic() - start, 2),
+                    phases={
+                        "plan": task_spec.to_dict(),
+                        "program": program_summary.to_dict(),
                     },
                     task_spec=task_spec.to_dict(),
                 ),

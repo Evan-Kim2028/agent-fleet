@@ -16,6 +16,7 @@ from agent_fleet.planner import plan
 if TYPE_CHECKING:
     from agent_fleet.dispatcher import FleetDispatcher
     from agent_fleet.hooks import LLMBackend, LLMSession, PersonaResolver
+    from agent_fleet.persona_foundry import PersonaFoundry
     from agent_fleet.spine_config import SpineConfig
 
 logger = logging.getLogger(__name__)
@@ -145,6 +146,7 @@ def child_tasks_from_task_spec(
     persona_resolver: PersonaResolver,
     fallback_persona: str,
     parent_run_id: str | None = None,
+    foundry: PersonaFoundry | None = None,
 ) -> list[FleetTask]:
     """Build FleetTask list from planner child_issues_proposed."""
     known = set(persona_resolver.list_personas())
@@ -156,13 +158,16 @@ def child_tasks_from_task_spec(
         body = str(child.get("body") or title).strip()
         persona = str(child.get("persona") or fallback_persona)
         if persona not in known:
-            logger.warning(
-                "Child task %r persona %r not in fleet; using %r",
-                title,
-                persona,
-                fallback_persona,
-            )
-            persona = fallback_persona
+            if foundry is not None:
+                persona = foundry.resolve_or_generate(persona, known, fallback_persona)
+            else:
+                logger.warning(
+                    "Child task %r persona %r not in fleet; using %r",
+                    title,
+                    persona,
+                    fallback_persona,
+                )
+                persona = fallback_persona
         goal = title if body == title else f"{title}\n\n{body}"
         context = _child_context(child, task_spec, parent_context=parent_context)
         child_equip = (
@@ -231,6 +236,7 @@ def dispatch_task_spec_children(
     fallback_persona: str,
     max_parallel: int | None = None,
     parent_run_id: str | None = None,
+    foundry: PersonaFoundry | None = None,
 ) -> tuple[list[FleetTaskResult], str, str | None, str]:
     """Fan out child tasks through the fleet dispatcher.
 
@@ -253,6 +259,7 @@ def dispatch_task_spec_children(
         persona_resolver=persona_resolver,
         fallback_persona=fallback_persona,
         parent_run_id=parent_run_id,
+        foundry=foundry,
     )
 
     limit = max_parallel or dispatcher.config.max_parallel
