@@ -79,11 +79,32 @@ def cmd_scout(args: argparse.Namespace) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     config = load_fleet_config(args.config) if args.config else load_fleet_config()
-    if (code := require_backend_env(config)) is not None:
-        return code
-
     workspace = Path(args.workspace or Path.cwd()).resolve()
     repo = find_repo_config(workspace)
+
+    if getattr(args, "dry_run", False):
+        persona = args.persona or (repo.default_persona if repo else config.default_persona)
+        print(
+            json.dumps(
+                {
+                    "dry_run": True,
+                    "goal": args.goal,
+                    "title": args.title,
+                    "context": args.context or "",
+                    "persona": persona,
+                    "pipeline": args.pipeline,
+                    "workspace": str(workspace),
+                    "backend": config.default_backend,
+                    "repo_config": str(repo.repo_root) if repo else None,
+                },
+                indent=2,
+                default=str,
+            )
+        )
+        return 0
+
+    if (code := require_backend_env(config)) is not None:
+        return code
 
     if args.pipeline == "full":
         if repo and repo.personas_dir:
@@ -493,6 +514,94 @@ def cmd_learn(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_doctor(args: argparse.Namespace) -> int:
+    from agent_fleet.doctor import doctor_exit_code, render_doctor, run_doctor_checks
+
+    backend = "cursor"
+    try:
+        config = load_fleet_config(args.config) if args.config else load_fleet_config()
+        backend = config.default_backend
+    except (OSError, ValueError):
+        pass
+    workspace = Path(args.workspace).resolve() if args.workspace else Path.cwd()
+    repo_present = find_repo_config(workspace) is not None
+    checks = run_doctor_checks(backend=backend, repo_present=repo_present)
+    if args.json:
+        print(json.dumps([c.to_dict() for c in checks], indent=2))
+    else:
+        print(render_doctor(checks))
+    return doctor_exit_code(checks)
+
+
+def cmd_runs(args: argparse.Namespace) -> int:
+    from agent_fleet.observability.run_store import read_run_index, render_runs_table
+
+    rows = read_run_index()
+    if args.limit and args.limit > 0:
+        rows = rows[: args.limit]
+    if args.json:
+        print(json.dumps(rows, indent=2, default=str))
+    else:
+        print(render_runs_table(rows))
+    return 0
+
+
+def cmd_watch(args: argparse.Namespace) -> int:
+    import time
+    from dataclasses import asdict
+
+    from agent_fleet.observability.run_store import (
+        fold_run_events,
+        load_fleet_events,
+        render_run_state,
+        resolve_run_path,
+        run_is_terminal,
+        run_log_total_tokens,
+    )
+
+    path = resolve_run_path(args.run)
+    if path is None:
+        print(f"error: no run matching {args.run!r} under the runs dir", file=sys.stderr)
+        return 1
+
+    if args.json:
+        rows = load_fleet_events(path)
+        payload = asdict(fold_run_events(rows))
+        payload["tokens"] = run_log_total_tokens(rows)
+        print(json.dumps(payload, indent=2, default=str))
+        return 0
+
+    def snapshot() -> tuple[str, bool]:
+        rows = load_fleet_events(path)
+        state = fold_run_events(rows)
+        return render_run_state(state, tokens=run_log_total_tokens(rows)), run_is_terminal(state)
+
+    text, terminal = snapshot()
+    if args.once or terminal:
+        print(text)
+        return 0
+
+    is_tty = sys.stdout.isatty()
+    last_size = -1
+    stable_ticks = 0
+    try:
+        while True:
+            text, terminal = snapshot()
+            if is_tty:
+                print("\033[2J\033[H", end="")
+            print(text, flush=True)
+            size = path.stat().st_size if path.exists() else 0
+            if terminal:
+                stable_ticks = stable_ticks + 1 if size == last_size else 0
+                if stable_ticks >= 1:
+                    break
+            last_size = size
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        return 130
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agent-fleet", description="Agentic coding fleet CLI")
     parser.add_argument(
@@ -517,6 +626,11 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=None,
         help="Override fleet config max_redispatches for this run.",
+    )
+    run_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Resolve and print the run plan (persona, pipeline, workspace) without dispatching.",
     )
     run_p.set_defaults(func=cmd_run)
 
@@ -560,6 +674,27 @@ def main(argv: list[str] | None = None) -> int:
     personas_p = sub.add_parser("personas", help="List personas")
     personas_p.add_argument("--workspace", help="Repo path (for repo-local personas)")
     personas_p.set_defaults(func=cmd_personas)
+
+    doctor_p = sub.add_parser("doctor", help="Preflight environment checks with actionable fixes")
+    doctor_p.add_argument("--workspace", help="Repo path (checks for .agent-fleet.yaml)")
+    doctor_p.add_argument("--json", action="store_true", help="Emit checks as JSON")
+    doctor_p.set_defaults(func=cmd_doctor)
+
+    runs_p = sub.add_parser("runs", help="List recorded fleet runs (newest first)")
+    runs_p.add_argument("--limit", type=int, default=20, help="Max rows to show (default 20)")
+    runs_p.add_argument("--json", action="store_true", help="Emit rows as JSON")
+    runs_p.set_defaults(func=cmd_runs)
+
+    watch_p = sub.add_parser(
+        "watch", help="Live phase/agent tree for a run (by id, prefix, or 'latest')"
+    )
+    watch_p.add_argument("run", nargs="?", default="latest", help="Run id, id prefix, or 'latest'")
+    watch_p.add_argument("--once", action="store_true", help="Render once and exit")
+    watch_p.add_argument(
+        "--json", action="store_true", help="Emit the folded run state as JSON and exit"
+    )
+    watch_p.add_argument("--interval", type=float, default=1.0, help="Poll seconds (default 1.0)")
+    watch_p.set_defaults(func=cmd_watch)
 
     loop_p = sub.add_parser("loop", help="Run PR review-fix-merge watcher")
     loop_p.add_argument("--workspace", help="Repo path")

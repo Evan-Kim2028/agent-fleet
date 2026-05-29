@@ -70,10 +70,13 @@ Use **absolute paths** to your target repo. You do not clone agent-fleet into th
 
 ### 1. Install fleet (once per machine)
 
+Agent-fleet is pinned to **Python 3.14** (`requires-python = ">=3.14,<3.15"`). Use `uv` to install the right interpreter and sync the lockfile:
+
 ```bash
+uv python install 3.14
 git clone https://github.com/Evan-Kim2028/agent-fleet.git
 cd agent-fleet
-pip install -e ".[dev]"    # or: uv sync --frozen --group dev
+uv sync
 
 export CURSOR_API_KEY=your_key_here
 mkdir -p ~/.agent-fleet
@@ -82,12 +85,26 @@ cp fleet.example.yaml ~/.agent-fleet/fleet.yaml
 # edit fleet.yaml: default_model: composer-2.5
 ```
 
-> **Import shadow:** Do not clone into `~/Documents/agent_fleet` (underscore). That path name matches the Python package and can shadow the installed `agent_fleet` module when used as cwd or on `PYTHONPATH`. Prefer `~/agent-fleet-dev` or any hyphenated path. Check with `python3 scripts/check-import-shadow.py` — see [docs/FLEET-CONFIG.md](docs/FLEET-CONFIG.md#import-shadow).
-
-### 2. Verify install
+Verify the install:
 
 ```bash
-agent-fleet personas    # should list coder, reviewer, pr-analyzer, …
+uv run agent-fleet --help
+```
+
+> **Import shadow:** Do not clone into `~/Documents/agent_fleet` (underscore). That path name matches the Python package and can shadow the installed `agent_fleet` module when used as cwd or on `PYTHONPATH`. Prefer `~/agent-fleet-dev` or any hyphenated path. Check with `python3 scripts/check-import-shadow.py` — see [docs/FLEET-CONFIG.md](docs/FLEET-CONFIG.md#import-shadow).
+
+### 2. Preflight check
+
+`doctor` runs environment checks and prints an actionable fix for each item not passing:
+
+```bash
+uv run agent-fleet doctor
+```
+
+Checks: Python version, backend API key (`CURSOR_API_KEY`), `cursor-sdk` import, `gh` CLI, fleet config, and repo config. The command exits non-zero only on a hard failure (missing key, wrong Python version); warnings about optional items still exit 0. For CI or scripted onboarding, use machine-readable output:
+
+```bash
+uv run agent-fleet doctor --json
 ```
 
 ### 3. Add your repo (recommended before real work)
@@ -122,6 +139,34 @@ agent-fleet review --workspace "$REPO" --format json
 ```
 
 Expect JSON with `status: completed` or a typed failure (`scope_violation`, `verify_failed`, `review_changes_requested`). Commit or stash local changes in the target repo before dispatch if you want a clean diff.
+
+**Preview a run without spending tokens** — `--dry-run` resolves the plan (persona, pipeline, workspace, backend) and prints it as JSON, then exits before requiring a backend API key:
+
+```bash
+uv run agent-fleet run "Add error handling to auth module" --dry-run
+```
+
+---
+
+## Monitoring runs
+
+`runs` lists every recorded run, newest first:
+
+```bash
+uv run agent-fleet runs
+```
+
+Each row shows: id, status, tokens, started, goal. Add `--json` for machine-readable output; `--limit N` to cap rows.
+
+`watch` tails a single run as a live phase/agent tree:
+
+```bash
+uv run agent-fleet watch            # defaults to 'latest'
+uv run agent-fleet watch <run-id>   # full id or a unique prefix
+```
+
+- `--once` prints one snapshot and exits (no live loop).
+- `--json` emits the complete folded run state as JSON and exits.
 
 ---
 

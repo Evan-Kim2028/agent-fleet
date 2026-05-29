@@ -11,3 +11,4 @@ pipeline_skills:
       - cursor-team-kit/deslop
       - agent-skills/doubt-driven-development
       - agent-skills/code-review-and-quality
+      - cli-for-agents

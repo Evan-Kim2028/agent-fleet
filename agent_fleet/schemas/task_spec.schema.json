@@ -110,6 +110,14 @@
       "type": ["string", "null"],
       "description": "Python orchestration program source (set only when decomposition_decision is 'program')"
     },
+    "program_args": {
+      "type": ["object", "null"],
+      "description": "Read-only inputs bound to the program as the `args` dict (set only when decomposition_decision is 'program')"
+    },
+    "program_cwd": {
+      "type": ["string", "null"],
+      "description": "Working directory hint bound to the program as `cwd`; the dispatcher supplies the repo root when this is null"
+    },
     "dag": {
       "type": "object",
       "description": "Cookbook-compatible DAG spec when decomposition_decision is dag",

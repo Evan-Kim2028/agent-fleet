@@ -1,0 +1,1 @@
+This skill is vendored from https://github.com/cursor/plugins/tree/main/cli-for-agent (the `cli-for-agents` skill under that plugin's `skills/` directory) under the MIT License, Copyright (c) 2026 Cursor; unmodified.

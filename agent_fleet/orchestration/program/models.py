@@ -41,6 +41,8 @@ class AgentResult:
     transcript never enters the program's namespace. ``summary`` is the
     synthesized answer the agent returned, already truncated to a ceiling.
     ``data`` holds parsed structured output when the call requested a schema.
+    ``schema_error`` is None when ``data`` validated against the requested
+    schema, or a human-readable reason when it did not (after the one retry).
     """
 
     status: str
@@ -50,6 +52,7 @@ class AgentResult:
     duration_seconds: float = 0.0
     agent_id: str | None = None
     data: dict[str, object] | None = None
+    schema_error: str | None = None
     error: str | None = None
     observed_total_tokens: int | None = None
     task_index: int = -1

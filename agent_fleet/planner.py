@@ -67,15 +67,24 @@ When to choose "program":
   subagents with routing, fan-out, branching, and convergence that a static
   DECOMPOSE or DAG cannot express. When decomposition_decision is "program",
   place the Python source in the top-level "program" field. The program may
-  call five injected primitives: agent(prompt, *, persona=None, context="",
+  call eight injected primitives: agent(prompt, *, persona=None, context="",
   complexity=None, pipeline=None, allowed_paths=(), title=None, schema=None)
-  dispatches one subagent and returns an AgentResult (.ok, .summary, .data);
-  parallel(thunks) runs a list of callables concurrently and returns results
-  in order; pipeline(items, *stages) passes each item through stages where
-  each stage receives (prev, original, index); phase(title) marks a named
-  execution phase; log(message) appends a message to the run log. The program
-  ends with a top-level "return <final_answer>" and only that return value
-  crosses back to the parent -- subagent transcripts remain isolated.
+  dispatches one subagent and returns an AgentResult (.ok, .summary, .data,
+  .schema_error) -- when schema is given the output is validated against it
+  with one corrective retry, and .schema_error is None on success; parallel(
+  thunks) runs a list of callables concurrently and returns results in order;
+  pipeline(items, *stages) passes each item through stages where each stage
+  receives (prev, original, index); branch(question, if_true, if_false=None)
+  lets a judge agent pick the control path; replan(goal, step, *, max_iterations)
+  loops a step under model control until a judge says the goal is met;
+  subprogram(source) generates and runs a nested program at runtime;
+  phase(title) marks a named execution phase; log(message) appends to the run
+  log. Three read-only globals are also bound: budget (.total may be None when
+  unbounded, .spent(), .remaining()) so the program can pace itself; args, a
+  dict of the optional top-level "program_args" inputs; and cwd, a string path
+  (the optional "program_cwd", else the repo root). The program ends with a
+  top-level "return <final_answer>" and only that return value crosses back to
+  the parent -- subagent transcripts remain isolated.
 """
 
 

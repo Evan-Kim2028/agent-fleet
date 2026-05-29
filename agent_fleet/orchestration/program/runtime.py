@@ -4,8 +4,10 @@ This is the deep module behind a small interface. A caller hands
 ``run_workflow_program`` a string of Python and a dispatcher; it returns a
 bounded ``ProgramRunSummary``. Behind the seam sit AST validation, the wrap
 that turns top-level ``return`` into a callable, a restricted namespace, the
-five primitives, thread-pooled fan-out, worktree isolation when agents run
-concurrently, an agent budget, a deadline, and token accounting.
+primitives, thread-pooled fan-out, worktree isolation when agents run
+concurrently, an agent budget, an optional token budget, a deadline, and token
+accounting. An ``agent()`` call that requests a schema gets one validate-and-
+retry pass; the program can read ``args``, ``cwd``, and a live ``budget``.
 
 The coordination logic, which agent runs, in what order, what fans out, how
 results converge, lives in the program text, not in any LLM context. The
@@ -25,6 +27,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TYPE_CHECKING, Protocol, cast
 
+import jsonschema
+
 from agent_fleet.hooks import FleetTask
 from agent_fleet.orchestration.primitives import effective_capacity
 from agent_fleet.orchestration.program.models import (
@@ -41,7 +45,7 @@ if TYPE_CHECKING:
     import types
     from collections.abc import Callable
 
-    from agent_fleet.hooks import PersonaResolver
+    from agent_fleet.hooks import FleetTaskResult, PersonaResolver
     from agent_fleet.orchestration.types import _DispatcherLike
 
 
@@ -166,6 +170,32 @@ def _wrap_as_main(source: str) -> types.CodeType:
     return compile(module, "<workflow-program>", "exec")
 
 
+class _Budget:
+    """The live token budget a program reads to pace itself.
+
+    Mirrors the contract the parent fleet's own workflow tool exposes. ``total``
+    is the optional ceiling (``None`` means unbounded). ``spent()`` sums the
+    tokens observed across every agent that has *returned* so far; in-flight
+    agents are not counted until they complete. ``remaining()`` is the headroom,
+    or ``inf`` when unbounded. The runtime also treats ``total`` as a hard
+    ceiling: once ``spent()`` reaches it, further ``agent()`` calls raise, so a
+    program can either self-throttle on ``remaining()`` or let the ceiling bite.
+    """
+
+    def __init__(self, ctx: ProgramContext, total: int | None) -> None:
+        self._ctx = ctx
+        self.total = total
+
+    def spent(self) -> int:
+        with self._ctx._lock:
+            return sum((r.observed_total_tokens or 0) for r in self._ctx._results)
+
+    def remaining(self) -> float:
+        if self.total is None:
+            return float("inf")
+        return max(0, self.total - self.spent())
+
+
 class ProgramContext:
     """Holds dispatch state for one program run and binds the five primitives.
 
@@ -186,6 +216,9 @@ class ProgramContext:
         timeout_s: float | None,
         fleet_log: _FleetLogLike | None,
         child_depth: int = 1,
+        token_budget: int | None = None,
+        args: dict[str, object] | None = None,
+        cwd: str | None = None,
     ) -> None:
         self._dispatcher = dispatcher
         self._persona_resolver = persona_resolver
@@ -193,6 +226,9 @@ class ProgramContext:
         self._default_pipeline = default_pipeline
         self._max_parallel = max(1, max_parallel)
         self._child_depth = child_depth
+        self._token_budget = token_budget
+        self._args = dict(args) if args else {}
+        self._cwd = cwd
         self._capacity = effective_capacity(dispatcher, fallback=self._max_parallel)
         self._max_agents = max(1, max_agents)
         self._fleet_log = fleet_log
@@ -222,6 +258,92 @@ class ProgramContext:
         with contextlib.suppress(Exception):
             self._fleet_log.emit(event, **fields)
 
+    def _dispatch(
+        self,
+        prompt: str,
+        *,
+        persona: str | None,
+        context: str,
+        complexity: str | None,
+        pipeline: str | None,
+        allowed_paths: tuple[str, ...],
+        title: str | None,
+    ) -> tuple[FleetTaskResult, int]:
+        """Run one subagent against the budgets and return its raw result and index.
+
+        This is the single place that charges the agent and token budgets,
+        detects live concurrency, and isolates a worktree when more than one
+        agent is in flight. It raises ``ProgramExecutionError`` when either
+        budget is exhausted or the deadline has passed; callers decide whether
+        to surface that or fall back to a best-effort result.
+        """
+        self._check_deadline()
+        with self._lock:
+            if self._dispatched >= self._max_agents:
+                raise ProgramExecutionError(
+                    f"agent budget exhausted: {self._max_agents} agents dispatched"
+                )
+            if self._token_budget is not None:
+                spent = sum((r.observed_total_tokens or 0) for r in self._results)
+                if spent >= self._token_budget:
+                    raise ProgramExecutionError(
+                        f"token budget exhausted: {spent}/{self._token_budget} tokens spent"
+                    )
+            idx = self._dispatched
+            self._dispatched += 1
+            self._inflight += 1
+            concurrency = self._inflight
+            fanout = self._fanout_depth
+
+        try:
+            effective_pipeline = None if complexity else (pipeline or self._default_pipeline)
+            task = FleetTask(
+                goal=str(prompt),
+                context=str(context or ""),
+                persona=str(persona or self._default_persona),
+                pipeline=effective_pipeline,
+                complexity=complexity,
+                allowed_paths=tuple(allowed_paths or ()),
+                title=title,
+            )
+            isolate = concurrency > 1 or fanout > 0
+            batch = 2 if isolate else 1
+            self._emit(
+                "program.agent.start",
+                idx=idx,
+                persona=task.persona,
+                isolate=isolate,
+                goal=task.goal[:120],
+            )
+            result = self._dispatcher._execute_task(
+                idx, task, batch_size=batch, same_workspace_tasks=batch, depth=self._child_depth
+            )
+        finally:
+            with self._lock:
+                self._inflight -= 1
+        return result, idx
+
+    def _coerce_schema(
+        self, summary: str, schema: dict[str, object] | None
+    ) -> tuple[dict[str, object] | None, str | None]:
+        """Parse JSON from agent output and validate it against *schema*.
+
+        Returns ``(data, schema_error)``. ``data`` is the parsed object whenever
+        one was found, even when it failed validation, so the program still sees
+        the model's best attempt. ``schema_error`` is ``None`` on success or a
+        human-readable reason otherwise.
+        """
+        if schema is None:
+            return None, None
+        data = _extract_json(summary)
+        if data is None:
+            return None, "no JSON object found in agent output"
+        try:
+            jsonschema.validate(instance=data, schema=schema)
+        except jsonschema.ValidationError as exc:
+            return data, f"schema validation failed: {exc.message}"
+        return data, None
+
     def agent(
         self,
         prompt: str,
@@ -240,58 +362,63 @@ class ProgramContext:
         live: if another agent is already in flight, this one runs in an
         isolated worktree so parallel writers never share a tree. A lone agent
         runs in place.
+
+        When *schema* is given the output is validated against it. A miss earns
+        exactly one corrective re-dispatch with the validation error appended;
+        if the retry also misses (or cannot run because a budget or the deadline
+        is spent), the best-effort result is returned with ``schema_error`` set.
         """
-        self._check_deadline()
-        with self._lock:
-            if self._dispatched >= self._max_agents:
-                raise ProgramExecutionError(
-                    f"agent budget exhausted: {self._max_agents} agents dispatched"
+        base_prompt = prompt if schema is None else f"{prompt}\n\n{_schema_instruction(schema)}"
+        attempt_prompt = base_prompt
+        attempts = 2 if schema is not None else 1
+        last: AgentResult | None = None
+        for _ in range(attempts):
+            try:
+                result, idx = self._dispatch(
+                    attempt_prompt,
+                    persona=persona,
+                    context=context,
+                    complexity=complexity,
+                    pipeline=pipeline,
+                    allowed_paths=allowed_paths,
+                    title=title,
                 )
-            idx = self._dispatched
-            self._dispatched += 1
-            self._inflight += 1
-            concurrency = self._inflight
-            fanout = self._fanout_depth
-
-        try:
-            full_prompt = prompt if schema is None else f"{prompt}\n\n{_schema_instruction(schema)}"
-            effective_pipeline = None if complexity else (pipeline or self._default_pipeline)
-            task = FleetTask(
-                goal=str(full_prompt),
-                context=str(context or ""),
-                persona=str(persona or self._default_persona),
-                pipeline=effective_pipeline,
-                complexity=complexity,
-                allowed_paths=tuple(allowed_paths or ()),
-                title=title,
+            except ProgramExecutionError:
+                if last is not None:
+                    return last
+                raise
+            data, schema_error = self._coerce_schema(result.summary or "", schema)
+            agent_result = AgentResult(
+                status=result.status,
+                summary=_bound_summary(result.summary or ""),
+                persona=result.persona,
+                goal=result.goal,
+                duration_seconds=result.duration_seconds,
+                agent_id=result.agent_id,
+                data=data,
+                schema_error=schema_error,
+                error=result.error,
+                observed_total_tokens=result.observed_total_tokens,
+                task_index=result.task_index,
             )
-            isolate = concurrency > 1 or fanout > 0
-            batch = 2 if isolate else 1
-            self._emit("program.agent.start", idx=idx, persona=task.persona, isolate=isolate)
-            result = self._dispatcher._execute_task(
-                idx, task, batch_size=batch, same_workspace_tasks=batch, depth=self._child_depth
-            )
-        finally:
             with self._lock:
-                self._inflight -= 1
-
-        data = _extract_json(result.summary or "") if schema is not None else None
-        agent_result = AgentResult(
-            status=result.status,
-            summary=_bound_summary(result.summary or ""),
-            persona=result.persona,
-            goal=result.goal,
-            duration_seconds=result.duration_seconds,
-            agent_id=result.agent_id,
-            data=data,
-            error=result.error,
-            observed_total_tokens=result.observed_total_tokens,
-            task_index=result.task_index,
-        )
-        with self._lock:
-            self._results.append(agent_result)
-        self._emit("program.agent.done", idx=idx, status=agent_result.status)
-        return agent_result
+                self._results.append(agent_result)
+            self._emit(
+                "program.agent.done",
+                idx=idx,
+                status=agent_result.status,
+                schema_ok=schema_error is None,
+                tokens=agent_result.observed_total_tokens,
+            )
+            last = agent_result
+            if schema is None or schema_error is None:
+                return agent_result
+            attempt_prompt = (
+                f"{base_prompt}\n\nYour previous response did not satisfy the schema: "
+                f"{schema_error}\nReturn corrected JSON in one ```json fenced block."
+            )
+            self._emit("program.agent.schema_retry", idx=idx, error=schema_error[:200])
+        return cast("AgentResult", last)
 
     def _guard(self, thunk: Callable[[], object]) -> object:
         try:
@@ -531,6 +658,9 @@ class ProgramContext:
             "branch": self.branch,
             "replan": self.replan,
             "subprogram": self.subprogram,
+            "budget": _Budget(self, self._token_budget),
+            "args": dict(self._args),
+            "cwd": self._cwd,
         }
 
 
@@ -546,6 +676,9 @@ def run_workflow_program(
     timeout_s: float | None = None,
     fleet_log: _FleetLogLike | None = None,
     child_depth: int = 1,
+    token_budget: int | None = None,
+    args: dict[str, object] | None = None,
+    cwd: str | None = None,
 ) -> ProgramRunSummary:
     """Validate, then run an orchestration program, returning a bounded summary.
 
@@ -571,6 +704,9 @@ def run_workflow_program(
         timeout_s=timeout_s,
         fleet_log=fleet_log,
         child_depth=child_depth,
+        token_budget=token_budget,
+        args=args,
+        cwd=cwd,
     )
     namespace = context.build_namespace()
     start = time.monotonic()

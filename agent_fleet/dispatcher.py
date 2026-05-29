@@ -384,6 +384,7 @@ class FleetDispatcher:
             and orchestration.auto_dispatch_program
             and task_spec.program
         ):
+            from agent_fleet.observability.run_store import append_run_index_row
             from agent_fleet.orchestration.program import run_workflow_program
 
             program_summary = run_workflow_program(
@@ -392,6 +393,8 @@ class FleetDispatcher:
                 persona_resolver=resolver,
                 fleet_log=fleet_log,
                 child_depth=child_depth,
+                args=task_spec.program_args,
+                cwd=task_spec.program_cwd or str(self._resolve_workspace(task)),
             )
             status = "completed" if program_summary.ok else "error"
             result_text = str(program_summary.result)
@@ -401,6 +404,18 @@ class FleetDispatcher:
                 "orchestration.program",
                 status=program_summary.status,
                 agents=program_summary.agents_dispatched,
+            )
+            jsonl_path = fleet_log.run_log.jsonl_path
+            append_run_index_row(
+                {
+                    "run_id": fleet_log.run_id,
+                    "goal": task.goal,
+                    "status": status,
+                    "started_at": time.time() - program_summary.duration_seconds,
+                    "tokens": program_summary.tokens_across_agents,
+                    "kind": "program",
+                },
+                runs_dir=jsonl_path.parent if jsonl_path is not None else None,
             )
             return (
                 FleetTaskResult(

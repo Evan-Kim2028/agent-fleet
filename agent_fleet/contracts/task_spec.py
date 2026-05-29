@@ -50,6 +50,8 @@ class TaskSpec:
     coordination_spec: dict[str, Any] | None
     dag: dict[str, Any] | None = None
     program: str | None = None
+    program_args: dict[str, Any] | None = None
+    program_cwd: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -59,6 +61,10 @@ class TaskSpec:
             d.pop("dag", None)
         if d.get("program") is None:
             d.pop("program", None)
+        if d.get("program_args") is None:
+            d.pop("program_args", None)
+        if d.get("program_cwd") is None:
+            d.pop("program_cwd", None)
         return d
 
     @classmethod

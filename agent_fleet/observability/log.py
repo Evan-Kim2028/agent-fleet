@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import contextlib
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -12,6 +13,7 @@ from agent_fleet.config import default_runs_dir
 from agent_fleet.observability.context import bind_phase, get_run_context
 from agent_fleet.observability.events import FleetEvent, RunContext
 from agent_fleet.observability.logfire_sink import LogfireSink
+from agent_fleet.observability.run_store import append_run_index_row
 from agent_fleet.observability.sinks import (
     JsonlFileSink,
     LogSink,
@@ -137,8 +139,23 @@ class RunLog:
                 }
                 self.emit("phase.end", phase=name, data=end_payload)
 
+    def _index_runs_dir(self) -> Path | None:
+        path = self.jsonl_path
+        return path.parent if path is not None else None
+
     def run_start(self, **data: object) -> None:
         self.emit("run.start", data=dict(data))
+        append_run_index_row(
+            {
+                "run_id": self.run_id,
+                "goal": str(data.get("title", "")),
+                "status": "running",
+                "started_at": time.time(),
+                "persona": self.context.persona if self.context else None,
+                "issue_number": self.context.issue_number if self.context else None,
+            },
+            runs_dir=self._index_runs_dir(),
+        )
 
     def run_end(self, *, outcome: str, changed_lines: int = 0, **data: object) -> None:
         # Flush per-task token rollup before the run terminates so the
@@ -153,6 +170,17 @@ class RunLog:
         self.emit("run.end", data=payload)
         rollup = self._last_usage_rollup
         total_tokens = rollup["totals"]["total_tokens"] if rollup else 0
+        # Merge-update the index row: run_start wrote goal/started_at, so this
+        # later row only needs to carry the fields that changed.
+        append_run_index_row(
+            {
+                "run_id": self.run_id,
+                "status": outcome,
+                "tokens": total_tokens,
+                "completed_at": time.time(),
+            },
+            runs_dir=self._index_runs_dir(),
+        )
         # Prefer the caller-supplied changed_lines when nonzero: the idempotency
         # guard in task_usage_rollup may have fired before changed_lines was known
         # (dispatcher path calls _peek_usage_rollup with changed_lines=0 first).
