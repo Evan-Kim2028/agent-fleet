@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
+    from agent_fleet.contracts.handoff import HandoffNote
     from agent_fleet.hooks import FleetTask, FleetTaskResult
 
 
@@ -18,6 +19,6 @@ class _DispatcherLike(Protocol):
         *,
         batch_size: int = ...,
         same_workspace_tasks: int = ...,
-        handoff: object = ...,
+        handoff: HandoffNote | None = ...,
         base_branch: str | None = ...,
     ) -> FleetTaskResult: ...

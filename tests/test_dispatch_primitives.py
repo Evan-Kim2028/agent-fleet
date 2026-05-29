@@ -48,7 +48,7 @@ def test_run_many_preserves_order() -> None:
     tasks = [_task("a"), _task("b"), _task("c")]
     results = primitives.run_many(tasks)
     assert [r.goal for r in results] == ["a", "b", "c"]
-    assert [c[0] for c in dispatcher.calls] == [0, 1, 2]
+    assert sorted(c[0] for c in dispatcher.calls) == [0, 1, 2]
 
 
 def test_run_many_wave_batch_size_and_same_workspace() -> None:
@@ -56,9 +56,8 @@ def test_run_many_wave_batch_size_and_same_workspace() -> None:
     primitives = DispatchPrimitives(dispatcher, max_parallel=2)
     tasks = [_task(f"t{i}") for i in range(3)]
     primitives.run_many(tasks)
-    # wave1: indices 0,1 batch_size=2; wave2: index 0 batch_size=1
-    assert dispatcher.calls[0] == (0, 2, 1)
-    assert dispatcher.calls[1] == (1, 2, 1)
+    # wave1 runs in parallel so its two calls can land in either order
+    assert sorted(dispatcher.calls[:2]) == [(0, 2, 1), (1, 2, 1)]
     assert dispatcher.calls[2] == (0, 1, 1)
 
 
