@@ -1,0 +1,23 @@
+=== agent-fleet v0.11.0 verification harness ===
+
+[D1] control surface
+  primitives (5): agent, log, parallel, phase, pipeline
+  new present: none
+  new absent : ['replan', 'branch', 'subprogram']
+
+[D2] elastic bound
+  hand-copied reserved=1 sites: 3
+    agent_fleet/orchestration/dag/runner.py:208
+    agent_fleet/orchestration/decompose.py:253
+    agent_fleet/orchestration/program/runtime.py:175
+  blocking CapacityGate present: False (absent)
+  load test (bounded cap=3, width=8): completed=8/8 denied=0 peak=2 status=completed
+  negative control (unbounded): completed=2/8 denied=6 peak=2
+
+[D3] crash-resume
+  resume entry point present: False (absent)
+
+[D4] queryable event log
+  journal fold/query present: False (absent)
+
+HARNESS INTEGRITY: OK (negative control reproduced denials; measurements trustworthy)
