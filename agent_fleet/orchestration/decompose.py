@@ -11,7 +11,7 @@ from agent_fleet.contracts.task_spec import DecompositionDecision, TaskSpec
 from agent_fleet.hooks import FleetTask, FleetTaskResult
 from agent_fleet.level_up.models import DispatchEquip
 from agent_fleet.orchestration.convergence import PARTIAL_OK, SUCCESS_STATUSES, compact_summary
-from agent_fleet.orchestration.primitives import DispatchPrimitives
+from agent_fleet.orchestration.primitives import DispatchPrimitives, effective_capacity
 from agent_fleet.planner import plan
 
 if TYPE_CHECKING:
@@ -247,7 +247,11 @@ def dispatch_task_spec_children(
         foundry=foundry,
     )
 
-    limit = max_parallel or dispatcher.config.max_parallel
+    limit_raw = max_parallel or dispatcher.config.max_parallel
+    limit = min(
+        limit_raw,
+        effective_capacity(dispatcher, fallback=limit_raw, reserved=1),
+    )
     if len(children) > limit:
         logger.info(
             "Dispatching %d children in waves (max_parallel=%d)",

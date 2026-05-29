@@ -25,7 +25,7 @@ from agent_fleet.orchestration.dag.scheduler import (
 )
 from agent_fleet.orchestration.dag.schema import DagSpec, DagTask
 from agent_fleet.orchestration.dag.stitch import build_dag_task_context
-from agent_fleet.orchestration.primitives import DispatchPrimitives
+from agent_fleet.orchestration.primitives import DispatchPrimitives, effective_capacity
 
 if TYPE_CHECKING:
     from agent_fleet.dispatcher import FleetDispatcher
@@ -190,7 +190,8 @@ def dispatch_dag(
     # independent chains never wait on each other and wall-clock tracks the
     # critical path. All mutable state below is touched only on this thread in
     # the drain loop, so no lock is needed. same_workspace_tasks stays 1: DAG
-    # nodes compose edits into the single parent workspace, as before.
+    # nodes compose edits into the single parent workspace. Concurrency is
+    # bounded to admission capacity minus the parent's held slot; overflow queues.
     by_id = {task.id: task for task in spec.tasks}
     remaining_deps = {task.id: len(task.depends_on) for task in spec.tasks}
     dependents: dict[str, list[str]] = {task.id: [] for task in spec.tasks}
@@ -200,7 +201,14 @@ def dispatch_dag(
 
     dispatch_index = 0
     n_total = len(spec.tasks)
-    primitives = DispatchPrimitives(dispatcher, max_parallel=n_total)
+    inflight = max(
+        1,
+        min(
+            n_total,
+            effective_capacity(dispatcher, fallback=n_total, reserved=1),
+        ),
+    )
+    primitives = DispatchPrimitives(dispatcher, max_parallel=inflight)
 
     def _emit_skip(dag_task: DagTask) -> None:
         if canvas_state is not None:
@@ -232,7 +240,7 @@ def dispatch_dag(
         freed.sort(key=lambda task: task.id)
         return freed
 
-    with ThreadPoolExecutor(max_workers=max(1, n_total)) as pool:
+    with ThreadPoolExecutor(max_workers=inflight) as pool:
         futures: dict[Future[FleetTaskResult], DagTask] = {}
 
         def _launch(ready: list[DagTask]) -> None:

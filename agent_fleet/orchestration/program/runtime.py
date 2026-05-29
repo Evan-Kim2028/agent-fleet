@@ -31,6 +31,7 @@ from agent_fleet.orchestration.program.models import (
     ProgramExecutionError,
     ProgramRunSummary,
 )
+from agent_fleet.orchestration.primitives import effective_capacity
 from agent_fleet.orchestration.program.validate import (
     SAFE_BUILTINS,
     validate_workflow_program,
@@ -170,6 +171,9 @@ class ProgramContext:
         self._default_persona = default_persona
         self._default_pipeline = default_pipeline
         self._max_parallel = max(1, max_parallel)
+        self._capacity = effective_capacity(
+            dispatcher, fallback=self._max_parallel, reserved=1
+        )
         self._max_agents = max(1, max_agents)
         self._fleet_log = fleet_log
         self._lock = threading.Lock()
@@ -283,7 +287,7 @@ class ProgramContext:
         items = list(thunks)
         if not items:
             return []
-        workers = max(1, min(self._max_parallel, len(items)))
+        workers = max(1, min(self._max_parallel, self._capacity, len(items)))
         results: list[object] = [None] * len(items)
         with self._lock:
             self._fanout_depth += 1
@@ -311,7 +315,7 @@ class ProgramContext:
         work = list(items)
         if not work:
             return []
-        workers = max(1, min(self._max_parallel, len(work)))
+        workers = max(1, min(self._max_parallel, self._capacity, len(work)))
 
         def run_item(index: int, original: object) -> object:
             value: object = original
@@ -374,7 +378,7 @@ def run_workflow_program(
     persona_resolver: PersonaResolver | None = None,
     default_persona: str = "coder",
     default_pipeline: str = "simple",
-    max_parallel: int = 4,
+    max_parallel: int = 16,
     max_agents: int = 64,
     timeout_s: float | None = None,
     fleet_log: _FleetLogLike | None = None,
