@@ -212,6 +212,36 @@ def _rotate_bridge_log(log_path: Path) -> None:
     log_path.unlink(missing_ok=True)
 
 
+def _terminate_process_group(
+    proc: subprocess.Popen, *, term_wait: float = 5.0, kill_wait: float = 2.0
+) -> None:
+    """SIGTERM then SIGKILL the bridge's whole process group.
+
+    ``start_new_session=True`` makes proc its own process-group leader, with
+    any sh/node descendants in the same group. Signaling the single pid
+    (``proc.terminate`` / ``os.kill``) hits only the shell wrapper and orphans
+    its node child. Capture the pgid once up front so the SIGKILL escalation
+    still targets the group after ``proc.wait`` reaps the leader.
+    """
+    if proc.poll() is not None:
+        return
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, PermissionError, OSError):
+        return
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+        os.killpg(pgid, signal.SIGTERM)
+    try:
+        proc.wait(timeout=term_wait)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+        os.killpg(pgid, signal.SIGKILL)
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.wait(timeout=kill_wait)
+
+
 def _launch_one_bridge(workspace: str, timeout_s: float) -> tuple[subprocess.Popen, dict[str, Any]]:
     log_path = bridge_log_path()
     _rotate_bridge_log(log_path)
@@ -220,8 +250,7 @@ def _launch_one_bridge(workspace: str, timeout_s: float) -> tuple[subprocess.Pop
     try:
         discovery = _read_discovery_from_log(log_path, deadline)
     except Exception:
-        with contextlib.suppress(Exception):
-            proc.terminate()
+        _terminate_process_group(proc)
         raise
     state = _publish_bridge_state(discovery, proc.pid)
     return proc, state
@@ -239,8 +268,11 @@ def _supervisor_loop(workspace: str, timeout_s: float) -> int:
         stopping["flag"] = True
         proc = child["proc"]
         if proc is not None and proc.poll() is None:
-            with contextlib.suppress(Exception):
-                proc.terminate()
+            # Signal the whole group (not just the sh wrapper) so the node
+            # grandchild dies too. Stay non-blocking inside the handler; the
+            # loop's proc.wait() reaps once the group is gone.
+            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
 
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
@@ -360,14 +392,16 @@ def stop_bridge() -> dict[str, Any]:
     pid = int(state.get("pid", 0) or 0)
     result["pid"] = pid
     if pid > 0 and _pid_alive(pid):
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(pid, signal.SIGTERM)
+        # The bridge pid is its own group leader (start_new_session=True);
+        # signal the group so the sh wrapper's node child dies with it.
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline and _pid_alive(pid):
             time.sleep(0.1)
         if _pid_alive(pid):
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(pid, signal.SIGKILL)
+            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                os.killpg(os.getpgid(pid), signal.SIGKILL)
     bridge_state_path().unlink(missing_ok=True)
     result["stopped"] = True
     return result
@@ -505,40 +539,18 @@ def launch_private_bridge(
         logger.warning("private bridge spawn failed: %s", exc)
         return None
 
-    def _kill_process_group() -> None:
-        """SIGTERM then SIGKILL the bridge's whole process group.
-
-        ``start_new_session=True`` made proc the process-group leader, with
-        any sh/node descendants in the same group. Plain ``proc.terminate``
-        only signals proc itself, so a shell wrapper's node child can be
-        leaked. Signal the group instead.
-        """
-        if proc.poll() is not None:
-            return
-        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        try:
-            proc.wait(timeout=5)
-            return
-        except subprocess.TimeoutExpired:
-            pass
-        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            proc.wait(timeout=2)
-
     deadline = time.monotonic() + timeout_s
     try:
         discovery = _read_discovery_from_log(log_path, deadline)
     except Exception as exc:
         logger.warning("private bridge discovery failed: %s", exc)
-        _kill_process_group()
+        _terminate_process_group(proc)
         return None
 
     state = _discovery_to_state(discovery, proc.pid)
     state["log_path"] = str(log_path)
 
-    atexit.register(_kill_process_group)
+    atexit.register(_terminate_process_group, proc)
     _private_bridges_by_workspace[workspace_key] = state
     return state
 

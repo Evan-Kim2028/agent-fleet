@@ -400,10 +400,16 @@ class FleetDispatcher:
         status = "completed" if result.outcome in ok_outcomes else "error"
         if result.outcome in {"decompose_failed", "rejected", "decompose", "scope_violation"}:
             status = result.outcome
-        run_log = get_run_log()
-        usage_rollup = (
-            run_log.usage_rollup_snapshot(task_id=task_index) if run_log is not None else None
-        )
+        # The full pipeline runs under LocalFleetRunner's own bind_run scope,
+        # so get_run_log() here sees an empty dispatcher RunLog. Prefer the
+        # rollup the runner carried out on its result (includes RESEARCH/PLAN/
+        # SYNTHESIZE); fall back to the live log for any other caller.
+        usage_rollup = result.usage_rollup
+        if usage_rollup is None:
+            run_log = get_run_log()
+            usage_rollup = (
+                run_log.usage_rollup_snapshot(task_id=task_index) if run_log is not None else None
+            )
         repo_cfg = find_repo_config(workspace)
         outcome_metrics = build_run_metrics(
             status=status,

@@ -127,6 +127,11 @@ class FleetRunResult:
     phases: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
     duration_seconds: float = 0.0
+    # Per-phase token rollup captured inside the runner's bind_run scope.
+    # The dispatcher's get_run_log() runs after that scope exits and sees an
+    # empty RunLog, so the full pipeline's RESEARCH/PLAN/SYNTHESIZE usage is
+    # carried out here instead of being lost. See _run_end_kwargs.
+    usage_rollup: dict[str, Any] | None = None
 
 
 def _run_end_kwargs(result: FleetRunResult, repo: RepoConfig | None) -> dict[str, Any]:
@@ -135,6 +140,9 @@ def _run_end_kwargs(result: FleetRunResult, repo: RepoConfig | None) -> dict[str
     usage_rollup = (
         run_log.usage_rollup_snapshot(task_id=result.task_id) if run_log is not None else None
     )
+    # Carry the rollup out on the result; the dispatcher reads it after this
+    # bind_run scope has closed, when get_run_log() no longer sees this RunLog.
+    result.usage_rollup = usage_rollup
     repo_key_value = level_up_repo_key(
         name=repo.name if repo else None,
         repo_root=repo.repo_root if repo else None,
