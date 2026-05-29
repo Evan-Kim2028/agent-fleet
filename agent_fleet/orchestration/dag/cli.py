@@ -5,19 +5,23 @@ from __future__ import annotations
 import argparse  # noqa: TC003 — register_dag_commands uses argparse at runtime
 import json
 import sys
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 from agent_fleet.cli_env import require_backend_env
-from agent_fleet.config import load_fleet_config
+from agent_fleet.config import FleetConfig, load_fleet_config
 from agent_fleet.dispatcher import FleetDispatcher
 from agent_fleet.hooks import FleetTask
 from agent_fleet.orchestration.dag.ascii import render_dag_ascii
 from agent_fleet.orchestration.dag.canvas_state import initial_run_state
 from agent_fleet.orchestration.dag.canvas_writer import DagCanvasWriter
 from agent_fleet.orchestration.dag.paths import resolve_canvas_path
-from agent_fleet.orchestration.dag.runner import dispatch_dag
+from agent_fleet.orchestration.dag.runner import DagRunSummary, dispatch_dag
 from agent_fleet.orchestration.dag.scheduler import topo_sort_ranks, validate_dag_graph
-from agent_fleet.orchestration.dag.schema import load_dag_spec
+from agent_fleet.orchestration.dag.schema import DagSpec, load_dag_spec
+from agent_fleet.orchestration.journal import RunJournal
+from agent_fleet.orchestration.resume import resume_run
 from agent_fleet.personas import YamlPersonaResolver
 from agent_fleet.repo import find_repo_config
 
@@ -45,11 +49,84 @@ def _print_ascii(
     *,
     status_by_id: dict[str, str] | None = None,
 ) -> None:
-    from agent_fleet.orchestration.dag.schema import DagSpec, DagTask
+    from agent_fleet.orchestration.dag.schema import DagTask
 
     assert isinstance(spec, DagSpec)
     typed_ranks: list[list[DagTask]] = ranks
     print(render_dag_ascii(spec, typed_ranks, status_by_id=status_by_id), end="")
+
+
+@dataclass(frozen=True)
+class _DispatchContext:
+    resolver: YamlPersonaResolver
+    dispatcher: FleetDispatcher
+    parent: FleetTask
+    default_pipeline: str
+    max_chars: int
+
+
+def _build_dispatch_context(
+    args: argparse.Namespace,
+    workspace: Path,
+    config: FleetConfig,
+    spec: DagSpec,
+) -> _DispatchContext:
+    """The dispatcher/parent/defaults build shared by ``dag run`` and ``dag resume``."""
+    repo = find_repo_config(workspace)
+    if repo and repo.personas_dir:
+        config.personas_dir = repo.personas_dir
+
+    resolver = YamlPersonaResolver(config)
+    dispatcher = FleetDispatcher(config=config)
+    parent = FleetTask(
+        goal=spec.title,
+        context=args.context or "",
+        persona=args.persona or (repo.default_persona if repo else config.default_persona),
+        workspace=str(workspace),
+        pipeline=args.pipeline or config.default_pipeline,
+    )
+    orchestration = repo.orchestration if repo and repo.orchestration else None
+    default_pipeline = orchestration.default_dag_pipeline if orchestration else "code_review"
+    max_chars = orchestration.dag_upstream_context_chars if orchestration else 2000
+    return _DispatchContext(resolver, dispatcher, parent, default_pipeline, max_chars)
+
+
+def _emit_summary(
+    spec: DagSpec,
+    ranks: list,
+    summary: DagRunSummary,
+    args: argparse.Namespace,
+    canvas_writer: DagCanvasWriter | None,
+) -> int:
+    """Print the ASCII/JSON tail shared by run and resume; return the exit code."""
+    if not args.json:
+        status_by_id: dict[str, str] = {}
+        for result in summary.results:
+            node_id = result.goal.rsplit(" — ", 1)[-1]
+            status_by_id[node_id] = result.status
+        _print_ascii(spec, ranks, status_by_id=status_by_id)
+        print()
+
+    print(
+        json.dumps(
+            {
+                "status": summary.aggregate_status,
+                "error": summary.error,
+                "summary": summary.summary,
+                "ranks": summary.ranks,
+                "results": [r.__dict__ for r in summary.results],
+                **(
+                    {"canvas_path": str(canvas_writer.canvas_path)}
+                    if canvas_writer is not None
+                    else {}
+                ),
+            },
+            indent=2,
+            default=str,
+        )
+    )
+    ok = {"completed", "dag_partial"}
+    return 0 if summary.aggregate_status in ok else 1
 
 
 def cmd_dag_validate(args: argparse.Namespace) -> int:
@@ -116,62 +193,75 @@ def cmd_dag_run(args: argparse.Namespace) -> int:
     if (code := require_backend_env(config)) is not None:
         return code
 
-    repo = find_repo_config(workspace)
-    if repo and repo.personas_dir:
-        config.personas_dir = repo.personas_dir
+    ctx = _build_dispatch_context(args, workspace, config, spec)
 
-    resolver = YamlPersonaResolver(config)
-    dispatcher = FleetDispatcher(config=config)
-    parent = FleetTask(
-        goal=spec.title,
-        context=args.context or "",
-        persona=args.persona or (repo.default_persona if repo else config.default_persona),
-        workspace=str(workspace),
-        pipeline=args.pipeline or config.default_pipeline,
-    )
-    orchestration = repo.orchestration if repo and repo.orchestration else None
-    default_pipeline = orchestration.default_dag_pipeline if orchestration else "code_review"
-    max_chars = orchestration.dag_upstream_context_chars if orchestration else 2000
+    journal: RunJournal | None = None
+    if args.journal:
+        run_id = args.run_id or uuid.uuid4().hex[:12]
+        journal = RunJournal(Path(args.journal), run_id)
+        print(f"journal → {args.journal} (run-id {run_id})", file=sys.stderr)
 
-    summary = dispatch_dag(
+    try:
+        summary = dispatch_dag(
+            spec=spec,
+            parent_task=ctx.parent,
+            dispatcher=ctx.dispatcher,
+            persona_resolver=ctx.resolver,
+            fallback_persona=ctx.parent.persona,
+            default_pipeline=args.pipeline or ctx.default_pipeline,
+            max_chars_per_parent=ctx.max_chars,
+            canvas_writer=canvas_writer,
+            journal=journal,
+        )
+    finally:
+        if journal is not None:
+            journal.close()
+
+    return _emit_summary(spec, ranks, summary, args, canvas_writer)
+
+
+def cmd_dag_resume(args: argparse.Namespace) -> int:
+    path = Path(args.file).resolve()
+    workspace = _resolve_workspace(args)
+    config = load_fleet_config(args.config) if args.config else load_fleet_config()
+
+    try:
+        spec = load_dag_spec(path)
+        validate_dag_graph(spec)
+        ranks = topo_sort_ranks(spec.tasks)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    journal_path = Path(args.journal)
+    if not journal_path.exists():
+        print(f"error: journal not found: {journal_path}", file=sys.stderr)
+        return 1
+
+    if (code := require_backend_env(config)) is not None:
+        return code
+
+    ctx = _build_dispatch_context(args, workspace, config, spec)
+    canvas_writer = _canvas_writer_from_args(args, workspace)
+    if canvas_writer is not None:
+        canvas_writer.schedule(initial_run_state(spec))
+        canvas_writer.flush()
+        print(f"canvas → {canvas_writer.canvas_path}", file=sys.stderr)
+
+    print(f"resuming run-id {args.run_id} from {journal_path}", file=sys.stderr)
+    summary = resume_run(
+        journal_path=journal_path,
+        run_id=args.run_id,
         spec=spec,
-        parent_task=parent,
-        dispatcher=dispatcher,
-        persona_resolver=resolver,
-        fallback_persona=parent.persona,
-        default_pipeline=args.pipeline or default_pipeline,
-        max_chars_per_parent=max_chars,
+        parent_task=ctx.parent,
+        dispatcher=ctx.dispatcher,
+        persona_resolver=ctx.resolver,
+        fallback_persona=ctx.parent.persona,
+        default_pipeline=args.pipeline or ctx.default_pipeline,
+        max_chars_per_parent=ctx.max_chars,
         canvas_writer=canvas_writer,
     )
-
-    if not args.json:
-        status_by_id: dict[str, str] = {}
-        for result in summary.results:
-            node_id = result.goal.rsplit(" — ", 1)[-1]
-            status_by_id[node_id] = result.status
-        _print_ascii(spec, ranks, status_by_id=status_by_id)
-        print()
-
-    print(
-        json.dumps(
-            {
-                "status": summary.aggregate_status,
-                "error": summary.error,
-                "summary": summary.summary,
-                "ranks": summary.ranks,
-                "results": [r.__dict__ for r in summary.results],
-                **(
-                    {"canvas_path": str(canvas_writer.canvas_path)}
-                    if canvas_writer is not None
-                    else {}
-                ),
-            },
-            indent=2,
-            default=str,
-        )
-    )
-    ok = {"completed", "dag_partial"}
-    return 0 if summary.aggregate_status in ok else 1
+    return _emit_summary(spec, ranks, summary, args, canvas_writer)
 
 
 def _add_canvas_flags(parser: argparse.ArgumentParser) -> None:
@@ -233,5 +323,33 @@ def register_dag_commands(sub: argparse._SubParsersAction) -> None:
     )
     run_p.add_argument("--workspace", help="Repo path (default: cwd)")
     run_p.add_argument("--config", help="Path to fleet.yaml")
+    run_p.add_argument(
+        "--journal",
+        help="Write a durable run-event journal here, enabling 'dag resume' after a crash",
+    )
+    run_p.add_argument(
+        "--run-id",
+        help="Run id stamped into the journal (default: a generated id, printed on start)",
+    )
     _add_canvas_flags(run_p)
     run_p.set_defaults(func=cmd_dag_run)
+
+    resume_p = dag_sub.add_parser(
+        "resume",
+        help="Resume a crashed DAG run from its journal, re-dispatching only unfinished tasks",
+    )
+    resume_p.add_argument("--file", required=True, help="Path to the same DAG JSON file")
+    resume_p.add_argument("--journal", required=True, help="Path to the run's journal")
+    resume_p.add_argument("--run-id", required=True, help="Run id to resume (printed by 'dag run')")
+    resume_p.add_argument("--persona", help="Default persona for nodes without one")
+    resume_p.add_argument("--pipeline", help="Default pipeline for nodes without one")
+    resume_p.add_argument("--context", help="Extra parent context for all nodes")
+    resume_p.add_argument(
+        "--json",
+        action="store_true",
+        help="Skip ASCII diagram; JSON result only",
+    )
+    resume_p.add_argument("--workspace", help="Repo path (default: cwd)")
+    resume_p.add_argument("--config", help="Path to fleet.yaml")
+    _add_canvas_flags(resume_p)
+    resume_p.set_defaults(func=cmd_dag_resume)
