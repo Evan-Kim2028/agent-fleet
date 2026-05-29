@@ -234,6 +234,7 @@ def build_task_result(
     task_workspace: TaskWorkspace | None,
     fleet_log: FleetLogger,
     changed_lines: int = 0,
+    repo_key: str | None = None,
 ) -> FleetTaskResult:
     from agent_fleet.hooks import FleetTaskResult
 
@@ -282,6 +283,8 @@ def build_task_result(
         usage_rollup=usage_rollup,
         changed_files_count=len(changed_files or ()),
         duration_seconds=result.duration_seconds,
+        repo_key=repo_key,
+        issue_number=task_index,
     )
     fleet_log.emit(
         "fleet.task.complete",
@@ -305,6 +308,8 @@ def record_completed_task_experience(
     changed_files: list[str] | None,
     workspace: Path | None,
     fleet_log: FleetLogger,
+    duration_seconds: float | None = None,
+    error: str | None = None,
 ) -> None:
     from agent_fleet.level_up.record import record_task_experience
 
@@ -316,6 +321,8 @@ def record_completed_task_experience(
         workspace=workspace,
         run_id=fleet_log.run_id,
         task_index=task_index,
+        duration_seconds=duration_seconds,
+        error=error,
     )
 
 

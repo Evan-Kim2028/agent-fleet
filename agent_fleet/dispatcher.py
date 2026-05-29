@@ -482,6 +482,7 @@ class FleetDispatcher:
                 name=repo_cfg.name if repo_cfg else None,
                 repo_root=repo_cfg.repo_root if repo_cfg else workspace,
             ),
+            issue_number=task_index,
         )
         fleet_log.emit(
             "fleet.task.complete",
@@ -726,6 +727,7 @@ class FleetDispatcher:
                             observed_total_tokens=read_observed_total_tokens(task_index),
                         )
 
+                repo_for_metrics = repo_config or git_repo
                 result = build_task_result(
                     task_index=task_index,
                     task=task,
@@ -737,6 +739,10 @@ class FleetDispatcher:
                     task_workspace=task_workspace,
                     fleet_log=fleet_log,
                     changed_lines=_changed_lines(run_workspace),
+                    repo_key=level_up_repo_key(
+                        name=repo_for_metrics.name if repo_for_metrics else None,
+                        repo_root=repo_for_metrics.repo_root if repo_for_metrics else run_workspace,
+                    ),
                 )
 
                 repo_for_publish = repo_config or git_repo
@@ -772,6 +778,8 @@ class FleetDispatcher:
                     changed_files=result.changed_files,
                     workspace=run_workspace,
                     fleet_log=fleet_log,
+                    duration_seconds=result.duration_seconds,
+                    error=result.error,
                 )
 
                 keep_worktree = should_keep_task_worktree(
@@ -801,6 +809,8 @@ class FleetDispatcher:
                     changed_files=None,
                     workspace=run_workspace,
                     fleet_log=fleet_log,
+                    duration_seconds=round(time.monotonic() - start, 2),
+                    error=str(exc),
                 )
                 return FleetTaskResult(
                     task_index=task_index,

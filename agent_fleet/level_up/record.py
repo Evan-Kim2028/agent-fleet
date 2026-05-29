@@ -88,6 +88,8 @@ def record_task_experience(
     workspace: Path | None = None,
     run_id: str | None = None,
     task_index: int | None = None,
+    duration_seconds: float | None = None,
+    error: str | None = None,
 ) -> None:
     """Append experience for a FleetDispatcher task run."""
     repo = find_repo_config(workspace) if workspace is not None else None
@@ -112,10 +114,13 @@ def record_task_experience(
     outcome_metrics = build_run_metrics(
         status=status,
         phases=phase_results,
+        error=error,
         review_verdict=review_verdict,
         usage_rollup=usage_rollup,
         changed_files_count=len(changed_files or ()),
+        duration_seconds=duration_seconds,
         repo_key=repo_key_value,
+        issue_number=task_index,
     )
 
     run_complete_data: dict[str, Any] = {
