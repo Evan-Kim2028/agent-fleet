@@ -4,18 +4,15 @@ The workload: a parent task whose work decomposes into 20 child sub-tasks,
 each producing a ~2000-char result, whose outputs must be combined into a
 single answer.
 
-v0.8.6 decompose path
----------------------
-aggregate_child_results() (decompose.py:199-226) builds the summary string the
-parent receives.  For each child it appends:
-  - a header line: "- [<persona>] <goal[:80]> → <status>"   (~85 chars)
-  - a body line:   "  <summary[:200]>"                       (200 chars capped)
-plus a one-line preamble (~60 chars).
+v0.8.6 / v0.10 decompose path
+-----------------------------
+aggregate_child_results() builds a bounded parent-facing summary (v0.10+ via
+convergence.compact_summary).  For N=20 all-success children the summary is a
+short count line (for example ``20/20 completed``), not O(N) per-child prose.
 
-We run it for real: construct 20 FleetTaskResult objects (each with a 2000-char
-summary) and call aggregate_child_results().  The length of the returned summary
-string is the actual bytes the parent must ingest; dividing by 4 gives the token
-estimate used throughout the codebase.
+We construct 20 FleetTaskResult objects (each with a 2000-char summary) and call
+aggregate_child_results().  The returned summary length is the bytes the parent
+must ingest; dividing by 4 gives the token estimate used throughout the codebase.
 
 v0.9.0 program path
 -------------------
@@ -60,10 +57,10 @@ def _make_child_result(i: int) -> FleetTaskResult:
     )
 
 
-def _measure_v086_tokens_to_parent() -> int:
+def _measure_v086_tokens_to_parent() -> tuple[int, str]:
     results = [_make_child_result(i) for i in range(N_CHILDREN)]
     _status, _error, summary = aggregate_child_results(results)
-    return max(1, len(summary) // 4)
+    return max(1, len(summary) // 4), summary
 
 
 # ---------------------------------------------------------------------------
@@ -106,32 +103,38 @@ def _measure_v090_tokens_to_parent() -> tuple[int, object]:
 # ---------------------------------------------------------------------------
 
 
+# Pre-v0.10 O(N) decompose summaries were ~5400+ chars for this workload.
+_HISTORICAL_V086_SUMMARY_CHARS = 5400
+
+
 def test_v086_vs_v090_token_leverage() -> None:
-    v086_tokens = _measure_v086_tokens_to_parent()
+    v086_tokens, v086_summary = _measure_v086_tokens_to_parent()
     v090_tokens, v090_result = _measure_v090_tokens_to_parent()
+
+    assert len(v086_summary) < 100, (
+        f"v0.10 bounded decompose summary too long: {len(v086_summary)} chars"
+    )
 
     result_str = str(v090_result or "")
     assert len(result_str) <= SYNTHESIS_TARGET_CHARS + 10, (
         f"v0.9.0 synthesised result too long: {len(result_str)} chars"
     )
 
-    reduction_factor = v086_tokens / v090_tokens
-    assert v090_tokens < v086_tokens, (
-        f"expected v090 < v086: v090={v090_tokens} v086={v086_tokens}"
+    assert len(v086_summary) * 10 < _HISTORICAL_V086_SUMMARY_CHARS, (
+        f"expected >10x summary shrink vs historical O(N) baseline: "
+        f"len={len(v086_summary)} baseline~{_HISTORICAL_V086_SUMMARY_CHARS}"
     )
-    assert reduction_factor > 10, (
-        f"expected reduction_factor > 10, got {reduction_factor:.1f} "
-        f"(v086={v086_tokens}, v090={v090_tokens})"
-    )
+    assert v086_tokens < 50, f"decompose tokens should stay bounded: {v086_tokens}"
+    assert v090_tokens < 100, f"program tokens should stay bounded: {v090_tokens}"
 
     # Correctness: the v0.9.0 synthesis mentions all 20 tasks.
     assert "20" in result_str, f"synthesis result should mention 20: {result_str!r}"
+    assert "20" in v086_summary, f"decompose summary should mention 20: {v086_summary!r}"
 
     # Report for reference (not an assertion — values captured in structured output).
     _ = (
-        f"v0.8.6 tokens_to_parent={v086_tokens}  "
-        f"v0.9.0 tokens_to_parent={v090_tokens}  "
-        f"reduction_factor={reduction_factor:.1f}x"
+        f"v0.10 decompose tokens_to_parent={v086_tokens}  "
+        f"v0.9.0 program tokens_to_parent={v090_tokens}"
     )
 
 

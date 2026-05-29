@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.contracts.task_spec import DecompositionDecision, TaskSpec
 from agent_fleet.hooks import FleetTask, FleetTaskResult
 from agent_fleet.level_up.models import DispatchEquip
+from agent_fleet.orchestration.convergence import PARTIAL_OK, SUCCESS_STATUSES, compact_summary
+from agent_fleet.orchestration.primitives import DispatchPrimitives
 from agent_fleet.planner import plan
 
 if TYPE_CHECKING:
@@ -20,9 +21,6 @@ if TYPE_CHECKING:
     from agent_fleet.spine_config import SpineConfig
 
 logger = logging.getLogger(__name__)
-
-_SUCCESS_STATUSES = frozenset({"completed", "merged"})
-_PARTIAL_OK = frozenset({"review_changes_requested"})
 
 
 def coerce_empty_decompose(task_spec: TaskSpec) -> tuple[TaskSpec, bool]:
@@ -201,25 +199,12 @@ def aggregate_child_results(results: list[FleetTaskResult]) -> tuple[str, str | 
     if not results:
         return "decompose_failed", "No child tasks were dispatched", ""
 
-    successes = sum(1 for r in results if r.status in _SUCCESS_STATUSES)
-    partial = sum(1 for r in results if r.status in _PARTIAL_OK)
-    failures = len(results) - successes - partial
+    summary = compact_summary(results)
 
-    lines = [
-        f"Decomposed into {len(results)} child task(s): "
-        f"{successes} completed, {partial} review pending, {failures} failed."
-    ]
-    for result in results:
-        lines.append(f"- [{result.persona}] {result.goal[:80]} → {result.status}")
-        if result.summary:
-            lines.append(f"  {result.summary[:200]}")
-
-    summary = "\n".join(lines)
-
-    if successes + partial == len(results):
+    if all(r.status in SUCCESS_STATUSES | PARTIAL_OK for r in results):
         return "completed", None, summary
-    if successes > 0 or partial > 0:
-        failed = [r for r in results if r.status not in _SUCCESS_STATUSES | _PARTIAL_OK]
+    if any(r.status in SUCCESS_STATUSES | PARTIAL_OK for r in results):
+        failed = [r for r in results if r.status not in SUCCESS_STATUSES | PARTIAL_OK]
         err = "; ".join(f"{r.persona}: {r.error or r.status}" for r in failed[:3])
         return "decompose_partial", err or "Some child tasks failed", summary
     err = results[0].error or results[0].status
@@ -270,30 +255,8 @@ def dispatch_task_spec_children(
             limit,
         )
 
-    all_results: list[FleetTaskResult] = []
-    for offset in range(0, len(children), limit):
-        wave = children[offset : offset + limit]
-        if len(wave) == 1:
-            all_results.append(
-                dispatcher._execute_task(0, wave[0], batch_size=1, same_workspace_tasks=1)
-            )
-            continue
-        wave_results: list[FleetTaskResult | None] = [None] * len(wave)
-        with ThreadPoolExecutor(max_workers=len(wave)) as pool:
-            futures = {
-                pool.submit(
-                    dispatcher._execute_task,
-                    idx,
-                    child,
-                    batch_size=len(wave),
-                    same_workspace_tasks=1,
-                ): idx
-                for idx, child in enumerate(wave)
-            }
-            for future in as_completed(futures):
-                idx = futures[future]
-                wave_results[idx] = future.result()
-        all_results.extend(r for r in wave_results if r is not None)
+    primitives = DispatchPrimitives(dispatcher, max_parallel=limit)
+    all_results = primitives.run_many(children)
 
     status, error, summary = aggregate_child_results(all_results)
     return all_results, status, error, summary

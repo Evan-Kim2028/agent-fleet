@@ -134,7 +134,27 @@ def test_aggregate_dag_results_completed() -> None:
     status, error, summary = aggregate_dag_results(results)
     assert status == "completed"
     assert error is None
-    assert "1 executed" in summary
+    assert "1/1" in summary
+
+
+def test_build_upstream_context_multi_dep_budget() -> None:
+    long_text = "x" * 2000
+    task = DagTask(
+        id="child",
+        depends_on=("a", "b", "c", "d"),
+        complexity="LOW",
+        subtask_prompt="go",
+    )
+    outputs = dict.fromkeys(task.depends_on, long_text)
+    ctx = build_upstream_context(task, outputs, max_chars_per_parent=2000)
+    assert len(ctx) <= 2200
+
+
+def test_build_upstream_context_single_dep_keeps_budget() -> None:
+    long_text = "y" * 2000
+    task = DagTask(id="child", depends_on=("only",), complexity="LOW", subtask_prompt="go")
+    ctx = build_upstream_context(task, {"only": long_text}, max_chars_per_parent=2000)
+    assert len(ctx) >= 1900
 
 
 def test_aggregate_dag_results_partial() -> None:

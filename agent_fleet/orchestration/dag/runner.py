@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, cast
 
 from agent_fleet.hooks import FleetTask, FleetTaskResult
 from agent_fleet.level_up.models import DispatchEquip
+from agent_fleet.orchestration.convergence import compact_summary, is_failure, is_success
 from agent_fleet.orchestration.dag.canvas_state import (
     finalize_run_state,
     fleet_status_to_canvas,
@@ -24,6 +25,7 @@ from agent_fleet.orchestration.dag.scheduler import (
 )
 from agent_fleet.orchestration.dag.schema import DagSpec, DagTask
 from agent_fleet.orchestration.dag.stitch import build_dag_task_context
+from agent_fleet.orchestration.primitives import DispatchPrimitives
 
 if TYPE_CHECKING:
     from agent_fleet.dispatcher import FleetDispatcher
@@ -33,12 +35,6 @@ if TYPE_CHECKING:
     from agent_fleet.persona_foundry import PersonaFoundry
 
 logger = logging.getLogger(__name__)
-
-_SUCCESS_STATUSES = frozenset({"completed", "merged"})
-_PARTIAL_OK = frozenset({"review_changes_requested"})
-_FAILURE_STATUSES = frozenset(
-    {"error", "verify_failed", "scope_violation", "review_blocked", "rejected"}
-)
 
 
 @dataclass(frozen=True)
@@ -63,15 +59,6 @@ def _result_output(result: FleetTaskResult) -> str:
     if result.error:
         parts.append(f"Error: {result.error}")
     return "\n".join(parts).strip()
-
-
-def _is_success(status: str) -> bool:
-    return status in _SUCCESS_STATUSES | _PARTIAL_OK
-
-
-def _is_failure(status: str) -> bool:
-    terminal = _SUCCESS_STATUSES | _PARTIAL_OK | {"skipped"}
-    return status in _FAILURE_STATUSES or status not in terminal
 
 
 def fleet_task_from_dag_node(
@@ -143,25 +130,12 @@ def aggregate_dag_results(results: list[FleetTaskResult]) -> tuple[str, str | No
 
     executed = [r for r in results if r.status != "skipped"]
     skipped = [r for r in results if r.status == "skipped"]
-    successes = sum(1 for r in executed if _is_success(r.status))
-    failures = sum(1 for r in executed if _is_failure(r.status))
+    summary = compact_summary(executed if executed else results)
 
-    lines = [
-        f"DAG run: {len(executed)} executed, {len(skipped)} skipped, "
-        f"{successes} succeeded, {failures} failed."
-    ]
-    for result in results:
-        label = result.goal[:80]
-        lines.append(f"- {label} → {result.status}")
-        if result.summary:
-            lines.append(f"  {result.summary[:200]}")
-
-    summary = "\n".join(lines)
-
-    if failures == 0 and successes == len(executed) and executed:
+    if executed and all(is_success(r.status) for r in executed):
         return "completed", None, summary
-    if successes > 0:
-        failed = [r for r in executed if _is_failure(r.status)]
+    if any(is_success(r.status) for r in executed):
+        failed = [r for r in executed if is_failure(r.status)]
         err = "; ".join(f"{r.goal[:40]}: {r.error or r.status}" for r in failed[:3])
         return "dag_partial", err or "Some DAG tasks failed", summary
     if skipped and not executed:
@@ -226,6 +200,7 @@ def dispatch_dag(
 
     dispatch_index = 0
     n_total = len(spec.tasks)
+    primitives = DispatchPrimitives(dispatcher, max_parallel=n_total)
 
     def _emit_skip(dag_task: DagTask) -> None:
         if canvas_state is not None:
@@ -285,11 +260,10 @@ def dispatch_dag(
                     set_task_status(canvas_state, dag_task.id, status="RUNNING")
                 futures[
                     pool.submit(
-                        dispatcher._execute_task,
+                        primitives.run_one,
                         dispatch_index,
                         fleet_task,
                         batch_size=n_total,
-                        same_workspace_tasks=1,
                     )
                 ] = dag_task
                 dispatch_index += 1
@@ -328,9 +302,9 @@ def dispatch_dag(
                         ),
                         duration_ms=int(result.duration_seconds * 1000),
                     )
-                if _is_success(result.status):
+                if is_success(result.status):
                     upstream_outputs[dag_task.id] = _result_output(result)
-                elif _is_failure(result.status):
+                elif is_failure(result.status):
                     failed_ids.add(dag_task.id)
                     skip_ids.update(transitive_dependents(spec, failed_ids))
                 _launch(_release(dag_task.id))
@@ -347,7 +321,7 @@ def dispatch_dag(
         fleet_log.emit(
             "orchestration.dag.done",
             status=status,
-            succeeded=sum(1 for r in all_results if _is_success(r.status)),
+            succeeded=sum(1 for r in all_results if is_success(r.status)),
             skipped=sum(1 for r in all_results if r.status == "skipped"),
         )
 

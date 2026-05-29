@@ -4,7 +4,22 @@
 
 from __future__ import annotations
 
+from agent_fleet.orchestration.convergence import (
+    FAILURE_STATUSES,
+    PARTIAL_OK,
+    SUCCESS_STATUSES,
+    budget_upstream_context,
+)
 from agent_fleet.orchestration.dag.schema import DagTask
+
+__all__ = [
+    "FAILURE_STATUSES",
+    "PARTIAL_OK",
+    "SUCCESS_STATUSES",
+    "build_dag_task_context",
+    "build_upstream_context",
+    "truncate",
+]
 
 
 def truncate(text: str, max_chars: int) -> str:
@@ -25,14 +40,12 @@ def build_upstream_context(
     if not task.depends_on:
         return ""
 
-    parts: list[str] = ["## Upstream task outputs"]
-    for parent_id in task.depends_on:
-        snippet = outputs.get(parent_id, "").strip()
-        if not snippet:
-            parts.append(f"### {parent_id}\n(no output recorded)")
-            continue
-        parts.append(f"### {parent_id}\n{truncate(snippet, max_chars_per_parent)}")
-    return "\n\n".join(parts)
+    body = budget_upstream_context(
+        outputs,
+        task.depends_on,
+        total_budget=max_chars_per_parent,
+    )
+    return f"## Upstream task outputs\n\n{body}"
 
 
 def build_dag_task_context(
