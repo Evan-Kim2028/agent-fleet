@@ -11,6 +11,7 @@ from agent_fleet.phases import (
     REVIEW_SKIP_LINES_THRESHOLD,
     build_review_skip_result,
     collect_changed_files,
+    last_verify_failure_is_bootstrap,
     resolve_pipeline_outcome,
     review_skip_reason,
     run_pipeline,
@@ -152,10 +153,18 @@ def run_code_review_with_auto_fix(
     effective_max_fix = max_retries if max_retries is not None else config.max_fix_attempts
     fix_persona = config.fix_persona or "coder"
     for attempt in range(1, effective_max_fix + 1):
-        status, _error = resolve_pipeline_outcome(phase_results, exit_code)
+        status, error = resolve_pipeline_outcome(phase_results, exit_code)
         if status == "completed":
             break
         if status not in {"review_changes_requested", "verify_failed"}:
+            break
+        if status == "verify_failed" and last_verify_failure_is_bootstrap(phase_results):
+            # A broken test harness (import/collection/startup crash) is not
+            # fixable by another rewrite. Surface it; do not spend full-context
+            # fix agents re-reading the repo to patch a harness that cannot start.
+            run_log = get_run_log()
+            if run_log is not None:
+                run_log.emit("verify.bootstrap_error", data={"attempt": attempt, "error": error})
             break
 
         with bind_phase("fix"):

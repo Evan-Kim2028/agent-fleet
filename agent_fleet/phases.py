@@ -676,6 +676,53 @@ def build_review_skip_result(reason: str) -> dict[str, Any]:
     }
 
 
+_BOOTSTRAP_VERIFY_SIGNALS: tuple[str, ...] = (
+    "conftestimportfailure",
+    "errors during collection",
+    "error collecting",
+    "internalerror",
+    "modulenotfounderror",
+    "no module named",
+    "_prepareconfig",
+    "syntaxerror",
+)
+
+
+def _verify_harness_ran(text: str) -> bool:
+    """True when the test harness started and reported results.
+
+    pytest prints a ``collected N items`` line and a passed/failed summary only
+    after collection succeeds. Their presence means a failure is a genuine test
+    failure, not a harness that could not start, so an in-test import error is
+    never mistaken for a collection crash.
+    """
+    return "collected" in text and ("passed" in text or "failed" in text)
+
+
+def classify_verify_failure(outcome: dict[str, Any]) -> str:
+    """Classify a failing verify outcome as ``"test"`` or ``"bootstrap"``.
+
+    A bootstrap error means the verify command could not run: an import,
+    collection, syntax, or config crash (e.g. pytest dying in ``_prepareconfig``
+    on a ModuleNotFoundError). No fix-loop rewrite recovers it, so the loop must
+    not spend full-context fix agents against a harness that cannot start. A
+    genuine assertion failure ran the harness and is fixable.
+    """
+    detail = str(outcome.get("detail") or "")
+    text = (detail or f"{outcome.get('stdout', '')}{outcome.get('stderr', '')}").lower()
+    if _verify_harness_ran(text):
+        return "test"
+    return "bootstrap" if any(sig in text for sig in _BOOTSTRAP_VERIFY_SIGNALS) else "test"
+
+
+def last_verify_failure_is_bootstrap(phase_results: list[dict[str, Any]]) -> bool:
+    """True when the most recent failing verify is a broken harness, not a test failure."""
+    for item in reversed(phase_results):
+        if item.get("phase") == "verify" and not item.get("passed", True):
+            return classify_verify_failure(item) == "bootstrap"
+    return False
+
+
 def run_pipeline(
     *,
     backend: LLMBackend,
