@@ -122,6 +122,7 @@ def fleet_task_from_dag_node(
         title=title,
         equip=child_equip,
         allowed_paths=task.allowed_paths,
+        skills=task.skills,
     )
 
 

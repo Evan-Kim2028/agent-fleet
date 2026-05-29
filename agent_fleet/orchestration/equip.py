@@ -108,6 +108,14 @@ def resolve_dispatch_equip(
             ):
                 extra_execute.append(skill_id)
 
+    for skill_id in task.skills:
+        if (
+            skill_exists_in_base_kit(skill_id)
+            and skill_id not in loadout_execute
+            and skill_id not in extra_execute
+        ):
+            extra_execute.append(skill_id)
+
     # Mirror compose_persona_body's minimal filter so the journaled equip matches
     # the skills actually composed into the body (filter the loadout, keep extras).
     filtered_execute = (

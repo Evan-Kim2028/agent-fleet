@@ -9,3 +9,5 @@ pipeline_skills:
     review:
       - pstack/unslop
       - cursor-team-kit/deslop
+      - agent-skills/doubt-driven-development
+      - agent-skills/code-review-and-quality

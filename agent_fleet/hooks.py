@@ -250,6 +250,7 @@ class FleetTask:
     equip: DispatchEquip | None = None
     complexity: str | None = None  # LOW | MED | HIGH; None → MED default
     allowed_paths: tuple[str, ...] = ()  # If non-empty, agent may only modify these prefixes
+    skills: tuple[str, ...] = ()  # Catalog skill ids equipped into this task's execute slots
 
 
 @dataclass(frozen=True)

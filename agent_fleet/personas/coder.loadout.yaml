@@ -15,4 +15,6 @@ skills:
     - pstack/figure-it-out
 pipeline_skills:
   code_review:
-    review: []
+    review:
+      - agent-skills/doubt-driven-development
+      - agent-skills/code-review-and-quality

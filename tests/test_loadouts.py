@@ -54,7 +54,10 @@ def test_reviewer_loadout_lists_unslop_for_review() -> None:
     loadout = load_loadout("reviewer")
     assert loadout is not None
     review_skills = loadout["pipeline_skills"]["code_review"]["review"]
-    assert review_skills == ["pstack/unslop", "cursor-team-kit/deslop"]
+    assert review_skills[:2] == ["pstack/unslop", "cursor-team-kit/deslop"]
+    # Unit 6 adversarial self-review gate equips these into the review slot.
+    assert "agent-skills/doubt-driven-development" in review_skills
+    assert "agent-skills/code-review-and-quality" in review_skills
 
 
 def test_compose_persona_body_includes_sections() -> None:

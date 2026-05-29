@@ -25,6 +25,7 @@ class DagTask:
     persona: str | None = None
     pipeline: str | None = None
     allowed_paths: tuple[str, ...] = ()
+    skills: tuple[str, ...] = ()  # Catalog skill ids equipped into this task's execute slots
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,7 @@ class DagSpec:
                     **({"persona": task.persona} if task.persona else {}),
                     **({"pipeline": task.pipeline} if task.pipeline else {}),
                     **({"allowed_paths": list(task.allowed_paths)} if task.allowed_paths else {}),
+                    **({"skills": list(task.skills)} if task.skills else {}),
                 }
                 for task in self.tasks
             ],
@@ -65,6 +67,7 @@ def dag_spec_from_dict(data: dict[str, Any]) -> DagSpec:
     tasks: list[DagTask] = []
     for raw in data["tasks"]:
         allowed = raw.get("allowed_paths") or []
+        skills = raw.get("skills") or []
         tasks.append(
             DagTask(
                 id=str(raw["id"]),
@@ -74,6 +77,7 @@ def dag_spec_from_dict(data: dict[str, Any]) -> DagSpec:
                 persona=str(raw["persona"]) if raw.get("persona") else None,
                 pipeline=str(raw["pipeline"]) if raw.get("pipeline") else None,
                 allowed_paths=tuple(str(p) for p in allowed),
+                skills=tuple(str(s) for s in skills),
             )
         )
     models_raw = data.get("models") or {}

@@ -42,6 +42,10 @@
           "allowed_paths": {
             "type": "array",
             "items": {"type": "string"}
+          },
+          "skills": {
+            "type": "array",
+            "items": {"type": "string"}
           }
         }
       }
