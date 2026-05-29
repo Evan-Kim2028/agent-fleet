@@ -40,26 +40,8 @@ if TYPE_CHECKING:
     import types
     from collections.abc import Callable
 
-    from agent_fleet.hooks import FleetTaskResult, PersonaResolver
-
-
-class _DispatcherLike(Protocol):
-    """Structural type for the dispatcher object used by ProgramContext.
-
-    The runtime only calls ``_execute_task``; callers may pass a real
-    ``FleetDispatcher`` or any test double that satisfies this interface.
-    """
-
-    def _execute_task(
-        self,
-        task_index: int,
-        task: FleetTask,
-        *,
-        batch_size: int = ...,
-        same_workspace_tasks: int = ...,
-        handoff: object = ...,
-        base_branch: str | None = ...,
-    ) -> FleetTaskResult: ...
+    from agent_fleet.hooks import PersonaResolver
+    from agent_fleet.orchestration.types import _DispatcherLike
 
 
 class _FleetLogLike(Protocol):

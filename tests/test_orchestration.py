@@ -154,7 +154,26 @@ def test_aggregate_child_results_all_success() -> None:
     status, error, summary = aggregate_child_results(results)
     assert status == "completed"
     assert error is None
-    assert "2 child task" in summary
+    assert "2/2" in summary
+
+
+def test_aggregate_child_results_bounded_summary_20_children() -> None:
+    results = [
+        FleetTaskResult(
+            task_index=i,
+            persona="coder",
+            goal=f"child-{i}",
+            status="completed",
+            summary="x" * 2000,
+            error=None,
+            duration_seconds=1.0,
+        )
+        for i in range(20)
+    ]
+    status, error, summary = aggregate_child_results(results)
+    assert status == "completed"
+    assert error is None
+    assert len(summary) < 100
 
 
 def test_aggregate_child_results_partial() -> None:
