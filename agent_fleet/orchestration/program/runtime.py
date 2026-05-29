@@ -51,6 +51,26 @@ class _FleetLogLike(Protocol):
 
 _SUMMARY_CEILING = 4000
 
+# Dynamic-control bounds (Unit 4). Recursion and re-plan loops are the only two
+# constructs that can grow the call tree without a fresh top-level dispatch, so
+# each gets a hard cap. The agent budget is still the global resource ceiling;
+# these caps stop pathological recursion that never dispatches an agent.
+MAX_SUBPROGRAM_DEPTH = 3
+MAX_REPLAN_ITERATIONS = 3
+
+# Judges answer a single boolean. The schema keeps the parse trivial and gives
+# the planner a stable contract.
+_BRANCH_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {"answer": {"type": "boolean"}, "reason": {"type": "string"}},
+    "required": ["answer"],
+}
+_REPLAN_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {"done": {"type": "boolean"}, "reason": {"type": "string"}},
+    "required": ["done"],
+}
+
 
 def _estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4) if text else 0
@@ -180,6 +200,12 @@ class ProgramContext:
         self._dispatched = 0
         self._inflight = 0
         self._fanout_depth = 0
+        # Sub-program recursion depth is a property of the call chain, not a
+        # global count, so it lives in thread-local state. parallel/pipeline
+        # seed each worker with the parent chain's depth so recursion stays
+        # bounded across a fan-out, mirroring how the admission gate threads
+        # ancestor depth rather than counting globally.
+        self._subprogram_local = threading.local()
         self._results: list[AgentResult] = []
         self._phases: list[str] = []
         self._log: list[str] = []
@@ -277,6 +303,20 @@ class ProgramContext:
                 self._log.append(f"thunk error: {type(exc).__name__}: {exc}")
             return None
 
+    def _current_subdepth(self) -> int:
+        return int(getattr(self._subprogram_local, "value", 0))
+
+    def _run_at_depth(self, thunk: Callable[[], object], depth: int) -> object:
+        """Run a fan-out thunk seeded with the parent chain's recursion depth.
+
+        A new pool thread starts with empty thread-local state, so without this
+        a sub-program called inside a parallel/pipeline thunk would reset to
+        depth zero and escape the recursion bound. Seeding carries the chain
+        depth across the fan-out.
+        """
+        self._subprogram_local.value = depth
+        return self._guard(thunk)
+
     def parallel(self, thunks: list[Callable[[], object]]) -> list[object]:
         """Run thunks concurrently and return their results in order.
 
@@ -288,12 +328,16 @@ class ProgramContext:
         if not items:
             return []
         workers = max(1, min(self._max_parallel, self._capacity, len(items)))
+        parent_depth = self._current_subdepth()
         results: list[object] = [None] * len(items)
         with self._lock:
             self._fanout_depth += 1
         try:
             with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="wf-par") as pool:
-                future_index = {pool.submit(self._guard, thunk): i for i, thunk in enumerate(items)}
+                future_index = {
+                    pool.submit(self._run_at_depth, thunk, parent_depth): i
+                    for i, thunk in enumerate(items)
+                }
                 for future in as_completed(future_index):
                     results[future_index[future]] = future.result()
         finally:
@@ -316,8 +360,10 @@ class ProgramContext:
         if not work:
             return []
         workers = max(1, min(self._max_parallel, self._capacity, len(work)))
+        parent_depth = self._current_subdepth()
 
         def run_item(index: int, original: object) -> object:
+            self._subprogram_local.value = parent_depth
             value: object = original
             for stage in stages:
                 try:
@@ -357,6 +403,120 @@ class ProgramContext:
             self._log.append(str(message))
         self._emit("program.log", message=str(message)[:500])
 
+    def branch(
+        self,
+        question: str,
+        if_true: Callable[[], object],
+        if_false: Callable[[], object] | None = None,
+        *,
+        persona: str | None = None,
+        context: str = "",
+    ) -> object:
+        """Let a judge agent decide a yes/no question, then run the chosen thunk.
+
+        The model picks the control-flow path at runtime. A judge answers
+        *question* with a boolean; on yes ``if_true()`` runs, on no
+        ``if_false()`` runs when supplied, else the call returns ``None``. The
+        judgment is one agent against the budget; the chosen thunk's own
+        dispatches count as usual. A thunk that raises resolves to ``None``.
+        """
+        self._check_deadline()
+        verdict = self.agent(
+            f"Answer this yes/no question with a JSON boolean.\n\nQuestion: {question}",
+            persona=persona,
+            context=context,
+            schema=_BRANCH_SCHEMA,
+        )
+        chose_true = bool(verdict.data and verdict.data.get("answer"))
+        with self._lock:
+            self._log.append(f"branch -> {chose_true}: {str(question)[:80]}")
+        self._emit("program.branch", chose_true=chose_true)
+        if chose_true:
+            return self._guard(if_true)
+        if if_false is not None:
+            return self._guard(if_false)
+        return None
+
+    def replan(
+        self,
+        goal: str,
+        step: Callable[[int, object], object],
+        *,
+        max_iterations: int = MAX_REPLAN_ITERATIONS,
+        persona: str | None = None,
+    ) -> list[object]:
+        """Loop a step under model control until the goal is met or the cap.
+
+        Each round runs ``step(iteration, last_result)`` then asks a judge
+        whether *goal* is satisfied. The loop stops on the first satisfied
+        verdict or after ``MAX_REPLAN_ITERATIONS`` rounds, whichever comes
+        first; the judge does not run after the final round. Returns the list of
+        per-round results so the program can keep the last or fold them. A round
+        whose step raises records ``None`` for that round and keeps looping.
+        """
+        self._check_deadline()
+        rounds = max(1, min(int(max_iterations), MAX_REPLAN_ITERATIONS))
+        history: list[object] = []
+        for i in range(rounds):
+            self._check_deadline()
+            last = history[-1] if history else None
+            try:
+                result = step(i, last)
+            except ProgramExecutionError:
+                raise
+            except Exception as exc:
+                with self._lock:
+                    self._log.append(f"replan step {i} error: {type(exc).__name__}: {exc}")
+                result = None
+            history.append(result)
+            if i + 1 >= rounds:
+                break
+            verdict = self.agent(
+                f"Goal:\n{goal}\n\nLatest result:\n"
+                f"{_bound_summary(_stringify_result(result), 2000)}\n\n"
+                "Is the goal fully met? Answer with a JSON boolean: "
+                "true to stop, false to iterate.",
+                persona=persona,
+                schema=_REPLAN_SCHEMA,
+            )
+            if verdict.data and verdict.data.get("done"):
+                self._emit("program.replan.satisfied", iteration=i)
+                break
+        return history
+
+    def subprogram(self, source: str) -> object:
+        """Generate and run a nested workflow program at runtime.
+
+        This is runtime-dynamic orchestration: a running program can build a new
+        program string, typically from what its agents just found, and execute
+        it here. The nested program shares this run's dispatcher, agent budget,
+        deadline, and result list, so the only newly bounded resource is
+        recursion depth, capped at ``MAX_SUBPROGRAM_DEPTH`` per call chain. The
+        source is validated by the same validator with zero relaxation; an
+        invalid or too-deep sub-program raises ``ProgramExecutionError``. The
+        sub-program's return value crosses back like any other value.
+        """
+        self._check_deadline()
+        depth = self._current_subdepth()
+        if depth >= MAX_SUBPROGRAM_DEPTH:
+            raise ProgramExecutionError(
+                f"subprogram recursion exceeded MAX_SUBPROGRAM_DEPTH={MAX_SUBPROGRAM_DEPTH}"
+            )
+        validation = validate_workflow_program(source)
+        if not validation.ok:
+            raise ProgramExecutionError(
+                "subprogram failed validation: " + "; ".join(validation.errors)
+            )
+        self._emit("program.subprogram.start", depth=depth + 1)
+        code = _wrap_as_main(source)
+        nested_ns = self.build_namespace()
+        self._subprogram_local.value = depth + 1
+        try:
+            exec(code, nested_ns)  # restricted namespace, validated source
+            return cast("Callable[[], object]", nested_ns["__workflow_main__"])()
+        finally:
+            self._subprogram_local.value = depth
+
     def build_namespace(self) -> dict[str, object]:
         safe = {
             name: getattr(builtins, name) for name in SAFE_BUILTINS if hasattr(builtins, name)
@@ -368,6 +528,9 @@ class ProgramContext:
             "pipeline": self.pipeline,
             "phase": self.phase,
             "log": self.log,
+            "branch": self.branch,
+            "replan": self.replan,
+            "subprogram": self.subprogram,
         }
 
 

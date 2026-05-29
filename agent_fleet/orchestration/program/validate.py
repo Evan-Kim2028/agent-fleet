@@ -29,8 +29,19 @@ SAFE_BUILTINS: frozenset[str] = frozenset(
     }
 )
 
-# Primitive surface the runner injects.
-PRIMITIVES: frozenset[str] = frozenset({"agent", "parallel", "pipeline", "phase", "log"})
+# Primitive surface the runner injects. The first five are the static set; the
+# last three are the dynamic-control primitives (Unit 4) that let a running
+# program re-plan a loop, branch on a model judgment, or generate and run a
+# bounded sub-program at runtime. All eight are plain names in the namespace, so
+# none of them widens the escape surface below.
+PRIMITIVES: frozenset[str] = frozenset(
+    {"agent", "parallel", "pipeline", "phase", "log", "replan", "branch", "subprogram"}
+)
+
+# The subset that dispatches work indirectly: a program built only out of these
+# still orchestrates agents, just one level down, so it must not be rejected as
+# dispatching nothing.
+_DYNAMIC_DISPATCH: frozenset[str] = frozenset({"replan", "branch", "subprogram"})
 
 # Calls that must never appear, even though the namespace already omits them.
 # Defense in depth, and a clearer error than a bare NameError.
@@ -63,6 +74,7 @@ class _Checker(ast.NodeVisitor):
         self.agent_calls = 0
         self.uses_parallel = False
         self.uses_pipeline = False
+        self.uses_dynamic = False
 
     def _fail(self, node: ast.AST, msg: str) -> None:
         line = getattr(node, "lineno", "?")
@@ -95,6 +107,8 @@ class _Checker(ast.NodeVisitor):
                 self.uses_parallel = True
             elif func.id == "pipeline":
                 self.uses_pipeline = True
+            elif func.id in _DYNAMIC_DISPATCH:
+                self.uses_dynamic = True
         self.generic_visit(node)
 
 
@@ -115,8 +129,11 @@ def validate_workflow_program(source: str) -> ProgramValidation:
     checker.visit(tree)
 
     errors = list(checker.errors)
-    if checker.agent_calls == 0 and not checker.uses_pipeline:
-        errors.append("program dispatches no agents (no agent() or pipeline() call)")
+    if checker.agent_calls == 0 and not checker.uses_pipeline and not checker.uses_dynamic:
+        errors.append(
+            "program dispatches no agents "
+            "(no agent()/pipeline()/branch()/replan()/subprogram() call)"
+        )
 
     return ProgramValidation(
         ok=not errors,
@@ -124,4 +141,5 @@ def validate_workflow_program(source: str) -> ProgramValidation:
         agent_calls=checker.agent_calls,
         uses_parallel=checker.uses_parallel,
         uses_pipeline=checker.uses_pipeline,
+        uses_dynamic=checker.uses_dynamic,
     )

@@ -74,6 +74,7 @@ class ProgramValidation:
     agent_calls: int = 0
     uses_parallel: bool = False
     uses_pipeline: bool = False
+    uses_dynamic: bool = False
 
     def raise_if_invalid(self) -> None:
         if not self.ok:
