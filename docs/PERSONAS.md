@@ -107,7 +107,7 @@ Injected into the agent prompt as "only modify paths matching: …"
 
 ## Repo factory (`.agent-fleet.yaml`)
 
-Generated via `agent-fleet init /path/to/repo`.
+Generated via `fleet init /path/to/repo`.
 
 ```yaml
 name: my-app
@@ -209,8 +209,8 @@ persona_scope_allowlist:
 ### Step 4 — verify
 
 ```bash
-agent-fleet personas --workspace /path/to/repo
-agent-fleet run "Add unit test for user validation" \
+fleet personas --workspace /path/to/repo
+fleet run "Add unit test for user validation" \
   --workspace /path/to/repo \
   --persona backend \
   --pipeline code_review

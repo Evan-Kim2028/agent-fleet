@@ -18,7 +18,7 @@ cp fleet.example.yaml ~/.agent-fleet/fleet.yaml
 Override path for a single command:
 
 ```bash
-agent-fleet run "..." --config /path/to/fleet.yaml
+fleet run "..." --config /path/to/fleet.yaml
 ```
 
 Environment variables:
@@ -118,4 +118,4 @@ The script reports the active import path, flags shadow entries on `sys.path`, a
 | `~/.agent-fleet/level_up/` | Persona learning journals and overlays |
 | `~/.agent-fleet/skills/` | Optional user skill overrides |
 
-Use `agent-fleet paths` (when available) to print resolved locations for your machine.
+Use `fleet runs` to list recorded runs, or `fleet watch` to tail a live run by id.

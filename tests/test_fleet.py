@@ -397,3 +397,76 @@ def test_workstream_subcommand_registered() -> None:
     with pytest.raises(SystemExit) as exc:
         main(["workstream", "--help"])
     assert exc.value.code == 0
+
+
+def test_summon_subcommand_registered() -> None:
+    """'fleet summon' must be wired into the top-level CLI."""
+    from agent_fleet.cli import main
+
+    with pytest.raises(SystemExit) as exc:
+        main(["summon", "--help"])
+    assert exc.value.code == 0
+
+
+def test_summon_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Running summon twice must not error and must not create duplicate configs."""
+    monkeypatch.chdir(tmp_path)
+    from agent_fleet.cli import main
+
+    rc1 = main(["summon", "--workspace", str(tmp_path)])
+    assert (tmp_path / ".agent-fleet.yaml").exists()
+    # Second run: config already present, must not fail.
+    rc2 = main(["summon", "--workspace", str(tmp_path)])
+    # Both runs return doctor exit code (0 if checks pass, 1 if not).
+    # We only assert they don't raise and that rc2 == rc1 (idempotent).
+    assert rc2 == rc1
+
+
+def test_normalize_argv_wired_empty_routes_to_summon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Passing [] to main() must route to summon (bare invocation)."""
+    monkeypatch.chdir(tmp_path)
+    from agent_fleet.cli import main
+
+    # Empty argv → normalize to ["summon"], which runs cmd_summon.
+    # Just assert it completes (doctor may return non-zero in CI; that's ok).
+    rc = main([])
+    assert isinstance(rc, int)
+
+
+def test_normalize_argv_unknown_token_routes_to_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unknown first token must be routed to 'run' via normalize_argv."""
+    monkeypatch.chdir(tmp_path)
+
+    # We use --dry-run to avoid needing a real backend.
+    repo_yaml = tmp_path / ".agent-fleet.yaml"
+    repo_yaml.write_text("default_backend: cursor\n", encoding="utf-8")
+
+    from agent_fleet.cli import main
+
+    # "fix the bug" is not a subcommand → normalize inserts "run" → ["run", "fix the bug", "--dry-run"]
+    rc = main(["fix the bug", "--dry-run"])
+    assert rc == 0
+
+
+def test_allow_abbrev_false_prefix_is_not_a_subcommand(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With allow_abbrev=False, 'doc' is NOT treated as an abbreviation of 'doctor'.
+
+    Instead, normalize_argv routes it to 'run doc', which succeeds as a dry-run
+    for a task with goal='doc'.  If allow_abbrev were True, argparse would have
+    intercepted 'doc' as 'doctor' — but with it False, the keyword router owns
+    the routing decision exclusively.
+    """
+    monkeypatch.chdir(tmp_path)
+    from agent_fleet.cli import main
+
+    # 'doc' → normalize → ['run', 'doc', '--dry-run'] → dry-run succeeds with exit 0.
+    # If allow_abbrev=True were in effect, argparse would expand 'doc' → 'doctor',
+    # and the '--dry-run' flag would be rejected by doctor (it has no such flag), exit != 0.
+    rc = main(["doc", "--dry-run"])
+    assert rc == 0, "normalize_argv must route 'doc' to 'run', not to 'doctor'"
