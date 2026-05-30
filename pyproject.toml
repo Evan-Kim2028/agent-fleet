@@ -51,6 +51,7 @@ agent_fleet = [
     "base-kit/**/*",
     "schemas/*.json",
     "orchestration/dag/data/*.tsx",
+    "templates/*.yaml",
 ]
 
 [tool.pytest.ini_options]
