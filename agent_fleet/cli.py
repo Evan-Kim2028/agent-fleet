@@ -738,10 +738,17 @@ def cmd_self_update(_args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from agent_fleet import __version__
+
     parser = argparse.ArgumentParser(
         prog="agent-fleet",
         description="Agentic coding fleet CLI",
         allow_abbrev=False,
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"fleet {__version__}",
     )
     parser.add_argument(
         "--config",
