@@ -16,8 +16,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -35,7 +33,7 @@ def _run_fleet(argv: list[str], env: dict | None = None) -> subprocess.Completed
     if env:
         base.update(env)
     return subprocess.run(
-        [sys.executable, "-m", "agent_fleet.cli"] + argv,
+        [sys.executable, "-m", "agent_fleet.cli", *argv],
         env=base,
         capture_output=True,
         text=True,
@@ -57,8 +55,12 @@ def _run_shim(argv: list[str], env: dict | None = None) -> subprocess.CompletedP
     if env:
         base.update(env)
     return subprocess.run(
-        [sys.executable, "-c",
-         "from agent_fleet.pr_loop._shim import main; raise SystemExit(main())"] + argv,
+        [
+            sys.executable,
+            "-c",
+            "from agent_fleet.pr_loop._shim import main; raise SystemExit(main())",
+            *argv,
+        ],
         env=base,
         capture_output=True,
         text=True,
@@ -122,7 +124,8 @@ def test_shim_and_fleet_loop_help_contain_loop_description() -> None:
     # Both should describe the loop subcommand
     for label, proc in [("fleet loop", fleet_proc), ("shim", shim_proc)]:
         combined = proc.stdout + proc.stderr
-        assert "loop" in combined.lower() or "watcher" in combined.lower() or "pr" in combined.lower(), (
+        lo = combined.lower()
+        assert "loop" in lo or "watcher" in lo or "pr" in lo, (
             f"{label} --help output doesn't mention loop/watcher/pr: {combined!r}"
         )
 

@@ -447,7 +447,8 @@ def test_normalize_argv_unknown_token_routes_to_run(
 
     from agent_fleet.cli import main
 
-    # "fix the bug" is not a subcommand → normalize inserts "run" → ["run", "fix the bug", "--dry-run"]
+    # "fix the bug" is not a subcommand → normalize inserts "run"
+    # → ["run", "fix the bug", "--dry-run"]
     rc = main(["fix the bug", "--dry-run"])
     assert rc == 0
 

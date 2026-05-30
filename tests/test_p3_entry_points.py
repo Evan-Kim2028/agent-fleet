@@ -18,8 +18,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -30,7 +28,7 @@ ROOT = Path(__file__).resolve().parent.parent
 def _run_fleet(argv: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     """Invoke ``fleet`` (agent_fleet.cli:main) as a subprocess."""
     return subprocess.run(
-        [sys.executable, "-m", "agent_fleet.cli"] + argv,
+        [sys.executable, "-m", "agent_fleet.cli", *argv],
         env=env,
         capture_output=True,
         text=True,
@@ -65,7 +63,11 @@ def test_fleet_console_script_in_pyproject() -> None:
     assert "agent_fleet.cli:main" in content
     assert "fleet" in content
     # Verify fleet points to the cli module (not some other target)
-    lines = [ln.strip() for ln in content.splitlines() if "fleet" in ln and "agent_fleet.cli:main" in ln]
+    lines = [
+        ln.strip()
+        for ln in content.splitlines()
+        if "fleet" in ln and "agent_fleet.cli:main" in ln
+    ]
     assert lines, "No pyproject.toml line matches 'fleet ... agent_fleet.cli:main'"
 
 

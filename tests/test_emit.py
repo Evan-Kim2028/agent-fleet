@@ -15,14 +15,12 @@ from __future__ import annotations
 import io
 import json
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from agent_fleet.emit import emit
-
 
 # ---------------------------------------------------------------------------
 # Minimal stubs so we don't need real backend imports
@@ -36,7 +34,7 @@ class _TaskResult:
     error: str | None = None
 
     @property
-    def __dict__(self):  # type: ignore[override]
+    def __dict__(self) -> dict[str, object]:  # type: ignore[override]
         return {"status": self.status, "summary": self.summary, "error": self.error}
 
 
@@ -47,7 +45,7 @@ class _RunResult:
     error: str | None = None
 
     @property
-    def __dict__(self):  # type: ignore[override]
+    def __dict__(self) -> dict[str, object]:  # type: ignore[override]
         return {"outcome": self.outcome, "run_id": self.run_id, "error": self.error}
 
 
@@ -56,7 +54,7 @@ class _RunResult:
 # ---------------------------------------------------------------------------
 
 
-def _emit_captured(result: Any, fmt: str = "json") -> tuple[int, str]:
+def _emit_captured(result: object, fmt: str = "json") -> tuple[int, str]:
     """Call emit() and capture stdout."""
     buf = io.StringIO()
     old_stdout = sys.stdout
@@ -223,7 +221,7 @@ def test_emit_dataclass_serializes_via_default_str() -> None:
         path: Path
 
         @property
-        def __dict__(self):  # type: ignore[override]
+        def __dict__(self) -> dict[str, object]:  # type: ignore[override]
             return {"name": self.name, "path": self.path}
 
     result = _WithPath(name="test", path=Path("/some/path")).__dict__

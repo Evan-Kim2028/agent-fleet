@@ -97,7 +97,10 @@ def test_readme_no_agent_fleet_run_command() -> None:
     readme = _readme()
     # Allow agent-fleet as a package reference (e.g. git+https://...agent-fleet.git)
     # but not as a CLI invocation: 'agent-fleet run', 'agent-fleet doctor', etc.
-    bad_cli_pattern = re.compile(r"^\s*(uv run )?agent-fleet (run|doctor|personas|review|loop|watch|schedule|dispatch|summon|init)\b", re.MULTILINE)
+    _cmds = r"(run|doctor|personas|review|loop|watch|schedule|dispatch|summon|init)"
+    bad_cli_pattern = re.compile(
+        rf"^\s*(uv run )?agent-fleet {_cmds}\b", re.MULTILINE
+    )
     matches = bad_cli_pattern.findall(readme)
     assert not matches, (
         f"README still contains old 'agent-fleet <cmd>' CLI invocations: {matches}"
@@ -127,7 +130,8 @@ def test_quickstart_uses_fleet_summon() -> None:
 
 def test_quickstart_no_old_agent_fleet_commands() -> None:
     qs = _quickstart()
-    bad = re.compile(r"^\s*(uv run )?agent-fleet (run|doctor|personas|review|loop|watch|schedule|dispatch|summon|init)\b", re.MULTILINE)
+    _cmds = r"(run|doctor|personas|review|loop|watch|schedule|dispatch|summon|init)"
+    bad = re.compile(rf"^\s*(uv run )?agent-fleet {_cmds}\b", re.MULTILINE)
     matches = bad.findall(qs)
     assert not matches, f"QUICKSTART still has old CLI invocations: {matches}"
 
@@ -155,7 +159,8 @@ def test_new_repo_uses_fleet_run() -> None:
 
 def test_new_repo_no_old_agent_fleet_commands() -> None:
     nr = _new_repo()
-    bad = re.compile(r"^\s*(uv run )?agent-fleet (run|doctor|personas|review|loop|watch|schedule|dispatch|summon|init)\b", re.MULTILINE)
+    _cmds = r"(run|doctor|personas|review|loop|watch|schedule|dispatch|summon|init)"
+    bad = re.compile(rf"^\s*(uv run )?agent-fleet {_cmds}\b", re.MULTILINE)
     matches = bad.findall(nr)
     assert not matches, f"NEW-REPO still has old CLI invocations: {matches}"
 
@@ -200,7 +205,8 @@ def test_fleet_config_uses_fleet_run_config() -> None:
 
 def test_fleet_config_no_old_agent_fleet_commands() -> None:
     fc = _fleet_config()
-    bad = re.compile(r"^\s*(uv run )?agent-fleet (run|doctor|personas|review|loop|watch|schedule|dispatch|summon|init|paths)\b", re.MULTILINE)
+    _cmds = r"(run|doctor|personas|review|loop|watch|schedule|dispatch|summon|init|paths)"
+    bad = re.compile(rf"^\s*(uv run )?agent-fleet {_cmds}\b", re.MULTILINE)
     matches = bad.findall(fc)
     assert not matches, f"FLEET-CONFIG still has old CLI invocations: {matches}"
 

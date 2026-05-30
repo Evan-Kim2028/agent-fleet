@@ -15,7 +15,7 @@ def main() -> int:
     # cmd_loop, then pass the rest of the original argv unchanged.
     from agent_fleet.cli import main as fleet_main
 
-    sys.argv = [sys.argv[0], "loop"] + sys.argv[1:]
+    sys.argv = [sys.argv[0], "loop", *sys.argv[1:]]
     return fleet_main()
 
 
