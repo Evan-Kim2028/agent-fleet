@@ -2,21 +2,35 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import pytest
+from agent_fleet.context import ContextOptions, build_fleet_context
 
-from agent_fleet.context import ContextOptions, FleetContext, build_fleet_context
-
+if TYPE_CHECKING:
+    import pytest
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _opts(**kwargs) -> ContextOptions:
+def _opts(
+    workspace_arg: str | None = None,
+    config_arg: str | None = None,
+    persona_arg: str | None = None,
+    require_env: bool = False,
+    use_env_target_config: bool = False,
+    personas_dir_from_repo: bool = False,
+) -> ContextOptions:
     """Build ContextOptions with sane defaults for tests."""
-    return ContextOptions(**kwargs)
+    return ContextOptions(
+        workspace_arg=workspace_arg,
+        config_arg=config_arg,
+        persona_arg=persona_arg,
+        require_env=require_env,
+        use_env_target_config=use_env_target_config,
+        personas_dir_from_repo=personas_dir_from_repo,
+    )
 
 
 # ---------------------------------------------------------------------------

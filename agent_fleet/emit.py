@@ -45,8 +45,7 @@ Empty list → exit 1 (no success confirmed).
 from __future__ import annotations
 
 import json
-import sys
-from typing import Any
+from typing import cast
 
 # ---------------------------------------------------------------------------
 # Exit-code tables
@@ -82,7 +81,7 @@ _REVIEW_OK: frozenset[str] = frozenset({"approve"})
 # ---------------------------------------------------------------------------
 
 
-def emit(result: Any, fmt: str = "json") -> int:
+def emit(result: object, fmt: str = "json") -> int:
     """Print *result* and return an exit code.
 
     Parameters
@@ -105,7 +104,7 @@ def emit(result: Any, fmt: str = "json") -> int:
     code = _exit_code(result)
 
     if fmt == "comment" and isinstance(result, dict) and "comment_markdown" in result:
-        print(result["comment_markdown"])
+        print(cast("dict[str, object]", result)["comment_markdown"])
     else:
         print(json.dumps(result, indent=2, default=str))
 
@@ -117,7 +116,7 @@ def emit(result: Any, fmt: str = "json") -> int:
 # ---------------------------------------------------------------------------
 
 
-def _exit_code(result: Any) -> int:
+def _exit_code(result: object) -> int:
     """Return 0 or 1 for *result* using the documented status→exit-code tables.
 
     Dispatch order:
@@ -133,21 +132,23 @@ def _exit_code(result: Any) -> int:
         if not result:
             return 1
         first = result[0]
-        status = first.get("status", "") if isinstance(first, dict) else ""
+        d = cast("dict[str, object]", first)
+        status = d.get("status", "") if isinstance(first, dict) else ""
         return 0 if status in _DISPATCHER_OK else 1
 
     if isinstance(result, dict):
+        d = cast("dict[str, object]", result)
         # Review verdict takes priority over status/outcome.
-        if "verdict" in result:
-            return 0 if str(result["verdict"]) in _REVIEW_OK else 1
+        if "verdict" in d:
+            return 0 if str(d["verdict"]) in _REVIEW_OK else 1
         # Full pipeline: outcome field.
-        if "outcome" in result:
-            return 0 if str(result["outcome"]) in _FULL_PIPELINE_OK else 1
+        if "outcome" in d:
+            return 0 if str(d["outcome"]) in _FULL_PIPELINE_OK else 1
         # Single dispatcher result: status field.
-        if "status" in result:
-            return 0 if str(result["status"]) in _DISPATCHER_OK else 1
+        if "status" in d:
+            return 0 if str(d["status"]) in _DISPATCHER_OK else 1
         # Error key present and truthy → failure.
-        if result.get("error"):
+        if d.get("error"):
             return 1
         return 0
 

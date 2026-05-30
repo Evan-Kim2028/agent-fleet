@@ -33,6 +33,7 @@ def cmd_review(args: argparse.Namespace) -> int:
     )
     if err is not None:
         return err
+    assert ctx is not None
 
     result = run_pr_review(
         workspace=ctx.workspace,
@@ -55,6 +56,7 @@ def cmd_scope(args: argparse.Namespace) -> int:
     )
     if err is not None:
         return err
+    assert ctx is not None
 
     result = run_scope(
         workspace=ctx.workspace,
@@ -77,6 +79,7 @@ def cmd_scout(args: argparse.Namespace) -> int:
     )
     if err is not None:
         return err
+    assert ctx is not None
 
     result = run_scout(
         workspace=ctx.workspace,
@@ -102,6 +105,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
     if err is not None:
         return err
+    assert ctx is not None
 
     if getattr(args, "dry_run", False):
         print(
@@ -168,6 +172,7 @@ def cmd_personas(args: argparse.Namespace) -> int:
     )
     if err is not None:
         return err
+    assert ctx is not None
 
     resolver = YamlPersonaResolver(ctx.config)
     return emit({"personas": resolver.list_personas(), "pipelines": ctx.config.pipelines})
@@ -195,6 +200,7 @@ def cmd_loop(args: argparse.Namespace) -> int:
     )
     if err is not None:
         return err
+    assert ctx is not None
 
     repo = ctx.repo
     if repo is None or repo.pr_loop is None or not repo.pr_loop.enabled:
@@ -510,6 +516,7 @@ def cmd_learn(args: argparse.Namespace) -> int:
     )
     if err is not None:
         return err
+    assert ctx is not None
 
     resolver = YamlPersonaResolver(ctx.config)
     backend = make_backend(ctx.config)
@@ -588,14 +595,14 @@ def cmd_schedule(args: argparse.Namespace) -> int:
     if getattr(args, "config", None):
         schedule_argv += ["--config", args.config]
     schedule_argv.append(args.schedule_command)
-    if args.schedule_command == "run":
-        if getattr(args, "schedule_id", None):
-            schedule_argv += ["--id", args.schedule_id]
+    if args.schedule_command == "run" and getattr(args, "schedule_id", None):
+        schedule_argv += ["--id", args.schedule_id]
     return _schedule_main(schedule_argv)
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
     import yaml
+
     from agent_fleet.doctor import doctor_exit_code, render_doctor, run_doctor_checks
 
     backend = "cursor"
@@ -983,7 +990,9 @@ def main(argv: list[str] | None = None) -> int:
     schedule_p.add_argument("--workspace", help="Repo path (default: cwd)")
     schedule_sub = schedule_p.add_subparsers(dest="schedule_command", required=True)
 
-    schedule_list_p = schedule_sub.add_parser("list", help="List configured schedules and next due times")
+    schedule_list_p = schedule_sub.add_parser(
+        "list", help="List configured schedules and next due times"
+    )
     schedule_list_p.add_argument("--workspace", help="Repo path (default: cwd)")
     schedule_list_p.set_defaults(func=cmd_schedule)
 

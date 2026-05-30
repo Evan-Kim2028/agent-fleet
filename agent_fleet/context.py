@@ -120,8 +120,7 @@ def build_fleet_context(
         persona = config.default_persona
 
     # 6. Backend env guard (only when require_env=True).
-    if opts.require_env:
-        if (code := require_backend_env(config)) is not None:
-            return None, code
+    if opts.require_env and (code := require_backend_env(config)) is not None:
+        return None, code
 
     return FleetContext(workspace=workspace, config=config, repo=repo, persona=persona), None

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import agent_fleet.doctor as doctor
 from agent_fleet.doctor import DoctorCheck, doctor_exit_code, render_doctor, run_doctor_checks
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     import pytest
 
 
@@ -150,7 +151,6 @@ def test_gh_check_warn_not_installed_when_which_returns_none(
 
 def test_cmd_doctor_falls_back_to_cursor_on_malformed_config(
     tmp_path: Path,
-    monkeypatch: "pytest.MonkeyPatch",
 ) -> None:
     """cmd_doctor must not crash on a malformed .agent-fleet.yaml.
 
