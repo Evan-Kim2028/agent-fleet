@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.resources
 import json
 import subprocess
 import sys
@@ -258,8 +259,12 @@ def cmd_init(args: argparse.Namespace) -> int:
     if dest.exists() and not args.force:
         print(f"already exists: {dest}", file=sys.stderr)
         return 1
-    example = Path(__file__).resolve().parent.parent / "examples" / "repo.agent-fleet.yaml"
-    dest.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
+    template_text = (
+        importlib.resources.files("agent_fleet.templates")
+        .joinpath("repo.agent-fleet.yaml")
+        .read_text(encoding="utf-8")
+    )
+    dest.write_text(template_text, encoding="utf-8")
     print(f"created {dest}")
     return 0
 

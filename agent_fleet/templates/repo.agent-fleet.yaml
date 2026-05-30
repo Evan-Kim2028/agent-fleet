@@ -1,0 +1,131 @@
+# Repo integration
+name: my-project
+default_persona: coder
+default_branch: main
+
+# Optional: isolated worktree per run (default: edit in-place)
+# use_worktree: true
+# worktree_base: /tmp/agent-fleet-worktrees
+
+# Repo-local personas (overrides global fleet.yaml personas_dir)
+# personas_dir: default_personas
+
+# Verification commands run after IMPLEMENT (any failure triggers retry)
+test_command: pytest -q
+lint_command: ruff check .
+# typecheck_command: mypy .
+
+# Or explicit list:
+# verify_commands:
+#   - npm test
+#   - npm run lint
+
+# Persona scope restrictions (path prefixes)
+persona_scope_allowlist:
+  backend:
+    - backend/
+    - api/
+  frontend:
+    - frontend/
+    - src/
+
+# Cross-cutting boundaries — planner forces decomposition when scope spans groups
+cross_cutting_groups:
+  - [frontend/, backend/]
+  - [frontend/, api/]
+
+# Automatic decomposition: planner fans out child tasks instead of stopping
+orchestration:
+  enabled: true
+  auto_dispatch_children: true
+  preflight_on_code_review: true
+  default_child_pipeline: code_review
+  max_decomposition_depth: 1
+
+# Protected paths agents must not modify
+critical_path_prefixes:
+  - .github/workflows/
+  - ops/
+
+# Optional spine overrides (advanced)
+# spine:
+#   branch_prefix: fleet
+#   worktree_base: /tmp/agent-fleet-worktrees
+
+# Optional issue comment dispatch (/agent --persona <name>)
+# issue_dispatch:
+#   enabled: true
+#   poll_interval_s: 30
+#   queue:
+#     enabled: true
+#     file: .agent-fleet-queue.yaml
+#     advance: dispatch   # or complete for strict serial
+# See examples/agent-fleet-queue.yaml
+
+# Cron schedules (daily docs sync, weekly audits) — see docs/SCHEDULES.md, run via: fleet schedule tick
+# schedules:
+#   enabled: true
+#   poll_interval_s: 60
+#   jobs:
+#     - id: docs-daily
+#       cron: "0 6 * * *"
+#       timezone: America/New_York
+#       dispatch:
+#         kind: issue
+#         issue: 42
+#         persona: docs
+#         note: "Sync API docs with code"
+#       policy:
+#         skip_if_in_flight: true
+#         missed: skip
+
+# Unified concurrency (watcher subprocess limits + per-run RESEARCH workers)
+# capacity:
+#   max_dispatches: 8
+#   tiers:
+#     visual_audit:
+#       max_concurrent: 4
+#       ram_gb: 6
+#       min_free_ram_gb: 10
+#   per_issue:
+#     default: 2
+#     visual_audit: 1
+#   run:
+#     max_research_workers: 4
+#     max_verify_retries: 3
+
+# Privacy / persona evolution (see docs/PERSONA-EVOLUTION.md)
+# level_up:
+#   train: true
+#   contribute_to_fleet: true
+#   journal_task_summaries: true
+#   auto_learn: false          # set true to auto-run agent-fleet learn after enough rows
+#   min_experience_rows: 20
+#   min_repos_for_fleet: 1
+#   learn_cooldown_seconds: 3600
+
+# code_review auto-fix loop (local pipeline: execute → review → fix → re-check)
+# When pr_loop.enabled is true, these defaults inherit automatically.
+# code_review:
+#   auto_fix: true
+#   max_fix_attempts: 2
+#   fix_persona: coder
+#   auto_push: false
+#   auto_pr_loop: false
+
+# Automated PR lifecycle (requires pr-analyzer workflow + local watcher)
+# Full example: examples/repo-full.agent-fleet.yaml — see docs/NEW-REPO.md
+# pr_loop:
+#   enabled: true
+#   branch_prefixes: [fleet/]
+#   poll_interval_s: 30
+#   auto_merge: true
+#   max_fix_attempts: 2
+#   max_ci_fix_attempts: 2
+#   merge_cooldown_s: 300
+#   tiered_merge_gate: false
+#   poll_interval_s: 10
+#   review_poll_s: 10
+#   ci_poll_s: 10
+#   fix_persona: coder
+#   ci_fix_persona: coder
