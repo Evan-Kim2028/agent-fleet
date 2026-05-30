@@ -9,7 +9,16 @@ import pytest
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from agent_fleet.agent_mode import AgentMode
+
 from agent_fleet.config import FleetConfig
+from agent_fleet.contracts.task_spec import (
+    DecompositionDecision,
+    RiskTier,
+    Scope,
+    TaskSpec,
+)
+from agent_fleet.hooks import FleetTask, LLMBackend, LLMResult
 from agent_fleet.persona_foundry import PersonaFoundry, PersonaGenerationError
 from agent_fleet.personas import YamlPersonaResolver
 
@@ -37,12 +46,36 @@ Communicates findings via structured reports with code evidence.
 
 class _FakeResult:
     def __init__(self, text: str) -> None:
-        self.stdout = text
-        self.stderr = ""
-        self.exit_code = 0
-        self.duration_s = 0.1
-        self.agent_id = None
-        self.usage = None
+        self._stdout = text
+        self._stderr = ""
+        self._exit_code = 0
+        self._duration_s = 0.1
+        self._agent_id: str | None = None
+        self._usage: None = None
+
+    @property
+    def stdout(self) -> str:
+        return self._stdout
+
+    @property
+    def stderr(self) -> str:
+        return self._stderr
+
+    @property
+    def exit_code(self) -> int:
+        return self._exit_code
+
+    @property
+    def duration_s(self) -> float:
+        return self._duration_s
+
+    @property
+    def agent_id(self) -> str | None:
+        return self._agent_id
+
+    @property
+    def usage(self) -> None:
+        return self._usage
 
 
 class _StubBackend:
@@ -50,19 +83,41 @@ class _StubBackend:
         self._response = response
         self.call_count = 0
 
-    def run(self, *_a: object, **_kw: object) -> _FakeResult:
+    def run(
+        self,
+        prompt: str,  # noqa: ARG002
+        *,
+        max_tokens: int,  # noqa: ARG002
+        timeout_s: int,  # noqa: ARG002
+        memory_limit: str = "4G",  # noqa: ARG002
+        allowed_tools: list[str] | None = None,  # noqa: ARG002
+        cwd: Path | None = None,  # noqa: ARG002
+        model: str | None = None,  # noqa: ARG002
+        mode: AgentMode | None = None,  # noqa: ARG002
+    ) -> LLMResult:
         self.call_count += 1
         return _FakeResult(self._response)
 
 
 class _ErrorBackend:
-    def run(self, *_a: object, **_kw: object) -> _FakeResult:
+    def run(
+        self,
+        prompt: str,  # noqa: ARG002
+        *,
+        max_tokens: int,  # noqa: ARG002
+        timeout_s: int,  # noqa: ARG002
+        memory_limit: str = "4G",  # noqa: ARG002
+        allowed_tools: list[str] | None = None,  # noqa: ARG002
+        cwd: Path | None = None,  # noqa: ARG002
+        model: str | None = None,  # noqa: ARG002
+        mode: AgentMode | None = None,  # noqa: ARG002
+    ) -> LLMResult:
         raise RuntimeError("backend unavailable")
 
 
 def _make_foundry(
     tmp_path: Path,
-    backend: object = None,
+    backend: LLMBackend | None = None,
     *,
     response: str = _VALID_BODY,
 ) -> PersonaFoundry:
@@ -70,7 +125,7 @@ def _make_foundry(
         backend = _StubBackend(response)
     return PersonaFoundry(
         personas_dir=tmp_path,
-        backend=backend,  # type: ignore[arg-type]
+        backend=backend,
         model="test-model",
     )
 
@@ -108,7 +163,7 @@ def test_generate_happy_path(tmp_path: Path) -> None:
 
 def test_generate_idempotent(tmp_path: Path) -> None:
     stub = _StubBackend()
-    foundry = PersonaFoundry(personas_dir=tmp_path, backend=stub, model="m")  # type: ignore[arg-type]
+    foundry = PersonaFoundry(personas_dir=tmp_path, backend=stub, model="m")
 
     (tmp_path / "analyst.md").write_text(_VALID_BODY, encoding="utf-8")
 
@@ -170,7 +225,7 @@ def test_sanitize_backslash_raises(tmp_path: Path) -> None:
 def test_resolve_or_generate_fallback(tmp_path: Path) -> None:
     foundry = PersonaFoundry(
         personas_dir=tmp_path,
-        backend=_ErrorBackend(),  # type: ignore[arg-type]
+        backend=_ErrorBackend(),
         model="m",
     )
     result = foundry.resolve_or_generate("x", set(), "coder")
@@ -179,7 +234,7 @@ def test_resolve_or_generate_fallback(tmp_path: Path) -> None:
 
 def test_resolve_or_generate_returns_known(tmp_path: Path) -> None:
     stub = _StubBackend()
-    foundry = PersonaFoundry(personas_dir=tmp_path, backend=stub, model="m")  # type: ignore[arg-type]
+    foundry = PersonaFoundry(personas_dir=tmp_path, backend=stub, model="m")
     result = foundry.resolve_or_generate("coder", {"coder", "reviewer"}, "fallback")
     assert result == "coder"
     assert stub.call_count == 0
@@ -197,14 +252,7 @@ def test_resolve_or_generate_generates_unknown(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_task_spec_with_child(persona: str) -> object:
-    from agent_fleet.contracts.task_spec import (
-        DecompositionDecision,
-        RiskTier,
-        Scope,
-        TaskSpec,
-    )
-
+def _make_task_spec_with_child(persona: str) -> TaskSpec:
     return TaskSpec(
         issue_number=1,
         decomposition_decision=DecompositionDecision.DECOMPOSE,
@@ -219,9 +267,7 @@ def _make_task_spec_with_child(persona: str) -> object:
     )
 
 
-def _make_parent_task() -> object:
-    from agent_fleet.hooks import FleetTask
-
+def _make_parent_task() -> FleetTask:
     return FleetTask(
         goal="Parent goal",
         context="",
@@ -242,8 +288,8 @@ def test_child_tasks_novel_persona_generated(tmp_path: Path) -> None:
     task_spec = _make_task_spec_with_child("novel-role")
 
     children = child_tasks_from_task_spec(
-        task_spec,  # type: ignore[arg-type]
-        parent_task=_make_parent_task(),  # type: ignore[arg-type]
+        task_spec,
+        parent_task=_make_parent_task(),
         child_pipeline="code_review",
         persona_resolver=resolver,
         fallback_persona="coder",
@@ -268,15 +314,15 @@ def test_child_tasks_foundry_failure_uses_fallback(
     resolver = YamlPersonaResolver(FleetConfig(personas_dir=tmp_path))
     foundry = PersonaFoundry(
         personas_dir=tmp_path,
-        backend=_ErrorBackend(),  # type: ignore[arg-type]
+        backend=_ErrorBackend(),
         model="m",
     )
     task_spec = _make_task_spec_with_child("broken-role")
 
     with caplog.at_level(logging.WARNING, logger="agent_fleet.persona_foundry"):
         children = child_tasks_from_task_spec(
-            task_spec,  # type: ignore[arg-type]
-            parent_task=_make_parent_task(),  # type: ignore[arg-type]
+            task_spec,
+            parent_task=_make_parent_task(),
             child_pipeline="code_review",
             persona_resolver=resolver,
             fallback_persona="coder",
@@ -335,7 +381,7 @@ def test_history_appends_per_generation(tmp_path: Path) -> None:
 
 def test_history_not_recorded_on_idempotent(tmp_path: Path) -> None:
     stub = _StubBackend()
-    foundry = PersonaFoundry(personas_dir=tmp_path, backend=stub, model="m")  # type: ignore[arg-type]
+    foundry = PersonaFoundry(personas_dir=tmp_path, backend=stub, model="m")
 
     (tmp_path / "preexisting.md").write_text(_VALID_BODY, encoding="utf-8")
     foundry.generate("preexisting")

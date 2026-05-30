@@ -6,6 +6,8 @@ No real LLM or composer is called — all dispatch is in-process and determinist
 
 from __future__ import annotations
 
+from typing import cast
+
 from agent_fleet.orchestration.program import run_workflow_program
 
 from .instrumented import InstrumentedDispatcher
@@ -104,10 +106,11 @@ def test_deep_pipeline() -> None:
 
     for i, item in enumerate(results):
         assert isinstance(item, dict), f"item {i} is not dict: {item!r}"
+        item_d = cast("dict[str, object]", item)
         for stage in ("s1", "s2", "s3", "s4", "s5"):
-            assert stage in item, f"item {i} missing stage {stage}: {item}"
-            assert item[stage] == "completed", f"item {i} stage {stage} not completed"
-        assert item["orig"] == i, f"item {i} has wrong orig={item['orig']}"
+            assert stage in item_d, f"item {i} missing stage {stage}: {item_d}"
+            assert item_d[stage] == "completed", f"item {i} stage {stage} not completed"
+        assert item_d["orig"] == i, f"item {i} has wrong orig={item_d['orig']}"
 
 
 # ---------------------------------------------------------------------------
@@ -207,8 +210,12 @@ def test_fanout_with_failure() -> None:
 
     result = summary.result
     assert isinstance(result, dict), f"result is not dict: {result!r}"
-    assert result["total"] == 20
-    assert result["ok"] + result["err"] + result["none"] == 20
+    result_d = cast("dict[str, object]", result)
+    assert result_d["total"] == 20
+    assert (
+        cast("int", result_d["ok"]) + cast("int", result_d["err"]) + cast("int", result_d["none"])
+        == 20
+    )
 
     assert summary.agents_ok < summary.agents_dispatched, (
         f"expected some failures: ok={summary.agents_ok}, dispatched={summary.agents_dispatched}"

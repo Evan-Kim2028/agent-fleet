@@ -18,7 +18,7 @@ class _FakeDispatcher:
 
     def _execute_task(
         self,
-        idx: int,
+        task_index: int,
         task: FleetTask,
         *,
         batch_size: int = 1,
@@ -27,14 +27,14 @@ class _FakeDispatcher:
         base_branch: object = None,  # noqa: ARG002
         depth: int = 1,  # noqa: ARG002
     ) -> FleetTaskResult:
-        self.calls.append((idx, task.goal[:40], batch_size, same_workspace_tasks))
+        self.calls.append((task_index, task.goal[:40], batch_size, same_workspace_tasks))
         time.sleep(0.01)
         return FleetTaskResult(
-            task_index=idx,
+            task_index=task_index,
             persona=task.persona,
             goal=task.goal,
             status="completed",
-            summary=f"done idx={idx}",
+            summary=f"done idx={task_index}",
             error=None,
             duration_seconds=0.01,
             observed_total_tokens=5000,

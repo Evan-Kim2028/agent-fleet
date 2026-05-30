@@ -8,9 +8,8 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import cast
 
-from agent_fleet.hooks import FleetTask, FleetTaskResult
+from agent_fleet.hooks import FleetTask, FleetTaskResult, Persona
 from agent_fleet.orchestration.dag.runner import dispatch_dag
 from agent_fleet.orchestration.dag.schema import DagSpec, DagTask
 
@@ -23,7 +22,7 @@ class _StubPersonaResolver:
     def list_personas(self) -> list[str]:
         return ["coder"]
 
-    def load(self, name: str, *, loadout_size: str | None = None) -> object:
+    def load(self, name: str, *, loadout_size: str | None = None) -> Persona:
         raise NotImplementedError
 
 
@@ -140,8 +139,8 @@ def test_wide_deep_dag() -> None:
     summary = dispatch_dag(
         spec=spec,
         parent_task=_PARENT,
-        dispatcher=cast("object", dispatcher),  # type: ignore[arg-type]
-        persona_resolver=cast("object", _RESOLVER),  # type: ignore[arg-type]
+        dispatcher=dispatcher,
+        persona_resolver=_RESOLVER,
         fallback_persona="coder",
         default_pipeline="simple",
     )
@@ -214,8 +213,8 @@ def test_dependency_driven_timing() -> None:
     summary = dispatch_dag(
         spec=_dep_driven_spec(),
         parent_task=_PARENT,
-        dispatcher=cast("object", dispatcher),  # type: ignore[arg-type]
-        persona_resolver=cast("object", _RESOLVER),  # type: ignore[arg-type]
+        dispatcher=dispatcher,
+        persona_resolver=_RESOLVER,
         fallback_persona="coder",
         default_pipeline="simple",
     )
@@ -273,8 +272,8 @@ def test_skip_propagation() -> None:
     summary = dispatch_dag(
         spec=_skip_propagation_spec(),
         parent_task=_PARENT,
-        dispatcher=cast("object", dispatcher),  # type: ignore[arg-type]
-        persona_resolver=cast("object", _RESOLVER),  # type: ignore[arg-type]
+        dispatcher=dispatcher,
+        persona_resolver=_RESOLVER,
         fallback_persona="coder",
         default_pipeline="simple",
     )

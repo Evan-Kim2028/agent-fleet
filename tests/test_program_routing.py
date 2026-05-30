@@ -22,13 +22,16 @@ tests/test_dag.py (handle_preflight_decision) and tests/test_orchestration.py.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 from agent_fleet.contracts.task_spec import DecompositionDecision, RiskTier, Scope, TaskSpec
 from agent_fleet.hooks import FleetTask, FleetTaskResult
 from agent_fleet.orchestration.config import resolve_orchestration_config
 from agent_fleet.orchestration.program import run_workflow_program
+
+if TYPE_CHECKING:
+    from agent_fleet.contracts.handoff import HandoffNote
 
 
 @dataclass
@@ -37,18 +40,18 @@ class _FakeDispatcher:
 
     def _execute_task(
         self,
-        idx: int,
+        task_index: int,
         task: FleetTask,
         *,
         batch_size: int = 1,  # noqa: ARG002
         same_workspace_tasks: int = 1,  # noqa: ARG002
-        handoff: object = None,  # noqa: ARG002
-        base_branch: object = None,  # noqa: ARG002
+        handoff: HandoffNote | None = None,  # noqa: ARG002
+        base_branch: str | None = None,  # noqa: ARG002
         depth: int = 1,  # noqa: ARG002
     ) -> FleetTaskResult:
-        self.calls.append((task.goal[:40], idx))
+        self.calls.append((task.goal[:40], task_index))
         return FleetTaskResult(
-            task_index=idx,
+            task_index=task_index,
             persona=task.persona,
             goal=task.goal,
             status="completed",

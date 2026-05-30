@@ -8,13 +8,16 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import cast
+from typing import TYPE_CHECKING
 
 from agent_fleet.config import load_fleet_config
 from agent_fleet.hooks import FleetTask, FleetTaskResult
 from agent_fleet.orchestration.dag.runner import dispatch_dag
 from agent_fleet.orchestration.dag.schema import DagSpec, DagTask
 from agent_fleet.personas import YamlPersonaResolver
+
+if TYPE_CHECKING:
+    from agent_fleet.contracts.handoff import HandoffNote
 
 ROOT = __import__("pathlib").Path(__file__).resolve().parent.parent
 
@@ -33,7 +36,12 @@ class _TimedDispatcher:
         self,
         task_index: int,
         task: FleetTask,
-        **_: object,
+        *,
+        batch_size: int = 1,  # noqa: ARG002
+        same_workspace_tasks: int = 0,  # noqa: ARG002
+        handoff: HandoffNote | None = None,  # noqa: ARG002
+        base_branch: str | None = None,  # noqa: ARG002
+        depth: int = 0,  # noqa: ARG002
     ) -> FleetTaskResult:
         node_id = (task.title or "").rsplit(" — ", 1)[-1]
         t0 = time.monotonic()
@@ -76,7 +84,7 @@ def test_fc_starts_before_s_finishes() -> None:
     summary = dispatch_dag(
         spec=_two_chain_spec(),
         parent_task=parent,
-        dispatcher=cast("object", dispatcher),  # type: ignore[arg-type]
+        dispatcher=dispatcher,
         persona_resolver=resolver,
         fallback_persona="coder",
         default_pipeline="simple",
@@ -112,7 +120,7 @@ def test_fc_depends_only_on_f_not_s() -> None:
     dispatch_dag(
         spec=_two_chain_spec(),
         parent_task=parent,
-        dispatcher=cast("object", dispatcher),  # type: ignore[arg-type]
+        dispatcher=dispatcher,
         persona_resolver=resolver,
         fallback_persona="coder",
         default_pipeline="simple",

@@ -28,11 +28,11 @@ from agent_fleet.orchestration.dag.stitch import build_dag_task_context
 from agent_fleet.orchestration.primitives import DispatchPrimitives, effective_capacity
 
 if TYPE_CHECKING:
-    from agent_fleet.dispatcher import FleetDispatcher
     from agent_fleet.hooks import PersonaResolver
     from agent_fleet.observability.fleet_logger import FleetLogger
     from agent_fleet.orchestration.dag.canvas_writer import DagCanvasWriter
     from agent_fleet.orchestration.journal import RunJournal, RunState
+    from agent_fleet.orchestration.types import _DispatcherLike
     from agent_fleet.persona_foundry import PersonaFoundry
 
 logger = logging.getLogger(__name__)
@@ -150,7 +150,7 @@ def dispatch_dag(
     *,
     spec: DagSpec,
     parent_task: FleetTask,
-    dispatcher: FleetDispatcher,
+    dispatcher: _DispatcherLike,
     persona_resolver: PersonaResolver,
     fallback_persona: str,
     default_pipeline: str = "code_review",
