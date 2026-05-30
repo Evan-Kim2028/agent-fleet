@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 # --- (a) backend key ---
 
+
 def test_cursor_api_key_pass_when_set(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CURSOR_API_KEY", "k")
     checks = run_doctor_checks(backend="cursor")
@@ -31,6 +32,7 @@ def test_cursor_api_key_fail_when_unset(monkeypatch: pytest.MonkeyPatch) -> None
 
 # --- (b) kimi backend ---
 
+
 def test_kimi_backend_includes_kimi_api_key_check() -> None:
     checks = run_doctor_checks(backend="kimi")
     names = [c.name for c in checks]
@@ -39,6 +41,7 @@ def test_kimi_backend_includes_kimi_api_key_check() -> None:
 
 # --- (c) unknown backend ---
 
+
 def test_unknown_backend_yields_warn_with_unknown_detail() -> None:
     checks = run_doctor_checks(backend="zzz")
     match = next((c for c in checks if c.status == "warn" and "unknown backend" in c.detail), None)
@@ -46,6 +49,7 @@ def test_unknown_backend_yields_warn_with_unknown_detail() -> None:
 
 
 # --- (d) repo_present ---
+
 
 def test_repo_present_none_yields_no_repo_config_check() -> None:
     checks = run_doctor_checks(repo_present=None)
@@ -65,6 +69,7 @@ def test_repo_present_false_yields_warn() -> None:
 
 
 # --- (e) doctor_exit_code ---
+
 
 def test_exit_code_1_when_any_fail() -> None:
     checks = [
@@ -87,6 +92,7 @@ def test_exit_code_0_when_all_warn() -> None:
 
 # --- (f) python check ---
 
+
 def test_python_runtime_check_passes_on_current_interpreter() -> None:
     checks = run_doctor_checks()
     match = next(c for c in checks if c.name == "Python runtime")
@@ -94,6 +100,7 @@ def test_python_runtime_check_passes_on_current_interpreter() -> None:
 
 
 # --- (g) render_doctor ---
+
 
 def test_render_doctor_contains_header() -> None:
     checks = [DoctorCheck("X", "pass", "ok")]
@@ -124,6 +131,7 @@ def test_doctor_check_to_dict_roundtrips() -> None:
 
 
 # --- gh CLI (deterministic monkeypatch) ---
+
 
 def test_gh_check_warn_not_installed_when_which_returns_none(
     monkeypatch: pytest.MonkeyPatch,

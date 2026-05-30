@@ -266,8 +266,13 @@ def test_efficiency_report_synthetic(tmp_path: Path) -> None:
     repo_root = _Path(__file__).resolve().parents[1]
     result = subprocess.run(
         [
-            "uv", "run", "python", "scripts/efficiency_report.py",
-            "--runs-dir", str(tmp_path), "--json",
+            "uv",
+            "run",
+            "python",
+            "scripts/efficiency_report.py",
+            "--runs-dir",
+            str(tmp_path),
+            "--json",
         ],
         capture_output=True,
         text=True,

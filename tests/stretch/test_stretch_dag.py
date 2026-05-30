@@ -104,6 +104,7 @@ class _FailingDispatcher:
 # Assert all results present, none duplicated.
 # ---------------------------------------------------------------------------
 
+
 def _wide_deep_spec() -> DagSpec:
     """DAG shape:
     rank 0:  root-A, root-B
@@ -118,14 +119,10 @@ def _wide_deep_spec() -> DagSpec:
     ]
     wide_ids = [f"wide-{i}" for i in range(8)]
     for wid in wide_ids:
-        tasks.append(
-            DagTask(id=wid, depends_on=("root-A",), complexity="LOW", subtask_prompt=wid)
-        )
+        tasks.append(DagTask(id=wid, depends_on=("root-A",), complexity="LOW", subtask_prompt=wid))
     side_ids = ["side-0", "side-1"]
     for sid in side_ids:
-        tasks.append(
-            DagTask(id=sid, depends_on=("root-B",), complexity="LOW", subtask_prompt=sid)
-        )
+        tasks.append(DagTask(id=sid, depends_on=("root-B",), complexity="LOW", subtask_prompt=sid))
     merge_deps = tuple(wide_ids + side_ids)
     tasks.append(
         DagTask(id="merge", depends_on=merge_deps, complexity="LOW", subtask_prompt="merge")
@@ -163,9 +160,7 @@ def test_wide_deep_dag() -> None:
 
     statuses = {r.goal.rsplit(" — ", 1)[-1]: r.status for r in summary.results}
     for node_id in expected_ids:
-        assert statuses[node_id] == "completed", (
-            f"node {node_id} has status {statuses[node_id]!r}"
-        )
+        assert statuses[node_id] == "completed", f"node {node_id} has status {statuses[node_id]!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -195,9 +190,7 @@ def _dep_driven_spec() -> DagSpec:
             DagTask(
                 id="mid-F", depends_on=("root-F",), complexity="LOW", subtask_prompt="fast mid"
             ),
-            DagTask(
-                id="mid-X", depends_on=("root-X",), complexity="LOW", subtask_prompt="x mid"
-            ),
+            DagTask(id="mid-X", depends_on=("root-X",), complexity="LOW", subtask_prompt="x mid"),
             DagTask(
                 id="leaf-F", depends_on=("mid-F",), complexity="LOW", subtask_prompt="fast leaf"
             ),
@@ -208,8 +201,12 @@ def _dep_driven_spec() -> DagSpec:
 def test_dependency_driven_timing() -> None:
     dispatcher = _TimedDispatcher(
         sleep_map={
-            "root-F": _FAST, "mid-F": _FAST, "leaf-F": _FAST,
-            "root-S": _SLOW, "root-X": _FAST, "mid-X": _FAST,
+            "root-F": _FAST,
+            "mid-F": _FAST,
+            "leaf-F": _FAST,
+            "root-S": _SLOW,
+            "root-X": _FAST,
+            "mid-X": _FAST,
         },
         default_sleep=_FAST,
     )
@@ -244,26 +241,28 @@ def test_dependency_driven_timing() -> None:
 # independent branches complete normally.
 # ---------------------------------------------------------------------------
 
+
 def _skip_propagation_spec() -> DagSpec:
     """Shape:
     root-ok    -> mid-fail -> child-A -> grandchild-A
                            -> child-B
     root-good  -> good-mid -> good-leaf
     """
+
     def _t(nid: str, deps: tuple[str, ...], prompt: str) -> DagTask:
         return DagTask(id=nid, depends_on=deps, complexity="LOW", subtask_prompt=prompt)
 
     return DagSpec(
         title="skip-prop",
         tasks=(
-            _t("root-ok",      (),             "root ok"),
-            _t("mid-fail",     ("root-ok",),   "mid fail"),
-            _t("child-A",      ("mid-fail",),  "child A"),
-            _t("grandchild-A", ("child-A",),   "grandchild A"),
-            _t("child-B",      ("mid-fail",),  "child B"),
-            _t("root-good",    (),             "root good"),
-            _t("good-mid",     ("root-good",), "good mid"),
-            _t("good-leaf",    ("good-mid",),  "good leaf"),
+            _t("root-ok", (), "root ok"),
+            _t("mid-fail", ("root-ok",), "mid fail"),
+            _t("child-A", ("mid-fail",), "child A"),
+            _t("grandchild-A", ("child-A",), "grandchild A"),
+            _t("child-B", ("mid-fail",), "child B"),
+            _t("root-good", (), "root good"),
+            _t("good-mid", ("root-good",), "good mid"),
+            _t("good-leaf", ("good-mid",), "good leaf"),
         ),
     )
 
@@ -280,9 +279,7 @@ def test_skip_propagation() -> None:
         default_pipeline="simple",
     )
 
-    assert summary.aggregate_status != "completed", (
-        "expected non-completed due to mid-fail failure"
-    )
+    assert summary.aggregate_status != "completed", "expected non-completed due to mid-fail failure"
 
     statuses: dict[str, str] = {}
     for r in summary.results:

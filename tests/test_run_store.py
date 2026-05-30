@@ -249,7 +249,10 @@ def test_run_is_terminal_for_terminal_states() -> None:
     events = [
         RunEvent(run_id="r1", seq=0, kind=RunEventKind.run_started, ts=1.0),
         RunEvent(
-            run_id="r1", seq=1, kind=RunEventKind.run_completed, ts=2.0,
+            run_id="r1",
+            seq=1,
+            kind=RunEventKind.run_completed,
+            ts=2.0,
             payload={"status": "completed"},
         ),
     ]

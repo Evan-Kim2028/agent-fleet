@@ -184,14 +184,14 @@ class RunLog:
         # Prefer the caller-supplied changed_lines when nonzero: the idempotency
         # guard in task_usage_rollup may have fired before changed_lines was known
         # (dispatcher path calls _peek_usage_rollup with changed_lines=0 first).
-        _cl = changed_lines if changed_lines > 0 else (
-            rollup.get("changed_lines", 0) if rollup else 0
+        _cl = (
+            changed_lines
+            if changed_lines > 0
+            else (rollup.get("changed_lines", 0) if rollup else 0)
         )
         tpl = round(total_tokens / max(_cl, 1))
         by_phase = rollup.get("by_phase", {}) if rollup else {}
-        by_phase_str = ",".join(
-            f"{ph}:{v['total_tokens']}" for ph, v in sorted(by_phase.items())
-        )
+        by_phase_str = ",".join(f"{ph}:{v['total_tokens']}" for ph, v in sorted(by_phase.items()))
         self.emit(
             "efficiency.headline",
             data={

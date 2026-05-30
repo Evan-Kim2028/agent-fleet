@@ -84,6 +84,7 @@ def _make_resolver(tmp_path: Path) -> YamlPersonaResolver:
 # Test 1: happy path
 # ---------------------------------------------------------------------------
 
+
 def test_generate_happy_path(tmp_path: Path) -> None:
     foundry = _make_foundry(tmp_path)
     foundry.generate("data-scientist")
@@ -104,6 +105,7 @@ def test_generate_happy_path(tmp_path: Path) -> None:
 # Test 2: idempotent — pre-existing .md prevents backend call
 # ---------------------------------------------------------------------------
 
+
 def test_generate_idempotent(tmp_path: Path) -> None:
     stub = _StubBackend()
     foundry = PersonaFoundry(personas_dir=tmp_path, backend=stub, model="m")  # type: ignore[arg-type]
@@ -118,6 +120,7 @@ def test_generate_idempotent(tmp_path: Path) -> None:
 # Test 3: invalid (empty) response raises PersonaGenerationError and no .md
 # ---------------------------------------------------------------------------
 
+
 def test_generate_invalid_response_raises(tmp_path: Path) -> None:
     foundry = _make_foundry(tmp_path, response="")
 
@@ -130,6 +133,7 @@ def test_generate_invalid_response_raises(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Test 4: path-traversal / bad names are rejected
 # ---------------------------------------------------------------------------
+
 
 def test_sanitize_path_traversal(tmp_path: Path) -> None:
     foundry = _make_foundry(tmp_path)
@@ -162,6 +166,7 @@ def test_sanitize_backslash_raises(tmp_path: Path) -> None:
 # Test 5: resolve_or_generate falls back when backend raises
 # ---------------------------------------------------------------------------
 
+
 def test_resolve_or_generate_fallback(tmp_path: Path) -> None:
     foundry = PersonaFoundry(
         personas_dir=tmp_path,
@@ -191,6 +196,7 @@ def test_resolve_or_generate_generates_unknown(tmp_path: Path) -> None:
 # Integration tests: foundry wired into child_tasks_from_task_spec
 # ---------------------------------------------------------------------------
 
+
 def _make_task_spec_with_child(persona: str) -> object:
     from agent_fleet.contracts.task_spec import (
         DecompositionDecision,
@@ -203,9 +209,7 @@ def _make_task_spec_with_child(persona: str) -> object:
         issue_number=1,
         decomposition_decision=DecompositionDecision.DECOMPOSE,
         decomposition_reason="test",
-        child_issues_proposed=[
-            {"title": "Novel task", "body": "Do the thing", "persona": persona}
-        ],
+        child_issues_proposed=[{"title": "Novel task", "body": "Do the thing", "persona": persona}],
         scope=Scope(allowed_paths=[], forbidden_paths=[]),
         research_plan=[],
         acceptance_criteria=[],
@@ -288,6 +292,7 @@ def test_child_tasks_foundry_failure_uses_fallback(
 # Test: generation history
 # ---------------------------------------------------------------------------
 
+
 def test_history_recorded(tmp_path: Path) -> None:
     foundry = _make_foundry(tmp_path)
     foundry.generate("historian")
@@ -298,6 +303,7 @@ def test_history_recorded(tmp_path: Path) -> None:
     assert len(lines) == 1
 
     import json
+
     row = json.loads(lines[0])
     assert row["name"] == "historian"
     assert row["model"] == "test-model"
@@ -321,6 +327,7 @@ def test_history_appends_per_generation(tmp_path: Path) -> None:
     assert len(lines) == 2
 
     import json
+
     names = {json.loads(ln)["name"] for ln in lines}
     assert "alpha-analyst" in names
     assert "beta-engineer" in names

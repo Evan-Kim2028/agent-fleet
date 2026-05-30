@@ -66,7 +66,8 @@ class RunEvent:
             task_index=int(str(raw_ti)) if raw_ti is not None else None,
             payload=(
                 dict(cast("dict[str, object]", raw_payload))
-                if isinstance(raw_payload, dict) else {}
+                if isinstance(raw_payload, dict)
+                else {}
             ),
         )
 

@@ -118,9 +118,7 @@ def test_cli_run_journals_then_resume_redispatches_only_pending(
     assert after_resume.completed_task_indices == frozenset({0, 1, 2, 3})
 
 
-def test_cli_resume_missing_journal_errors(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_cli_resume_missing_journal_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     spec_file = tmp_path / "diamond.json"
     spec_file.write_text(json.dumps(_DIAMOND), encoding="utf-8")
     _patch_backend(monkeypatch, _FakeDispatcher())

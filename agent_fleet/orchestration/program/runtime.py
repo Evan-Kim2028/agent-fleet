@@ -87,7 +87,7 @@ def _stringify_result(obj: object) -> str:
         return obj
     try:
         return json.dumps(obj, default=str, ensure_ascii=False)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return repr(obj)
 
 
@@ -135,7 +135,7 @@ def _extract_json(text: str) -> dict[str, object] | None:
 def _try_load_object(candidate: str) -> dict[str, object] | None:
     try:
         value = json.loads(candidate)
-    except (json.JSONDecodeError, ValueError):
+    except json.JSONDecodeError, ValueError:
         return None
     return value if isinstance(value, dict) else None
 
@@ -645,9 +645,7 @@ class ProgramContext:
             self._subprogram_local.value = depth
 
     def build_namespace(self) -> dict[str, object]:
-        safe = {
-            name: getattr(builtins, name) for name in SAFE_BUILTINS if hasattr(builtins, name)
-        }
+        safe = {name: getattr(builtins, name) for name in SAFE_BUILTINS if hasattr(builtins, name)}
         return {
             "__builtins__": safe,
             "agent": self.agent,

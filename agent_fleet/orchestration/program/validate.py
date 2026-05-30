@@ -22,10 +22,39 @@ from agent_fleet.orchestration.program.models import ProgramValidation
 # the planner know what it is allowed to lean on.
 SAFE_BUILTINS: frozenset[str] = frozenset(
     {
-        "len", "range", "enumerate", "sorted", "reversed", "min", "max", "sum",
-        "abs", "round", "str", "int", "float", "bool", "list", "dict", "set",
-        "tuple", "frozenset", "zip", "map", "filter", "any", "all", "isinstance",
-        "repr", "format", "type", "next", "iter", "slice", "divmod", "pow",
+        "len",
+        "range",
+        "enumerate",
+        "sorted",
+        "reversed",
+        "min",
+        "max",
+        "sum",
+        "abs",
+        "round",
+        "str",
+        "int",
+        "float",
+        "bool",
+        "list",
+        "dict",
+        "set",
+        "tuple",
+        "frozenset",
+        "zip",
+        "map",
+        "filter",
+        "any",
+        "all",
+        "isinstance",
+        "repr",
+        "format",
+        "type",
+        "next",
+        "iter",
+        "slice",
+        "divmod",
+        "pow",
     }
 )
 
@@ -47,9 +76,24 @@ _DYNAMIC_DISPATCH: frozenset[str] = frozenset({"replan", "branch", "subprogram"}
 # Defense in depth, and a clearer error than a bare NameError.
 _FORBIDDEN_CALLS: frozenset[str] = frozenset(
     {
-        "eval", "exec", "compile", "open", "__import__", "input", "breakpoint",
-        "globals", "locals", "vars", "getattr", "setattr", "delattr", "hasattr",
-        "memoryview", "exit", "quit", "help",
+        "eval",
+        "exec",
+        "compile",
+        "open",
+        "__import__",
+        "input",
+        "breakpoint",
+        "globals",
+        "locals",
+        "vars",
+        "getattr",
+        "setattr",
+        "delattr",
+        "hasattr",
+        "memoryview",
+        "exit",
+        "quit",
+        "help",
     }
 )
 

@@ -227,7 +227,7 @@ def _terminate_process_group(
         return
     try:
         pgid = os.getpgid(proc.pid)
-    except (ProcessLookupError, PermissionError, OSError):
+    except ProcessLookupError, PermissionError, OSError:
         return
     with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
         os.killpg(pgid, signal.SIGTERM)

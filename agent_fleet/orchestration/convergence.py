@@ -49,9 +49,7 @@ def compact_summary(results: list[FleetTaskResult], *, total_chars: int = 400) -
             line = f"{successes}/{len(results)} completed, {partial} review pending"
         return line[:total_chars]
 
-    parts: list[str] = [
-        f"{successes + partial}/{len(results)} completed, {len(failures)} failed"
-    ]
+    parts: list[str] = [f"{successes + partial}/{len(results)} completed, {len(failures)} failed"]
     for result in failures[:3]:
         err = (result.error or result.status)[:100]
         parts.append(f"- {result.goal[:60]}: {err}")

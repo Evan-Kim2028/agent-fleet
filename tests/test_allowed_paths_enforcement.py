@@ -27,9 +27,7 @@ def test_all_in_scope_files_pass() -> None:
     task = FleetTask(goal="scoped", allowed_paths=("tests/", "packages/lakestore/"))
     changed = ["tests/test_foo.py", "packages/lakestore/model.py"]
 
-    out_of_scope = [
-        p for p in changed if not any(p.startswith(ap) for ap in task.allowed_paths)
-    ]
+    out_of_scope = [p for p in changed if not any(p.startswith(ap) for ap in task.allowed_paths)]
     assert out_of_scope == [], "All files should be in scope"
 
 
@@ -47,9 +45,7 @@ def test_out_of_scope_triggers_violation() -> None:
         "pipelines/pokemontcg_pipe/config.yaml",  # OUT OF SCOPE
     ]
 
-    out_of_scope = [
-        p for p in changed if not any(p.startswith(ap) for ap in task.allowed_paths)
-    ]
+    out_of_scope = [p for p in changed if not any(p.startswith(ap) for ap in task.allowed_paths)]
     assert len(out_of_scope) == 2
     assert "pipelines/pokemontcg_pipe/run.py" in out_of_scope
     assert "pipelines/pokemontcg_pipe/config.yaml" in out_of_scope
@@ -91,9 +87,7 @@ def test_scope_violation_error_message_format() -> None:
         "pipelines/c.py",
         "pipelines/d.py",
     ]
-    out_of_scope = [
-        p for p in changed if not any(p.startswith(ap) for ap in task.allowed_paths)
-    ]
+    out_of_scope = [p for p in changed if not any(p.startswith(ap) for ap in task.allowed_paths)]
     n = len(out_of_scope)
     first3 = out_of_scope[:3]
     error_msg = f"Agent modified {n} file(s) outside allowed_paths: {first3}"

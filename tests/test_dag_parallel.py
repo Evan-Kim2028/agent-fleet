@@ -70,9 +70,7 @@ def test_fc_starts_before_s_finishes() -> None:
     """Fc must start before S finishes; under rank-barrier it could not."""
     fleet_config = load_fleet_config(ROOT / "fleet.example.yaml")
     resolver = YamlPersonaResolver(fleet_config)
-    dispatcher = _TimedDispatcher(
-        sleep_map={"F": _FAST_SLEEP, "S": _SLOW_SLEEP, "Fc": _FAST_SLEEP}
-    )
+    dispatcher = _TimedDispatcher(sleep_map={"F": _FAST_SLEEP, "S": _SLOW_SLEEP, "Fc": _FAST_SLEEP})
     parent = FleetTask(goal="parent", persona="coder", pipeline="simple")
 
     summary = dispatch_dag(
@@ -108,9 +106,7 @@ def test_fc_depends_only_on_f_not_s() -> None:
     """F must complete before Fc starts."""
     fleet_config = load_fleet_config(ROOT / "fleet.example.yaml")
     resolver = YamlPersonaResolver(fleet_config)
-    dispatcher = _TimedDispatcher(
-        sleep_map={"F": _FAST_SLEEP, "S": _SLOW_SLEEP, "Fc": _FAST_SLEEP}
-    )
+    dispatcher = _TimedDispatcher(sleep_map={"F": _FAST_SLEEP, "S": _SLOW_SLEEP, "Fc": _FAST_SLEEP})
     parent = FleetTask(goal="parent", persona="coder", pipeline="simple")
 
     dispatch_dag(

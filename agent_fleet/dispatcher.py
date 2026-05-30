@@ -751,9 +751,7 @@ class FleetDispatcher:
                             goal=task.goal,
                             status="scope_violation",
                             summary=None,
-                            error=(
-                                f"Agent modified {_n} file(s) outside allowed_paths: {_first3}"
-                            ),
+                            error=(f"Agent modified {_n} file(s) outside allowed_paths: {_first3}"),
                             duration_seconds=round(time.monotonic() - start, 2),
                             changed_files=list(changed_files or ()),
                             files_modified=tuple(changed_files or ()),

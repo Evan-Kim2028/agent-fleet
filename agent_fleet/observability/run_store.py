@@ -71,7 +71,7 @@ def read_run_index(*, runs_dir: Path | None = None) -> list[dict[str, object]]:
                 continue
             try:
                 row = json.loads(stripped)
-            except (json.JSONDecodeError, ValueError):
+            except json.JSONDecodeError, ValueError:
                 continue
             if not isinstance(row, dict):
                 continue
@@ -105,7 +105,7 @@ def load_fleet_events(path: str | Path) -> list[dict[str, object]]:
                 continue
             try:
                 obj = json.loads(stripped)
-            except (json.JSONDecodeError, ValueError):
+            except json.JSONDecodeError, ValueError:
                 continue
             if isinstance(obj, dict):
                 rows.append(obj)
@@ -166,23 +166,35 @@ def _map_event(seq: int, row: Mapping[str, object]) -> RunEvent | None:
 
     if event == "run.start":
         return RunEvent(
-            run_id=run_id, seq=seq, kind=RunEventKind.run_started, ts=ts,
+            run_id=run_id,
+            seq=seq,
+            kind=RunEventKind.run_started,
+            ts=ts,
             payload={"goal": data.get("title", "")},
         )
     if event == "run.end":
         return RunEvent(
-            run_id=run_id, seq=seq, kind=RunEventKind.run_completed, ts=ts,
+            run_id=run_id,
+            seq=seq,
+            kind=RunEventKind.run_completed,
+            ts=ts,
             payload={"status": str(data.get("outcome", "completed"))},
         )
     if event == "program.agent.start":
         return RunEvent(
-            run_id=run_id, seq=seq, kind=RunEventKind.agent_started, ts=ts,
+            run_id=run_id,
+            seq=seq,
+            kind=RunEventKind.agent_started,
+            ts=ts,
             task_index=_coerce_int(data.get("idx")),
             payload={"persona": data.get("persona", ""), "goal": data.get("goal", "")},
         )
     if event == "program.agent.done":
         return RunEvent(
-            run_id=run_id, seq=seq, kind=RunEventKind.agent_completed, ts=ts,
+            run_id=run_id,
+            seq=seq,
+            kind=RunEventKind.agent_completed,
+            ts=ts,
             task_index=_coerce_int(data.get("idx")),
             payload={
                 "status": str(data.get("status", "completed")),
@@ -191,18 +203,27 @@ def _map_event(seq: int, row: Mapping[str, object]) -> RunEvent | None:
         )
     if event == "program.phase":
         return RunEvent(
-            run_id=run_id, seq=seq, kind=RunEventKind.phase, ts=ts,
+            run_id=run_id,
+            seq=seq,
+            kind=RunEventKind.phase,
+            ts=ts,
             payload={"title": str(data.get("title", ""))},
         )
     if event == "phase.start":
         title = data.get("phase") or row.get("phase") or ""
         return RunEvent(
-            run_id=run_id, seq=seq, kind=RunEventKind.phase, ts=ts,
+            run_id=run_id,
+            seq=seq,
+            kind=RunEventKind.phase,
+            ts=ts,
             payload={"title": str(title)},
         )
     if event == "program.log":
         return RunEvent(
-            run_id=run_id, seq=seq, kind=RunEventKind.log, ts=ts,
+            run_id=run_id,
+            seq=seq,
+            kind=RunEventKind.log,
+            ts=ts,
             payload={"message": str(data.get("message", ""))},
         )
     return None
@@ -276,9 +297,7 @@ def render_run_state(state: RunState, *, tokens: int | None = None) -> str:
             tok = f"  {agent.observed_total_tokens}t" if agent.observed_total_tokens else ""
             goal = (" " + " ".join(agent.goal.split())[:48]) if agent.goal else ""
             persona = agent.persona or "?"
-            lines.append(
-                f"  #{agent.task_index} {persona:<10} [{agent.status}] {mark}{tok}{goal}"
-            )
+            lines.append(f"  #{agent.task_index} {persona:<10} [{agent.status}] {mark}{tok}{goal}")
     if state.log:
         lines.append("log (last 5):")
         lines.extend(f"  - {line}" for line in state.log[-5:])

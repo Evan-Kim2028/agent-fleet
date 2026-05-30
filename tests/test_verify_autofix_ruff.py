@@ -140,9 +140,7 @@ def test_ruff_autofix_event_emitted(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert "after_exit" in ev_data
 
 
-def test_no_autofix_for_non_ruff_commands(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_no_autofix_for_non_ruff_commands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Autofix is not triggered for non-ruff verify commands."""
     _git_init(tmp_path)
 
@@ -188,9 +186,7 @@ def test_run_verify_phases_persona_scope_skips_out_of_lane_debt(tmp_path: Path) 
     repo.verify_commands = [f"{ruff} ."]
     repo.persona_verify_commands = {"lakestore": (f"{ruff} lane",)}
 
-    scoped = run_verify_phases(
-        workspace=tmp_path, repo=repo, timeout_s=120, persona="lakestore"
-    )
+    scoped = run_verify_phases(workspace=tmp_path, repo=repo, timeout_s=120, persona="lakestore")
     assert scoped and scoped[-1]["passed"], scoped[-1].get("detail")
 
     repo_wide = run_verify_phases(workspace=tmp_path, repo=repo, timeout_s=120, persona="gold")

@@ -72,9 +72,7 @@ def load_persona_md(
                 )
             return flat_path.read_text(encoding="utf-8")
 
-    raise FileNotFoundError(
-        f"Persona {name!r} not found in any of: {[str(b) for b in bases]}"
-    )
+    raise FileNotFoundError(f"Persona {name!r} not found in any of: {[str(b) for b in bases]}")
 
 
 def _load_directory_persona(

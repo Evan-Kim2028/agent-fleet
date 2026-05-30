@@ -72,5 +72,5 @@ def changed_lines(workspace: Path | str | None) -> int:
         if working > 0:
             return working
         return _numstat_total(["HEAD~1..HEAD"], cwd)
-    except (OSError, subprocess.TimeoutExpired, subprocess.CalledProcessError):
+    except OSError, subprocess.TimeoutExpired, subprocess.CalledProcessError:
         return 0

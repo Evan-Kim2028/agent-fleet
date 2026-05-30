@@ -100,11 +100,22 @@ def test_load_journal_round_trip(tmp_path: Path) -> None:
     p = tmp_path / "events.jsonl"
     events = [
         _make_event("r1", 0, RunEventKind.run_started),
-        _make_event("r1", 1, RunEventKind.agent_started, agent_id="a1", task_index=0,
-                    payload={"persona": "coder", "goal": "do stuff"}),
-        _make_event("r1", 2, RunEventKind.agent_completed, agent_id="a1", task_index=0,
-                    payload={"status": "completed", "summary": "done",
-                             "observed_total_tokens": 100}),
+        _make_event(
+            "r1",
+            1,
+            RunEventKind.agent_started,
+            agent_id="a1",
+            task_index=0,
+            payload={"persona": "coder", "goal": "do stuff"},
+        ),
+        _make_event(
+            "r1",
+            2,
+            RunEventKind.agent_completed,
+            agent_id="a1",
+            task_index=0,
+            payload={"status": "completed", "summary": "done", "observed_total_tokens": 100},
+        ),
         _make_event("r1", 3, RunEventKind.run_completed, payload={"status": "completed"}),
     ]
     with p.open("w") as fh:
@@ -147,14 +158,24 @@ def test_fold_reconstructs_run_state() -> None:
     events = [
         _make_event("r1", 0, RunEventKind.run_started, ts=100.0),
         _make_event("r1", 1, RunEventKind.phase, payload={"title": "dispatch"}),
-        _make_event("r1", 2, RunEventKind.agent_started, agent_id="a0", task_index=0,
-                    payload={"persona": "coder", "goal": "implement X"}),
-        _make_event("r1", 3, RunEventKind.agent_completed, agent_id="a0", task_index=0,
-                    payload={"status": "completed", "summary": "done X",
-                             "observed_total_tokens": 200}),
+        _make_event(
+            "r1",
+            2,
+            RunEventKind.agent_started,
+            agent_id="a0",
+            task_index=0,
+            payload={"persona": "coder", "goal": "implement X"},
+        ),
+        _make_event(
+            "r1",
+            3,
+            RunEventKind.agent_completed,
+            agent_id="a0",
+            task_index=0,
+            payload={"status": "completed", "summary": "done X", "observed_total_tokens": 200},
+        ),
         _make_event("r1", 4, RunEventKind.log, payload={"message": "all good"}),
-        _make_event("r1", 5, RunEventKind.run_completed, ts=200.0,
-                    payload={"status": "completed"}),
+        _make_event("r1", 5, RunEventKind.run_completed, ts=200.0, payload={"status": "completed"}),
     ]
     state = fold_journal(events)
 
@@ -183,10 +204,22 @@ def test_fold_reconstructs_run_state() -> None:
 def test_fold_agent_failed() -> None:
     events = [
         _make_event("r1", 0, RunEventKind.run_started),
-        _make_event("r1", 1, RunEventKind.agent_started, agent_id="a0", task_index=0,
-                    payload={"persona": "coder", "goal": "do thing"}),
-        _make_event("r1", 2, RunEventKind.agent_failed, agent_id="a0", task_index=0,
-                    payload={"status": "failed", "error": "timeout"}),
+        _make_event(
+            "r1",
+            1,
+            RunEventKind.agent_started,
+            agent_id="a0",
+            task_index=0,
+            payload={"persona": "coder", "goal": "do thing"},
+        ),
+        _make_event(
+            "r1",
+            2,
+            RunEventKind.agent_failed,
+            agent_id="a0",
+            task_index=0,
+            payload={"status": "failed", "error": "timeout"},
+        ),
     ]
     state = fold_journal(events)
     agent = state.agent_by_index(0)
@@ -200,12 +233,27 @@ def test_fold_agent_failed() -> None:
 def test_fold_completed_task_indices() -> None:
     events = [
         _make_event("r1", 0, RunEventKind.run_started),
-        _make_event("r1", 1, RunEventKind.agent_completed, task_index=0,
-                    payload={"status": "completed", "summary": "ok"}),
-        _make_event("r1", 2, RunEventKind.agent_completed, task_index=1,
-                    payload={"status": "merged", "summary": "merged"}),
-        _make_event("r1", 3, RunEventKind.agent_failed, task_index=2,
-                    payload={"status": "failed", "error": "boom"}),
+        _make_event(
+            "r1",
+            1,
+            RunEventKind.agent_completed,
+            task_index=0,
+            payload={"status": "completed", "summary": "ok"},
+        ),
+        _make_event(
+            "r1",
+            2,
+            RunEventKind.agent_completed,
+            task_index=1,
+            payload={"status": "merged", "summary": "merged"},
+        ),
+        _make_event(
+            "r1",
+            3,
+            RunEventKind.agent_failed,
+            task_index=2,
+            payload={"status": "failed", "error": "boom"},
+        ),
     ]
     state = fold_journal(events)
     assert state.completed_task_indices == frozenset({0, 1})
@@ -219,10 +267,22 @@ def test_fold_completed_task_indices() -> None:
 def test_fold_idempotent_under_duplicate_events() -> None:
     events = [
         _make_event("r1", 0, RunEventKind.run_started),
-        _make_event("r1", 1, RunEventKind.agent_started, agent_id="a0", task_index=0,
-                    payload={"persona": "coder", "goal": "g"}),
-        _make_event("r1", 2, RunEventKind.agent_completed, agent_id="a0", task_index=0,
-                    payload={"status": "completed", "summary": "ok", "observed_total_tokens": 50}),
+        _make_event(
+            "r1",
+            1,
+            RunEventKind.agent_started,
+            agent_id="a0",
+            task_index=0,
+            payload={"persona": "coder", "goal": "g"},
+        ),
+        _make_event(
+            "r1",
+            2,
+            RunEventKind.agent_completed,
+            agent_id="a0",
+            task_index=0,
+            payload={"status": "completed", "summary": "ok", "observed_total_tokens": 50},
+        ),
         _make_event("r1", 3, RunEventKind.run_completed, payload={"status": "completed"}),
     ]
     state_once = fold_journal(events)
@@ -236,11 +296,21 @@ def test_fold_idempotent_under_duplicate_events() -> None:
 
 def test_fold_stale_duplicate_does_not_undo_completed() -> None:
     """A replayed agent_completed (lower seq) must not clobber a later completed."""
-    early_complete = _make_event("r1", 2, RunEventKind.agent_completed, task_index=0,
-                                 payload={"status": "completed", "summary": "first"})
+    early_complete = _make_event(
+        "r1",
+        2,
+        RunEventKind.agent_completed,
+        task_index=0,
+        payload={"status": "completed", "summary": "first"},
+    )
     # A stale replay arrives with seq=1 (lower than seq=2).
-    stale_replay = _make_event("r1", 1, RunEventKind.agent_completed, task_index=0,
-                               payload={"status": "failed", "summary": "stale"})
+    stale_replay = _make_event(
+        "r1",
+        1,
+        RunEventKind.agent_completed,
+        task_index=0,
+        payload={"status": "failed", "summary": "stale"},
+    )
     events = [
         _make_event("r1", 0, RunEventKind.run_started),
         stale_replay,
@@ -334,14 +404,24 @@ def test_query_by_run_isolates_run_id_from_file(tmp_path: Path) -> None:
     p = tmp_path / "mixed.jsonl"
     events_r1 = [
         _make_event("r1", 0, RunEventKind.run_started, ts=1.0),
-        _make_event("r1", 1, RunEventKind.agent_completed, task_index=0,
-                    payload={"status": "completed", "summary": "ok"}),
+        _make_event(
+            "r1",
+            1,
+            RunEventKind.agent_completed,
+            task_index=0,
+            payload={"status": "completed", "summary": "ok"},
+        ),
         _make_event("r1", 2, RunEventKind.run_completed, payload={"status": "completed"}),
     ]
     events_r2 = [
         _make_event("r2", 0, RunEventKind.run_started, ts=2.0),
-        _make_event("r2", 1, RunEventKind.agent_failed, task_index=0,
-                    payload={"status": "failed", "error": "oops"}),
+        _make_event(
+            "r2",
+            1,
+            RunEventKind.agent_failed,
+            task_index=0,
+            payload={"status": "failed", "error": "oops"},
+        ),
     ]
     with p.open("w") as fh:
         for e in events_r1 + events_r2:
@@ -379,12 +459,27 @@ def test_query_by_run_accepts_preloaded_list() -> None:
 def test_pending_task_indices() -> None:
     events = [
         _make_event("r1", 0, RunEventKind.run_started),
-        _make_event("r1", 1, RunEventKind.agent_completed, task_index=0,
-                    payload={"status": "completed", "summary": "ok"}),
-        _make_event("r1", 2, RunEventKind.agent_completed, task_index=2,
-                    payload={"status": "merged", "summary": "merged"}),
-        _make_event("r1", 3, RunEventKind.agent_failed, task_index=3,
-                    payload={"status": "failed", "error": "err"}),
+        _make_event(
+            "r1",
+            1,
+            RunEventKind.agent_completed,
+            task_index=0,
+            payload={"status": "completed", "summary": "ok"},
+        ),
+        _make_event(
+            "r1",
+            2,
+            RunEventKind.agent_completed,
+            task_index=2,
+            payload={"status": "merged", "summary": "merged"},
+        ),
+        _make_event(
+            "r1",
+            3,
+            RunEventKind.agent_failed,
+            task_index=3,
+            payload={"status": "failed", "error": "err"},
+        ),
     ]
     state = fold_journal(events)
     expected = {0, 1, 2, 3}
@@ -395,10 +490,20 @@ def test_pending_task_indices() -> None:
 
 def test_pending_task_indices_all_complete() -> None:
     events = [
-        _make_event("r1", 0, RunEventKind.agent_completed, task_index=0,
-                    payload={"status": "completed", "summary": "ok"}),
-        _make_event("r1", 1, RunEventKind.agent_completed, task_index=1,
-                    payload={"status": "completed", "summary": "ok2"}),
+        _make_event(
+            "r1",
+            0,
+            RunEventKind.agent_completed,
+            task_index=0,
+            payload={"status": "completed", "summary": "ok"},
+        ),
+        _make_event(
+            "r1",
+            1,
+            RunEventKind.agent_completed,
+            task_index=1,
+            payload={"status": "completed", "summary": "ok2"},
+        ),
     ]
     state = fold_journal(events)
     assert state.pending_task_indices({0, 1}) == frozenset()
@@ -414,8 +519,9 @@ def test_run_journal_events_and_state(tmp_path: Path) -> None:
     with RunJournal(p, "run-j") as j:
         j.run_started()
         j.agent_started(0, agent_id="a0", persona="coder", goal="do it")
-        j.agent_completed(0, agent_id="a0", status="completed", summary="done",
-                          observed_total_tokens=77)
+        j.agent_completed(
+            0, agent_id="a0", status="completed", summary="done", observed_total_tokens=77
+        )
         j.run_completed(status="completed")
 
         evts = j.events()
@@ -453,9 +559,16 @@ def test_run_journal_close_is_idempotent(tmp_path: Path) -> None:
 def test_agent_record_ok_statuses() -> None:
     def make(status: str) -> AgentRecord:
         return AgentRecord(
-            task_index=0, agent_id=None, persona="p", goal="g",
-            status=status, summary=None, observed_total_tokens=None,
-            started=True, done=True, error=None,
+            task_index=0,
+            agent_id=None,
+            persona="p",
+            goal="g",
+            status=status,
+            summary=None,
+            observed_total_tokens=None,
+            started=True,
+            done=True,
+            error=None,
         )
 
     assert make("completed").ok is True

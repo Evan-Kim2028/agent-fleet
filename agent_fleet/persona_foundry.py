@@ -95,9 +95,7 @@ class PersonaFoundry:
             )
         safe = _SAFE_NAME_RE.sub("", name.lower())[:_MAX_NAME_LEN]
         if not safe:
-            raise PersonaGenerationError(
-                f"Persona name {name!r} is empty after sanitization"
-            )
+            raise PersonaGenerationError(f"Persona name {name!r} is empty after sanitization")
         return safe
 
     @staticmethod
@@ -109,9 +107,7 @@ class PersonaFoundry:
                 f"Generated persona body exceeds {_MAX_BODY_LEN} chars (got {len(text)})"
             )
         if "## " not in text:
-            raise PersonaGenerationError(
-                "Generated persona body contains no '## ' headings"
-            )
+            raise PersonaGenerationError("Generated persona body contains no '## ' headings")
 
     # ------------------------------------------------------------------
     # Public API

@@ -46,13 +46,7 @@ class _Dispatcher:
 # (a) self-throttle loop
 # ---------------------------------------------------------------------------
 
-_SELF_THROTTLE = (
-    "n = 0\n"
-    "while budget.remaining() > 0:\n"
-    "    agent('s')\n"
-    "    n += 1\n"
-    "return n"
-)
+_SELF_THROTTLE = "n = 0\nwhile budget.remaining() > 0:\n    agent('s')\n    n += 1\nreturn n"
 
 
 def test_self_throttle_loop_dispatches_until_budget_exhausted() -> None:
@@ -67,10 +61,7 @@ def test_self_throttle_loop_dispatches_until_budget_exhausted() -> None:
 # ---------------------------------------------------------------------------
 
 _THREE_SEQUENTIAL = (
-    "a = agent('a')\n"
-    "b = agent('b')\n"
-    "c = agent('c')\n"
-    "return [a.summary, b.summary, c.summary]"
+    "a = agent('a')\nb = agent('b')\nc = agent('c')\nreturn [a.summary, b.summary, c.summary]"
 )
 
 
@@ -89,6 +80,7 @@ def test_hard_ceiling_refuses_third_dispatch() -> None:
 # (c) total readback
 # ---------------------------------------------------------------------------
 
+
 def test_budget_total_readable_from_program() -> None:
     summary = run_workflow_program(
         "x = agent('x')\nreturn budget.total",
@@ -101,6 +93,7 @@ def test_budget_total_readable_from_program() -> None:
 # ---------------------------------------------------------------------------
 # (d) unbounded: token_budget=None
 # ---------------------------------------------------------------------------
+
 
 def test_budget_remaining_is_inf_when_unbounded() -> None:
     summary = run_workflow_program(
@@ -123,6 +116,7 @@ def test_budget_total_is_none_when_unbounded() -> None:
 # ---------------------------------------------------------------------------
 # (e) spent counts returned agents
 # ---------------------------------------------------------------------------
+
 
 def test_budget_spent_counts_returned_agents() -> None:
     summary = run_workflow_program(

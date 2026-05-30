@@ -35,9 +35,7 @@ def _patch_level_up_root(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
     monkeypatch.setattr("agent_fleet.level_up.paths.LEVEL_UP_ROOT", root)
 
 
-def test_task_skill_lands_in_execute_slots(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_task_skill_lands_in_execute_slots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A skill in FleetTask.skills appears in equip.skill_slots_execute."""
     _patch_level_up_root(monkeypatch, tmp_path / "level_up")
 
@@ -63,9 +61,7 @@ def test_task_skill_content_in_compose_body(
     assert _SKILL_SUBSTRING in equip.compose_body
 
 
-def test_nonexistent_skill_dropped(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_nonexistent_skill_dropped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A skill not present in base-kit is silently dropped from skill_slots_execute."""
     _patch_level_up_root(monkeypatch, tmp_path / "level_up")
 

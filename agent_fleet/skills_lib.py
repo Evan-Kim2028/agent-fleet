@@ -17,12 +17,14 @@ SYSTEMATIC_DEBUGGING_SKILL = "pstack/why"
 # pstack/how.  These are style/meta principles optional for a small well-defined task.
 # Note: extra_skills (SYSTEMATIC_DEBUGGING_SKILL, PR_LOOP_EXECUTE_SKILLS) are appended
 # after this filter, so the actual minimal loadout may contain more than these four.
-MINIMAL_EXECUTE_SKILL_CORE: frozenset[str] = frozenset({
-    "pstack/tdd",
-    "cursor-team-kit/verify-this",
-    "pstack/figure-it-out",
-    "pstack/principle-fix-root-causes",
-})
+MINIMAL_EXECUTE_SKILL_CORE: frozenset[str] = frozenset(
+    {
+        "pstack/tdd",
+        "cursor-team-kit/verify-this",
+        "pstack/figure-it-out",
+        "pstack/principle-fix-root-causes",
+    }
+)
 # Injected when repo pr_loop.enabled (CI fix / watcher workflows).
 PR_LOOP_EXECUTE_SKILLS: tuple[str, ...] = (
     "cursor-team-kit/fix-ci",

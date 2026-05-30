@@ -59,6 +59,7 @@ class _Dispatcher:
 # validator: a program built only out of dynamic primitives still dispatches
 # ---------------------------------------------------------------------------
 
+
 def test_validate_accepts_subprogram_only_program() -> None:
     result = validate_workflow_program('return subprogram("return agent(\\"x\\")")')
     assert result.ok
@@ -91,8 +92,7 @@ def test_dynamic_primitives_add_no_escape_surface() -> None:
 # ---------------------------------------------------------------------------
 
 _BRANCH_PROG = (
-    'picked = branch("ship it?", lambda: agent("ship"), lambda: agent("hold"))\n'
-    "return picked.goal"
+    'picked = branch("ship it?", lambda: agent("ship"), lambda: agent("hold"))\nreturn picked.goal'
 )
 
 
@@ -128,8 +128,7 @@ def test_branch_counts_judge_plus_chosen_agent() -> None:
 # ---------------------------------------------------------------------------
 
 _REPLAN_PROG = (
-    'hist = replan("converge", lambda i, last: agent("attempt " + str(i)))\n'
-    "return len(hist)"
+    'hist = replan("converge", lambda i, last: agent("attempt " + str(i)))\nreturn len(hist)'
 )
 
 
@@ -153,10 +152,7 @@ def test_replan_judge_not_run_after_final_round() -> None:
 
 
 def test_replan_caps_requested_iterations_at_max() -> None:
-    prog = (
-        'hist = replan("x", lambda i, last: agent("a"), max_iterations=99)\n'
-        "return len(hist)"
-    )
+    prog = 'hist = replan("x", lambda i, last: agent("a"), max_iterations=99)\nreturn len(hist)'
     summary = run_workflow_program(prog, dispatcher=_Dispatcher(summary='{"done": false}'))
     assert summary.result == MAX_REPLAN_ITERATIONS
 
@@ -164,6 +160,7 @@ def test_replan_caps_requested_iterations_at_max() -> None:
 # ---------------------------------------------------------------------------
 # subprogram: bounded runtime recursion (the arbitrary-Python capability)
 # ---------------------------------------------------------------------------
+
 
 def test_subprogram_runs_nested_and_returns_value() -> None:
     prog = 'inner = "x = agent(\\"leaf\\")\\nreturn x.summary"\nreturn subprogram(inner)'
@@ -221,7 +218,7 @@ def test_subprogram_recursion_bounded_across_parallel_fanout() -> None:
     nested = f"return subprogram({leaf!r})"
     # parent (d0) -> sub (d1) -> parallel thunk -> sub (d2) -> sub (d3) -> sub (d3>=3 raises)
     inside_parallel = f"return subprogram({nested!r})"
-    par = f'r = parallel([lambda: subprogram({inside_parallel!r})])\nreturn r[0]'
+    par = f"r = parallel([lambda: subprogram({inside_parallel!r})])\nreturn r[0]"
     top = f"return subprogram({par!r})"
     summary = run_workflow_program(top, dispatcher=_Dispatcher(summary="deep"), max_agents=64)
     assert summary.status == "error"

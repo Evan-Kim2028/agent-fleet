@@ -54,9 +54,7 @@ def test_roll_up_status_all_fail() -> None:
 
 
 def test_compact_summary_all_success_bounded() -> None:
-    results = [
-        _result(goal=f"goal-{i}", summary="x" * 2000, index=i) for i in range(20)
-    ]
+    results = [_result(goal=f"goal-{i}", summary="x" * 2000, index=i) for i in range(20)]
     summary = compact_summary(results, total_chars=400)
     assert len(summary) < 100
     assert "20/20" in summary

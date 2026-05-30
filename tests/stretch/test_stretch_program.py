@@ -211,8 +211,7 @@ def test_fanout_with_failure() -> None:
     assert result["ok"] + result["err"] + result["none"] == 20
 
     assert summary.agents_ok < summary.agents_dispatched, (
-        f"expected some failures: ok={summary.agents_ok}, "
-        f"dispatched={summary.agents_dispatched}"
+        f"expected some failures: ok={summary.agents_ok}, dispatched={summary.agents_dispatched}"
     )
     failed_count = summary.agents_dispatched - summary.agents_ok
     assert failed_count >= len(fail_labels), (

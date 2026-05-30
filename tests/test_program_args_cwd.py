@@ -45,6 +45,7 @@ class _Dispatcher:
 # Programs must include at least one agent() call to pass validation.
 # The agent result is ignored; args/cwd are what's under test.
 
+
 def test_args_and_cwd_passthrough() -> None:
     source = 'agent("noop")\nreturn [args.get("repo"), cwd]'
     summary = run_workflow_program(

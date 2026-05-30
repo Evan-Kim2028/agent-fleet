@@ -45,6 +45,7 @@ class _FakeDispatcher:
 # validate_workflow_program
 # ---------------------------------------------------------------------------
 
+
 def test_validate_rejects_import() -> None:
     result = validate_workflow_program("import os\nreturn agent('x')")
     assert not result.ok
@@ -125,6 +126,7 @@ def test_run_workflow_phases_recorded() -> None:
 # ISOLATION: same_workspace_tasks per dispatch kind
 # ---------------------------------------------------------------------------
 
+
 def test_parallel_agents_isolated_sws2() -> None:
     fake = _FakeDispatcher()
     run_workflow_program(_COMPLEX_PROG, dispatcher=fake)
@@ -186,6 +188,7 @@ def test_budget_parallel_thunk_not_silently_none() -> None:
 # TOKEN ACCOUNTING
 # ---------------------------------------------------------------------------
 
+
 def test_tokens_across_agents_sum() -> None:
     summary = run_workflow_program(_COMPLEX_PROG, dispatcher=_FakeDispatcher())
     assert summary.tokens_across_agents == 6 * 5000
@@ -205,11 +208,22 @@ def test_context_leverage_high() -> None:
 # to_dict round-trip
 # ---------------------------------------------------------------------------
 
+
 def test_program_run_summary_to_dict_keys() -> None:
-    summary = run_workflow_program("x = agent('hi')\nreturn x.summary", dispatcher=_FakeDispatcher())  # noqa: E501
+    summary = run_workflow_program(
+        "x = agent('hi')\nreturn x.summary", dispatcher=_FakeDispatcher()
+    )
     d = summary.to_dict()
     assert set(d.keys()) >= {
-        "status", "result", "error", "agents_dispatched", "agents_ok",
-        "phases", "log", "tokens_across_agents", "tokens_to_parent",
-        "context_leverage", "duration_seconds",
+        "status",
+        "result",
+        "error",
+        "agents_dispatched",
+        "agents_ok",
+        "phases",
+        "log",
+        "tokens_across_agents",
+        "tokens_to_parent",
+        "context_leverage",
+        "duration_seconds",
     }

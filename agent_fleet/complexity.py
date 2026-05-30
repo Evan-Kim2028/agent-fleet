@@ -119,9 +119,7 @@ def coerce_complexity(value: str | None) -> Complexity:
         return "MED"
     upper = str(value).strip().upper()
     if upper not in _VALID:
-        raise ValueError(
-            f"Invalid complexity {value!r}. Must be one of {sorted(_VALID)}."
-        )
+        raise ValueError(f"Invalid complexity {value!r}. Must be one of {sorted(_VALID)}.")
     return cast("Complexity", upper)
 
 

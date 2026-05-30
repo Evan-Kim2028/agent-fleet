@@ -66,6 +66,7 @@ _TINY_PROGRAM = 'x = agent("do one thing")\nreturn x.summary'
 # OrchestrationConfig — auto_dispatch_program
 # ---------------------------------------------------------------------------
 
+
 def test_auto_dispatch_program_defaults_true() -> None:
     cfg = resolve_orchestration_config({})
     assert cfg.auto_dispatch_program is True
@@ -84,6 +85,7 @@ def test_auto_dispatch_program_explicit_false() -> None:
 # ---------------------------------------------------------------------------
 # TaskSpec with PROGRAM decision constructs correctly
 # ---------------------------------------------------------------------------
+
 
 def test_task_spec_program_decision() -> None:
     spec = TaskSpec(
@@ -126,6 +128,7 @@ def test_task_spec_program_to_dict_includes_program() -> None:
 # PROGRAM branch: run_workflow_program produces the right shape
 # ---------------------------------------------------------------------------
 
+
 def test_program_branch_run_workflow_program_status() -> None:
     """The PROGRAM branch calls run_workflow_program; result is completed."""
     summary = run_workflow_program(_TINY_PROGRAM, dispatcher=_FakeDispatcher())
@@ -164,6 +167,7 @@ def test_program_branch_agents_dispatched_count() -> None:
 # ---------------------------------------------------------------------------
 # run_workflow_program is reached when PROGRAM spec is executed
 # ---------------------------------------------------------------------------
+
 
 def test_run_workflow_program_called_via_patch() -> None:
     """Assert run_workflow_program is reached for a PROGRAM spec by patching it."""

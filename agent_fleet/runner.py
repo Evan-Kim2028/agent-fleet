@@ -615,9 +615,7 @@ class LocalFleetRunner:
                             task_spec=task_spec.to_dict() if task_spec else None,
                             changed_files=[str(p) for p in _all_changed],
                             phases=phases,
-                            error=(
-                                f"Agent modified {_n} file(s) outside allowed_paths: {_first3}"
-                            ),
+                            error=(f"Agent modified {_n} file(s) outside allowed_paths: {_first3}"),
                             duration_seconds=round(time.monotonic() - start, 2),
                         )
                         run_log.run_end(
