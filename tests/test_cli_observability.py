@@ -28,7 +28,10 @@ def _seed_run(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_doctor_returns_0_and_renders_header(capsys: pytest.CaptureFixture[str]) -> None:
+def test_doctor_returns_0_and_renders_header(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("CURSOR_API_KEY", "k")
     code = main(["doctor"])
     assert code == 0
     out = capsys.readouterr().out
