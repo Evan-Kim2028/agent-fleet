@@ -62,7 +62,7 @@ critical_path_prefixes:
 #     advance: dispatch   # or complete for strict serial
 # See examples/agent-fleet-queue.yaml
 
-# Cron schedules (daily docs sync, weekly audits) — see docs/SCHEDULES.md
+# Cron schedules (daily docs sync, weekly audits) — see docs/SCHEDULES.md, run via: fleet schedule tick
 # schedules:
 #   enabled: true
 #   poll_interval_s: 60

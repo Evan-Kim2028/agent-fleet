@@ -6,7 +6,7 @@ How to add Agent Fleet to any git repository — from a first local run through 
 
 | Level | What you get | Effort |
 |-------|----------------|--------|
-| 1 | Global install + `agent-fleet run` | ~15 min |
+| 1 | Global install + `fleet run` | ~15 min |
 | 2 | Per-repo scope + verify commands | ~30 min |
 | 3 | Composer PR analysis on GitHub Actions | ~1 hr |
 | 4 | PR loop (review → fix → CI → merge) | ~2–4 hr (includes bootstrap) |
@@ -31,7 +31,7 @@ Start with [QUICKSTART.md](QUICKSTART.md) for level 1, then return here for repo
 ### Scaffold
 
 ```bash
-agent-fleet init /absolute/path/to/your/repo
+fleet init /absolute/path/to/your/repo
 ```
 
 This copies `examples/repo.agent-fleet.yaml` → `.agent-fleet.yaml` in the repo.
@@ -68,7 +68,7 @@ For multi-package repos, see `examples/monorepo.agent-fleet.yaml`.
 ### Verify
 
 ```bash
-agent-fleet run "Add a docstring to the main entry module" \
+fleet run "Add a docstring to the main entry module" \
   --workspace /absolute/path/to/your/repo \
   --persona backend \
   --pipeline code_review
@@ -144,7 +144,7 @@ Open a pull request. Within a few minutes you should see a **Composer PR Analysi
 Local test (no GitHub):
 
 ```bash
-agent-fleet pr-review --workspace /path/to/repo --base-branch main
+fleet review --workspace /path/to/repo --base main
 ```
 
 ---
@@ -193,19 +193,19 @@ Merge that PR yourself (or with admin override). After bootstrap, fleet branches
 One-shot poll (good for testing):
 
 ```bash
-agent-fleet loop --workspace /path/to/repo --once
+fleet loop --workspace /path/to/repo --once
 ```
 
 Dry run (no fix dispatch or merge):
 
 ```bash
-agent-fleet loop --workspace /path/to/repo --once --dry-run
+fleet loop --workspace /path/to/repo --once --dry-run
 ```
 
 Long-running watcher:
 
 ```bash
-agent-fleet-pr-loop --workspace /path/to/repo
+fleet loop --workspace /path/to/repo
 ```
 
 Systemd unit template: `examples/agent-fleet-pr-loop.service` (edit paths before enabling).
@@ -224,7 +224,7 @@ git checkout -b fleet/fix-login-timeout
 1. Bootstrap merged on `main`
 2. Create `fleet/test-automation` with a small change **outside** `critical_path_prefixes`
 3. Wait for PR analyzer comment + CI
-4. Run `agent-fleet loop --workspace ... --once` or start the watcher
+4. Run `fleet loop --workspace ... --once` or start the watcher
 5. Confirm fix commit (if needed) and auto-merge
 
 ---
@@ -256,13 +256,13 @@ Tools: `coding_fleet_dispatch`, `coding_fleet_pr_review`, `coding_fleet_pr_loop`
 
 ```
 [ ] pip install -e agent-fleet + CURSOR_API_KEY
-[ ] agent-fleet init <repo>
+[ ] fleet init <repo>
 [ ] Edit test_command / lint_command / persona_scope_allowlist
-[ ] Smoke: agent-fleet run ... --pipeline code_review
+[ ] Smoke: fleet run ... --pipeline code_review
 [ ] (Optional) pr_review + agents/pr_review_overlay.md
 [ ] (Optional) .github/workflows/pr-analyzer.yml + CURSOR_API_KEY secret
 [ ] (Optional) Bootstrap PR merged manually
-[ ] (Optional) pr_loop + gh auth + watcher or gateway coding_fleet_pr_loop
+[ ] (Optional) pr_loop + gh auth + fleet loop
 [ ] (Optional) Test fleet/<name> PR auto-merge on non-critical paths
 ```
 

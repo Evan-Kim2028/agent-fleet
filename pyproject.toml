@@ -1,6 +1,6 @@
 [project]
 name = "agent-fleet"
-version = "0.11.0"
+version = "0.11.1"
 description = "Multi-agent coding fleet — scoped personas, review pipelines, pluggable execution backends"
 readme = "README.md"
 requires-python = ">=3.14,<3.15"
@@ -26,9 +26,10 @@ dev = ["pytest>=8.0", "ruff>=0.4", "ty>=0.0.20"]
 dev = ["pytest>=8.0", "ruff>=0.4", "ty>=0.0.20"]
 
 [project.scripts]
+fleet = "agent_fleet.cli:main"
 agent-fleet = "agent_fleet.cli:main"
 agent-fleet-pr-analyzer = "agent_fleet.pr_review.github_action:main"
-agent-fleet-pr-loop = "agent_fleet.pr_loop.cli:main"
+agent-fleet-pr-loop = "agent_fleet.pr_loop._shim:main"
 agent-fleet-watch = "agent_fleet.issue_loop.cli:main"
 agent-fleet-issue-dispatch = "agent_fleet.issue_loop.dispatch:main"
 agent-fleet-schedule = "agent_fleet.schedule.cli:main"

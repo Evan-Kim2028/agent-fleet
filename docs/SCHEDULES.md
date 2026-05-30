@@ -1,8 +1,8 @@
 # Scheduled fleet dispatch
 
 Run fleet jobs on a cron schedule from `.agent-fleet.yaml`. Schedules are
-evaluated by `agent-fleet-watch` (combined watcher) or manually via
-`agent-fleet-schedule`.
+evaluated by `fleet dispatch` (combined watcher) or manually via
+`fleet schedule`.
 
 ## Quick example
 
@@ -72,13 +72,13 @@ checkout path and `state_root:` to agent_fleet. Issue dispatch, PR loop, queue, 
 verify scope live there — not on the target repo.
 
 - **State:** `.agent-fleet-state.json` in agent_fleet
-- **Watcher:** one `agent-fleet-watch --workspace /path/to/agent_fleet` (see
+- **Watcher:** one `fleet dispatch --workspace /path/to/agent_fleet` (see
   `examples/agent-fleet-watch.service`)
 
 
 | Kind | Behavior |
 |------|----------|
-| `issue` | Spawns `agent-fleet-issue-dispatch` — full pipeline, PR, issue comments |
+| `issue` | Spawns `fleet dispatch` — full pipeline, PR, issue comments |
 | `task` | Spawns headless `FleetDispatcher` run in a subprocess |
 
 `issue` kind requires `issue_dispatch` settings (comment marker, labels) in
@@ -89,18 +89,18 @@ the comment marker fields the dispatch subprocess expects.
 
 ```bash
 # List jobs and next due times
-agent-fleet-schedule list --workspace /path/to/repo
+fleet schedule list --workspace /path/to/repo
 
-# Evaluate all schedules once (also: agent-fleet-watch --once)
-agent-fleet-schedule tick --workspace /path/to/repo
+# Evaluate all schedules once
+fleet schedule tick --workspace /path/to/repo
 
 # Manual fire (ignores cron expression)
-agent-fleet-schedule run --id docs-daily --workspace /path/to/repo
+fleet schedule run --id docs-daily --workspace /path/to/repo
 ```
 
 ## Watcher integration
 
-When `schedules.enabled: true`, the combined watcher (`agent-fleet-watch`)
+When `schedules.enabled: true`, the combined watcher (`fleet dispatch`)
 evaluates schedules on every poll cycle alongside issue comments and PR loop
 work. You can enable schedules without issue comment dispatch.
 
@@ -111,7 +111,7 @@ State is stored in unified `.agent-fleet-state.json` under the `schedules` key.
 For minimal setup before upgrading, system cron can call:
 
 ```bash
-agent-fleet-schedule tick --workspace /path/to/repo
+fleet schedule tick --workspace /path/to/repo
 ```
 
 Run every minute; the schedule module handles dedup and next-fire tracking.
@@ -126,6 +126,6 @@ Run every minute; the schedule module handles dedup and next-fire tracking.
 
 ## Systemd
 
-Use the existing `agent-fleet-watch` unit — schedules piggyback on the same
+Use the existing `fleet dispatch` unit — schedules piggyback on the same
 daemon. Set `poll_interval_s` on `schedules` (default 60s) and/or
 `issue_dispatch.poll_interval_s`; the watcher uses the maximum of enabled loops.

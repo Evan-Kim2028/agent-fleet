@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import argparse
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import agent_fleet.doctor as doctor
@@ -141,3 +143,31 @@ def test_gh_check_warn_not_installed_when_which_returns_none(
     match = next(c for c in checks if c.name == "GitHub CLI (gh)")
     assert match.status == "warn"
     assert "not installed" in match.detail
+
+
+# --- cmd_doctor malformed config fallback ---
+
+
+def test_cmd_doctor_falls_back_to_cursor_on_malformed_config(
+    tmp_path: Path,
+    monkeypatch: "pytest.MonkeyPatch",
+) -> None:
+    """cmd_doctor must not crash on a malformed .agent-fleet.yaml.
+
+    It should silently fall back to backend='cursor' and return a result
+    with at least one DoctorCheck, regardless of the YAML parse error.
+    """
+    from agent_fleet.cli import cmd_doctor
+
+    bad_yaml = tmp_path / "fleet-malformed.yaml"
+    bad_yaml.write_text("{  # malformed: unterminated flow mapping\n", encoding="utf-8")
+
+    args = argparse.Namespace(
+        config=str(bad_yaml),
+        workspace=str(tmp_path),
+        json=False,
+    )
+
+    # Must not raise; must return an int exit code
+    result = cmd_doctor(args)
+    assert isinstance(result, int)

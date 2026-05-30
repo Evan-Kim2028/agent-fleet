@@ -58,7 +58,7 @@ See **[KIMI.md](KIMI.md)** for full Kimi Code CLI setup.
 Verify personas load with either backend:
 
 ```bash
-agent-fleet personas
+fleet personas
 # → coder, reviewer, explorer
 ```
 
@@ -67,7 +67,7 @@ agent-fleet personas
 Pick any git repo and run:
 
 ```bash
-agent-fleet run "Add a one-line comment to README explaining the project" \
+fleet run "Add a one-line comment to README explaining the project" \
   --workspace /path/to/your/repo \
   --pipeline code_review
 ```
@@ -85,7 +85,7 @@ Set `default_backend: kimi` in `fleet.yaml`, then use the same command:
 ```bash
 export KIMI_API_KEY=sk-kimi-...
 
-agent-fleet run "Add a one-line comment to README explaining the project" \
+fleet run "Add a one-line comment to README explaining the project" \
   --workspace /path/to/your/repo \
   --pipeline code_review
 ```
@@ -102,7 +102,7 @@ Change backends anytime by editing `default_backend` in `fleet.yaml`.
 Scaffold per-repo settings:
 
 ```bash
-agent-fleet init /path/to/your/repo
+fleet init /path/to/your/repo
 ```
 
 Edit `/path/to/your/repo/.agent-fleet.yaml`:
@@ -123,7 +123,7 @@ persona_scope_allowlist:
 Re-run with repo scope applied automatically:
 
 ```bash
-agent-fleet run "Fix failing test in src/" \
+fleet run "Fix failing test in src/" \
   --workspace /path/to/your/repo \
   --persona backend \
   --pipeline code_review
@@ -182,6 +182,14 @@ results = dispatch_tasks(
 
 The execution backend is read from `fleet.yaml` automatically.
 
+## Summon (idempotent first-run setup)
+
+`fleet summon` (or bare `fleet`) is safe to call multiple times. It creates `.agent-fleet.yaml` in the current directory if absent, runs doctor checks, and prints a ready banner:
+
+```bash
+fleet summon
+```
+
 ## Troubleshooting
 
 | Problem | Fix |
@@ -189,8 +197,8 @@ The execution backend is read from `fleet.yaml` automatically.
 | `CURSOR_API_KEY is not set` | Export key or set `default_backend: kimi` |
 | `KIMI_API_KEY is not set` | Export key or set `default_backend: cursor` — see [KIMI.md](KIMI.md) |
 | `kimi-cli failed` | Install Kimi Code CLI; set `kimi_bin` in `fleet.yaml` |
-| `agent-fleet: command not found` | Re-run `pip install -e ".[dev]"` |
-| Persona not found | Run `agent-fleet personas`; check `fleet.yaml` |
+| `fleet: command not found` | Re-run `pip install -e ".[dev]"` |
+| Persona not found | Run `fleet personas`; check `fleet.yaml` |
 | Agent edits wrong directories | Set `persona_scope_allowlist` in `.agent-fleet.yaml` |
 | Parallel tasks overwrite each other | Parallel batch auto-creates one worktree + branch per task; or set `use_worktree: true` for single runs |
 

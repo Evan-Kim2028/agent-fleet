@@ -25,7 +25,7 @@ Built on **[Cursor SDK](https://github.com/cursor/cursor-sdk)** (`cursor-sdk`). 
 |------------|---------|
 | **Parallel implementers** | Up to `max_parallel` Composer agents; same-repo tasks auto-isolate in git worktrees |
 | **In-pipeline review** | `code_review`: implement → scope → verify → **reviewer verdict** (`approve` / `request_changes` / `block`) |
-| **PR analyzer** | Two-pass **Composer PR review** — CLI (`agent-fleet review`), GHA ([`pr-analyzer.yml`](examples/github/pr-analyzer.yml)), feeds PR loop |
+| **PR analyzer** | Two-pass **Composer PR review** — CLI (`fleet review`), GHA ([`pr-analyzer.yml`](examples/github/pr-analyzer.yml)), feeds PR loop |
 | **Background modes** | PR loop watcher, issue-comment dispatch, **cron schedules**, parallel Python batch |
 | **Structured logs** | JSONL at `~/.agent-fleet/fleet/runs/<run-id>.jsonl` |
 
@@ -88,23 +88,37 @@ cp fleet.example.yaml ~/.agent-fleet/fleet.yaml
 Verify the install:
 
 ```bash
-uv run agent-fleet --help
+fleet --help
 ```
+
+To upgrade fleet to the latest published version:
+
+```bash
+fleet self update
+```
+
+This runs `uv tool upgrade agent-fleet` under the hood. Requires `uv` on `PATH`.
 
 > **Import shadow:** Do not clone into `~/Documents/agent_fleet` (underscore). That path name matches the Python package and can shadow the installed `agent_fleet` module when used as cwd or on `PYTHONPATH`. Prefer `~/agent-fleet-dev` or any hyphenated path. Check with `python3 scripts/check-import-shadow.py` — see [docs/FLEET-CONFIG.md](docs/FLEET-CONFIG.md#import-shadow).
 
 ### 2. Preflight check
 
-`doctor` runs environment checks and prints an actionable fix for each item not passing:
+`summon` runs environment checks and prints an actionable fix for each item not passing, then prints a ready banner:
 
 ```bash
-uv run agent-fleet doctor
+fleet summon
+```
+
+Or run checks directly:
+
+```bash
+fleet doctor
 ```
 
 Checks: Python version, backend API key (`CURSOR_API_KEY`), `cursor-sdk` import, `gh` CLI, fleet config, and repo config. The command exits non-zero only on a hard failure (missing key, wrong Python version); warnings about optional items still exit 0. For CI or scripted onboarding, use machine-readable output:
 
 ```bash
-uv run agent-fleet doctor --json
+fleet doctor --json
 ```
 
 ### 3. Add your repo (recommended before real work)
@@ -116,7 +130,7 @@ uv run agent-fleet doctor --json
 ```bash
 export REPO=/absolute/path/to/your/repo   # must be a git checkout
 
-agent-fleet init "$REPO"
+fleet init "$REPO"
 # creates $REPO/.agent-fleet.yaml — edit persona_scope_allowlist, test_command, lint_command
 ```
 
@@ -127,7 +141,7 @@ Details: [docs/NEW-REPO.md](docs/NEW-REPO.md).
 **Implement + review** (~30–120s on `composer-2.5`):
 
 ```bash
-agent-fleet run "Add a one-line project description to README" \
+fleet run "Add a one-line project description to README" \
   --workspace "$REPO" \
   --pipeline code_review
 ```
@@ -135,7 +149,7 @@ agent-fleet run "Add a one-line project description to README" \
 **PR review only** (working tree vs `main`):
 
 ```bash
-agent-fleet review --workspace "$REPO" --format json
+fleet review --workspace "$REPO" --format json
 ```
 
 Expect JSON with `status: completed` or a typed failure (`scope_violation`, `verify_failed`, `review_changes_requested`). Commit or stash local changes in the target repo before dispatch if you want a clean diff.
@@ -143,7 +157,7 @@ Expect JSON with `status: completed` or a typed failure (`scope_violation`, `ver
 **Preview a run without spending tokens** — `--dry-run` resolves the plan (persona, pipeline, workspace, backend) and prints it as JSON, then exits before requiring a backend API key:
 
 ```bash
-uv run agent-fleet run "Add error handling to auth module" --dry-run
+fleet run "Add error handling to auth module" --dry-run
 ```
 
 ---
@@ -153,7 +167,7 @@ uv run agent-fleet run "Add error handling to auth module" --dry-run
 `runs` lists every recorded run, newest first:
 
 ```bash
-uv run agent-fleet runs
+fleet runs
 ```
 
 Each row shows: id, status, tokens, started, goal. Add `--json` for machine-readable output; `--limit N` to cap rows.
@@ -161,8 +175,8 @@ Each row shows: id, status, tokens, started, goal. Add `--json` for machine-read
 `watch` tails a single run as a live phase/agent tree:
 
 ```bash
-uv run agent-fleet watch            # defaults to 'latest'
-uv run agent-fleet watch <run-id>   # full id or a unique prefix
+fleet watch            # defaults to 'latest'
+fleet watch <run-id>   # full id or a unique prefix
 ```
 
 - `--once` prints one snapshot and exits (no live loop).
@@ -174,11 +188,11 @@ uv run agent-fleet watch <run-id>   # full id or a unique prefix
 
 | Mode | Entry | Behavior |
 |------|-------|----------|
-| One-shot | `agent-fleet run …` | Single job → JSON |
+| One-shot | `fleet run …` | Single job → JSON |
 | Parallel batch | `dispatch_tasks(…)` / `FleetDispatcher` | N concurrent agents (worktree per same-repo task) |
 | PR analyzer (CI) | `examples/github/pr-analyzer.yml` | Composer posts structured review comment on every PR |
-| PR loop watcher | `agent-fleet loop` / `agent-fleet-pr-loop` | Poll `fleet/*` PRs → fix findings → CI → optional merge |
-| Issue trigger | `agent-fleet-watch` | `/agent --persona …` on issue comments → full pipeline |
+| PR loop watcher | `fleet loop` | Poll `fleet/*` PRs → fix findings → CI → optional merge |
+| Issue trigger | `fleet dispatch` | `/agent --persona …` on issue comments → full pipeline |
 
 **Concurrency** (`~/.agent-fleet/fleet.yaml`) — starting point for a typical 16–32 GB laptop:
 
@@ -222,12 +236,12 @@ orchestration:
 
 ```bash
 # Terminal ASCII diagram (default for validate / dry-run / post-run)
-agent-fleet dag validate --file examples/dag/example_dag.json
-agent-fleet dag validate --file examples/dag/example_dag.json --json   # machine-readable
+fleet dag validate --file examples/dag/example_dag.json
+fleet dag validate --file examples/dag/example_dag.json --json   # machine-readable
 
 # Execute (add --canvas for Cursor IDE live graph)
-agent-fleet dag run --file examples/dag/example_dag.json --workspace .
-agent-fleet dag run --file examples/dag/example_dag.json --canvas dag-run --init-only
+fleet dag run --file examples/dag/example_dag.json --workspace .
+fleet dag run --file examples/dag/example_dag.json --canvas dag-run --init-only
 # Open the printed canvas path in Cursor, then run without --init-only
 ```
 
@@ -289,7 +303,7 @@ results = dispatch_tasks(
 
 ## PR loop + Composer review (typical setup)
 
-1. **GHA** runs `agent-fleet-pr-analyzer` → posts Composer PR analysis comment.
+1. **GHA** runs `fleet pr-analyze` → posts Composer PR analysis comment.
 2. **Local watcher** reads that comment, dispatches fix agents, waits for CI, merges.
 
 ```yaml
