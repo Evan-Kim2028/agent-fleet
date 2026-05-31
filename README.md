@@ -88,6 +88,7 @@ cp fleet.example.yaml ~/.agent-fleet/fleet.yaml
 Verify the install:
 
 ```bash
+fleet --version   # prints: fleet 0.11.1
 fleet --help
 ```
 
