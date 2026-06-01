@@ -41,7 +41,7 @@ from agent_fleet.researcher import research_all
 from agent_fleet.reviewer import review
 from agent_fleet.spine_config import SpineConfig
 from agent_fleet.synthesizer import synthesize
-from agent_fleet.workstreams.scope import path_under_allowlist
+from agent_fleet.scope_paths import path_under_allowlist
 from agent_fleet.tech_lead import tech_lead_review
 from agent_fleet.verify_core import get_changed_files
 

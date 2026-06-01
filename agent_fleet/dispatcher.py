@@ -43,6 +43,7 @@ from agent_fleet.runner import run_full_pipeline
 from agent_fleet.telemetry import span as _telemetry_span
 from agent_fleet.verify_core import is_git_repo
 from agent_fleet.worktree import maybe_commit_recoverable_worktree, should_keep_task_worktree
+from agent_fleet.scope_paths import path_under_allowlist
 
 if TYPE_CHECKING:
     from collections.abc import Callable
