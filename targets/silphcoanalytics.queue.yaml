@@ -1,9 +1,0 @@
-# FIFO dispatch queue for silphcoanalytics — managed from agent_fleet repo.
-# advance=dispatch in target YAML allows parallel parents when personas differ.
-queue:
-  - issue: 2027
-    persona: frontend
-    note: "C2: extract ChatSurface config from ChatPage (redispatch after fleet-only migration)."
-  - issue: 1737
-    persona: backend
-    note: "Remove backend GraphQL + agent + decouple MPP (#1692 child)"

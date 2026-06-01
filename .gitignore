@@ -16,3 +16,8 @@ htmlcov/
 .worktrees/
 .agent-fleet-state.json
 .codegraph/
+
+# Per-target-repo configs and code stay local — agent-fleet is standalone.
+# Live targets (silphcoanalytics, etc.) are not committed here; see examples/
+# for committed templates.
+targets/
