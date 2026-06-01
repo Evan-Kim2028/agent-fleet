@@ -30,6 +30,7 @@ class RunFacts:
     verify_fatal: bool
     scope_violated: bool
     changed_files: tuple[str, ...]
+    halted_by_controller: bool = False
 
 
 @dataclass
@@ -81,6 +82,14 @@ def decide_disposition(facts: RunFacts, policy: DispositionPolicy) -> Dispositio
             draft=False,
             outcome="completed_noop",
             reason="implementer produced no code changes",
+        )
+
+    if facts.halted_by_controller:
+        return Disposition(
+            kind=DispositionKind.SALVAGE,
+            draft=True,
+            outcome="controller_halted_salvaged",
+            reason="run controller halted FIX spiral — opening draft PR for human review",
         )
 
     if policy.salvage_on_verify_failed:
