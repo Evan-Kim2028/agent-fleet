@@ -24,6 +24,7 @@ from agent_fleet.disposition import (
     RunFacts,
     decide_disposition,
 )
+from agent_fleet.fix_attempt import FixMemory, _FixDeps, make_fix_strategy
 from agent_fleet.fleet_session import create_fleet_session
 from agent_fleet.hooks import FleetTask, ResumableGitOps
 from agent_fleet.implementer import implement
@@ -76,21 +77,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _truncate_verify_message(message: str, *, max_lines: int = 50) -> str:
-    """Truncate verify failure output to keep fix-loop prompts small.
-
-    Whole pytest dumps balloon the IMPLEMENT prompt and inflate token cost.
-    Keep the first ``max_lines`` lines; mark the elision so the agent knows
-    output was clipped.
-    """
-    if not message:
-        return message
-    lines = message.splitlines()
-    if len(lines) <= max_lines:
-        return message
-    omitted = len(lines) - max_lines
-    return "\n".join(lines[:max_lines]) + f"\n... [{omitted} more lines truncated]"
-
 
 def _task_spec_with_browser_research(task_spec: TaskSpec) -> TaskSpec:
     if not task_spec.research_plan:
@@ -123,6 +109,7 @@ class FleetRunConfig:
     commit_changes: bool = True
     resume: bool = True
     preserve_worktree_on_failure: bool = True
+    fix_strategy: str = "cold"
 
 
 @dataclass
@@ -717,6 +704,8 @@ class LocalFleetRunner:
                 verify_attempts = 0
                 verify_result = None
                 _halted_by_controller = False
+                _accumulated_failures: list[str] = []
+                _fix_strategy = make_fix_strategy(self._config.fix_strategy)
                 while verify_attempts <= effective_max_retries:
                     with run_log.phase("VERIFY", attempt=verify_attempts + 1):
                         logger.info("[%s] VERIFY (attempt %d)", run_id, verify_attempts + 1)
@@ -732,6 +721,8 @@ class LocalFleetRunner:
                         break
                     if verify_result.severity == VerifySeverity.FATAL:
                         break
+                    if verify_result.message:
+                        _accumulated_failures.append(verify_result.message)
                     verify_attempts += 1
                     if verify_attempts > effective_max_retries:
                         break
@@ -800,41 +791,32 @@ class LocalFleetRunner:
                                 browser_session_factory=browser_session_factory,
                             )
                             phases.setdefault("RESEARCH", [n.to_dict() for n in notes])
-                        # Recycle the persistent session before each fix iteration.
-                        # The full pipeline reuses one session across PLAN→…→IMPLEMENT,
-                        # so its conversation history balloons and re-running
-                        # SYNTHESIZE+IMPLEMENT on retry costs ~M tokens of cache reads.
-                        # A fresh session per fix keeps the prompt scope minimal.
-                        if session is not None:
-                            with contextlib.suppress(Exception):
-                                session.dispose()
-                        session = create_fleet_session(
-                            self._backend,
+                        _fix_changed = self._git_ops.changed_files(worktree)
+                        _fix_diff = self._git_ops.diff_summary(worktree)
+                        _fix_mem = FixMemory(
+                            attempt=verify_attempts,
+                            diff_so_far=_fix_diff,
+                            failures=tuple(_accumulated_failures),
+                            files_touched=tuple(str(p) for p in _fix_changed),
+                        )
+                        _fix_deps = _FixDeps(
+                            backend=self._backend,
+                            persona_resolver=self._persona_resolver,
                             fleet_config=self._fleet_config,
-                            persona_resolver=self._persona_resolver,
                             persona=persona,
-                            cwd=repo_root,
-                        )
-                        verify_msg = _truncate_verify_message(verify_result.message)
-                        brief = synthesize(
-                            task_spec,
-                            notes,
-                            backend=self._backend,
-                            extra_context=(f"Verification failed: {verify_msg}. Fix and retry."),
-                            session=session,
-                        )
-                        implement(
-                            brief,
-                            task_spec,
-                            worktree,
-                            branch_name,
-                            backend=self._backend,
-                            persona_resolver=self._persona_resolver,
-                            persona_name=persona,
-                            prompt_suffix=f"Previous verify failure: {verify_msg}",
-                            session=session,
-                            require_mcp_tools=require_mcp,
+                            repo_root=repo_root,
+                            require_mcp=require_mcp,
                             compose_body=dispatch_equip.compose_body,
+                        )
+                        brief, session = _fix_strategy.run_fix(
+                            _fix_mem,
+                            task_spec=task_spec,
+                            worktree=worktree,
+                            branch=branch_name,
+                            deps=_fix_deps,
+                            notes=notes,
+                            session=session,
+                            brief=brief,
                         )
 
                 if verify_result is None or verify_result.severity != VerifySeverity.OK:
