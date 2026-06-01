@@ -729,10 +729,15 @@ class FleetDispatcher:
 
                 # --- allowed_paths enforcement (task-level, not persona-level) ---
                 if task.allowed_paths and changed_files:
+                    scope_root = (
+                        task_workspace.path if task_workspace is not None else workspace
+                    )
                     _out_of_scope = [
                         p
                         for p in changed_files
-                        if not any(p.startswith(ap) for ap in task.allowed_paths)
+                        if not path_under_allowlist(
+                            p, task.allowed_paths, worktree=scope_root
+                        )
                     ]
                     if _out_of_scope:
                         _n = len(_out_of_scope)

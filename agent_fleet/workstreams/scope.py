@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -18,6 +19,26 @@ def scope_prefixes_for_persona(repo: RepoConfig, persona: str) -> frozenset[str]
 
 def _prefixes_overlap(a: str, b: str) -> bool:
     return a == b or a.startswith(f"{b}/") or b.startswith(f"{a}/")
+
+
+def path_under_allowlist(
+    path: Path | str,
+    allowed_paths: tuple[str, ...] | list[str],
+    *,
+    worktree: Path | None = None,
+) -> bool:
+    """Return True if *path* is under one of *allowed_paths* repo-relative prefixes."""
+    from pathlib import Path as _Path
+
+    raw = path.as_posix() if isinstance(path, _Path) else str(path).replace("\\", "/")
+    if worktree is not None:
+        try:
+            p = _Path(raw)
+            if p.is_absolute():
+                raw = p.relative_to(worktree.resolve()).as_posix()
+        except ValueError:
+            pass
+    return any(raw.startswith(ap) for ap in allowed_paths)
 
 
 def find_scope_overlaps(

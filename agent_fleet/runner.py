@@ -41,6 +41,7 @@ from agent_fleet.researcher import research_all
 from agent_fleet.reviewer import review
 from agent_fleet.spine_config import SpineConfig
 from agent_fleet.synthesizer import synthesize
+from agent_fleet.workstreams.scope import path_under_allowlist
 from agent_fleet.tech_lead import tech_lead_review
 from agent_fleet.verify_core import get_changed_files
 
@@ -594,7 +595,7 @@ class LocalFleetRunner:
                     _out_of_scope = [
                         p
                         for p in _all_changed
-                        if not any(str(p).startswith(ap) for ap in allowed_paths)
+                        if not path_under_allowlist(p, allowed_paths, worktree=worktree)
                     ]
                     if _out_of_scope:
                         _n = len(_out_of_scope)
