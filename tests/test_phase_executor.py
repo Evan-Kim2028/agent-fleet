@@ -5,8 +5,8 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 from agent_fleet.phase_graph import (
-    PhaseGraph,
     PhaseDeps,
+    PhaseGraph,
     PhaseHandler,
     PhaseResult,
     PhaseRunContext,
@@ -54,17 +54,28 @@ def _simple_graph(names: list[str]) -> tuple[PhaseGraph, dict[str, _RecordingHan
     return graph, handlers
 
 
+class _VisitingHandler(PhaseHandler):
+    """Handler that appends its key to a shared list on each run."""
+
+    def __init__(self, key: str, log: list[str]) -> None:
+        self.calls: list[tuple[PhaseRunContext, PhaseDeps]] = []
+        self._key = key
+        self._log = log
+
+    def run(self, ctx: PhaseRunContext, deps: PhaseDeps) -> PhaseResult:
+        self._log.append(self._key)
+        self.calls.append((ctx, deps))
+        return PhaseResult(terminal=None)
+
+
 def test_execute_graph_visits_all_phases_in_order() -> None:
-    graph, handlers = _simple_graph(["PLAN", "RESEARCH", "IMPLEMENT"])
+    names = ["PLAN", "RESEARCH", "IMPLEMENT"]
     visited: list[str] = []
-    for key, h in handlers.items():
-        orig = h.run
-
-        def _run(ctx, deps, _h=h, _key=key):  # noqa: ANN001
-            visited.append(_key)
-            return orig(ctx, deps)
-
-        h.run = _run  # type: ignore[method-assign]
+    specs = [PhaseSpec(name=n, handler_key=n.lower()) for n in names]
+    graph = PhaseGraph(specs)
+    handlers: dict[str, _VisitingHandler] = {
+        n.lower(): _VisitingHandler(n.lower(), visited) for n in names
+    }
 
     result = execute_graph(graph, PhaseRunContext(), handlers, deps=_stub_deps())
     assert result is None

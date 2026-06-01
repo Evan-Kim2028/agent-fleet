@@ -45,10 +45,10 @@ from __future__ import annotations
 
 import fnmatch
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterator, Mapping
 
     from agent_fleet.disposition import DispositionPolicy
     from agent_fleet.fix_attempt import FixStrategy
@@ -108,17 +108,20 @@ class PhaseResult:
 # ---------------------------------------------------------------------------
 
 
-class PhaseHandler:
-    """Protocol for a single phase of the fleet pipeline.
+class PhaseHandler(Protocol):
+    """Protocol every handler in the fleet pipeline must implement.
 
     Concrete handlers live in ``runner.py`` as inner classes or closures
     returned by ``_build_handlers()``.  The ``run`` method receives the
     mutable ``PhaseRunContext`` (for reading results from earlier phases and
     writing results for later ones) and the immutable ``PhaseDeps`` bundle.
+
+    Using ``Protocol`` enables structural subtyping: any object with a
+    compatible ``run`` method satisfies this interface without inheriting.
     """
 
     def run(self, ctx: PhaseRunContext, deps: PhaseDeps) -> PhaseResult:  # pragma: no cover
-        raise NotImplementedError
+        ...
 
 
 # ---------------------------------------------------------------------------
@@ -422,7 +425,7 @@ def should_run_phase(graph: PhaseGraph, name: str, ctx: PhaseRunContext) -> bool
 def execute_graph(
     graph: PhaseGraph,
     ctx: PhaseRunContext,
-    handlers: dict[str, PhaseHandler],
+    handlers: Mapping[str, PhaseHandler],
     *,
     deps: PhaseDeps,
 ) -> FleetRunResult | None:
