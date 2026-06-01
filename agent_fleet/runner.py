@@ -46,6 +46,13 @@ from agent_fleet.planner import plan
 from agent_fleet.repo import RepoConfig, find_repo_config
 from agent_fleet.researcher import research_all
 from agent_fleet.reviewer import review
+from agent_fleet.run_controller import (
+    ControlDecision,
+    ControllerPolicy,
+    RunController,
+    ThresholdController,
+    _build_run_metrics,
+)
 from agent_fleet.scope_paths import path_under_allowlist
 from agent_fleet.spine_config import SpineConfig
 from agent_fleet.synthesizer import synthesize
@@ -225,6 +232,8 @@ class LocalFleetRunner:
         config: FleetRunConfig | None = None,
         forge: GitForge | None = None,
         fleet_config: FleetConfig | None = None,
+        controller: RunController | None = None,
+        controller_policy: ControllerPolicy | None = None,
     ) -> None:
         self._backend = backend
         self._persona_resolver = persona_resolver
@@ -234,6 +243,8 @@ class LocalFleetRunner:
         self._config = config or FleetRunConfig()
         self._forge = forge
         self._fleet_config = fleet_config
+        self._controller: RunController = controller or ThresholdController()
+        self._controller_policy = controller_policy or ControllerPolicy()
 
     def _build_phase_graph(self) -> PhaseGraph:
         return default_phase_graph(
@@ -705,6 +716,7 @@ class LocalFleetRunner:
                 assert worktree is not None
                 verify_attempts = 0
                 verify_result = None
+                _halted_by_controller = False
                 while verify_attempts <= effective_max_retries:
                     with run_log.phase("VERIFY", attempt=verify_attempts + 1):
                         logger.info("[%s] VERIFY (attempt %d)", run_id, verify_attempts + 1)
@@ -737,6 +749,44 @@ class LocalFleetRunner:
                                 data={"reason": "stderr not actionable"},
                             )
                             break
+                    _ctrl_snapshot = run_log.usage_rollup_snapshot(task_id=task_id)
+                    _ctrl_metrics = _build_run_metrics(_ctrl_snapshot, verify_attempts)
+                    _ctrl_decision = self._controller.before_fix(
+                        _ctrl_metrics, self._controller_policy
+                    )
+                    if _ctrl_decision == ControlDecision.HALT:
+                        logger.info(
+                            "[%s] run_controller HALT after %d attempts (fix_ratio=%.2f)",
+                            run_id,
+                            verify_attempts,
+                            _ctrl_metrics.fix_phase_ratio,
+                        )
+                        run_log.emit(
+                            "run_controller.halt",
+                            data={
+                                "verify_attempts": _ctrl_metrics.verify_attempts,
+                                "fix_token_total": _ctrl_metrics.fix_token_total,
+                                "total_tokens": _ctrl_metrics.total_tokens,
+                                "fix_phase_ratio": _ctrl_metrics.fix_phase_ratio,
+                                "cost_alerts": list(_ctrl_metrics.cost_alerts),
+                            },
+                        )
+                        _halted_by_controller = True
+                        break
+                    if _ctrl_decision == ControlDecision.ABANDON:
+                        logger.info(
+                            "[%s] run_controller ABANDON after %d attempts",
+                            run_id,
+                            verify_attempts,
+                        )
+                        run_log.emit(
+                            "run_controller.abandon",
+                            data={
+                                "verify_attempts": _ctrl_metrics.verify_attempts,
+                                "fix_phase_ratio": _ctrl_metrics.fix_phase_ratio,
+                            },
+                        )
+                        break
                     with run_log.phase("FIX", attempt=verify_attempts):
                         if notes is None:
                             logger.info("[%s] RESEARCH (resume retry)", run_id)
@@ -797,6 +847,7 @@ class LocalFleetRunner:
                         ),
                         scope_violated=False,
                         changed_files=_vf_changed,
+                        halted_by_controller=_halted_by_controller,
                     )
                     _vf_policy = DispositionPolicy()
                     _vf_disp = decide_disposition(_vf_facts, _vf_policy)

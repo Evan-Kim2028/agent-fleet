@@ -173,6 +173,38 @@ def extract_complexity_ceiling(
     return None
 
 
+def fix_phase_ratio(usage_rollup: dict[str, Any] | None) -> float:
+    """Return the fraction of total tokens consumed by FIX-prefixed phases.
+
+    Returns 0.0 when there is no usage data or the total is zero.
+    """
+    if not usage_rollup:
+        return 0.0
+
+    by_phase = usage_rollup.get("by_phase")
+    if not isinstance(by_phase, dict):
+        return 0.0
+
+    totals = usage_rollup.get("totals")
+    total_tokens = 0
+    if isinstance(totals, dict):
+        total_tokens = int(totals.get("total_tokens") or 0)
+    if total_tokens <= 0:
+        for bucket in by_phase.values():
+            if isinstance(bucket, dict):
+                total_tokens += int(bucket.get("total_tokens") or 0)
+    if total_tokens <= 0:
+        return 0.0
+
+    fix_tokens = 0
+    for phase_name, bucket in by_phase.items():
+        if not isinstance(bucket, dict):
+            continue
+        if str(phase_name).upper().startswith("FIX"):
+            fix_tokens += int(bucket.get("total_tokens") or 0)
+    return fix_tokens / total_tokens
+
+
 def build_cost_alerts(
     *,
     usage_rollup: dict[str, Any] | None,
@@ -186,28 +218,7 @@ def build_cost_alerts(
     if not usage_rollup:
         return alerts
 
-    by_phase = usage_rollup.get("by_phase")
-    if not isinstance(by_phase, dict):
-        return alerts
-
-    totals = usage_rollup.get("totals")
-    total_tokens = 0
-    if isinstance(totals, dict):
-        total_tokens = int(totals.get("total_tokens") or 0)
-    if total_tokens <= 0:
-        for bucket in by_phase.values():
-            if isinstance(bucket, dict):
-                total_tokens += int(bucket.get("total_tokens") or 0)
-    if total_tokens <= 0:
-        return alerts
-
-    fix_tokens = 0
-    for phase_name, bucket in by_phase.items():
-        if not isinstance(bucket, dict):
-            continue
-        if str(phase_name).upper().startswith("FIX"):
-            fix_tokens += int(bucket.get("total_tokens") or 0)
-    if fix_tokens / total_tokens > _FIX_TOKEN_RATIO_ALERT:
+    if fix_phase_ratio(usage_rollup) > _FIX_TOKEN_RATIO_ALERT:
         alerts.append("fix_phase_token_ratio_high")
     return alerts
 
