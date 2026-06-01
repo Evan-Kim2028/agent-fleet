@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from agent_fleet.runner import FleetRunConfig, _truncate_verify_message
+from agent_fleet.fix_attempt import _truncate as _truncate_verify_message
+from agent_fleet.runner import FleetRunConfig
 
 
 def test_default_max_verify_retries_is_one() -> None:

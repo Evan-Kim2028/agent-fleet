@@ -61,8 +61,6 @@ class _FixDeps:
     fleet_config: Any | None
     persona: str
     repo_root: Path
-    memory_limit_research: str
-    max_research_workers: int
     require_mcp: bool
     compose_body: str | None
 

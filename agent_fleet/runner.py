@@ -77,21 +77,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _truncate_verify_message(message: str, *, max_lines: int = 50) -> str:
-    """Truncate verify failure output to keep fix-loop prompts small.
-
-    Whole pytest dumps balloon the IMPLEMENT prompt and inflate token cost.
-    Keep the first ``max_lines`` lines; mark the elision so the agent knows
-    output was clipped.
-    """
-    if not message:
-        return message
-    lines = message.splitlines()
-    if len(lines) <= max_lines:
-        return message
-    omitted = len(lines) - max_lines
-    return "\n".join(lines[:max_lines]) + f"\n... [{omitted} more lines truncated]"
-
 
 def _task_spec_with_browser_research(task_spec: TaskSpec) -> TaskSpec:
     if not task_spec.research_plan:
@@ -820,8 +805,6 @@ class LocalFleetRunner:
                             fleet_config=self._fleet_config,
                             persona=persona,
                             repo_root=repo_root,
-                            memory_limit_research=self._config.memory_limit_research,
-                            max_research_workers=self._config.max_research_workers,
                             require_mcp=require_mcp,
                             compose_body=dispatch_equip.compose_body,
                         )

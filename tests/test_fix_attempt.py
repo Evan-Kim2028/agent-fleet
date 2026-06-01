@@ -25,8 +25,6 @@ def _make_deps() -> _FixDeps:
         fleet_config=None,
         persona="sage",
         repo_root=Path("/repo"),
-        memory_limit_research="2G",
-        max_research_workers=4,
         require_mcp=False,
         compose_body=None,
     )
