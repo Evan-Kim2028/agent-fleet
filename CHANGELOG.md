@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.11.2 — 2026-06-01
+
+### Summary
+
+Deepened the Run pipeline so the Fleet can govern and salvage its own runs
+instead of spiralling and stranding worktrees. Four stacked seams turn the
+open-loop static pipeline into a closed loop with explicit disposition,
+control, and fix-strategy seams behind `run()`.
+
+### Changes
+
+- **C1 — Disposition seam:** new `agent_fleet/disposition.py` with a pure
+  `decide_disposition(RunFacts, policy) -> Disposition`. The four terminal sites
+  in `runner.py` build `RunFacts` and execute the returned `Disposition`.
+  Failed-verify-with-changes and scope-violation now salvage to a labeled draft
+  PR; a FATAL verifier tripwire always abandons.
+- **C2 — Run Controller seam:** new `agent_fleet/run_controller.py` with
+  `ThresholdController`. The fix/total token ratio is extracted into one
+  `phase_token_counts` helper reused by both `build_cost_alerts` and the
+  controller; `RunLog` gains a live-usage accessor. HALT and ABANDON route into
+  the C1 salvage disposition, breaking the FIX spiral on its own signal.
+- **C3 — Fix Attempt memory seam:** new `agent_fleet/fix_attempt.py` with
+  `FixMemory` and a `FixStrategy` protocol. `ColdRestartStrategy` is the default
+  and preserves current behavior; `WarmContinuationStrategy` is gated behind a
+  `fix_strategy` config flag. The duplicated truncate helper is removed.
+- **C4 — Phase executor:** `execute_graph` and a `PhaseHandler` protocol in
+  `phase_graph.py`; `run()` delegates to the executor instead of hand-coding the
+  phase sequence.
+
 ## 0.11.1 — 2026-05-30
 
 ### Summary
