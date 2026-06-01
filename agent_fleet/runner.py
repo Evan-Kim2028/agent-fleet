@@ -17,6 +17,13 @@ from agent_fleet.contracts.review import ReviewResult, ReviewVerdict
 from agent_fleet.contracts.task_spec import DecompositionDecision, TaskSpec
 from agent_fleet.contracts.tech_lead_review import TechLeadReview, TechLeadVerdict
 from agent_fleet.contracts.verify_result import VerifySeverity
+from agent_fleet.disposition import (
+    Disposition,
+    DispositionKind,
+    DispositionPolicy,
+    RunFacts,
+    decide_disposition,
+)
 from agent_fleet.fleet_session import create_fleet_session
 from agent_fleet.hooks import FleetTask, ResumableGitOps
 from agent_fleet.implementer import implement
@@ -39,9 +46,9 @@ from agent_fleet.planner import plan
 from agent_fleet.repo import RepoConfig, find_repo_config
 from agent_fleet.researcher import research_all
 from agent_fleet.reviewer import review
+from agent_fleet.scope_paths import path_under_allowlist
 from agent_fleet.spine_config import SpineConfig
 from agent_fleet.synthesizer import synthesize
-from agent_fleet.scope_paths import path_under_allowlist
 from agent_fleet.tech_lead import tech_lead_review
 from agent_fleet.verify_core import get_changed_files
 
@@ -316,6 +323,46 @@ class LocalFleetRunner:
         prefix = self._spine.coop_parent_label_prefix + "/"
         propagated = [name for name in issue_labels if name.startswith(prefix)]
         return list(base_labels) + propagated
+
+    def _apply_disposition(
+        self,
+        disposition: Disposition,
+        *,
+        worktree: Path,
+        branch_name: str,
+        base_branch: str,
+        pr_title: str | None,
+        pr_body: str,
+        pr_labels: list[str],
+        policy: DispositionPolicy,
+        run_log: RunLog,
+        run_id: str,
+    ) -> int | None:
+        """Execute the IO side of a Disposition (push + open_pr) and return pr_number.
+
+        Returns None immediately for ABANDON and NOOP kinds (and when no forge is
+        configured) — all three call sites pass every kind through here.
+        """
+        if disposition.kind not in (DispositionKind.OPEN_PR, DispositionKind.SALVAGE):
+            return None
+        if self._forge is None:
+            return None
+        with run_log.phase("OPEN_PR"):
+            logger.info(
+                "[%s] OPEN_PR kind=%s draft=%s", run_id, disposition.kind, disposition.draft
+            )
+            self._git_ops.push_branch(worktree, branch_name)
+            labels = pr_labels[:]
+            if disposition.kind == DispositionKind.SALVAGE:
+                labels = list({*labels, *policy.salvage_labels})
+            return self._forge.open_pr(
+                title=pr_title or branch_name,
+                body=pr_body,
+                branch=branch_name,
+                base=base_branch,
+                draft=disposition.draft,
+                labels=labels,
+            )
 
     def run(
         self,
@@ -608,15 +655,44 @@ class LocalFleetRunner:
                             },
                         )
                         _first3 = [str(p) for p in _out_of_scope[:3]]
+                        _scope_changed = tuple(str(p) for p in _all_changed)
+                        _scope_facts = RunFacts(
+                            verify_ok=False,
+                            verify_fatal=False,
+                            scope_violated=True,
+                            changed_files=_scope_changed,
+                        )
+                        _scope_policy = DispositionPolicy()
+                        _scope_disp = decide_disposition(_scope_facts, _scope_policy)
+                        _scope_pr_body = (
+                            f"Automated fleet PR. Run: {run_id}\n\nCloses #{task_id}"
+                        )
+                        _scope_labels = self._pr_labels_for_issue(
+                            issue_number or task_id,
+                            pr_labels or [self._spine.pr_draft_label],
+                        )
+                        _scope_pr = self._apply_disposition(
+                            _scope_disp,
+                            worktree=worktree,
+                            branch_name=branch_name,
+                            base_branch=base_branch,
+                            pr_title=pr_title,
+                            pr_body=_scope_pr_body,
+                            pr_labels=_scope_labels,
+                            policy=_scope_policy,
+                            run_log=run_log,
+                            run_id=run_id,
+                        )
                         result = FleetRunResult(
                             run_id=run_id,
                             task_id=task_id,
                             persona=persona,
-                            outcome="scope_violation",
+                            outcome=_scope_disp.outcome,
                             task_spec=task_spec.to_dict() if task_spec else None,
-                            changed_files=[str(p) for p in _all_changed],
+                            changed_files=list(_scope_changed),
                             phases=phases,
                             error=(f"Agent modified {_n} file(s) outside allowed_paths: {_first3}"),
+                            pr_number=_scope_pr,
                             duration_seconds=round(time.monotonic() - start, 2),
                         )
                         run_log.run_end(
@@ -711,15 +787,50 @@ class LocalFleetRunner:
                         )
 
                 if verify_result is None or verify_result.severity != VerifySeverity.OK:
+                    _vf_changed = tuple(get_changed_files(worktree))
+                    _vf_facts = RunFacts(
+                        verify_ok=False,
+                        verify_fatal=(
+                            verify_result.severity == VerifySeverity.FATAL
+                            if verify_result is not None
+                            else False
+                        ),
+                        scope_violated=False,
+                        changed_files=_vf_changed,
+                    )
+                    _vf_policy = DispositionPolicy()
+                    _vf_disp = decide_disposition(_vf_facts, _vf_policy)
+                    _vf_pr_body = (
+                        pr_body_builder(run_id, brief.summary if brief else None)
+                        if pr_body_builder
+                        else f"Automated fleet PR. Run: {run_id}\n\nCloses #{task_id}"
+                    )
+                    _vf_labels = self._pr_labels_for_issue(
+                        issue_number or task_id,
+                        pr_labels or [self._spine.pr_draft_label],
+                    )
+                    _vf_pr = self._apply_disposition(
+                        _vf_disp,
+                        worktree=worktree,
+                        branch_name=branch_name,
+                        base_branch=base_branch,
+                        pr_title=pr_title,
+                        pr_body=_vf_pr_body,
+                        pr_labels=_vf_labels,
+                        policy=_vf_policy,
+                        run_log=run_log,
+                        run_id=run_id,
+                    )
                     result = FleetRunResult(
                         run_id=run_id,
                         task_id=task_id,
                         persona=persona,
-                        outcome="verify_failed",
+                        outcome=_vf_disp.outcome,
                         task_spec=task_spec.to_dict(),
-                        changed_files=get_changed_files(worktree),
+                        changed_files=list(_vf_changed),
                         phases=phases,
                         error=verify_result.message if verify_result else "verify failed",
+                        pr_number=_vf_pr,
                         duration_seconds=round(time.monotonic() - start, 2),
                     )
                     run_log.run_end(
@@ -755,6 +866,13 @@ class LocalFleetRunner:
                     )
 
                 if self._config.commit_changes and commit_sha is None and not changed_files:
+                    _noop_facts = RunFacts(
+                        verify_ok=False,
+                        verify_fatal=False,
+                        scope_violated=False,
+                        changed_files=(),
+                    )
+                    _noop_disp = decide_disposition(_noop_facts, DispositionPolicy())
                     logger.info(
                         "[%s] NOOP: implementer produced no changes; skipping OPEN_PR/REVIEW",
                         run_id,
@@ -778,7 +896,7 @@ class LocalFleetRunner:
                         run_id=run_id,
                         task_id=task_id,
                         persona=persona,
-                        outcome="completed_noop",
+                        outcome=_noop_disp.outcome,
                         task_spec=task_spec.to_dict(),
                         summary=brief.summary if brief else "",
                         changed_files=changed_files,
@@ -795,39 +913,48 @@ class LocalFleetRunner:
                     )
                     return result
 
-                pr_number: int | None = None
-                if self._forge is not None:
-                    if brief is None:
-                        if notes is None:
-                            notes = research_all(
-                                task_spec.research_plan,
-                                backend=self._backend,
-                                memory_limit=self._config.memory_limit_research,
-                                max_workers=self._config.max_research_workers,
-                                cwd=repo_root,
-                                browser_session_factory=browser_session_factory,
-                            )
-                        brief = synthesize(task_spec, notes, backend=self._backend, session=session)
-                    with run_log.phase("OPEN_PR"):
-                        logger.info("[%s] OPEN_PR", run_id)
-                        self._git_ops.push_branch(worktree, branch_name)
-                        pr_body = (
-                            pr_body_builder(run_id, brief.summary)
-                            if pr_body_builder
-                            else f"Automated fleet PR. Run: {run_id}\n\nCloses #{task_id}"
+                if self._forge is not None and brief is None:
+                    if notes is None:
+                        notes = research_all(
+                            task_spec.research_plan,
+                            backend=self._backend,
+                            memory_limit=self._config.memory_limit_research,
+                            max_workers=self._config.max_research_workers,
+                            cwd=repo_root,
+                            browser_session_factory=browser_session_factory,
                         )
-                        labels = self._pr_labels_for_issue(
-                            issue_number or task_id,
-                            pr_labels or [self._spine.pr_ready_label],
-                        )
-                        pr_number = self._forge.open_pr(
-                            title=pr_title or f"{branch_name}",
-                            body=pr_body,
-                            branch=branch_name,
-                            base=base_branch,
-                            draft=False,
-                            labels=labels,
-                        )
+                    brief = synthesize(task_spec, notes, backend=self._backend, session=session)
+
+                _ok_facts = RunFacts(
+                    verify_ok=True,
+                    verify_fatal=False,
+                    scope_violated=False,
+                    changed_files=tuple(changed_files),
+                )
+                _ok_policy = DispositionPolicy()
+                _ok_disp = decide_disposition(_ok_facts, _ok_policy)
+                _ok_pr_body = (
+                    pr_body_builder(run_id, brief.summary if brief else None)
+                    if pr_body_builder
+                    else f"Automated fleet PR. Run: {run_id}\n\nCloses #{task_id}"
+                )
+                _ok_labels = self._pr_labels_for_issue(
+                    issue_number or task_id,
+                    pr_labels or [self._spine.pr_ready_label],
+                )
+                pr_number: int | None = self._apply_disposition(
+                    _ok_disp,
+                    worktree=worktree,
+                    branch_name=branch_name,
+                    base_branch=base_branch,
+                    pr_title=pr_title,
+                    pr_body=_ok_pr_body,
+                    pr_labels=_ok_labels,
+                    policy=_ok_policy,
+                    run_log=run_log,
+                    run_id=run_id,
+                )
+                if pr_number is not None:
                     phases["OPEN_PR"] = {"pr_number": pr_number, "branch": branch_name}
 
                 with run_log.phase("REVIEW"):
