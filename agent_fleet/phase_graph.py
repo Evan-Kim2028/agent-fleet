@@ -12,11 +12,16 @@ Provides:
   - ``PhaseGraph``   — ordered, dependency-aware container of PhaseSpecs.
   - ``default_phase_graph()`` — the canonical PLAN→…→OPEN_PR graph that
     exactly replicates the pre-extraction straight-line sequence in runner.py.
+  - ``PhaseHandler`` — Protocol every handler must implement.
+  - ``PhaseDeps``    — bundle of collaborators forwarded to each handler.
+  - ``PhaseResult``  — per-phase output carrying optional FleetRunResult.
+  - ``execute_graph()`` — walk graph, run handlers, return terminal result.
 
 Design contract:
   - The graph is purely declarative; it does NOT call handlers itself.
-  - ``FleetRunner.run()`` iterates the graph and dispatches each phase to its
-    handler via ``AgentExecutor``.
+  - ``execute_graph`` iterates the graph, evaluates conditions, and dispatches
+    to the matching handler.  Terminal phases return a ``FleetRunResult`` via
+    ``PhaseResult.terminal``; ``execute_graph`` stops and returns it.
   - ``default_phase_graph()`` produces the same phase order, same retry bounds,
     and the same conditional TECH_LEAD as the pre-extraction runner.
   - The graph is injectable: ``FleetRunner.__init__(..., phase_graph=...)`` so
@@ -45,6 +50,77 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
+    from agent_fleet.disposition import DispositionPolicy
+    from agent_fleet.fix_attempt import FixStrategy
+    from agent_fleet.hooks import GitForge, GitOps, LLMBackend, PersonaResolver, Verifier
+    from agent_fleet.observability.log import RunLog
+    from agent_fleet.run_controller import ControllerPolicy, RunController
+    from agent_fleet.runner import FleetRunConfig, FleetRunResult
+    from agent_fleet.spine_config import SpineConfig
+
+# ---------------------------------------------------------------------------
+# PhaseDeps — collaborator bundle forwarded to every handler
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PhaseDeps:
+    """All runner-level services a phase handler may need.
+
+    Handlers receive this instead of individual positional arguments so new
+    collaborators can be added without touching every handler's signature.
+    """
+
+    backend: LLMBackend
+    persona_resolver: PersonaResolver
+    git_ops: GitOps
+    verifier: Verifier
+    forge: GitForge | None
+    run_config: FleetRunConfig
+    spine: SpineConfig
+    run_log: RunLog
+    fix_strategy: FixStrategy
+    controller: RunController
+    controller_policy: ControllerPolicy
+    disposition_policy: DispositionPolicy
+
+
+# ---------------------------------------------------------------------------
+# PhaseResult — per-handler return value
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PhaseResult:
+    """Output of one phase handler invocation.
+
+    Most handlers return ``terminal=None`` to let the graph continue.  A
+    handler that reaches a terminal state (scope violation, verify failed,
+    noop, or success) populates ``terminal`` with a fully-constructed
+    ``FleetRunResult``; ``execute_graph`` returns it immediately.
+    """
+
+    terminal: FleetRunResult | None = None
+
+
+# ---------------------------------------------------------------------------
+# PhaseHandler — Protocol every handler must implement
+# ---------------------------------------------------------------------------
+
+
+class PhaseHandler:
+    """Protocol for a single phase of the fleet pipeline.
+
+    Concrete handlers live in ``runner.py`` as inner classes or closures
+    returned by ``_build_handlers()``.  The ``run`` method receives the
+    mutable ``PhaseRunContext`` (for reading results from earlier phases and
+    writing results for later ones) and the immutable ``PhaseDeps`` bundle.
+    """
+
+    def run(self, ctx: PhaseRunContext, deps: PhaseDeps) -> PhaseResult:  # pragma: no cover
+        raise NotImplementedError
+
+
 # ---------------------------------------------------------------------------
 # PhaseRunContext — thin context bag passed to condition predicates
 # ---------------------------------------------------------------------------
@@ -52,15 +128,31 @@ if TYPE_CHECKING:
 
 @dataclass
 class PhaseRunContext:
-    """Minimal mutable context that condition predicates receive.
+    """Mutable context bag shared across all phase handlers in one run.
 
     The runner populates this incrementally as phases complete; predicates
-    should only read fields that were set by earlier phases.
+    and handlers should only read fields set by earlier phases.
+
+    Fields used by condition predicates (``task_spec``, ``reviews``,
+    ``changed_files``) are listed first for clarity.  The remaining fields
+    carry inter-phase state that would otherwise need to travel through
+    function arguments or a parallel dict.
     """
 
     task_spec: Any = None  # fleet.contracts.task_spec.TaskSpec | None
     reviews: list[Any] = field(default_factory=list)
     changed_files: list[str] = field(default_factory=list)
+    # --- inter-phase state written by handlers ---
+    notes: list[Any] = field(default_factory=list)
+    brief: Any = None  # ImplementationBrief | None
+    worktree: Any = None  # Path | None
+    commit_sha: str | None = None
+    branch_name: str | None = None
+    session: Any = None  # LLMSession | None
+    diff: str = ""
+    tech_lead: Any = None  # TechLeadReview | None
+    # phases dict accumulated across handlers; mirrors runner.phases
+    phases: dict[str, Any] = field(default_factory=dict)
     # Additional fields may be added in future phases without breaking
     # existing predicates (they just won't read the new fields).
 
@@ -325,3 +417,33 @@ def should_run_phase(graph: PhaseGraph, name: str, ctx: PhaseRunContext) -> bool
     if spec.condition is None:
         return True
     return spec.condition(ctx)
+
+
+def execute_graph(
+    graph: PhaseGraph,
+    ctx: PhaseRunContext,
+    handlers: dict[str, PhaseHandler],
+    *,
+    deps: PhaseDeps,
+) -> FleetRunResult | None:
+    """Walk *graph* in declaration order, dispatch handlers, return first terminal result.
+
+    For each phase:
+    - Skip if ``should_run_phase`` returns False (condition gated or absent from graph).
+    - Skip if no handler is registered for ``spec.handler_key``.
+    - Call ``handler.run(ctx, deps)``; if ``result.terminal`` is not None, return it.
+
+    Returns ``None`` when the graph is exhausted with no terminal — callers must
+    handle this case (the OPEN_PR success path builds the result after the graph
+    walk completes).
+    """
+    for spec in graph:
+        if not should_run_phase(graph, spec.name, ctx):
+            continue
+        handler = handlers.get(spec.handler_key)
+        if handler is None:
+            continue
+        result = handler.run(ctx, deps)
+        if result.terminal is not None:
+            return result.terminal
+    return None
