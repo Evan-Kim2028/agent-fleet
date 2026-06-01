@@ -1,0 +1,104 @@
+# promptfoo evaluation configuration for the self-improvement loop.
+#
+# PURPOSE
+# -------
+# This eval set has two jobs:
+#
+#   1. TARGET-SIGNATURE cases  — verify that a proposed persona/prompt change
+#      actually improves behaviour on the failure class it was designed to fix.
+#
+#   2. FROZEN SUCCESS cases    — verify that the same change does not regress
+#      behaviour on cases that previously passed.  These are never shown to
+#      the proposer (gate.py reads this file; propose.py has no access).
+#
+# GROWING THE CORPUS
+# ------------------
+# After each accepted fleet run, promote real failure traces to this file:
+#
+#   1. Copy the raw trace from data/events/agent_runs/<date>.ndjson.
+#   2. Add a "target_signature" test case whose vars include the trace.
+#   3. Add a "frozen_success" test case for the same persona + phase pair
+#      with a passing trace (where the old prompt worked fine).
+#   4. Write an appropriate assert: for target cases check the LLM now
+#      produces a valid artefact; for frozen cases assert the artefact is
+#      still produced correctly.
+#
+# TOLERANCE
+# ---------
+# gate.py enforces: frozen pass-rate must not drop by more than TOLERANCE
+# (currently 5%).  Target cases must improve (pass-rate >= threshold).
+# See gate.py for the exact thresholds.
+
+description: "SilphCo self-improvement loop — regression gate"
+
+# Default provider — override via PROMPTFOO_PROVIDER env var or --provider flag.
+defaultTest:
+  options:
+    provider: openai:gpt-4o-mini   # placeholder; replace with real provider
+
+providers:
+  - id: openai:gpt-4o-mini
+    config:
+      temperature: 0
+
+# ---------------------------------------------------------------------------
+# Test cases
+# ---------------------------------------------------------------------------
+tests:
+  # ---- FROZEN SUCCESS (category: frozen_success) ----
+  # These cases MUST keep passing after any proposal is applied.
+  # They represent baseline behaviour that must not regress.
+
+  - description: "[frozen_success] backend/plan/other — planner produces valid JSON schema"
+    vars:
+      category: frozen_success
+      persona: backend
+      phase: plan
+      prompt: "You are a backend agent. Produce a minimal JSON plan for issue: 'Fix null pointer in api/routes/health.py'."
+    assert:
+      - type: is-json
+        description: "planner output must be valid JSON"
+      - type: contains
+        value: "title"
+        description: "plan must contain a title field"
+
+  - description: "[frozen_success] frontend/implement/other — implementer outputs a diff"
+    vars:
+      category: frozen_success
+      persona: frontend
+      phase: implement
+      prompt: "You are a frontend agent. Produce a unified diff to fix a typo in a React component."
+    assert:
+      - type: regex
+        value: "^(---|\\+\\+\\+|@@)"
+        description: "implementation must start with diff header"
+
+  # ---- TARGET SIGNATURE (category: target_signature) ----
+  # These cases represent the failure class being improved.
+  # After a proposal is applied, these should pass (or pass-rate should rise).
+
+  - description: "[target_signature] backend/verify/schema_validation_failed — schema error trace"
+    vars:
+      category: target_signature
+      persona: backend
+      phase: verify
+      error_class: schema_validation_failed
+      prompt: "You are a backend agent completing the verify phase. Produce a VerifyResult JSON with keys: severity, checks, violating_paths, files_changed, message."
+    assert:
+      - type: is-json
+        description: "verify result must be valid JSON"
+      - type: javascript
+        value: "output.includes('severity')"
+        description: "must include severity field"
+
+  - description: "[target_signature] backend/implement/zero_diff — must produce non-empty diff"
+    vars:
+      category: target_signature
+      persona: backend
+      phase: implement
+      error_class: zero_diff
+      prompt: "You are a backend agent. The issue is: 'Add a docstring to pipeline/src/gold_builder.py::build()'. Produce a unified diff with at least one added line."
+    assert:
+      - type: regex
+        value: "\\+"
+        description: "diff must have at least one added line"

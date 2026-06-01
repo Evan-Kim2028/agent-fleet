@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "benchmarks": [
+    {
+      "name": "agent-verify",
+      "description": "Post-implementation verification for agent worktrees",
+      "tools": ["verify.py"]
+    },
+    {
+      "name": "analytics-tools",
+      "description": "Agent analytics and trending evaluation tools",
+      "tools": ["analytics_tools.py"]
+    },
+    {
+      "name": "agent-core",
+      "description": "Core agent execution and tool dispatch",
+      "tools": ["core.py"]
+    },
+    {
+      "name": "api-main",
+      "description": "FastAPI application bootstrap",
+      "tools": ["main.py"]
+    },
+    {
+      "name": "auth-middleware",
+      "description": "API authentication middleware",
+      "tools": ["auth.py"]
+    },
+    {
+      "name": "logging-middleware",
+      "description": "Request logging middleware",
+      "tools": ["logging.py"]
+    },
+    {
+      "name": "mpp-payment",
+      "description": "MPP payment middleware",
+      "tools": ["mpp_payment.py"]
+    },
+    {
+      "name": "keys-router",
+      "description": "API key management routes",
+      "tools": ["keys.py"]
+    },
+    {
+      "name": "public-quota",
+      "description": "Public quota route handlers",
+      "tools": ["public_quota.py"]
+    },
+    {
+      "name": "dashboard",
+      "description": "Frontend dashboard route",
+      "tools": ["dashboard.tsx"]
+    }
+  ]
+}
