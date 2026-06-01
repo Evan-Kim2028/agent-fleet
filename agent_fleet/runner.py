@@ -786,6 +786,7 @@ class LocalFleetRunner:
                                 "fix_phase_ratio": _ctrl_metrics.fix_phase_ratio,
                             },
                         )
+                        _halted_by_controller = True
                         break
                     with run_log.phase("FIX", attempt=verify_attempts):
                         if notes is None:

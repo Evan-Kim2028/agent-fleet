@@ -7,19 +7,28 @@ halts and produces a salvage draft PR.
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from agent_fleet.contracts.implementation_brief import ImplementationBrief
+from agent_fleet.contracts.task_spec import (
+    DecompositionDecision,
+    RiskTier,
+    Scope,
+    TaskSpec,
+)
+from agent_fleet.contracts.verify_result import VerifyResult, VerifySeverity
 from agent_fleet.disposition import (
     DispositionKind,
     DispositionPolicy,
     RunFacts,
     decide_disposition,
 )
-from agent_fleet.observability.log import RunLog
+from agent_fleet.level_up.models import DispatchEquip
 from agent_fleet.run_controller import (
     ControlDecision,
     ControllerPolicy,
@@ -255,15 +264,6 @@ class _FakeForge:
         return []
 
 
-def _make_run_log(tmp_path: Path) -> RunLog:
-    return RunLog.create(
-        run_id="test-run",
-        task_id=1,
-        persona="coder",
-        runs_dir=tmp_path,
-        include_memory_ring=False,
-    )
-
 
 class _ImmediateHaltController:
     """Controller that always returns HALT on first before_fix call."""
@@ -273,54 +273,105 @@ class _ImmediateHaltController:
         return ControlDecision.HALT
 
 
+def _minimal_task_spec() -> TaskSpec:
+    return TaskSpec(
+        issue_number=1,
+        decomposition_decision=DecompositionDecision.SINGLE,
+        decomposition_reason="ok",
+        child_issues_proposed=[],
+        scope=Scope(allowed_paths=["src/"], forbidden_paths=[]),
+        research_plan=[],
+        acceptance_criteria=["pass"],
+        risk_tier=RiskTier.LOW,
+        critical_paths_touched=[],
+        coordination_spec=None,
+    )
+
+
+def _minimal_brief() -> ImplementationBrief:
+    return ImplementationBrief(
+        issue_number=1,
+        summary="stub",
+        files_to_create=[],
+        files_to_modify=["src/foo.py"],
+        test_strategy="none",
+        acceptance_criteria=["pass"],
+        references=[],
+    )
+
+
+def _retry_verify_result() -> VerifyResult:
+    return VerifyResult(
+        severity=VerifySeverity.RETRY,
+        checks=[],
+        violating_paths=[],
+        files_changed=["src/foo.py"],
+        message="test failure",
+    )
+
+
 def test_controller_halt_produces_salvage_draft_pr(tmp_path: Path) -> None:
-    """A FIX spiral with fix_ratio > max_fix_ratio halts after >=2 attempts
-    and the runner salvages the partial work as a draft PR.
+    """The runner sets _halted_by_controller when the controller returns HALT
+    and routes to controller_halted_salvaged disposition.
+
+    Exercises the actual verify/fix loop code path — controller.before_fix() is
+    called by the runner, which then breaks with _halted_by_controller=True.
     """
     forge = _FakeForge(pr_number=77)
+    verifier = MagicMock()
+    verifier.check.return_value = _retry_verify_result()
+
+    equip = DispatchEquip(
+        skill_slots_execute=(),
+        skill_slots_review=(),
+        level_up_generation=0,
+        compose_body="",
+    )
+
+    patches = [
+        patch("agent_fleet.runner.plan", return_value=_minimal_task_spec()),
+        patch("agent_fleet.runner.research_all", return_value=[]),
+        patch("agent_fleet.runner.synthesize", return_value=_minimal_brief()),
+        patch("agent_fleet.runner.implement"),
+        patch("agent_fleet.runner.coerce_empty_decompose", side_effect=lambda ts: (ts, False)),
+        patch("agent_fleet.runner.resolve_dispatch_equip", return_value=equip),
+        patch("agent_fleet.runner.find_repo_config", return_value=None),
+        patch("agent_fleet.runner.load_fleet_config", return_value=MagicMock(mcp_servers={})),
+        patch("agent_fleet.runner.create_fleet_session", return_value=None),
+        patch("agent_fleet.runner.get_changed_files", return_value=["src/foo.py"]),
+        patch("agent_fleet.observability.log._DEFAULT_RUNS_DIR", tmp_path),
+    ]
+
     runner = LocalFleetRunner(
         backend=MagicMock(),
         persona_resolver=MagicMock(),
         git_ops=_FakeGitOps(),
-        verifier=MagicMock(),
+        verifier=verifier,
         forge=forge,
         controller=_ImmediateHaltController(),
     )
 
-    run_log = _make_run_log(tmp_path)
+    with contextlib.ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
 
-    facts = RunFacts(
-        verify_ok=False,
-        verify_fatal=False,
-        scope_violated=False,
-        changed_files=("src/foo.py",),
-        halted_by_controller=True,
-    )
-    policy = DispositionPolicy()
-    disp = decide_disposition(facts, policy)
+        result = runner.run(
+            task_id=1,
+            title="test task",
+            body="fix something",
+            persona="coder",
+            repo_root=tmp_path,
+            base_branch="main",
+            pr_title="WIP fix",
+            pr_labels=["fleet-draft"],
+        )
 
-    assert disp.kind == DispositionKind.SALVAGE
-    assert disp.draft is True
-    assert disp.outcome == "controller_halted_salvaged"
-
-    pr = runner._apply_disposition(
-        disp,
-        worktree=tmp_path,
-        branch_name="fleet/coder/1-abc",
-        base_branch="main",
-        pr_title="WIP fix",
-        pr_body="Salvaged by run controller",
-        pr_labels=["fleet-draft"],
-        policy=policy,
-        run_log=run_log,
-        run_id="test-run",
-    )
-
-    assert pr == 77
+    assert result.outcome == "controller_halted_salvaged"
     assert len(forge.open_pr_calls) == 1
     call = forge.open_pr_calls[0]
     assert call["draft"] is True
     assert "fleet-salvage" in call["labels"]
+    assert result.pr_number == 77
 
 
 def test_halted_by_controller_flag_in_disposition() -> None:

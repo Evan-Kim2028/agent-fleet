@@ -7,7 +7,7 @@ each FIX iteration, halting the loop early to avoid runaway token spend.
 from __future__ import annotations
 
 import enum
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 
@@ -42,26 +42,15 @@ def _build_run_metrics(
     verify_attempts: int,
 ) -> RunMetrics:
     """Construct RunMetrics from a usage_rollup snapshot and attempt counter."""
-    from agent_fleet.observability.run_metrics import build_cost_alerts, fix_phase_ratio
+    from agent_fleet.observability.run_metrics import (
+        build_cost_alerts,
+        fix_phase_ratio,
+        phase_token_counts,
+    )
 
     ratio = fix_phase_ratio(usage_rollup)
     alerts = tuple(build_cost_alerts(usage_rollup=usage_rollup, verify_attempts=verify_attempts))
-
-    total_tokens = 0
-    fix_token_total = 0
-    if usage_rollup:
-        totals = usage_rollup.get("totals")
-        if isinstance(totals, dict):
-            total_tokens = int(totals.get("total_tokens") or 0)
-        if total_tokens <= 0:
-            by_phase = usage_rollup.get("by_phase") or {}
-            for bucket in by_phase.values():
-                if isinstance(bucket, dict):
-                    total_tokens += int(bucket.get("total_tokens") or 0)
-        by_phase = usage_rollup.get("by_phase") or {}
-        for phase_name, bucket in by_phase.items():
-            if isinstance(bucket, dict) and str(phase_name).upper().startswith("FIX"):
-                fix_token_total += int(bucket.get("total_tokens") or 0)
+    total_tokens, fix_token_total = phase_token_counts(usage_rollup)
 
     return RunMetrics(
         verify_attempts=verify_attempts,
@@ -75,10 +64,6 @@ def _build_run_metrics(
 @dataclass
 class ThresholdController:
     """Halt when FIX phase tokens dominate, attempts exceed the ceiling, or an alert fires."""
-
-    # The extra field declaration lets callers override it on instances if needed
-    # without subclassing; the real policy is passed per-call to before_fix.
-    _extra: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def before_fix(self, m: RunMetrics, policy: ControllerPolicy) -> ControlDecision:
         # Two or more verify attempts means at least one FIX has already run,
