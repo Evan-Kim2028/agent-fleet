@@ -37,9 +37,13 @@ from agent_fleet.observability.run_metrics import build_run_metrics
 from agent_fleet.orchestration.decompose import coerce_empty_decompose
 from agent_fleet.orchestration.equip import resolve_dispatch_equip
 from agent_fleet.phase_graph import (
+    PhaseDeps,
     PhaseGraph,
+    PhaseHandler,
+    PhaseResult,
     PhaseRunContext,
     default_phase_graph,
+    execute_graph,
     should_run_phase,
 )
 from agent_fleet.phases import run_pipeline
@@ -72,6 +76,7 @@ if TYPE_CHECKING:
         PersonaResolver,
         Verifier,
     )
+    from agent_fleet.level_up.models import DispatchEquip
     from agent_fleet.orchestration.config import OrchestrationConfig
 
 logger = logging.getLogger(__name__)
@@ -362,6 +367,557 @@ class LocalFleetRunner:
                 labels=labels,
             )
 
+    def _build_handlers(
+        self,
+        *,
+        run_id: str,
+        task_id: int,
+        persona: str,
+        repo_root: Path,
+        base_branch: str,
+        title: str,
+        run_log: RunLog,
+        phase_graph: PhaseGraph,
+        effective_max_retries: int,
+        task_complexity: str | None,
+        allowed_paths: tuple[str, ...],
+        require_mcp: bool,
+        browser_session_factory: Callable[[], Any] | None,
+        pr_title: str | None,
+        pr_body_builder: Callable[[str, str | None], str] | None,
+        pr_labels: list[str] | None,
+        issue_number: int | None,
+        start: float,
+        dispatch_equip: DispatchEquip,
+        resume_mode: bool,
+    ) -> dict[str, PhaseHandler]:
+        """Build handler instances for every phase key in the default graph.
+
+        Each handler captures the per-run closure variables above and implements
+        the same logic that previously lived inline in run().  Handlers mutate
+        ctx fields to pass results to later phases.
+        """
+        runner = self
+
+        class ResearchHandler(PhaseHandler):
+            def run(self, ctx: PhaseRunContext, deps: PhaseDeps) -> PhaseResult:
+                if resume_mode:
+                    return PhaseResult()
+                ts = ctx.task_spec
+                assert ts is not None
+                with run_log.phase("RESEARCH", items=len(ts.research_plan)):
+                    logger.info("[%s] RESEARCH (%d items)", run_id, len(ts.research_plan))
+                    ctx.notes = research_all(
+                        ts.research_plan,
+                        backend=deps.backend,
+                        memory_limit=deps.run_config.memory_limit_research,
+                        max_workers=deps.run_config.max_research_workers,
+                        cwd=repo_root,
+                        browser_session_factory=browser_session_factory,
+                    )
+                ctx.phases["RESEARCH"] = [n.to_dict() for n in ctx.notes]
+                return PhaseResult()
+
+        class SynthesizeHandler(PhaseHandler):
+            def run(self, ctx: PhaseRunContext, deps: PhaseDeps) -> PhaseResult:
+                if resume_mode:
+                    return PhaseResult()
+                ts = ctx.task_spec
+                assert ts is not None
+                with run_log.phase("SYNTHESIZE"):
+                    logger.info("[%s] SYNTHESIZE", run_id)
+                    ctx.brief = synthesize(ts, ctx.notes, backend=deps.backend, session=ctx.session)
+                ctx.phases["SYNTHESIZE"] = ctx.brief.to_dict()
+                return PhaseResult()
+
+        class ImplementHandler(PhaseHandler):
+            def run(self, ctx: PhaseRunContext, deps: PhaseDeps) -> PhaseResult:
+                ts = ctx.task_spec
+                assert ts is not None
+                assert ctx.branch_name is not None
+                _branch = ctx.branch_name
+                with run_log.phase("IMPLEMENT"):
+                    logger.info("[%s] IMPLEMENT", run_id)
+                    ctx.worktree = deps.git_ops.setup_workspace(
+                        repo_root,
+                        run_id,
+                        base_branch,
+                        branch_name=_branch if deps.run_config.create_branch else None,
+                    )
+                    if deps.run_config.create_branch and not getattr(
+                        deps.git_ops, "use_worktree", False
+                    ):
+                        deps.git_ops.create_branch(ctx.worktree, _branch)
+
+                    implement(
+                        ctx.brief,
+                        ts,
+                        ctx.worktree,
+                        _branch,
+                        backend=deps.backend,
+                        persona_resolver=deps.persona_resolver,
+                        persona_name=persona,
+                        memory_limit=deps.run_config.memory_limit_parent,
+                        session=ctx.session,
+                        require_mcp_tools=require_mcp,
+                        compose_body=dispatch_equip.compose_body,
+                    )
+                ctx.phases["IMPLEMENT"] = {"branch": _branch, "worktree": str(ctx.worktree)}
+
+                if not allowed_paths:
+                    return PhaseResult()
+
+                _wt = ctx.worktree
+                assert _wt is not None
+                _all_changed = deps.git_ops.changed_files(_wt)
+                _out_of_scope = [
+                    p
+                    for p in _all_changed
+                    if not path_under_allowlist(p, allowed_paths, worktree=_wt)
+                ]
+                if not _out_of_scope:
+                    return PhaseResult()
+
+                _n = len(_out_of_scope)
+                run_log.emit(
+                    "scope.violation",
+                    data={
+                        "allowed": list(allowed_paths),
+                        "offending": [str(p) for p in _out_of_scope],
+                        "count": _n,
+                    },
+                )
+                _first3 = [str(p) for p in _out_of_scope[:3]]
+                _scope_changed = tuple(str(p) for p in _all_changed)
+                _scope_facts = RunFacts(
+                    verify_ok=False,
+                    verify_fatal=False,
+                    scope_violated=True,
+                    changed_files=_scope_changed,
+                )
+                _scope_policy = DispositionPolicy()
+                _scope_disp = decide_disposition(_scope_facts, _scope_policy)
+                _scope_pr_body = f"Automated fleet PR. Run: {run_id}\n\nCloses #{task_id}"
+                _scope_labels = runner._pr_labels_for_issue(
+                    issue_number or task_id,
+                    pr_labels or [runner._spine.pr_draft_label],
+                )
+                _scope_pr = runner._apply_disposition(
+                    _scope_disp,
+                    worktree=_wt,
+                    branch_name=_branch,
+                    base_branch=base_branch,
+                    pr_title=pr_title,
+                    pr_body=_scope_pr_body,
+                    pr_labels=_scope_labels,
+                    policy=_scope_policy,
+                    run_log=run_log,
+                    run_id=run_id,
+                )
+                terminal = FleetRunResult(
+                    run_id=run_id,
+                    task_id=task_id,
+                    persona=persona,
+                    outcome=_scope_disp.outcome,
+                    task_spec=ts.to_dict() if ts else None,
+                    changed_files=list(_scope_changed),
+                    phases=ctx.phases,
+                    error=(f"Agent modified {_n} file(s) outside allowed_paths: {_first3}"),
+                    pr_number=_scope_pr,
+                    duration_seconds=round(time.monotonic() - start, 2),
+                )
+                run_log.run_end(
+                    outcome=terminal.outcome,
+                    changed_lines=_changed_lines(_wt),
+                    **_run_end_kwargs(terminal, find_repo_config(repo_root)),
+                )
+                return PhaseResult(terminal=terminal)
+
+        class VerifyHandler(PhaseHandler):
+            def run(self, ctx: PhaseRunContext, deps: PhaseDeps) -> PhaseResult:
+                ts = ctx.task_spec
+                assert ts is not None
+                worktree = ctx.worktree
+                assert worktree is not None
+                assert ctx.branch_name is not None
+                _branch = ctx.branch_name
+
+                verify_attempts = 0
+                verify_result = None
+                _halted_by_controller = False
+                _accumulated_failures: list[str] = []
+                _fix_strategy = deps.fix_strategy
+
+                while verify_attempts <= effective_max_retries:
+                    with run_log.phase("VERIFY", attempt=verify_attempts + 1):
+                        logger.info("[%s] VERIFY (attempt %d)", run_id, verify_attempts + 1)
+                        changed = deps.git_ops.changed_files(worktree)
+                        verify_result = deps.verifier.check(
+                            worktree,
+                            persona=persona,
+                            changed_files=changed,
+                            task_id=task_id,
+                        )
+                    ctx.phases[f"VERIFY_{verify_attempts}"] = verify_result.to_dict()
+                    if verify_result.severity == VerifySeverity.OK:
+                        break
+                    if verify_result.severity == VerifySeverity.FATAL:
+                        break
+                    if verify_result.message:
+                        _accumulated_failures.append(verify_result.message)
+                    verify_attempts += 1
+                    if verify_attempts > effective_max_retries:
+                        break
+                    if task_complexity == "LOW":
+                        written = tuple(str(f) for f in changed)
+                        if not is_actionable_stderr(verify_result.message, written):
+                            logger.info(
+                                "[%s] LOW complexity: skipping fix retry (stderr not actionable)",
+                                run_id,
+                            )
+                            run_log.emit(
+                                "complexity.low_retry_suppressed",
+                                data={"reason": "stderr not actionable"},
+                            )
+                            break
+                    _ctrl_snapshot = run_log.usage_rollup_snapshot(task_id=task_id)
+                    _ctrl_metrics = _build_run_metrics(_ctrl_snapshot, verify_attempts)
+                    _ctrl_decision = deps.controller.before_fix(
+                        _ctrl_metrics, deps.controller_policy
+                    )
+                    if _ctrl_decision == ControlDecision.HALT:
+                        logger.info(
+                            "[%s] run_controller HALT after %d attempts (fix_ratio=%.2f)",
+                            run_id,
+                            verify_attempts,
+                            _ctrl_metrics.fix_phase_ratio,
+                        )
+                        run_log.emit(
+                            "run_controller.halt",
+                            data={
+                                "verify_attempts": _ctrl_metrics.verify_attempts,
+                                "fix_token_total": _ctrl_metrics.fix_token_total,
+                                "total_tokens": _ctrl_metrics.total_tokens,
+                                "fix_phase_ratio": _ctrl_metrics.fix_phase_ratio,
+                                "cost_alerts": list(_ctrl_metrics.cost_alerts),
+                            },
+                        )
+                        _halted_by_controller = True
+                        break
+                    if _ctrl_decision == ControlDecision.ABANDON:
+                        logger.info(
+                            "[%s] run_controller ABANDON after %d attempts",
+                            run_id,
+                            verify_attempts,
+                        )
+                        run_log.emit(
+                            "run_controller.abandon",
+                            data={
+                                "verify_attempts": _ctrl_metrics.verify_attempts,
+                                "fix_phase_ratio": _ctrl_metrics.fix_phase_ratio,
+                            },
+                        )
+                        _halted_by_controller = True
+                        break
+                    with run_log.phase("FIX", attempt=verify_attempts):
+                        if not ctx.notes:
+                            logger.info("[%s] RESEARCH (resume retry)", run_id)
+                            ctx.notes = research_all(
+                                ts.research_plan,
+                                backend=deps.backend,
+                                memory_limit=deps.run_config.memory_limit_research,
+                                max_workers=deps.run_config.max_research_workers,
+                                cwd=repo_root,
+                                browser_session_factory=browser_session_factory,
+                            )
+                            ctx.phases.setdefault(
+                                "RESEARCH", [n.to_dict() for n in ctx.notes]
+                            )
+                        _fix_changed = deps.git_ops.changed_files(worktree)
+                        _fix_diff = deps.git_ops.diff_summary(worktree)
+                        _fix_mem = FixMemory(
+                            attempt=verify_attempts,
+                            diff_so_far=_fix_diff,
+                            failures=tuple(_accumulated_failures),
+                            files_touched=tuple(str(p) for p in _fix_changed),
+                        )
+                        _fix_deps = _FixDeps(
+                            backend=deps.backend,
+                            persona_resolver=deps.persona_resolver,
+                            fleet_config=runner._fleet_config,
+                            persona=persona,
+                            repo_root=repo_root,
+                            require_mcp=require_mcp,
+                            compose_body=dispatch_equip.compose_body,
+                        )
+                        ctx.brief, ctx.session = _fix_strategy.run_fix(
+                            _fix_mem,
+                            task_spec=ts,
+                            worktree=worktree,
+                            branch=_branch,
+                            deps=_fix_deps,
+                            notes=ctx.notes,
+                            session=ctx.session,
+                            brief=ctx.brief,
+                        )
+
+                if verify_result is None or verify_result.severity != VerifySeverity.OK:
+                    _vf_changed = tuple(get_changed_files(worktree))
+                    _vf_facts = RunFacts(
+                        verify_ok=False,
+                        verify_fatal=(
+                            verify_result.severity == VerifySeverity.FATAL
+                            if verify_result is not None
+                            else False
+                        ),
+                        scope_violated=False,
+                        changed_files=_vf_changed,
+                        halted_by_controller=_halted_by_controller,
+                    )
+                    _vf_policy = DispositionPolicy()
+                    _vf_disp = decide_disposition(_vf_facts, _vf_policy)
+                    _vf_pr_body = (
+                        pr_body_builder(run_id, ctx.brief.summary if ctx.brief else None)
+                        if pr_body_builder
+                        else f"Automated fleet PR. Run: {run_id}\n\nCloses #{task_id}"
+                    )
+                    _vf_labels = runner._pr_labels_for_issue(
+                        issue_number or task_id,
+                        pr_labels or [runner._spine.pr_draft_label],
+                    )
+                    _vf_pr = runner._apply_disposition(
+                        _vf_disp,
+                        worktree=worktree,
+                        branch_name=_branch,
+                        base_branch=base_branch,
+                        pr_title=pr_title,
+                        pr_body=_vf_pr_body,
+                        pr_labels=_vf_labels,
+                        policy=_vf_policy,
+                        run_log=run_log,
+                        run_id=run_id,
+                    )
+                    terminal = FleetRunResult(
+                        run_id=run_id,
+                        task_id=task_id,
+                        persona=persona,
+                        outcome=_vf_disp.outcome,
+                        task_spec=ts.to_dict(),
+                        changed_files=list(_vf_changed),
+                        phases=ctx.phases,
+                        error=verify_result.message if verify_result else "verify failed",
+                        pr_number=_vf_pr,
+                        duration_seconds=round(time.monotonic() - start, 2),
+                    )
+                    run_log.run_end(
+                        outcome=terminal.outcome,
+                        changed_lines=_changed_lines(worktree),
+                        **_run_end_kwargs(terminal, find_repo_config(repo_root)),
+                    )
+                    return PhaseResult(terminal=terminal)
+
+                ctx.changed_files = get_changed_files(worktree)
+                ctx.diff = deps.git_ops.diff_summary(worktree)
+                return PhaseResult()
+
+        class ReviewHandler(PhaseHandler):
+            def run(self, ctx: PhaseRunContext, deps: PhaseDeps) -> PhaseResult:
+                ts = ctx.task_spec
+                assert ts is not None
+                worktree = ctx.worktree
+                assert worktree is not None
+                assert ctx.branch_name is not None
+                _branch = ctx.branch_name
+
+                phase_ctx_inner = PhaseRunContext(
+                    task_spec=ts,
+                    changed_files=ctx.changed_files,
+                )
+                if should_run_phase(phase_graph, "DESIGN_REVIEW", phase_ctx_inner):
+                    with run_log.phase("DESIGN_REVIEW"):
+                        run_log.emit(
+                            "design_review.skipped",
+                            data={"reason": "handler not configured"},
+                        )
+                    ctx.phases["DESIGN_REVIEW"] = {
+                        "skipped": True,
+                        "reason": "handler not configured",
+                    }
+
+                commit_sha: str | None = None
+                if deps.run_config.commit_changes:
+                    commit_sha = deps.git_ops.commit_changes(
+                        worktree,
+                        f"fleet({persona}): {title[:72]}",
+                    )
+                ctx.commit_sha = commit_sha
+
+                if deps.run_config.commit_changes and commit_sha is None and not ctx.changed_files:
+                    _noop_facts = RunFacts(
+                        verify_ok=False,
+                        verify_fatal=False,
+                        scope_violated=False,
+                        changed_files=(),
+                    )
+                    _noop_disp = decide_disposition(_noop_facts, DispositionPolicy())
+                    logger.info(
+                        "[%s] NOOP: implementer produced no changes; skipping OPEN_PR/REVIEW",
+                        run_id,
+                    )
+                    ctx.phases["NOOP"] = {
+                        "reason": "implementer determined no code changes were required",
+                    }
+                    if deps.forge is not None and (issue_number or task_id):
+                        try:
+                            deps.forge.comment(
+                                issue_number or task_id,
+                                (
+                                    f"Fleet run `{run_id}` completed with no code changes — "
+                                    "the implementer determined the requested work was already "
+                                    "satisfied by existing code. No PR was opened."
+                                ),
+                            )
+                        except Exception:
+                            logger.exception("[%s] NOOP comment failed", run_id)
+                    terminal = FleetRunResult(
+                        run_id=run_id,
+                        task_id=task_id,
+                        persona=persona,
+                        outcome=_noop_disp.outcome,
+                        task_spec=ts.to_dict(),
+                        summary=ctx.brief.summary if ctx.brief else "",
+                        changed_files=ctx.changed_files,
+                        commit_sha=None,
+                        branch_name=_branch,
+                        pr_number=None,
+                        phases=ctx.phases,
+                        duration_seconds=round(time.monotonic() - start, 2),
+                    )
+                    run_log.run_end(
+                        outcome=terminal.outcome,
+                        changed_lines=_changed_lines(worktree),
+                        **_run_end_kwargs(terminal, find_repo_config(repo_root)),
+                    )
+                    return PhaseResult(terminal=terminal)
+
+                if deps.forge is not None and ctx.brief is None:
+                    if not ctx.notes:
+                        ctx.notes = research_all(
+                            ts.research_plan,
+                            backend=deps.backend,
+                            memory_limit=deps.run_config.memory_limit_research,
+                            max_workers=deps.run_config.max_research_workers,
+                            cwd=repo_root,
+                            browser_session_factory=browser_session_factory,
+                        )
+                    ctx.brief = synthesize(
+                        ts, ctx.notes, backend=deps.backend, session=ctx.session
+                    )
+
+                _ok_facts = RunFacts(
+                    verify_ok=True,
+                    verify_fatal=False,
+                    scope_violated=False,
+                    changed_files=tuple(ctx.changed_files),
+                )
+                _ok_policy = DispositionPolicy()
+                _ok_disp = decide_disposition(_ok_facts, _ok_policy)
+                _ok_pr_body = (
+                    pr_body_builder(run_id, ctx.brief.summary if ctx.brief else None)
+                    if pr_body_builder
+                    else f"Automated fleet PR. Run: {run_id}\n\nCloses #{task_id}"
+                )
+                _ok_labels = runner._pr_labels_for_issue(
+                    issue_number or task_id,
+                    pr_labels or [runner._spine.pr_ready_label],
+                )
+                pr_number: int | None = runner._apply_disposition(
+                    _ok_disp,
+                    worktree=worktree,
+                    branch_name=_branch,
+                    base_branch=base_branch,
+                    pr_title=pr_title,
+                    pr_body=_ok_pr_body,
+                    pr_labels=_ok_labels,
+                    policy=_ok_policy,
+                    run_log=run_log,
+                    run_id=run_id,
+                )
+                if pr_number is not None:
+                    ctx.phases["OPEN_PR"] = {"pr_number": pr_number, "branch": ctx.branch_name}
+
+                with run_log.phase("REVIEW"):
+                    logger.info("[%s] REVIEW", run_id)
+                    review_results = review(
+                        pr_number or task_id,
+                        ctx.diff,
+                        ctx.changed_files,
+                        backend=deps.backend,
+                        session=ctx.session,
+                    )
+                ctx.phases["REVIEW"] = [r.to_dict() for r in review_results]
+                ctx.reviews = review_results
+
+                phase_ctx_post = PhaseRunContext(
+                    task_spec=ts,
+                    reviews=review_results,
+                    changed_files=ctx.changed_files,
+                )
+                tech_lead_result = None
+                if should_run_phase(phase_graph, "TECH_LEAD", phase_ctx_post):
+                    with run_log.phase("TECH_LEAD"):
+                        logger.info("[%s] TECH_LEAD", run_id)
+                        tech_lead_result = tech_lead_review(
+                            ts,
+                            review_results,
+                            pr_number or task_id,
+                            backend=deps.backend,
+                            session=ctx.session,
+                        )
+                    if tech_lead_result:
+                        ctx.phases["TECH_LEAD"] = tech_lead_result.to_dict()
+                ctx.tech_lead = tech_lead_result
+
+                summary_parts = [ctx.brief.summary if ctx.brief else ""]
+                if review_results:
+                    summary_parts.append(review_results[0].summary)
+                summary = "\n\n".join(p for p in summary_parts if p)
+
+                outcome = _run_outcome(review_results, tech_lead_result)
+                terminal = FleetRunResult(
+                    run_id=run_id,
+                    task_id=task_id,
+                    persona=persona,
+                    outcome=outcome,
+                    task_spec=ts.to_dict(),
+                    summary=summary,
+                    changed_files=ctx.changed_files,
+                    reviews=[r.to_dict() for r in review_results],
+                    tech_lead=tech_lead_result.to_dict() if tech_lead_result else None,
+                    commit_sha=ctx.commit_sha,
+                    branch_name=_branch,
+                    pr_number=pr_number,
+                    phases=ctx.phases,
+                    duration_seconds=round(time.monotonic() - start, 2),
+                )
+                run_log.run_end(
+                    outcome=terminal.outcome,
+                    changed_lines=_changed_lines(worktree),
+                    pr_number=pr_number,
+                    jsonl=str(run_log.jsonl_path) if run_log.jsonl_path else None,
+                    **_run_end_kwargs(terminal, find_repo_config(repo_root)),
+                )
+                return PhaseResult(terminal=terminal)
+
+        return {
+            "research": ResearchHandler(),
+            "synthesize": SynthesizeHandler(),
+            "implement": ImplementHandler(),
+            "verify": VerifyHandler(),
+            "review": ReviewHandler(),
+            # tech_lead and open_pr are absorbed into ReviewHandler's run()
+        }
+
     def run(
         self,
         *,
@@ -387,8 +943,6 @@ class LocalFleetRunner:
         phases: dict[str, Any] = {}
         task_spec: TaskSpec | None = None
         branch_name = f"{self._spine.branch_prefix}/{persona}/{task_id}-{run_id}"
-        notes = None
-        brief = None
         resume_mode = False
         result: FleetRunResult | None = None
         dispatch_equip = None
@@ -583,474 +1137,62 @@ class LocalFleetRunner:
                     )
                     return result
 
-                if not resume_mode:
-                    with run_log.phase("RESEARCH", items=len(task_spec.research_plan)):
-                        logger.info(
-                            "[%s] RESEARCH (%d items)",
-                            run_id,
-                            len(task_spec.research_plan),
-                        )
-                        notes = research_all(
-                            task_spec.research_plan,
-                            backend=self._backend,
-                            memory_limit=self._config.memory_limit_research,
-                            max_workers=self._config.max_research_workers,
-                            cwd=repo_root,
-                            browser_session_factory=browser_session_factory,
-                        )
-                    phases["RESEARCH"] = [n.to_dict() for n in notes]
-
-                    with run_log.phase("SYNTHESIZE"):
-                        logger.info("[%s] SYNTHESIZE", run_id)
-                        brief = synthesize(task_spec, notes, backend=self._backend, session=session)
-                    phases["SYNTHESIZE"] = brief.to_dict()
-
-                    with run_log.phase("IMPLEMENT"):
-                        logger.info("[%s] IMPLEMENT", run_id)
-                        worktree = self._git_ops.setup_workspace(
-                            repo_root,
-                            run_id,
-                            base_branch,
-                            branch_name=branch_name if self._config.create_branch else None,
-                        )
-                        if self._config.create_branch and not getattr(
-                            self._git_ops, "use_worktree", False
-                        ):
-                            self._git_ops.create_branch(worktree, branch_name)
-
-                        implement(
-                            brief,
-                            task_spec,
-                            worktree,
-                            branch_name,
-                            backend=self._backend,
-                            persona_resolver=self._persona_resolver,
-                            persona_name=persona,
-                            memory_limit=self._config.memory_limit_parent,
-                            session=session,
-                            require_mcp_tools=require_mcp,
-                            compose_body=dispatch_equip.compose_body,
-                        )
-                    phases["IMPLEMENT"] = {"branch": branch_name, "worktree": str(worktree)}
-
-                # --- allowed_paths enforcement ---
-                if allowed_paths:
-                    assert worktree is not None
-                    _all_changed = self._git_ops.changed_files(worktree)
-                    _out_of_scope = [
-                        p
-                        for p in _all_changed
-                        if not path_under_allowlist(p, allowed_paths, worktree=worktree)
-                    ]
-                    if _out_of_scope:
-                        _n = len(_out_of_scope)
-                        run_log.emit(
-                            "scope.violation",
-                            data={
-                                "allowed": list(allowed_paths),
-                                "offending": [str(p) for p in _out_of_scope],
-                                "count": _n,
-                            },
-                        )
-                        _first3 = [str(p) for p in _out_of_scope[:3]]
-                        _scope_changed = tuple(str(p) for p in _all_changed)
-                        _scope_facts = RunFacts(
-                            verify_ok=False,
-                            verify_fatal=False,
-                            scope_violated=True,
-                            changed_files=_scope_changed,
-                        )
-                        _scope_policy = DispositionPolicy()
-                        _scope_disp = decide_disposition(_scope_facts, _scope_policy)
-                        _scope_pr_body = (
-                            f"Automated fleet PR. Run: {run_id}\n\nCloses #{task_id}"
-                        )
-                        _scope_labels = self._pr_labels_for_issue(
-                            issue_number or task_id,
-                            pr_labels or [self._spine.pr_draft_label],
-                        )
-                        _scope_pr = self._apply_disposition(
-                            _scope_disp,
-                            worktree=worktree,
-                            branch_name=branch_name,
-                            base_branch=base_branch,
-                            pr_title=pr_title,
-                            pr_body=_scope_pr_body,
-                            pr_labels=_scope_labels,
-                            policy=_scope_policy,
-                            run_log=run_log,
-                            run_id=run_id,
-                        )
-                        result = FleetRunResult(
-                            run_id=run_id,
-                            task_id=task_id,
-                            persona=persona,
-                            outcome=_scope_disp.outcome,
-                            task_spec=task_spec.to_dict() if task_spec else None,
-                            changed_files=list(_scope_changed),
-                            phases=phases,
-                            error=(f"Agent modified {_n} file(s) outside allowed_paths: {_first3}"),
-                            pr_number=_scope_pr,
-                            duration_seconds=round(time.monotonic() - start, 2),
-                        )
-                        run_log.run_end(
-                            outcome=result.outcome,
-                            changed_lines=_changed_lines(worktree),
-                            **_run_end_kwargs(result, find_repo_config(repo_root)),
-                        )
-                        return result
-
-                assert worktree is not None
-                verify_attempts = 0
-                verify_result = None
-                _halted_by_controller = False
-                _accumulated_failures: list[str] = []
-                _fix_strategy = make_fix_strategy(self._config.fix_strategy)
-                while verify_attempts <= effective_max_retries:
-                    with run_log.phase("VERIFY", attempt=verify_attempts + 1):
-                        logger.info("[%s] VERIFY (attempt %d)", run_id, verify_attempts + 1)
-                        changed = self._git_ops.changed_files(worktree)
-                        verify_result = self._verifier.check(
-                            worktree,
-                            persona=persona,
-                            changed_files=changed,
-                            task_id=task_id,
-                        )
-                    phases[f"VERIFY_{verify_attempts}"] = verify_result.to_dict()
-                    if verify_result.severity == VerifySeverity.OK:
-                        break
-                    if verify_result.severity == VerifySeverity.FATAL:
-                        break
-                    if verify_result.message:
-                        _accumulated_failures.append(verify_result.message)
-                    verify_attempts += 1
-                    if verify_attempts > effective_max_retries:
-                        break
-                    # LOW-complexity retry gate: only retry when stderr is
-                    # non-empty AND mentions a file the agent wrote.
-                    if task_complexity == "LOW":
-                        written = tuple(str(f) for f in changed)
-                        if not is_actionable_stderr(verify_result.message, written):
-                            logger.info(
-                                "[%s] LOW complexity: skipping fix retry (stderr not actionable)",
-                                run_id,
-                            )
-                            run_log.emit(
-                                "complexity.low_retry_suppressed",
-                                data={"reason": "stderr not actionable"},
-                            )
-                            break
-                    _ctrl_snapshot = run_log.usage_rollup_snapshot(task_id=task_id)
-                    _ctrl_metrics = _build_run_metrics(_ctrl_snapshot, verify_attempts)
-                    _ctrl_decision = self._controller.before_fix(
-                        _ctrl_metrics, self._controller_policy
-                    )
-                    if _ctrl_decision == ControlDecision.HALT:
-                        logger.info(
-                            "[%s] run_controller HALT after %d attempts (fix_ratio=%.2f)",
-                            run_id,
-                            verify_attempts,
-                            _ctrl_metrics.fix_phase_ratio,
-                        )
-                        run_log.emit(
-                            "run_controller.halt",
-                            data={
-                                "verify_attempts": _ctrl_metrics.verify_attempts,
-                                "fix_token_total": _ctrl_metrics.fix_token_total,
-                                "total_tokens": _ctrl_metrics.total_tokens,
-                                "fix_phase_ratio": _ctrl_metrics.fix_phase_ratio,
-                                "cost_alerts": list(_ctrl_metrics.cost_alerts),
-                            },
-                        )
-                        _halted_by_controller = True
-                        break
-                    if _ctrl_decision == ControlDecision.ABANDON:
-                        logger.info(
-                            "[%s] run_controller ABANDON after %d attempts",
-                            run_id,
-                            verify_attempts,
-                        )
-                        run_log.emit(
-                            "run_controller.abandon",
-                            data={
-                                "verify_attempts": _ctrl_metrics.verify_attempts,
-                                "fix_phase_ratio": _ctrl_metrics.fix_phase_ratio,
-                            },
-                        )
-                        _halted_by_controller = True
-                        break
-                    with run_log.phase("FIX", attempt=verify_attempts):
-                        if notes is None:
-                            logger.info("[%s] RESEARCH (resume retry)", run_id)
-                            notes = research_all(
-                                task_spec.research_plan,
-                                backend=self._backend,
-                                memory_limit=self._config.memory_limit_research,
-                                max_workers=self._config.max_research_workers,
-                                cwd=repo_root,
-                                browser_session_factory=browser_session_factory,
-                            )
-                            phases.setdefault("RESEARCH", [n.to_dict() for n in notes])
-                        _fix_changed = self._git_ops.changed_files(worktree)
-                        _fix_diff = self._git_ops.diff_summary(worktree)
-                        _fix_mem = FixMemory(
-                            attempt=verify_attempts,
-                            diff_so_far=_fix_diff,
-                            failures=tuple(_accumulated_failures),
-                            files_touched=tuple(str(p) for p in _fix_changed),
-                        )
-                        _fix_deps = _FixDeps(
-                            backend=self._backend,
-                            persona_resolver=self._persona_resolver,
-                            fleet_config=self._fleet_config,
-                            persona=persona,
-                            repo_root=repo_root,
-                            require_mcp=require_mcp,
-                            compose_body=dispatch_equip.compose_body,
-                        )
-                        brief, session = _fix_strategy.run_fix(
-                            _fix_mem,
-                            task_spec=task_spec,
-                            worktree=worktree,
-                            branch=branch_name,
-                            deps=_fix_deps,
-                            notes=notes,
-                            session=session,
-                            brief=brief,
-                        )
-
-                if verify_result is None or verify_result.severity != VerifySeverity.OK:
-                    _vf_changed = tuple(get_changed_files(worktree))
-                    _vf_facts = RunFacts(
-                        verify_ok=False,
-                        verify_fatal=(
-                            verify_result.severity == VerifySeverity.FATAL
-                            if verify_result is not None
-                            else False
-                        ),
-                        scope_violated=False,
-                        changed_files=_vf_changed,
-                        halted_by_controller=_halted_by_controller,
-                    )
-                    _vf_policy = DispositionPolicy()
-                    _vf_disp = decide_disposition(_vf_facts, _vf_policy)
-                    _vf_pr_body = (
-                        pr_body_builder(run_id, brief.summary if brief else None)
-                        if pr_body_builder
-                        else f"Automated fleet PR. Run: {run_id}\n\nCloses #{task_id}"
-                    )
-                    _vf_labels = self._pr_labels_for_issue(
-                        issue_number or task_id,
-                        pr_labels or [self._spine.pr_draft_label],
-                    )
-                    _vf_pr = self._apply_disposition(
-                        _vf_disp,
-                        worktree=worktree,
-                        branch_name=branch_name,
-                        base_branch=base_branch,
-                        pr_title=pr_title,
-                        pr_body=_vf_pr_body,
-                        pr_labels=_vf_labels,
-                        policy=_vf_policy,
-                        run_log=run_log,
-                        run_id=run_id,
-                    )
-                    result = FleetRunResult(
-                        run_id=run_id,
-                        task_id=task_id,
-                        persona=persona,
-                        outcome=_vf_disp.outcome,
-                        task_spec=task_spec.to_dict(),
-                        changed_files=list(_vf_changed),
-                        phases=phases,
-                        error=verify_result.message if verify_result else "verify failed",
-                        pr_number=_vf_pr,
-                        duration_seconds=round(time.monotonic() - start, 2),
-                    )
-                    run_log.run_end(
-                        outcome=result.outcome,
-                        changed_lines=_changed_lines(worktree),
-                        **_run_end_kwargs(result, find_repo_config(repo_root)),
-                    )
-                    return result
-
-                changed_files = get_changed_files(worktree)
-                diff = self._git_ops.diff_summary(worktree)
-
                 phase_ctx = PhaseRunContext(
                     task_spec=task_spec,
-                    changed_files=changed_files,
-                )
-                if should_run_phase(phase_graph, "DESIGN_REVIEW", phase_ctx):
-                    with run_log.phase("DESIGN_REVIEW"):
-                        run_log.emit(
-                            "design_review.skipped",
-                            data={"reason": "handler not configured"},
-                        )
-                    phases["DESIGN_REVIEW"] = {
-                        "skipped": True,
-                        "reason": "handler not configured",
-                    }
-
-                commit_sha = None
-                if self._config.commit_changes:
-                    commit_sha = self._git_ops.commit_changes(
-                        worktree,
-                        f"fleet({persona}): {title[:72]}",
-                    )
-
-                if self._config.commit_changes and commit_sha is None and not changed_files:
-                    _noop_facts = RunFacts(
-                        verify_ok=False,
-                        verify_fatal=False,
-                        scope_violated=False,
-                        changed_files=(),
-                    )
-                    _noop_disp = decide_disposition(_noop_facts, DispositionPolicy())
-                    logger.info(
-                        "[%s] NOOP: implementer produced no changes; skipping OPEN_PR/REVIEW",
-                        run_id,
-                    )
-                    phases["NOOP"] = {
-                        "reason": "implementer determined no code changes were required",
-                    }
-                    if self._forge is not None and (issue_number or task_id):
-                        try:
-                            self._forge.comment(
-                                issue_number or task_id,
-                                (
-                                    f"Fleet run `{run_id}` completed with no code changes — "
-                                    "the implementer determined the requested work was already "
-                                    "satisfied by existing code. No PR was opened."
-                                ),
-                            )
-                        except Exception:
-                            logger.exception("[%s] NOOP comment failed", run_id)
-                    result = FleetRunResult(
-                        run_id=run_id,
-                        task_id=task_id,
-                        persona=persona,
-                        outcome=_noop_disp.outcome,
-                        task_spec=task_spec.to_dict(),
-                        summary=brief.summary if brief else "",
-                        changed_files=changed_files,
-                        commit_sha=None,
-                        branch_name=branch_name,
-                        pr_number=None,
-                        phases=phases,
-                        duration_seconds=round(time.monotonic() - start, 2),
-                    )
-                    run_log.run_end(
-                        outcome=result.outcome,
-                        changed_lines=_changed_lines(worktree),
-                        **_run_end_kwargs(result, find_repo_config(repo_root)),
-                    )
-                    return result
-
-                if self._forge is not None and brief is None:
-                    if notes is None:
-                        notes = research_all(
-                            task_spec.research_plan,
-                            backend=self._backend,
-                            memory_limit=self._config.memory_limit_research,
-                            max_workers=self._config.max_research_workers,
-                            cwd=repo_root,
-                            browser_session_factory=browser_session_factory,
-                        )
-                    brief = synthesize(task_spec, notes, backend=self._backend, session=session)
-
-                _ok_facts = RunFacts(
-                    verify_ok=True,
-                    verify_fatal=False,
-                    scope_violated=False,
-                    changed_files=tuple(changed_files),
-                )
-                _ok_policy = DispositionPolicy()
-                _ok_disp = decide_disposition(_ok_facts, _ok_policy)
-                _ok_pr_body = (
-                    pr_body_builder(run_id, brief.summary if brief else None)
-                    if pr_body_builder
-                    else f"Automated fleet PR. Run: {run_id}\n\nCloses #{task_id}"
-                )
-                _ok_labels = self._pr_labels_for_issue(
-                    issue_number or task_id,
-                    pr_labels or [self._spine.pr_ready_label],
-                )
-                pr_number: int | None = self._apply_disposition(
-                    _ok_disp,
-                    worktree=worktree,
+                    phases=phases,
                     branch_name=branch_name,
-                    base_branch=base_branch,
-                    pr_title=pr_title,
-                    pr_body=_ok_pr_body,
-                    pr_labels=_ok_labels,
-                    policy=_ok_policy,
+                    session=session,
+                )
+                phase_deps = PhaseDeps(
+                    backend=self._backend,
+                    persona_resolver=self._persona_resolver,
+                    git_ops=self._git_ops,
+                    verifier=self._verifier,
+                    forge=self._forge,
+                    run_config=self._config,
+                    spine=self._spine,
                     run_log=run_log,
-                    run_id=run_id,
+                    fix_strategy=make_fix_strategy(self._config.fix_strategy),
+                    controller=self._controller,
+                    controller_policy=self._controller_policy,
+                    disposition_policy=DispositionPolicy(),
                 )
-                if pr_number is not None:
-                    phases["OPEN_PR"] = {"pr_number": pr_number, "branch": branch_name}
-
-                with run_log.phase("REVIEW"):
-                    logger.info("[%s] REVIEW", run_id)
-                    review_results = review(
-                        pr_number or task_id,
-                        diff,
-                        changed_files,
-                        backend=self._backend,
-                        session=session,
-                    )
-                phases["REVIEW"] = [r.to_dict() for r in review_results]
-
-                phase_ctx = PhaseRunContext(
-                    task_spec=task_spec,
-                    reviews=review_results,
-                    changed_files=changed_files,
-                )
-                tech_lead: TechLeadReview | None = None
-                if should_run_phase(phase_graph, "TECH_LEAD", phase_ctx):
-                    with run_log.phase("TECH_LEAD"):
-                        logger.info("[%s] TECH_LEAD", run_id)
-                        tech_lead = tech_lead_review(
-                            task_spec,
-                            review_results,
-                            pr_number or task_id,
-                            backend=self._backend,
-                            session=session,
-                        )
-                    if tech_lead:
-                        phases["TECH_LEAD"] = tech_lead.to_dict()
-
-                summary_parts = [brief.summary if brief else ""]
-                if review_results:
-                    summary_parts.append(review_results[0].summary)
-                summary = "\n\n".join(p for p in summary_parts if p)
-
-                outcome = _run_outcome(review_results, tech_lead)
-
-                result = FleetRunResult(
+                handlers = self._build_handlers(
                     run_id=run_id,
                     task_id=task_id,
                     persona=persona,
-                    outcome=outcome,
-                    task_spec=task_spec.to_dict(),
-                    summary=summary,
-                    changed_files=changed_files,
-                    reviews=[r.to_dict() for r in review_results],
-                    tech_lead=tech_lead.to_dict() if tech_lead else None,
-                    commit_sha=commit_sha,
-                    branch_name=branch_name,
-                    pr_number=pr_number,
-                    phases=phases,
-                    duration_seconds=round(time.monotonic() - start, 2),
+                    repo_root=repo_root,
+                    base_branch=base_branch,
+                    title=title,
+                    run_log=run_log,
+                    phase_graph=phase_graph,
+                    effective_max_retries=effective_max_retries,
+                    task_complexity=task_complexity,
+                    allowed_paths=allowed_paths,
+                    require_mcp=require_mcp,
+                    browser_session_factory=browser_session_factory,
+                    pr_title=pr_title,
+                    pr_body_builder=pr_body_builder,
+                    pr_labels=pr_labels,
+                    issue_number=issue_number,
+                    start=start,
+                    dispatch_equip=dispatch_equip,
+                    resume_mode=resume_mode,
                 )
-                run_log.run_end(
-                    outcome=result.outcome,
-                    changed_lines=_changed_lines(worktree),
-                    pr_number=pr_number,
-                    jsonl=str(run_log.jsonl_path) if run_log.jsonl_path else None,
-                    **_run_end_kwargs(result, find_repo_config(repo_root)),
-                )
+                result = execute_graph(phase_graph, phase_ctx, handlers, deps=phase_deps)
+                if result is None:
+                    result = FleetRunResult(
+                        run_id=run_id,
+                        task_id=task_id,
+                        persona=persona,
+                        outcome="error",
+                        task_spec=task_spec.to_dict() if task_spec else None,
+                        phases=phases,
+                        error="execute_graph exhausted without terminal result",
+                        duration_seconds=round(time.monotonic() - start, 2),
+                    )
+                worktree = phase_ctx.worktree
+                session = phase_ctx.session
                 return result
             except Exception as exc:
                 logger.exception("[%s] fleet run failed", run_id)
