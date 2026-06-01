@@ -12,7 +12,7 @@ fi
 
 # Share main-repo Python venvs when worktree lacks its own (fleet verify runs api ruff).
 if [[ -n "$main_repo" ]]; then
-  for component in api pipeline agents; do
+  for component in api pipeline; do
     work_venv="${repo_root}/${component}/.venv"
     main_venv="${main_repo}/${component}/.venv"
     if [[ ! -e "$work_venv/bin/ruff" && -d "$main_venv" ]]; then

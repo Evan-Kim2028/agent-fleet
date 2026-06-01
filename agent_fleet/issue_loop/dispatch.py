@@ -107,6 +107,7 @@ def run_issue_dispatch(
 
     spine = _spine_from_repo(repo)
     branch_prefix = spine.branch_prefix
+    scope_allowlist = repo.persona_scope_allowlist.get(resolved_persona, ())
     git_ops = LocalGitOps(
         repo.repo_root,
         use_worktree=True,
@@ -150,6 +151,7 @@ def run_issue_dispatch(
         issue_number=issue_number,
         issue_labels=issue_labels,
         experience_source="issue_dispatch",
+        allowed_paths=scope_allowlist,
     )
 
     if result.pr_number:
