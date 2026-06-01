@@ -30,7 +30,6 @@ class RunFacts:
     verify_fatal: bool
     scope_violated: bool
     changed_files: tuple[str, ...]
-    halted_by_controller: bool = False
 
 
 @dataclass

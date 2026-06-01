@@ -340,8 +340,8 @@ class LocalFleetRunner:
     ) -> int | None:
         """Execute the IO side of a Disposition (push + open_pr) and return pr_number.
 
-        Returns None for ABANDON and NOOP kinds; the caller never reaches here for
-        those, but keeping the return type clear avoids ambiguity.
+        Returns None immediately for ABANDON and NOOP kinds (and when no forge is
+        configured) — all three call sites pass every kind through here.
         """
         if disposition.kind not in (DispositionKind.OPEN_PR, DispositionKind.SALVAGE):
             return None
@@ -867,7 +867,7 @@ class LocalFleetRunner:
 
                 if self._config.commit_changes and commit_sha is None and not changed_files:
                     _noop_facts = RunFacts(
-                        verify_ok=True,
+                        verify_ok=False,
                         verify_fatal=False,
                         scope_violated=False,
                         changed_files=(),

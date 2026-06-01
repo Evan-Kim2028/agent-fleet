@@ -8,6 +8,7 @@ GitForge protocols so no real git or HTTP calls occur.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 import pytest
@@ -18,9 +19,11 @@ from agent_fleet.disposition import (
     RunFacts,
     decide_disposition,
 )
-from agent_fleet.hooks import GitForge
 from agent_fleet.observability.log import RunLog
 from agent_fleet.runner import LocalFleetRunner
+
+if TYPE_CHECKING:
+    from agent_fleet.hooks import GitForge
 
 
 class _FakeGitOps:
@@ -248,3 +251,23 @@ def test_verify_failed_disposition_kind(changed: tuple[str, ...]) -> None:
     else:
         assert disp.kind == DispositionKind.NOOP
         assert disp.outcome == "completed_noop"
+
+
+def test_noop_facts_yield_completed_noop_not_completed() -> None:
+    """Runner NOOP branch must use verify_ok=False so outcome is 'completed_noop'.
+
+    Regression guard: passing verify_ok=True to decide_disposition returns
+    outcome='completed', silently losing the 'completed_noop' signal that
+    emit.py and dispatch.py treat as a distinct case.
+    """
+    noop_facts = RunFacts(
+        verify_ok=False,
+        verify_fatal=False,
+        scope_violated=False,
+        changed_files=(),
+    )
+    disp = decide_disposition(noop_facts, DispositionPolicy())
+    assert disp.kind == DispositionKind.NOOP
+    assert disp.outcome == "completed_noop", (
+        "outcome must be 'completed_noop'; got 'completed' if verify_ok=True was passed"
+    )
