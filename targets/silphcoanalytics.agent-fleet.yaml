@@ -11,7 +11,7 @@ worktree_bootstrap_commands:
   - bash scripts/fleet-worktree-bootstrap.sh
 
 personas_dir: agents/personas
-worktree_base: /tmp/agent-worktrees
+worktree_base: ~/tmp/agent-worktrees
 
 verify_commands:
   - bash scripts/fleet-worktree-bootstrap.sh
@@ -65,7 +65,7 @@ critical_path_prefixes:
 
 spine:
   branch_prefix: fleet
-  worktree_base: /tmp/agent-worktrees
+  worktree_base: ~/tmp/agent-worktrees
   pr_ready_label: fleet-ready
 
 issue_dispatch:
@@ -75,7 +75,7 @@ issue_dispatch:
   running_label_prefix: fleet-running
   queue:
     enabled: true
-    file: targets/silphcoanalytics.queue.yaml
+    file: silphcoanalytics.queue.yaml
     advance: dispatch
 
 pr_review:
