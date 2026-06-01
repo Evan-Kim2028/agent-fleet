@@ -8,13 +8,13 @@ default_branch: main
 use_worktree: true
 
 worktree_bootstrap_commands:
-  - bash scripts/fleet-worktree-bootstrap.sh
+  # Lives in agent-fleet repo — runs with cwd = target worktree (silphco checkout).
+  - bash /home/evan/Documents/agent-fleet/scripts/worktree-bootstrap.sh
 
 personas_dir: agents/personas
 worktree_base: ~/tmp/agent-worktrees
 
 verify_commands:
-  - bash scripts/fleet-worktree-bootstrap.sh
   - uv run --directory agents python agents/verify.py ..
   - uv run --directory api ruff check .
 
