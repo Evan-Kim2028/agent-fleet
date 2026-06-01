@@ -1,15 +1,9 @@
 # FIFO dispatch queue for silphcoanalytics — managed from agent_fleet repo.
 # advance=dispatch in target YAML allows parallel parents when personas differ.
 queue:
-  - issue: 2025
-    persona: backend
-    note: "C1-backend: persist full chat turns (widgets + steps) in conversations API. Blocks #2026."
   - issue: 2027
     persona: frontend
-    note: "C2: extract ChatSurface config from ChatPage (parallel with #2025)."
-  - issue: 2026
-    persona: frontend
-    note: "C1-frontend: wire useConversations/useChatSession to metadata API (#2025)."
+    note: "C2: extract ChatSurface config from ChatPage (redispatch after fleet-only migration)."
   - issue: 1737
     persona: backend
     note: "Remove backend GraphQL + agent + decouple MPP (#1692 child)"
