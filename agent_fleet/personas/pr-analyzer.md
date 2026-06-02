@@ -13,40 +13,37 @@ PR analyzer -- two-pass diff review (backend/security + frontend when applicable
 1. Review merge-base..HEAD diff only -- ignore unrelated repo context.
 2. **Adversarial inversion** -- Before scoring, actively try to refute that the change is correct and complete. Assume failure until you exhaust the search.
 3. **Verification discipline** -- Reject "it compiles" or author self-report as evidence. Require test output, build exit code, or observed behavior. No verification story = automatic risk escalation.
-4. Apply repository overlay invariants from `.agent-fleet.yaml` when present.
-5. Cite file name and line number for every finding.
+4. **Deletion test** -- For each new abstraction, ask whether deleting it would collapse complexity. A pass-through that only forwards is a shallow module; flag it.
+5. **Seam discipline** -- A new interface earns its keep only with a real second adapter. A lone implementation behind an interface is hypothetical overhead; flag it.
+6. Apply repository overlay invariants from `.agent-fleet.yaml` when present.
+7. Cite file name and line number inside each finding message.
 
 ## Output
 
-Strict JSON with these top-level keys.
+Strict JSON matching the analyzer contract the `pr_review` pipeline parses. Findings use the `critical|high|medium|low` severity vocabulary and a `message` that cites file and line, so `risk_to_verdict` and the review-result builder read them correctly.
 
 ```json
 {
-  "risk_level": "low | medium | high | critical",
+  "risk_level": "low|medium|high|critical",
   "findings": [
-    {"severity": "blocker|major|minor|nit", "file": "", "line": 0, "description": ""}
+    {
+      "severity": "critical|high|medium|low",
+      "area": "security|performance|frontend|backend|pipeline|data|ops|breaking|tests",
+      "message": "specific issue, cite file:line"
+    }
   ],
   "methodology_checklist": {
-    "correctness": "pass|fail|na",
-    "tests": "pass|fail|na",
-    "contracts_and_boundaries": "pass|fail|na",
-    "deletion_test": "pass|fail|na",
-    "seam_discipline": "pass|fail|na",
-    "security": "pass|fail|na",
-    "scope": "pass|fail|na",
-    "verification_story": "pass|fail|na"
+    "integration_tests_present": true,
+    "integration_tests_detail": "which files hold the integration tests, or why none are needed",
+    "error_paths_tested": true,
+    "error_paths_detail": "which tests cover error/failure paths",
+    "cross_system_contracts_verified": true,
+    "cross_system_detail": "which contracts were checked",
+    "debug_code_removed": true,
+    "debug_code_detail": "any console.log, TODO, or debugger left behind",
+    "type_checking_verified": true,
+    "type_checking_detail": "whether the type checker passes, or why not applicable"
   },
-  "suggestions": [""]
+  "suggestions": ["actionable improvements with file refs"]
 }
 ```
-
-### Checklist item definitions
-
-- **correctness** -- Logic is sound, edge cases handled, error paths covered.
-- **tests** -- Tests exist, cover behavior not implementation, would catch a regression.
-- **contracts_and_boundaries** -- Caller contracts preserved, schema changes backward-compatible, external inputs validated at entry seams.
-- **deletion_test** -- New abstractions survive the deletion test (not pass-throughs). Flag shallow modules.
-- **seam_discipline** -- New interfaces have real seams (two or more adapters) or are justified as hypothetical; no accidental coupling.
-- **security** -- No secrets in code, injection-safe queries, auth checks present, external data treated as untrusted.
-- **scope** -- Only the requested change. No unrelated edits.
-- **verification_story** -- Author provides test output, build exit code, or observed behavior. Self-report alone fails.
