@@ -36,6 +36,22 @@ if TYPE_CHECKING:
     from agent_fleet.level_up.models import DispatchEquip
     from agent_fleet.repo import RepoConfig
 
+# Registry of phase names handled by run_pipeline.  Presence in the dict is
+# the source of truth; the value is unused (None) and exists only to give a
+# dict[str, None] type that callers can introspect.
+PHASE_REGISTRY: dict[str, None] = {"execute": None, "analyze": None, "review": None}
+
+
+def validate_phases(phases: list[str]) -> None:
+    """Raise ValueError if any phase name is not in PHASE_REGISTRY.
+
+    Call at pipeline-resolve time so unknown names fail before any agent runs.
+    """
+    unknown = [p for p in phases if p not in PHASE_REGISTRY]
+    if unknown:
+        known = sorted(PHASE_REGISTRY)
+        raise ValueError(f"Unknown phase(s) {unknown!r}; known phases are {known}")
+
 
 def _record_token_ceiling_metric(
     *,
@@ -747,6 +763,8 @@ def run_pipeline(
     phase, a ``complexity.ceiling_metric`` event is emitted and the pipeline
     continues (verify/review still run when configured).
     """
+    validate_phases(phases)
+
     results: list[dict[str, Any]] = []
     summary = ""
     exit_code = 0
@@ -890,9 +908,8 @@ def run_pipeline(
                     break
             continue
 
-        results.append({"phase": phase, "error": f"Unknown phase: {phase}"})
-        exit_code = 1
-        break
+        # validate_phases() above ensures this is unreachable.
+        raise AssertionError(f"unhandled phase {phase!r} slipped past validate_phases")
 
     return results, summary, exit_code, changed_files
 
