@@ -26,10 +26,10 @@ from agent_fleet.disposition import (
 )
 from agent_fleet.fix_attempt import FixMemory, _FixDeps, make_fix_strategy
 from agent_fleet.fleet_session import create_fleet_session
-from agent_fleet.hooks import FleetTask, ResumableGitOps
+from agent_fleet.hooks import ExperienceRecorder, FleetTask, LevelUpRecorder, ResumableGitOps
 from agent_fleet.implementer import implement
 from agent_fleet.level_up.paths import repo_key as level_up_repo_key
-from agent_fleet.level_up.record import record_runner_experience, review_verdict_from_runner_result
+from agent_fleet.level_up.record import review_verdict_from_runner_result
 from agent_fleet.observability.context import bind_run, get_run_log
 from agent_fleet.observability.efficiency import changed_lines as _changed_lines
 from agent_fleet.observability.log import RunLog
@@ -225,6 +225,7 @@ class LocalFleetRunner:
         fleet_config: FleetConfig | None = None,
         controller: RunController | None = None,
         controller_policy: ControllerPolicy | None = None,
+        experience_recorder: ExperienceRecorder | None = None,
     ) -> None:
         self._backend = backend
         self._persona_resolver = persona_resolver
@@ -236,6 +237,7 @@ class LocalFleetRunner:
         self._fleet_config = fleet_config
         self._controller: RunController = controller or ThresholdController()
         self._controller_policy = controller_policy or ControllerPolicy()
+        self._experience_recorder: ExperienceRecorder = experience_recorder or LevelUpRecorder()
 
     def _build_phase_graph(self) -> PhaseGraph:
         return default_phase_graph(
@@ -1209,7 +1211,7 @@ class LocalFleetRunner:
                 return result
             finally:
                 if result is not None:
-                    record_runner_experience(
+                    self._experience_recorder.record_runner_experience(
                         result=result,
                         title=title,
                         persona=persona,
