@@ -6,6 +6,7 @@ import time
 from typing import TYPE_CHECKING
 
 from agent_fleet.code_review import publish_fleet_branch, run_code_review_with_auto_fix
+from agent_fleet.complexity import observe_token_ceiling
 from agent_fleet.fleet_session import create_fleet_session
 from agent_fleet.handoff_context import apply_handoff_to_task
 from agent_fleet.observability.context import get_run_log
@@ -168,6 +169,7 @@ def run_configured_pipeline(
     max_retries: int | None = None,
     token_ceiling: int | None = None,
     declared_complexity: str | None = None,
+    enforce_token_ceiling: bool = False,
 ) -> tuple[list[dict[str, object]], str, int, list[str] | None]:
     effective_task = apply_handoff_to_task(task, handoff)
     pipeline_name = task.pipeline or task_config.default_pipeline
@@ -190,7 +192,7 @@ def run_configured_pipeline(
     )
     try:
         if use_auto_fix:
-            return run_code_review_with_auto_fix(
+            outcome = run_code_review_with_auto_fix(
                 backend=backend,
                 resolver=resolver,
                 task=effective_task,
@@ -204,22 +206,47 @@ def run_configured_pipeline(
                 token_ceiling=token_ceiling,
                 declared_complexity=declared_complexity,
             )
-        return run_pipeline(
-            backend=backend,
-            resolver=resolver,
-            task=task,
-            workspace=run_workspace,
-            timeout_s=task_config.timeout_seconds,
-            phases=phases,
-            repo=repo_config or git_repo,
-            session=session,
-            fleet_config=task_config,
-            token_ceiling=token_ceiling,
-            declared_complexity=declared_complexity,
-        )
+        else:
+            outcome = run_pipeline(
+                backend=backend,
+                resolver=resolver,
+                task=task,
+                workspace=run_workspace,
+                timeout_s=task_config.timeout_seconds,
+                phases=phases,
+                repo=repo_config or git_repo,
+                session=session,
+                fleet_config=task_config,
+                token_ceiling=token_ceiling,
+                declared_complexity=declared_complexity,
+            )
     finally:
         if session is not None:
             session.dispose()
+
+    # Enforcement is opt-in (enforce_token_ceiling=False by default).
+    # When enabled, a ceiling breach after the pipeline aborts the run instead
+    # of being a log-only metric.
+    if enforce_token_ceiling and token_ceiling is not None and declared_complexity is not None:
+        breach = observe_token_ceiling(
+            token_ceiling=token_ceiling,
+            declared_complexity=declared_complexity,
+        )
+        if breach is not None:
+            phase_results, _summary, _exit_code, changed_files = outcome
+            abort_phase: dict[str, object] = {
+                "phase": "ceiling_abort",
+                "enforced": True,
+                **breach.to_dict(),
+            }
+            return (
+                [*phase_results, abort_phase],
+                f"Token ceiling enforced: {breach.observed_total_tokens} > {breach.ceiling}",
+                1,
+                changed_files,
+            )
+
+    return outcome
 
 
 def build_task_result(

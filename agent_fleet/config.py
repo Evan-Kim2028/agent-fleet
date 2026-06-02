@@ -72,6 +72,7 @@ class FleetConfig:
     repo_config: RepoConfig | None = None
     mcp_servers: dict[str, McpServerSpec] = field(default_factory=dict)
     max_redispatches: int = 1
+    enforce_token_ceiling: bool = False
 
 
 def _expand_path(value: str) -> Path:
@@ -197,4 +198,5 @@ def load_fleet_config(
         default_workspace=default_workspace or data.get("default_workspace"),
         mcp_servers=mcp_catalog,
         max_redispatches=int(data.get("max_redispatches") or 1),
+        enforce_token_ceiling=bool(data.get("enforce_token_ceiling", False)),
     )
