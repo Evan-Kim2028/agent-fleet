@@ -67,3 +67,24 @@ def test_unknown_backend_raises_helpful_error(monkeypatch: pytest.MonkeyPatch) -
     # Error message must list known backends so the user knows what to use.
     assert "cursor" in str(exc_info.value)
     assert "kimi" in str(exc_info.value)
+
+
+def test_doctor_covers_every_registered_backend() -> None:
+    """A registered backend must have a real key check, not a fallback warn.
+
+    make_backend resolves any registered backend from one file, but the backend's
+    env-var contract is duplicated as a closed {cursor, kimi} set in doctor,
+    cli_env, and pr_review.github_action. A third backend instantiates yet
+    silently degrades there (doctor warns "unknown backend", the preflights skip
+    its key check). This pins the doctor copy to the registry so that drift fails
+    loudly instead of shipping a half-wired backend.
+    """
+    from agent_fleet import backends
+    from agent_fleet.doctor import _BACKEND_ENV
+
+    missing = set(backends._REGISTRY) - set(_BACKEND_ENV)
+    assert not missing, (
+        f"backends registered but absent from doctor._BACKEND_ENV: {sorted(missing)}. "
+        "Add the env var there (and in cli_env and pr_review.github_action), or wire the "
+        "env contract into the registry so all three derive from one source."
+    )
