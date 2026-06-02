@@ -24,7 +24,13 @@ from agent_fleet.disposition import (
     RunFacts,
     decide_disposition,
 )
-from agent_fleet.fix_attempt import FixMemory, _FixDeps, make_fix_strategy
+from agent_fleet.fix_attempt import (
+    FixMemory,
+    _FixDeps,
+    _truncate,
+    is_repeated_verify_failure,
+    make_fix_strategy,
+)
 from agent_fleet.fleet_session import create_fleet_session
 from agent_fleet.hooks import ExperienceRecorder, FleetTask, LevelUpRecorder, ResumableGitOps
 from agent_fleet.implementer import implement
@@ -563,6 +569,15 @@ class LocalFleetRunner:
                     if verify_result.severity == VerifySeverity.OK:
                         break
                     if verify_result.severity == VerifySeverity.FATAL:
+                        break
+                    if is_repeated_verify_failure(verify_result.message, _accumulated_failures):
+                        run_log.emit(
+                            "verify.repeated_failure",
+                            data={
+                                "verify_attempts": verify_attempts + 1,
+                                "failure_signature": _truncate(verify_result.message),
+                            },
+                        )
                         break
                     if verify_result.message:
                         _accumulated_failures.append(verify_result.message)

@@ -18,6 +18,7 @@ from agent_fleet.implementer import implement
 from agent_fleet.synthesizer import synthesize
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
     from agent_fleet.contracts.implementation_brief import ImplementationBrief
@@ -37,6 +38,16 @@ def _truncate(message: str, *, max_lines: int = 50) -> str:
         return message
     omitted = len(lines) - max_lines
     return "\n".join(lines[:max_lines]) + f"\n... [{omitted} more lines truncated]"
+
+
+def is_repeated_verify_failure(message: str, accumulated: Sequence[str]) -> bool:
+    """True when *message* repeats the most recent accumulated verify failure.
+
+    A FIX phase runs between two verify attempts. An identical failure message
+    on the next attempt means that FIX changed nothing that affects the verdict,
+    so further fixes are doomed and the loop should stop.
+    """
+    return bool(message) and bool(accumulated) and message == accumulated[-1]
 
 
 @dataclass(frozen=True)
