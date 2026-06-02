@@ -9,6 +9,7 @@ import pytest
 
 from agent_fleet.complexity import (
     RuntimeConfig,
+    classify_complexity,
     coerce_complexity,
     derive_runtime,
     is_actionable_stderr,
@@ -380,3 +381,111 @@ def test_build_task_result_no_complexity_task() -> None:
     )
 
     assert result.declared_complexity is None
+
+
+# ---------------------------------------------------------------------------
+# classify_complexity — deterministic tier derivation
+# ---------------------------------------------------------------------------
+
+
+def test_classify_complexity_short_simple_goal_is_low() -> None:
+    assert classify_complexity("fix typo in README") == "LOW"
+
+
+def test_classify_complexity_rename_is_low() -> None:
+    assert classify_complexity("rename the variable foo to bar") == "LOW"
+
+
+def test_classify_complexity_moderate_goal_is_low_by_default() -> None:
+    # Short goal, no keywords, no files → LOW
+    assert classify_complexity("add a unit test for the login endpoint") == "LOW"
+
+
+def test_classify_complexity_scope_keyword_refactor_is_high() -> None:
+    assert classify_complexity("refactor the authentication module") == "HIGH"
+
+
+def test_classify_complexity_scope_keyword_migrate_is_high() -> None:
+    assert classify_complexity("migrate the database schema to Postgres") == "HIGH"
+
+
+def test_classify_complexity_scope_keyword_architecture_is_high() -> None:
+    assert classify_complexity("redesign the service architecture for multi-tenancy") == "HIGH"
+
+
+def test_classify_complexity_many_files_is_high() -> None:
+    files = [f"src/module_{i}.py" for i in range(10)]
+    assert classify_complexity("update all modules", changed_files=files) == "HIGH"
+
+
+def test_classify_complexity_few_files_promotes_to_med() -> None:
+    files = ["src/a.py", "src/b.py", "src/c.py"]
+    assert classify_complexity("update imports in these files", changed_files=files) == "MED"
+
+
+def test_classify_complexity_long_goal_is_med() -> None:
+    # 65 words → MED (above _WORDS_HIGH=60, below _WORDS_VERY_HIGH=120)
+    long_goal = " ".join(["word"] * 65)
+    assert classify_complexity(long_goal) == "MED"
+
+
+def test_classify_complexity_very_long_goal_is_high() -> None:
+    # 125 words → HIGH
+    very_long_goal = " ".join(["word"] * 125)
+    assert classify_complexity(very_long_goal) == "HIGH"
+
+
+def test_classify_complexity_no_files_arg_same_as_empty() -> None:
+    assert classify_complexity("add logging") == classify_complexity(
+        "add logging", changed_files=[]
+    )
+
+
+def test_classify_complexity_explicit_complexity_overrides_classifier() -> None:
+    """An explicit caller-supplied complexity on FleetTask always wins."""
+    from agent_fleet.dispatcher import _normalize_tasks
+
+    # A "refactor" goal would be classified HIGH, but caller says LOW.
+    tasks, _ = _normalize_tasks(
+        goal=None,
+        context=None,
+        persona=None,
+        workspace=None,
+        pipeline=None,
+        tasks=[{"goal": "refactor the entire authentication system", "complexity": "LOW"}],
+        complexity=None,
+    )
+    assert tasks[0].complexity == "LOW"
+
+
+def test_classify_complexity_auto_fills_when_no_explicit_complexity() -> None:
+    """When no explicit complexity, _normalize_tasks fills it via classifier."""
+    from agent_fleet.dispatcher import _normalize_tasks
+
+    tasks, _ = _normalize_tasks(
+        goal="refactor the entire authentication system",
+        context=None,
+        persona=None,
+        workspace=None,
+        pipeline=None,
+        tasks=None,
+        complexity=None,
+    )
+    # "refactor" triggers HIGH
+    assert tasks[0].complexity == "HIGH"
+
+
+def test_classify_complexity_explicit_single_goal_overrides() -> None:
+    """An explicit complexity on single-goal dispatch wins over classifier."""
+    from agent_fleet.dispatcher import _normalize_tasks
+
+    tasks, _ = _normalize_tasks(
+        goal="refactor the entire system",
+        context=None,
+        persona=None,
+        workspace=None,
+        pipeline=None,
+        tasks=None,
+        complexity="LOW",
+    )
+    assert tasks[0].complexity == "LOW"

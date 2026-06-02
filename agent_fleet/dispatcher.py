@@ -18,7 +18,7 @@ from agent_fleet.admission import (
     ResourceTier,
 )
 from agent_fleet.backends import make_backend
-from agent_fleet.complexity import derive_runtime
+from agent_fleet.complexity import classify_complexity, derive_runtime
 from agent_fleet.config import FleetConfig, load_fleet_config
 from agent_fleet.dispatcher_task import (
     build_task_result,
@@ -81,6 +81,9 @@ def _normalize_tasks(
                 continue
             base_branches.append(_optional_entry_str(entry.get("base_branch"), None))
             entry_complexity = _optional_entry_str(entry.get("complexity"), complexity)
+            # Auto-classify when no explicit complexity was declared by the caller.
+            if entry_complexity is None:
+                entry_complexity = classify_complexity(task_goal)
             normalized.append(
                 FleetTask(
                     goal=task_goal,
@@ -94,6 +97,9 @@ def _normalize_tasks(
         if normalized:
             return normalized, base_branches
     if goal and goal.strip():
+        effective_complexity = (
+            complexity if complexity is not None else classify_complexity(goal.strip())
+        )
         return [
             FleetTask(
                 goal=goal.strip(),
@@ -101,7 +107,7 @@ def _normalize_tasks(
                 persona=str(persona or "coder"),
                 workspace=workspace,
                 pipeline=pipeline,
-                complexity=complexity,
+                complexity=effective_complexity,
             )
         ], [None]
     raise ValueError("Provide either 'goal' (single task) or 'tasks' (batch).")

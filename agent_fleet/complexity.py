@@ -110,6 +110,84 @@ _RUNTIME_MAP: dict[str, RuntimeConfig] = {
 }
 
 
+_SCOPE_HIGH: frozenset[str] = frozenset(
+    {
+        "refactor",
+        "migrate",
+        "migration",
+        "rewrite",
+        "architect",
+        "architecture",
+        "redesign",
+        "overhaul",
+        "restructure",
+        "cross-cutting",
+        "cross cutting",
+        "system-wide",
+        "system wide",
+        "entire codebase",
+        "multiple services",
+    }
+)
+
+_SCOPE_LOW: frozenset[str] = frozenset(
+    {
+        "fix typo",
+        "rename",
+        "update comment",
+        "update docs",
+        "add comment",
+        "bump version",
+        "format",
+        "lint",
+        "one-liner",
+        "single line",
+        "small fix",
+        "minor fix",
+        "trivial",
+    }
+)
+
+_WORDS_HIGH = 60  # goal word count threshold → at least MED
+_WORDS_VERY_HIGH = 120  # goal word count threshold → HIGH
+_FILES_MED = 3  # changed_files count thresholds
+_FILES_HIGH = 8
+
+
+def classify_complexity(
+    goal: str,
+    changed_files: list[str] | None = None,
+) -> Complexity:
+    """Derive a Complexity tier from *goal* text and optional scope hints.
+
+    Rules applied in order (first match wins):
+    1. Any HIGH scope keyword in goal → HIGH.
+    2. File count >= _FILES_HIGH or goal word count >= _WORDS_VERY_HIGH → HIGH.
+    3. Any LOW scope keyword in goal AND file count <= 1 AND word count < _WORDS_HIGH → LOW.
+    4. File count >= _FILES_MED or word count >= _WORDS_HIGH → MED.
+    5. Default → LOW.
+    """
+    goal_lower = goal.lower()
+    words = len(goal.split())
+    n_files = len(changed_files) if changed_files else 0
+
+    for kw in _SCOPE_HIGH:
+        if kw in goal_lower:
+            return "HIGH"
+
+    if n_files >= _FILES_HIGH or words >= _WORDS_VERY_HIGH:
+        return "HIGH"
+
+    for kw in _SCOPE_LOW:
+        if kw in goal_lower and n_files <= 1 and words < _WORDS_HIGH:
+            return "LOW"
+
+    if n_files >= _FILES_MED or words >= _WORDS_HIGH:
+        return "MED"
+
+    return "LOW"
+
+
 def coerce_complexity(value: str | None) -> Complexity:
     """Validate and normalise a raw complexity string; default to 'MED'.
 
