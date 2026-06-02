@@ -36,7 +36,7 @@ from agent_fleet.observability.efficiency import changed_lines as _changed_lines
 from agent_fleet.observability.fleet_logger import FleetLogger
 from agent_fleet.observability.run_metrics import build_run_metrics
 from agent_fleet.personas import YamlPersonaResolver
-from agent_fleet.redispatch import dispatch_with_retry
+from agent_fleet.redispatch import RetryPolicy, dispatch_with_retry
 from agent_fleet.repo import RepoConfig, find_repo_config, merge_repo_into_fleet_config
 from agent_fleet.runner import run_full_pipeline
 from agent_fleet.scope_paths import path_under_allowlist
@@ -915,7 +915,7 @@ class FleetDispatcher:
                 dispatch_with_retry(
                     task,
                     dispatch=_run_with_handoff,
-                    max_redispatches=self.config.max_redispatches,
+                    policy=RetryPolicy.from_max_redispatches(self.config.max_redispatches),
                     on_event=self._emit_progress,
                 )
             ]
