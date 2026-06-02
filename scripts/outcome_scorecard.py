@@ -104,6 +104,7 @@ def _parse_file(path: Path) -> dict | None:
     rollup_tokens: int | None = None
     issue_top: int | None = None
     pr_number: int | None = None
+    fleet_version: str | None = None
 
     for e in events:
         if not isinstance(e, dict):
@@ -122,6 +123,13 @@ def _parse_file(path: Path) -> dict | None:
             it = e.get("issue_number")
             if isinstance(it, int):
                 issue_top = it
+
+        if fleet_version is None:
+            d = e.get("data")
+            if isinstance(d, dict):
+                fv = d.get("fleet_version")
+                if isinstance(fv, str) and fv:
+                    fleet_version = fv
 
         phase = e.get("phase")
         if isinstance(phase, str) and phase:
@@ -255,6 +263,7 @@ def _parse_file(path: Path) -> dict | None:
         "pipeline": _infer_pipeline(phases),
         "status": status,
         "success": status == "completed",
+        "version": fleet_version,
         "fix_attempts": fix_attempts,
         "verify_attempts": verify_attempts,
         "verify_failure": verify_failure,
@@ -289,6 +298,7 @@ def _build_summary(rows: list[dict]) -> dict:
             "by_pipeline": {},
             "by_repo_key": {},
             "by_model": {},
+            "by_version": {},
         }
 
     total = len(rows)
@@ -344,6 +354,19 @@ def _build_summary(rows: list[dict]) -> dict:
             }
         return out
 
+    version_groups: dict[str, list[dict]] = {}
+    for r in rows:
+        k = r.get("version") or "unstamped"
+        version_groups.setdefault(k, []).append(r)
+    by_version: dict[str, dict] = {}
+    for k, group in sorted(version_groups.items(), key=lambda x: (x[0] == "unstamped", x[0])):
+        sc = sum(1 for g in group if g["success"])
+        by_version[k] = {
+            "count": len(group),
+            "success_count": sc,
+            "success_rate": round(sc / len(group), 4),
+        }
+
     return {
         "total": total,
         "success_count": success_count,
@@ -355,6 +378,7 @@ def _build_summary(rows: list[dict]) -> dict:
         "by_pipeline": _breakdown("pipeline"),
         "by_repo_key": _breakdown("repo_key"),
         "by_model": _breakdown("model"),
+        "by_version": by_version,
     }
 
 
@@ -416,6 +440,14 @@ def _print_human(rows: list[dict], top_n: int, runs_dir: Path) -> None:
                 f"rate={100*info['success_rate']:>5.1f}%"
             )
 
+    print("\nBy fleet version:")
+    for k, info in s["by_version"].items():
+        print(
+            f"  {k:<30}  count={info['count']:>5}  "
+            f"success={info['success_count']:>5}  "
+            f"rate={100*info['success_rate']:>5.1f}%"
+        )
+
     failures = sorted(
         [r for r in real if not r["success"]],
         key=lambda r: r["tokens_total"],
@@ -433,8 +465,8 @@ def _print_human(rows: list[dict], top_n: int, runs_dir: Path) -> None:
         )
 
     print(
-        "\nNote: no version is stamped in the logs; monthly buckets below use file mtime"
-        " as a proxy, not a per-version measurement."
+        "\nNote: the version axis is available for runs stamped at or after this change;"
+        " unstamped runs fall back to mtime months below."
     )
     buckets: dict[str, list[bool]] = {}
     for r in real:

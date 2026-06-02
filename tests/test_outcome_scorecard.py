@@ -705,3 +705,122 @@ def test_run_end_completed_counts_as_success(tmp_path: Path) -> None:
     assert r["pr_number"] == 201
     assert summary["success_count"] == 1
     assert summary["status_histogram"]["completed"]["count"] == 1
+
+
+def test_version_stamped_run_in_by_version(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "stamped-run.jsonl",
+        [
+            {
+                "run_id": "stamped-run",
+                "event": "run.start",
+                "data": {"title": "stamped test", "fleet_version": "0.12.0"},
+            },
+            {
+                "run_id": "stamped-run",
+                "event": "llm.usage",
+                "phase": "execute",
+                "data": {
+                    "model": "composer-2.5",
+                    "total_tokens": 50000,
+                    "input_tokens": 30000,
+                    "output_tokens": 5000,
+                    "cache_read_tokens": 15000,
+                    "cache_write_tokens": 0,
+                    "duration_s": 30.0,
+                    "agent_id": "a1",
+                },
+            },
+            {
+                "run_id": "stamped-run",
+                "event": "fleet.task.complete",
+                "data": {
+                    "status": "completed",
+                    "task_index": 0,
+                    "persona": "backend",
+                    "duration_seconds": 60.0,
+                    "outcome_metrics": {
+                        "status": "completed",
+                        "fix_attempts": 0,
+                        "verify_attempts": 0,
+                        "repo_key": "agent-fleet",
+                        "issue_number": 0,
+                        "duration_seconds": 60.0,
+                        "changed_files_count": 2,
+                    },
+                    "error": None,
+                    "stderr_snippet": None,
+                },
+            },
+        ],
+    )
+
+    out = _run(tmp_path)
+    r = {x["run_id"]: x for x in out["runs"]}["stamped-run"]
+    assert r["version"] == "0.12.0"
+
+    by_version = out["summary"]["by_version"]
+    assert "0.12.0" in by_version
+    bucket = by_version["0.12.0"]
+    assert bucket["count"] == 1
+    assert bucket["success_count"] == 1
+    assert bucket["success_rate"] == 1.0
+
+
+def test_unstamped_run_in_by_version(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "unstamped-run.jsonl",
+        [
+            {
+                "run_id": "unstamped-run",
+                "event": "run.start",
+                "data": {"title": "no version"},
+            },
+            {
+                "run_id": "unstamped-run",
+                "event": "llm.usage",
+                "phase": "execute",
+                "data": {
+                    "model": "composer-2.5",
+                    "total_tokens": 50000,
+                    "input_tokens": 30000,
+                    "output_tokens": 5000,
+                    "cache_read_tokens": 15000,
+                    "cache_write_tokens": 0,
+                    "duration_s": 30.0,
+                    "agent_id": "a2",
+                },
+            },
+            {
+                "run_id": "unstamped-run",
+                "event": "fleet.task.complete",
+                "data": {
+                    "status": "completed",
+                    "task_index": 0,
+                    "persona": "backend",
+                    "duration_seconds": 60.0,
+                    "outcome_metrics": {
+                        "status": "completed",
+                        "fix_attempts": 0,
+                        "verify_attempts": 0,
+                        "repo_key": "agent-fleet",
+                        "issue_number": 0,
+                        "duration_seconds": 60.0,
+                        "changed_files_count": 2,
+                    },
+                    "error": None,
+                    "stderr_snippet": None,
+                },
+            },
+        ],
+    )
+
+    out = _run(tmp_path)
+    r = {x["run_id"]: x for x in out["runs"]}["unstamped-run"]
+    assert r["version"] is None
+
+    by_version = out["summary"]["by_version"]
+    assert "unstamped" in by_version
+    bucket = by_version["unstamped"]
+    assert bucket["count"] == 1
+    assert bucket["success_count"] == 1
