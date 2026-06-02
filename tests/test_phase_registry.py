@@ -9,7 +9,7 @@ import pytest
 from agent_fleet.config import load_fleet_config
 from agent_fleet.hooks import FleetTask
 from agent_fleet.personas import YamlPersonaResolver
-from agent_fleet.phases import PHASE_REGISTRY, run_pipeline, validate_phases
+from agent_fleet.phases import run_pipeline, validate_phases
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -51,14 +51,14 @@ def test_validate_phases_empty_list_ok() -> None:
 
 
 # ---------------------------------------------------------------------------
-# PHASE_REGISTRY shape
+# Each known phase is accepted by validate_phases
 # ---------------------------------------------------------------------------
 
 
-def test_phase_registry_contains_expected_keys() -> None:
-    assert "execute" in PHASE_REGISTRY
-    assert "analyze" in PHASE_REGISTRY
-    assert "review" in PHASE_REGISTRY
+def test_validate_phases_accepts_each_known_phase() -> None:
+    # Every phase run_pipeline can dispatch must pass validation.
+    for phase in ("execute", "analyze", "review"):
+        validate_phases([phase])
 
 
 # ---------------------------------------------------------------------------

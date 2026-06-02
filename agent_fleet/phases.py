@@ -36,20 +36,19 @@ if TYPE_CHECKING:
     from agent_fleet.level_up.models import DispatchEquip
     from agent_fleet.repo import RepoConfig
 
-# Registry of phase names handled by run_pipeline.  Presence in the dict is
-# the source of truth; the value is unused (None) and exists only to give a
-# dict[str, None] type that callers can introspect.
-PHASE_REGISTRY: dict[str, None] = {"execute": None, "analyze": None, "review": None}
+# The phase names run_pipeline knows how to dispatch.  validate_phases rejects
+# anything outside this set before any agent runs.
+_KNOWN_PHASES: frozenset[str] = frozenset({"execute", "analyze", "review"})
 
 
 def validate_phases(phases: list[str]) -> None:
-    """Raise ValueError if any phase name is not in PHASE_REGISTRY.
+    """Raise ValueError if any phase name is not a known phase.
 
     Call at pipeline-resolve time so unknown names fail before any agent runs.
     """
-    unknown = [p for p in phases if p not in PHASE_REGISTRY]
+    unknown = [p for p in phases if p not in _KNOWN_PHASES]
     if unknown:
-        known = sorted(PHASE_REGISTRY)
+        known = sorted(_KNOWN_PHASES)
         raise ValueError(f"Unknown phase(s) {unknown!r}; known phases are {known}")
 
 
