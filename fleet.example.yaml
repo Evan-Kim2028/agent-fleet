@@ -17,7 +17,7 @@ default_pipeline: simple
 
 # --- Hard-failure redispatch (v0.5.0) ---
 # Number of automatic retries when a task ends in a hard failure (error/expired/timeout/
-# scope_violation/pipeline_nonzero). 1 = one retry, two total attempts. 0 disables.
+# scope_violation). 1 = one retry, two total attempts. 0 disables.
 # Override per-run with: fleet run ... --max-redispatches N
 # Recommended: 0 in CI (fail fast), 1-2 in interactive use.
 max_redispatches: 1

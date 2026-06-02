@@ -17,7 +17,6 @@ _HARD_STATUSES = frozenset(
         "expired",
         "timeout",
         "scope_violation",
-        "pipeline_nonzero",
         "token_ceiling_exceeded",
     }
 )
@@ -33,8 +32,12 @@ class RetryPolicy:
     """Decides whether a failed attempt should be retried.
 
     ``max_attempts`` is the total number of tries (initial + retries), matching
-    ``max_redispatches + 1`` from the legacy flat-int configuration so that the
-    default policy reproduces prior behavior exactly.
+    ``max_redispatches + 1`` from the legacy flat-int configuration.
+
+    Note: this is NOT an exact reproduction of the legacy behavior. Terminal
+    statuses (``scope_violation`` and ``token_ceiling_exceeded``) are never
+    retried regardless of budget — an intentional deviation from the legacy
+    flat-int which had no such exemption.
     """
 
     max_attempts: int = 2
@@ -57,7 +60,12 @@ class RetryPolicy:
 
     @classmethod
     def from_max_redispatches(cls, max_redispatches: int) -> RetryPolicy:
-        """Build a policy equivalent to the legacy ``max_redispatches`` int."""
+        """Build a policy from the legacy ``max_redispatches`` int.
+
+        The attempt budget matches the legacy value (``max_redispatches + 1``
+        total tries), but terminal statuses are never retried — an intentional
+        deviation that the legacy flat-int did not enforce.
+        """
         return cls(max_attempts=max_redispatches + 1)
 
 

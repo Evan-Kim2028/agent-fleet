@@ -85,6 +85,19 @@ def test_fleet_task_complexity_defaults_none() -> None:
     assert task.complexity is None
 
 
+def test_derive_runtime_invalid_loadout_size_raises() -> None:
+    """A misspelled loadout_size in a tier override is rejected, not silently coerced."""
+    with pytest.raises(ValueError, match="Invalid loadout_size"):
+        derive_runtime("LOW", tier_overrides={"LOW": {"loadout_size": "ful"}})
+
+
+def test_derive_runtime_valid_loadout_sizes_accepted() -> None:
+    """All three valid loadout_size values are accepted without error."""
+    for size in ("minimal", "standard", "full"):
+        rt = derive_runtime("MED", tier_overrides={"MED": {"loadout_size": size}})
+        assert rt.loadout_size == size
+
+
 # ---------------------------------------------------------------------------
 # Token ceiling metric (no mid-run abort)
 # ---------------------------------------------------------------------------

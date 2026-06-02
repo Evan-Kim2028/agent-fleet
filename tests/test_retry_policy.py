@@ -68,7 +68,7 @@ def test_success_is_not_retried() -> None:
 
 @pytest.mark.parametrize(
     "status",
-    ["error", "cancelled", "expired", "timeout", "pipeline_nonzero"],
+    ["error", "cancelled", "expired", "timeout"],
 )
 def test_hard_transient_statuses_retry_within_budget(status: str) -> None:
     policy = RetryPolicy(max_attempts=2)
