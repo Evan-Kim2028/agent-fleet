@@ -17,7 +17,6 @@ plus any non-zero `exit_code`:
 | `status = "timeout"` | Fleet-level timeout (`timeout_seconds`) exceeded |
 | `status = "scope_violation"` | Implementer modified files outside the persona allowlist |
 | `status = "token_ceiling_exceeded"` | Observed token usage exceeded the declared-complexity ceiling (enforcement on) |
-| `status = "pipeline_nonzero"` | A phase's underlying command returned non-zero |
 | `exit_code != 0` | Any result where `exit_code` is non-zero |
 
 Most of these share one thing: the failure is **environmental or infrastructural**, not
