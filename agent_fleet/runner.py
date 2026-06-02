@@ -82,7 +82,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-
 def _task_spec_with_browser_research(task_spec: TaskSpec) -> TaskSpec:
     if not task_spec.research_plan:
         return task_spec
@@ -630,9 +629,7 @@ class LocalFleetRunner:
                                 cwd=repo_root,
                                 browser_session_factory=browser_session_factory,
                             )
-                            ctx.phases.setdefault(
-                                "RESEARCH", [n.to_dict() for n in ctx.notes]
-                            )
+                            ctx.phases.setdefault("RESEARCH", [n.to_dict() for n in ctx.notes])
                         _fix_changed = deps.git_ops.changed_files(worktree)
                         _fix_diff = deps.git_ops.diff_summary(worktree)
                         _fix_mem = FixMemory(
@@ -810,9 +807,7 @@ class LocalFleetRunner:
                             cwd=repo_root,
                             browser_session_factory=browser_session_factory,
                         )
-                    ctx.brief = synthesize(
-                        ts, ctx.notes, backend=deps.backend, session=ctx.session
-                    )
+                    ctx.brief = synthesize(ts, ctx.notes, backend=deps.backend, session=ctx.session)
 
                 _ok_facts = RunFacts(
                     verify_ok=True,

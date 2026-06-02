@@ -614,7 +614,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     try:
         config = load_fleet_config(args.config) if args.config else load_fleet_config()
         backend = config.default_backend
-    except (OSError, ValueError, yaml.YAMLError):
+    except OSError, ValueError, yaml.YAMLError:
         pass
     workspace = Path(args.workspace).resolve() if args.workspace else Path.cwd()
     repo_present = find_repo_config(workspace) is not None

@@ -40,10 +40,10 @@ from agent_fleet.personas import YamlPersonaResolver
 from agent_fleet.redispatch import dispatch_with_retry
 from agent_fleet.repo import RepoConfig, find_repo_config, merge_repo_into_fleet_config
 from agent_fleet.runner import run_full_pipeline
+from agent_fleet.scope_paths import path_under_allowlist
 from agent_fleet.telemetry import span as _telemetry_span
 from agent_fleet.verify_core import is_git_repo
 from agent_fleet.worktree import maybe_commit_recoverable_worktree, should_keep_task_worktree
-from agent_fleet.scope_paths import path_under_allowlist
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -730,15 +730,11 @@ class FleetDispatcher:
 
                 # --- allowed_paths enforcement (task-level, not persona-level) ---
                 if task.allowed_paths and changed_files:
-                    scope_root = (
-                        task_workspace.path if task_workspace is not None else workspace
-                    )
+                    scope_root = task_workspace.path if task_workspace is not None else workspace
                     _out_of_scope = [
                         p
                         for p in changed_files
-                        if not path_under_allowlist(
-                            p, task.allowed_paths, worktree=scope_root
-                        )
+                        if not path_under_allowlist(p, task.allowed_paths, worktree=scope_root)
                     ]
                     if _out_of_scope:
                         _n = len(_out_of_scope)

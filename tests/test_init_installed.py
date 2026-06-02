@@ -61,9 +61,7 @@ def test_cmd_init_does_not_depend_on_toplevel_examples(tmp_path: Path) -> None:
     with patch.object(Path, "read_text", _patched_read_text):
         rc = cmd_init(init_args)
 
-    assert rc == 0, (
-        f"cmd_init failed (rc={rc}) — it still depends on the un-packaged examples/ dir"
-    )
+    assert rc == 0, f"cmd_init failed (rc={rc}) — it still depends on the un-packaged examples/ dir"
     assert dest.exists(), ".agent-fleet.yaml was not created"
     content = dest.read_text(encoding="utf-8")
     assert "name:" in content, "generated config missing 'name:' field"
