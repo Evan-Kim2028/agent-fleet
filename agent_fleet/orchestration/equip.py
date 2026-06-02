@@ -17,11 +17,11 @@ from agent_fleet.level_up.models import DispatchEquip
 from agent_fleet.level_up.overlay import compose_overlay_text, load_overlay
 from agent_fleet.level_up.paths import FLEET_TIER, repo_key
 from agent_fleet.skills_lib import (
-    MINIMAL_EXECUTE_SKILL_CORE,
-    PR_LOOP_EXECUTE_SKILLS,
     SYSTEMATIC_DEBUGGING_SKILL,
     base_kit_skill_dirs,
     compose_persona_body,
+    effective_minimal_core,
+    effective_pr_loop_skills,
     load_loadout,
     loadout_execute_skill_ids,
     loadout_review_skill_ids,
@@ -100,7 +100,7 @@ def resolve_dispatch_equip(
         extra_execute.append(SYSTEMATIC_DEBUGGING_SKILL)
 
     if repo is not None and repo.pr_loop is not None and repo.pr_loop.enabled:
-        for skill_id in PR_LOOP_EXECUTE_SKILLS:
+        for skill_id in effective_pr_loop_skills(fleet_config):
             if (
                 skill_exists_in_base_kit(skill_id)
                 and skill_id not in loadout_execute
@@ -118,8 +118,9 @@ def resolve_dispatch_equip(
 
     # Mirror compose_persona_body's minimal filter so the journaled equip matches
     # the skills actually composed into the body (filter the loadout, keep extras).
+    _minimal_core = effective_minimal_core(fleet_config)
     filtered_execute = (
-        [s for s in loadout_execute if s in MINIMAL_EXECUTE_SKILL_CORE]
+        [s for s in loadout_execute if s in _minimal_core]
         if loadout_size == "minimal"
         else loadout_execute
     )
@@ -135,6 +136,7 @@ def resolve_dispatch_equip(
         level_up_generation=generation,
         skill_dirs=skill_dirs,
         loadout_size=loadout_size,
+        minimal_core=_minimal_core,
     )
 
     equip = DispatchEquip(

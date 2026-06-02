@@ -33,6 +33,34 @@ PR_LOOP_EXECUTE_SKILLS: tuple[str, ...] = (
 )
 
 
+def effective_minimal_core(fleet_config: object | None = None) -> frozenset[str]:
+    """Return the effective minimal-execute skill core set.
+
+    When *fleet_config* supplies a ``skills.minimal_core`` list it overrides
+    the Python constant; otherwise ``MINIMAL_EXECUTE_SKILL_CORE`` is returned.
+    """
+    if fleet_config is not None:
+        overrides: dict[str, list[str]] = getattr(fleet_config, "skill_overrides", {}) or {}
+        raw = overrides.get("minimal_core")
+        if raw is not None:
+            return frozenset(raw)
+    return MINIMAL_EXECUTE_SKILL_CORE
+
+
+def effective_pr_loop_skills(fleet_config: object | None = None) -> tuple[str, ...]:
+    """Return the effective PR-loop execute skills.
+
+    When *fleet_config* supplies a ``skills.pr_loop`` list it overrides the
+    Python constant; otherwise ``PR_LOOP_EXECUTE_SKILLS`` is returned.
+    """
+    if fleet_config is not None:
+        overrides: dict[str, list[str]] = getattr(fleet_config, "skill_overrides", {}) or {}
+        raw = overrides.get("pr_loop")
+        if raw is not None:
+            return tuple(raw)
+    return PR_LOOP_EXECUTE_SKILLS
+
+
 def base_kit_dir() -> Path:
     return _BASE_KIT_DIR
 
@@ -151,12 +179,14 @@ def compose_persona_body(
     skill_dirs: list[Path] | None = None,
     level_up_generation: int = 0,
     loadout_size: str | None = None,
+    minimal_core: frozenset[str] | None = None,
 ) -> str:
     """Layer base-kit skills, persona stub, fleet/repo overlays into one prompt body."""
     dirs = skill_dirs or base_kit_skill_dirs()
     skill_ids = _loadout_execute_skill_ids(loadout)
     if loadout_size == "minimal":
-        skill_ids = [s for s in skill_ids if s in MINIMAL_EXECUTE_SKILL_CORE]
+        _core = minimal_core if minimal_core is not None else MINIMAL_EXECUTE_SKILL_CORE
+        skill_ids = [s for s in skill_ids if s in _core]
     if extra_skills:
         skill_ids.extend(extra_skills)
 
