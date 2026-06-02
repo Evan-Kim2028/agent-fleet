@@ -17,6 +17,7 @@ from agent_fleet.fleet_paths import (
     default_runs_dir,
     user_skill_dir,
 )
+from agent_fleet.persona_router import PersonaRoutingConfig, parse_persona_routing
 from agent_fleet.skills_lib import bundled_skill_dirs, merge_skill_dirs
 
 if TYPE_CHECKING:
@@ -73,6 +74,7 @@ class FleetConfig:
     mcp_servers: dict[str, McpServerSpec] = field(default_factory=dict)
     max_redispatches: int = 1
     enforce_token_ceiling: bool = False
+    persona_routing: PersonaRoutingConfig | None = None
 
 
 def _expand_path(value: str) -> Path:
@@ -199,4 +201,5 @@ def load_fleet_config(
         mcp_servers=mcp_catalog,
         max_redispatches=int(data.get("max_redispatches") or 1),
         enforce_token_ceiling=bool(data.get("enforce_token_ceiling", False)),
+        persona_routing=parse_persona_routing(data.get("persona_routing")),
     )

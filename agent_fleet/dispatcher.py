@@ -35,6 +35,7 @@ from agent_fleet.observability.context import get_run_log
 from agent_fleet.observability.efficiency import changed_lines as _changed_lines
 from agent_fleet.observability.fleet_logger import FleetLogger
 from agent_fleet.observability.run_metrics import build_run_metrics
+from agent_fleet.persona_router import PersonaRouter, PersonaRoutingConfig
 from agent_fleet.personas import YamlPersonaResolver
 from agent_fleet.redispatch import RetryPolicy, dispatch_with_retry
 from agent_fleet.repo import RepoConfig, find_repo_config, merge_repo_into_fleet_config
@@ -60,6 +61,25 @@ def _optional_entry_str(value: object | None, fallback: str | None) -> str | Non
     return str(value)
 
 
+def _resolve_persona(
+    explicit: str | None,
+    goal: str,
+    *,
+    router: PersonaRouter | None,
+    fallback: str,
+    scope: str = "",
+) -> str:
+    """Return the persona to use for a task.
+
+    Priority: explicit task persona > routing table > fallback.
+    """
+    if explicit:
+        return explicit
+    if router is not None:
+        return router.route(goal, scope)
+    return fallback
+
+
 def _normalize_tasks(
     *,
     goal: str | None,
@@ -69,7 +89,12 @@ def _normalize_tasks(
     pipeline: str | None,
     tasks: list[dict[str, object]] | None,
     complexity: str | None = None,
+    routing: PersonaRoutingConfig | None = None,
+    default_persona: str = "coder",
 ) -> tuple[list[FleetTask], list[str | None]]:
+    router = PersonaRouter(routing, fallback=default_persona) if routing is not None else None
+    # caller-supplied persona is the fleet-level default; tasks may override per entry
+    caller_persona = persona  # explicit fleet-level persona (may be None)
     base_branches: list[str | None] = []
     if tasks:
         normalized: list[FleetTask] = []
@@ -84,11 +109,20 @@ def _normalize_tasks(
             # Auto-classify when no explicit complexity was declared by the caller.
             if entry_complexity is None:
                 entry_complexity = classify_complexity(task_goal)
+            entry_explicit_persona = _optional_entry_str(entry.get("persona"), caller_persona)
+            entry_scope = str(entry.get("scope") or "")
+            resolved_persona = _resolve_persona(
+                entry_explicit_persona,
+                task_goal,
+                router=router,
+                fallback=default_persona,
+                scope=entry_scope,
+            )
             normalized.append(
                 FleetTask(
                     goal=task_goal,
                     context=str(entry.get("context") or ""),
-                    persona=str(entry.get("persona") or persona or "coder"),
+                    persona=resolved_persona,
                     workspace=_optional_entry_str(entry.get("workspace"), workspace),
                     pipeline=_optional_entry_str(entry.get("pipeline"), pipeline),
                     complexity=entry_complexity,
@@ -100,11 +134,17 @@ def _normalize_tasks(
         effective_complexity = (
             complexity if complexity is not None else classify_complexity(goal.strip())
         )
+        resolved_persona = _resolve_persona(
+            caller_persona,
+            goal.strip(),
+            router=router,
+            fallback=default_persona,
+        )
         return [
             FleetTask(
                 goal=goal.strip(),
                 context=str(context or ""),
-                persona=str(persona or "coder"),
+                persona=resolved_persona,
                 workspace=workspace,
                 pipeline=pipeline,
                 complexity=effective_complexity,
@@ -888,6 +928,8 @@ class FleetDispatcher:
             pipeline=pipeline,
             tasks=tasks,
             complexity=complexity,
+            routing=self.config.persona_routing,
+            default_persona=self.config.default_persona,
         )
         if len(normalized) > self.config.max_parallel:
             raise ValueError(
