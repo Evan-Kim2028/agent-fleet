@@ -12,14 +12,13 @@ if TYPE_CHECKING:
 
 def require_backend_env(config: FleetConfig) -> int | None:
     """Return an exit code when required API keys are missing, else None."""
-    backend_name = config.default_backend.lower()
-    if backend_name == "cursor" and not os.environ.get("CURSOR_API_KEY"):
-        print("error: CURSOR_API_KEY is not set", file=sys.stderr)
-        return 1
-    if backend_name == "kimi" and not os.environ.get("KIMI_API_KEY"):
-        print(
-            "error: KIMI_API_KEY is not set (Kimi Code subscription)",
-            file=sys.stderr,
-        )
+    from agent_fleet.backends import backend_env_var, backend_key_hint
+
+    name = config.default_backend.lower()
+    env = backend_env_var(name)
+    if env and not os.environ.get(env):
+        hint = backend_key_hint(name)
+        suffix = f" ({hint})" if hint else ""
+        print(f"error: {env} is not set{suffix}", file=sys.stderr)
         return 1
     return None

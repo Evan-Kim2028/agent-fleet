@@ -69,22 +69,37 @@ def test_unknown_backend_raises_helpful_error(monkeypatch: pytest.MonkeyPatch) -
     assert "kimi" in str(exc_info.value)
 
 
-def test_doctor_covers_every_registered_backend() -> None:
-    """A registered backend must have a real key check, not a fallback warn.
+def test_builtin_backend_env_vars() -> None:
+    from agent_fleet.backends import backend_env_var
 
-    make_backend resolves any registered backend from one file, but the backend's
-    env-var contract is duplicated as a closed {cursor, kimi} set in doctor,
-    cli_env, and pr_review.github_action. A third backend instantiates yet
-    silently degrades there (doctor warns "unknown backend", the preflights skip
-    its key check). This pins the doctor copy to the registry so that drift fails
-    loudly instead of shipping a half-wired backend.
+    assert backend_env_var("cursor") == "CURSOR_API_KEY"
+    assert backend_env_var("kimi") == "KIMI_API_KEY"
+    assert backend_env_var("unregistered") is None
+
+
+def test_doctor_derives_key_check_from_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """doctor reads each backend's env contract from the registry, one source.
+
+    Registering a backend with an env_var makes doctor check that exact key with
+    no edit to doctor, cli_env, or github_action. This locks the single-source
+    invariant the env-metadata registry establishes: a new backend wires its key
+    contract once, at the register() call.
     """
     from agent_fleet import backends
-    from agent_fleet.doctor import _BACKEND_ENV
+    from agent_fleet.doctor import run_doctor_checks
 
-    missing = set(backends._REGISTRY) - set(_BACKEND_ENV)
-    assert not missing, (
-        f"backends registered but absent from doctor._BACKEND_ENV: {sorted(missing)}. "
-        "Add the env var there (and in cli_env and pr_review.github_action), or wire the "
-        "env contract into the registry so all three derive from one source."
+    backends.register(
+        "fake",
+        lambda _cfg: object(),  # ty: ignore[invalid-argument-type]
+        env_var="FAKE_API_KEY",
+        key_hint="from nowhere",
     )
+    try:
+        monkeypatch.delenv("FAKE_API_KEY", raising=False)
+        checks = run_doctor_checks(backend="fake")
+        match = next((c for c in checks if c.name == "FAKE_API_KEY"), None)
+        assert match is not None
+        assert match.status == "fail"
+        assert "from nowhere" in match.fix
+    finally:
+        backends._REGISTRY.pop("fake", None)

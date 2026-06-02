@@ -18,7 +18,6 @@ from dataclasses import dataclass
 from agent_fleet.fleet_paths import agent_fleet_home
 
 _TARGET_PY = (3, 14)
-_BACKEND_ENV = {"cursor": "CURSOR_API_KEY", "kimi": "KIMI_API_KEY"}
 _STATUS_GLYPH = {"pass": "PASS", "warn": "WARN", "fail": "FAIL"}
 
 
@@ -55,7 +54,9 @@ def _check_python() -> DoctorCheck:
 
 
 def _check_backend_key(backend: str) -> DoctorCheck:
-    env = _BACKEND_ENV.get(backend.lower())
+    from agent_fleet.backends import backend_env_var, backend_key_hint
+
+    env = backend_env_var(backend)
     if env is None:
         return DoctorCheck(
             f"{backend} API key", "warn", f"unknown backend '{backend}'; cannot verify a key"
@@ -63,8 +64,9 @@ def _check_backend_key(backend: str) -> DoctorCheck:
     if os.environ.get(env):
         return DoctorCheck(env, "pass", "set")
     fix = f"export {env}=<your key>"
-    if backend.lower() == "cursor":
-        fix += "  (create one at cursor.com/dashboard)"
+    hint = backend_key_hint(backend)
+    if hint:
+        fix += f"  ({hint})"
     return DoctorCheck(env, "fail", "not set", fix)
 
 
