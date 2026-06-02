@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
 from agent_fleet.contracts.handoff import HandoffNote
@@ -12,6 +13,43 @@ if TYPE_CHECKING:
 _HARD_STATUSES = frozenset(
     {"error", "cancelled", "expired", "timeout", "scope_violation", "pipeline_nonzero"}
 )
+
+# scope_violation is a deterministic outcome: retrying the same task into the same
+# scope constraint will produce the same result. Never retry these.
+_TERMINAL_STATUSES = frozenset({"scope_violation"})
+
+
+@dataclass
+class RetryPolicy:
+    """Decides whether a failed attempt should be retried.
+
+    ``max_attempts`` is the total number of tries (initial + retries), matching
+    ``max_redispatches + 1`` from the legacy flat-int configuration so that the
+    default policy reproduces prior behavior exactly.
+    """
+
+    max_attempts: int = 2
+    # Statuses that are never retried regardless of budget.
+    terminal_statuses: frozenset[str] = field(default_factory=lambda: _TERMINAL_STATUSES)
+
+    def should_retry(self, result: _ResultLike, attempt: int) -> bool:
+        """Return True if ``result`` from ``attempt`` (0-based) should be retried.
+
+        ``attempt`` is the 0-based index of the attempt just completed, so
+        attempt 0 is the first try, attempt 1 is the first retry, etc.
+        """
+        status = getattr(result, "status", "")
+        if status in self.terminal_statuses:
+            return False
+        if not _is_hard_failure(result):
+            return False
+        # attempt is 0-based; max_attempts includes the initial run.
+        return attempt + 1 < self.max_attempts
+
+    @classmethod
+    def from_max_redispatches(cls, max_redispatches: int) -> RetryPolicy:
+        """Build a policy equivalent to the legacy ``max_redispatches`` int."""
+        return cls(max_attempts=max_redispatches + 1)
 
 
 class _ResultLike(Protocol):
@@ -55,21 +93,21 @@ def dispatch_with_retry[T: _ResultLike](
     *,
     dispatch: Callable[..., T],
     max_redispatches: int = 1,
+    policy: RetryPolicy | None = None,
     on_event: Callable[[str, dict[str, object]], None] | None = None,
 ) -> T:
+    effective_policy = policy or RetryPolicy.from_max_redispatches(max_redispatches)
     handoff: HandoffNote | None = None
     result: T | None = None
-    for attempt in range(max_redispatches + 1):
+    for attempt in range(effective_policy.max_attempts):
         if on_event is not None:
             on_event(
                 "redispatch.attempt",
                 {"attempt": attempt, "has_handoff": handoff is not None},
             )
         result = dispatch(task, handoff=handoff)
-        if not _is_hard_failure(result):
+        if not effective_policy.should_retry(result, attempt):
             return result
-        if attempt == max_redispatches:
-            break
         handoff = _extract_handoff(result, previous=handoff)
     assert result is not None
     return result
