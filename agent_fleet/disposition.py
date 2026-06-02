@@ -72,7 +72,8 @@ def decide_disposition(facts: RunFacts, policy: DispositionPolicy) -> Dispositio
             kind=DispositionKind.ABANDON,
             draft=False,
             outcome="scope_violation",
-            reason="scope violation — no changes to salvage" if not facts.changed_files
+            reason="scope violation — no changes to salvage"
+            if not facts.changed_files
             else "scope violation — salvage disabled by policy",
         )
 

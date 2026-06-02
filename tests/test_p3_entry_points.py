@@ -64,9 +64,7 @@ def test_fleet_console_script_in_pyproject() -> None:
     assert "fleet" in content
     # Verify fleet points to the cli module (not some other target)
     lines = [
-        ln.strip()
-        for ln in content.splitlines()
-        if "fleet" in ln and "agent_fleet.cli:main" in ln
+        ln.strip() for ln in content.splitlines() if "fleet" in ln and "agent_fleet.cli:main" in ln
     ]
     assert lines, "No pyproject.toml line matches 'fleet ... agent_fleet.cli:main'"
 
@@ -233,17 +231,14 @@ def test_schedule_shim_and_fleet_schedule_same_output(tmp_path: Path) -> None:
 
     # Standalone adapter: --workspace precedes the subcommand
     standalone = subprocess.run(
-        [sys.executable, "-m", "agent_fleet.schedule.cli",
-         "--workspace", str(tmp_path), "list"],
+        [sys.executable, "-m", "agent_fleet.schedule.cli", "--workspace", str(tmp_path), "list"],
         env=env,
         capture_output=True,
         text=True,
         check=False,
     )
     # Unified CLI: workspace comes after the schedule subcommand
-    unified = _run_fleet(
-        ["schedule", "list", "--workspace", str(tmp_path)], env
-    )
+    unified = _run_fleet(["schedule", "list", "--workspace", str(tmp_path)], env)
 
     assert standalone.returncode == unified.returncode, (
         f"standalone rc={standalone.returncode}, unified rc={unified.returncode}\n"
@@ -251,6 +246,5 @@ def test_schedule_shim_and_fleet_schedule_same_output(tmp_path: Path) -> None:
         f"unified stderr: {unified.stderr!r}"
     )
     assert standalone.stdout.strip() == unified.stdout.strip(), (
-        f"standalone: {standalone.stdout!r}\n"
-        f"unified:    {unified.stdout!r}"
+        f"standalone: {standalone.stdout!r}\nunified:    {unified.stdout!r}"
     )

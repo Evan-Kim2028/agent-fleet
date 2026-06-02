@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _opts(
     workspace_arg: str | None = None,
     config_arg: str | None = None,
@@ -183,9 +184,7 @@ def test_personas_dir_from_repo_true_applies_repo_personas_dir(tmp_path: Path) -
     repo_yaml = tmp_path / ".agent-fleet.yaml"
     repo_yaml.write_text(f"personas_dir: {personas}\n", encoding="utf-8")
 
-    ctx, err = build_fleet_context(
-        _opts(workspace_arg=str(tmp_path), personas_dir_from_repo=True)
-    )
+    ctx, err = build_fleet_context(_opts(workspace_arg=str(tmp_path), personas_dir_from_repo=True))
     assert err is None
     assert ctx is not None
     assert ctx.config.personas_dir == personas
@@ -203,9 +202,7 @@ def test_personas_dir_from_repo_false_does_not_apply(tmp_path: Path) -> None:
 
     fleet_personas = _lfc().personas_dir
 
-    ctx, err = build_fleet_context(
-        _opts(workspace_arg=str(tmp_path), personas_dir_from_repo=False)
-    )
+    ctx, err = build_fleet_context(_opts(workspace_arg=str(tmp_path), personas_dir_from_repo=False))
     assert err is None
     assert ctx is not None
     assert ctx.config.personas_dir == fleet_personas
@@ -231,9 +228,7 @@ def test_use_env_target_config_false_ignores_env(
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
-    ctx, err = build_fleet_context(
-        _opts(workspace_arg=str(workspace), use_env_target_config=False)
-    )
+    ctx, err = build_fleet_context(_opts(workspace_arg=str(workspace), use_env_target_config=False))
     assert err is None
     assert ctx is not None
     # repo must be None (no .agent-fleet.yaml in workspace) — env var ignored
@@ -254,9 +249,7 @@ def test_use_env_target_config_true_honours_env(
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
-    ctx, err = build_fleet_context(
-        _opts(workspace_arg=str(workspace), use_env_target_config=True)
-    )
+    ctx, err = build_fleet_context(_opts(workspace_arg=str(workspace), use_env_target_config=True))
     assert err is None
     assert ctx is not None
     assert ctx.repo is not None

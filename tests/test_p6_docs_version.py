@@ -98,13 +98,9 @@ def test_readme_no_agent_fleet_run_command() -> None:
     # Allow agent-fleet as a package reference (e.g. git+https://...agent-fleet.git)
     # but not as a CLI invocation: 'agent-fleet run', 'agent-fleet doctor', etc.
     _cmds = r"(run|doctor|personas|review|loop|watch|schedule|dispatch|summon|init)"
-    bad_cli_pattern = re.compile(
-        rf"^\s*(uv run )?agent-fleet {_cmds}\b", re.MULTILINE
-    )
+    bad_cli_pattern = re.compile(rf"^\s*(uv run )?agent-fleet {_cmds}\b", re.MULTILINE)
     matches = bad_cli_pattern.findall(readme)
-    assert not matches, (
-        f"README still contains old 'agent-fleet <cmd>' CLI invocations: {matches}"
-    )
+    assert not matches, f"README still contains old 'agent-fleet <cmd>' CLI invocations: {matches}"
 
 
 # ---------------------------------------------------------------------------
@@ -237,14 +233,17 @@ def test_personas_uses_fleet_personas() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("doc", [
-    "README.md",
-    "docs/QUICKSTART.md",
-    "docs/NEW-REPO.md",
-    "docs/FLEET-CONFIG.md",
-    "docs/PERSONAS.md",
-    "docs/SCHEDULES.md",
-])
+@pytest.mark.parametrize(
+    "doc",
+    [
+        "README.md",
+        "docs/QUICKSTART.md",
+        "docs/NEW-REPO.md",
+        "docs/FLEET-CONFIG.md",
+        "docs/PERSONAS.md",
+        "docs/SCHEDULES.md",
+    ],
+)
 def test_no_migration_table(doc: str) -> None:
     """Docs must not contain old→new migration tables (per locked decision)."""
     content = (ROOT / doc).read_text(encoding="utf-8")
@@ -256,9 +255,7 @@ def test_no_migration_table(doc: str) -> None:
         re.IGNORECASE | re.MULTILINE,
     )
     matches = bad_pattern.findall(content)
-    assert not matches, (
-        f"{doc} appears to contain a migration table: {matches[:3]}"
-    )
+    assert not matches, f"{doc} appears to contain a migration table: {matches[:3]}"
 
 
 # ---------------------------------------------------------------------------

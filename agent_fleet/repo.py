@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -10,6 +11,8 @@ import yaml
 
 from agent_fleet.level_up.config import LevelUpConfig, load_level_up_config
 from agent_fleet.pr_review.config import PrReviewConfig, load_pr_review_config
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from agent_fleet.capacity.config import FleetCapacity
@@ -181,6 +184,12 @@ def load_repo_config(
         for entry in raw.get("targets") or []:
             if isinstance(entry, dict) and entry.get("config"):
                 target_path = (config_root / str(entry["config"])).resolve()
+                if not target_path.exists():
+                    # Per-target configs are kept local and gitignored, so a
+                    # fresh checkout legitimately has none. Skip the missing
+                    # ones instead of failing the whole controller load.
+                    logger.warning("target config not found, skipping: %s", target_path)
+                    continue
                 target_configs.append(load_repo_config(target_path, controller_root=config_root))
 
     return RepoConfig(

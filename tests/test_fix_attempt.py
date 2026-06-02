@@ -268,9 +268,7 @@ class TestWarmContinuationStrategy:
         existing_session = MagicMock()
 
         with (
-            patch(
-                "agent_fleet.fix_attempt.create_fleet_session"
-            ) as mock_create,
+            patch("agent_fleet.fix_attempt.create_fleet_session") as mock_create,
             patch("agent_fleet.fix_attempt.synthesize", return_value=mock_brief),
             patch("agent_fleet.fix_attempt.implement"),
         ):

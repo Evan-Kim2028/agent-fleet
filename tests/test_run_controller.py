@@ -42,6 +42,7 @@ from agent_fleet.runner import LocalFleetRunner
 # Helper: build a usage_rollup dict that matches the RunLog snapshot shape
 # ---------------------------------------------------------------------------
 
+
 def _usage_rollup(
     *,
     total_tokens: int,
@@ -195,6 +196,7 @@ def test_threshold_controller(
 # _build_run_metrics helper
 # ---------------------------------------------------------------------------
 
+
 def test_build_run_metrics_computes_ratio() -> None:
     rollup = _usage_rollup(total_tokens=1000, fix_tokens=700)
     m = _build_run_metrics(rollup, verify_attempts=3)
@@ -262,7 +264,6 @@ class _FakeForge:
     def get_labels(self, issue_or_pr: int) -> list[str]:
         del issue_or_pr
         return []
-
 
 
 class _ImmediateHaltController:

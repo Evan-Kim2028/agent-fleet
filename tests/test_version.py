@@ -18,9 +18,7 @@ def test_version_flag_exits_0(capsys: pytest.CaptureFixture[str]) -> None:
 
     with pytest.raises(SystemExit) as exc:
         main(["--version"])
-    assert exc.value.code == 0, (
-        f"expected exit code 0 for --version, got {exc.value.code!r}"
-    )
+    assert exc.value.code == 0, f"expected exit code 0 for --version, got {exc.value.code!r}"
     out = capsys.readouterr().out
     assert agent_fleet.__version__ in out, (
         f"version string {agent_fleet.__version__!r} not found in stdout: {out!r}"
@@ -36,9 +34,7 @@ def test_version_flag_includes_program_name(capsys: pytest.CaptureFixture[str]) 
     assert exc.value.code == 0
     out = capsys.readouterr().out
     # Accept either "fleet" or "agent-fleet" as the program prefix.
-    assert "fleet" in out.lower(), (
-        f"expected 'fleet' in --version output, got: {out!r}"
-    )
+    assert "fleet" in out.lower(), f"expected 'fleet' in --version output, got: {out!r}"
 
 
 def test_normalize_argv_version_flag_passthrough() -> None:
