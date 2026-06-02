@@ -67,6 +67,7 @@ def _resolve_persona(
     *,
     router: PersonaRouter | None,
     fallback: str,
+    scope: str = "",
 ) -> str:
     """Return the persona to use for a task.
 
@@ -75,7 +76,7 @@ def _resolve_persona(
     if explicit:
         return explicit
     if router is not None:
-        return router.route(goal)
+        return router.route(goal, scope)
     return fallback
 
 
@@ -109,11 +110,13 @@ def _normalize_tasks(
             if entry_complexity is None:
                 entry_complexity = classify_complexity(task_goal)
             entry_explicit_persona = _optional_entry_str(entry.get("persona"), caller_persona)
+            entry_scope = str(entry.get("scope") or "")
             resolved_persona = _resolve_persona(
                 entry_explicit_persona,
                 task_goal,
                 router=router,
                 fallback=default_persona,
+                scope=entry_scope,
             )
             normalized.append(
                 FleetTask(

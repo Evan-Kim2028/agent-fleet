@@ -210,6 +210,42 @@ def test_normalize_absent_routing_no_persona_uses_coder() -> None:
     assert tasks[0].persona == "coder"
 
 
+def test_normalize_scope_prefix_routing_threaded_through_batch() -> None:
+    """scope_prefix rule must fire when a batch task entry carries a scope field."""
+    routing = PersonaRoutingConfig(
+        rules=[RoutingRule(persona="data-eng", scope_prefix="packages/data")]
+    )
+    tasks, _ = _normalize_tasks(
+        goal=None,
+        context=None,
+        persona=None,
+        workspace=None,
+        pipeline=None,
+        tasks=[{"goal": "Fix the pipeline", "scope": "packages/data/etl.py"}],
+        routing=routing,
+        default_persona="coder",
+    )
+    assert tasks[0].persona == "data-eng"
+
+
+def test_normalize_scope_prefix_routing_no_match_uses_fallback() -> None:
+    """scope_prefix rule must NOT fire when the task scope does not match."""
+    routing = PersonaRoutingConfig(
+        rules=[RoutingRule(persona="data-eng", scope_prefix="packages/data")]
+    )
+    tasks, _ = _normalize_tasks(
+        goal=None,
+        context=None,
+        persona=None,
+        workspace=None,
+        pipeline=None,
+        tasks=[{"goal": "Fix the UI button", "scope": "packages/ui/button.tsx"}],
+        routing=routing,
+        default_persona="coder",
+    )
+    assert tasks[0].persona == "coder"
+
+
 # ---------------------------------------------------------------------------
 # Load from config
 # ---------------------------------------------------------------------------
