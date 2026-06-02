@@ -966,17 +966,32 @@ class FleetDispatcher:
                 )
             ]
 
+        def _run_task_with_retry(idx: int, task: FleetTask) -> FleetTaskResult:
+            def _dispatch(
+                t: FleetTask,
+                *,
+                handoff: HandoffNote | None = None,
+            ) -> FleetTaskResult:
+                return self._execute_task(
+                    idx,
+                    t,
+                    batch_size=batch_size,
+                    same_workspace_tasks=workspace_counts[self._workspace_key(t)],
+                    base_branch=base_branches[idx] if idx < len(base_branches) else None,
+                    handoff=handoff,
+                )
+
+            return dispatch_with_retry(
+                task,
+                dispatch=_dispatch,
+                policy=RetryPolicy.from_max_redispatches(self.config.max_redispatches),
+                on_event=self._emit_progress,
+            )
+
         results: list[FleetTaskResult | None] = [None] * batch_size
         with ThreadPoolExecutor(max_workers=batch_size) as pool:
             futures = {
-                pool.submit(
-                    self._execute_task,
-                    idx,
-                    task,
-                    batch_size=batch_size,
-                    same_workspace_tasks=workspace_counts[self._workspace_key(task)],
-                    base_branch=base_branches[idx] if idx < len(base_branches) else None,
-                ): idx
+                pool.submit(_run_task_with_retry, idx, task): idx
                 for idx, task in enumerate(normalized)
             }
             for future in as_completed(futures):

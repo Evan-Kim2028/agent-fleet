@@ -171,3 +171,49 @@ def test_fleet_dispatcher_does_not_retry_scope_violation(
     assert len(results) == 1
     assert results[0].status == "scope_violation"
     assert call_count == 1  # terminal: no retry despite budget=3
+
+
+# ---------------------------------------------------------------------------
+# Dispatcher-level: batch (parallel) tasks retry hard failures like single tasks
+# ---------------------------------------------------------------------------
+
+
+def test_fleet_dispatcher_batch_retries_hard_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A batch (>1 task) must retry a hard transient failure, same as a single task.
+
+    Before the fix, the batch path submitted ``_execute_task`` raw to the thread
+    pool with no ``dispatch_with_retry`` wrapper, so a transient failure in a
+    parallel run was returned permanently while the identical task run alone
+    would have retried.
+    """
+    from agent_fleet.config import load_fleet_config
+    from agent_fleet.dispatcher import FleetDispatcher
+
+    call_counts: dict[int, int] = {}
+
+    def fake_execute_task(self, task_index, task, **kwargs):  # noqa: ANN001, ANN003, ANN202, ARG001
+        attempt = call_counts.get(task_index, 0) + 1
+        call_counts[task_index] = attempt
+        if attempt == 1:
+            return FakeResult(status="error", exit_code=1)
+        return FakeResult(status="completed")
+
+    monkeypatch.setattr(FleetDispatcher, "_execute_task", fake_execute_task)
+
+    fc = load_fleet_config(ROOT / "fleet.example.yaml")
+    fc.max_redispatches = 2
+    dispatcher = FleetDispatcher(config=fc)
+
+    results = dispatcher.dispatch(
+        tasks=[
+            {"goal": "batch task a", "persona": "coder", "workspace": str(ROOT)},
+            {"goal": "batch task b", "persona": "coder", "workspace": str(ROOT)},
+        ],
+    )
+
+    assert len(results) == 2
+    assert {r.status for r in results} == {"completed"}
+    # Each task: first attempt failed (error), redispatch succeeded → 2 calls each.
+    assert call_counts == {0: 2, 1: 2}
