@@ -6,8 +6,15 @@ from __future__ import annotations
 
 import contextlib
 import time
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+try:
+    _FLEET_VERSION = _pkg_version("agent-fleet")
+except PackageNotFoundError:
+    _FLEET_VERSION = "unknown"
 
 from agent_fleet.config import default_runs_dir
 from agent_fleet.observability.context import bind_phase, get_run_context
@@ -56,6 +63,7 @@ class RunLog:
         self._usage_by_phase: dict[str, dict[str, int]] = {}
         self._usage_rollup_emitted: bool = False
         self._last_usage_rollup: dict[str, Any] | None = None
+        self._version_stamped: bool = False
 
     @classmethod
     def create(
@@ -99,6 +107,10 @@ class RunLog:
         phase: str | None = None,
         data: dict[str, Any] | None = None,
     ) -> FleetEvent:
+        # Stamp fleet_version on the first event so the scorecard can attribute every run.
+        if not self._version_stamped:
+            data = {**(data or {}), "fleet_version": _FLEET_VERSION}
+            self._version_stamped = True
         ctx = get_run_context() or self.context
         fleet_event = FleetEvent.now(
             run_id=self.run_id,

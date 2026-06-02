@@ -296,6 +296,29 @@ def test_changed_lines_non_git_dir(tmp_path: Path) -> None:
     assert changed_lines(tmp_path) == 0
 
 
+def test_fleet_version_stamped_on_first_event_only(tmp_path: Path) -> None:
+    import importlib.metadata
+
+    expected_version = importlib.metadata.version("agent-fleet")
+    ring = MemoryRingSink(max_events=10)
+    run_log = RunLog.create(
+        run_id="version-stamp-test",
+        runs_dir=tmp_path,
+        include_memory_ring=False,
+    )
+    run_log._sinks = [ring]
+
+    run_log.emit("run.start", data={"title": "test"})
+    run_log.emit("run.end", data={"outcome": "completed"})
+
+    events = list(ring.events)
+    assert len(events) == 2
+    assert events[0].data is not None
+    assert events[0].data.get("fleet_version") == expected_version
+    assert events[1].data is not None
+    assert "fleet_version" not in events[1].data
+
+
 def test_changed_lines_none() -> None:
     assert changed_lines(None) == 0
 
