@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import time
 from typing import TYPE_CHECKING
@@ -22,6 +23,26 @@ def _format_failure(headline: str, proc: subprocess.CompletedProcess[str]) -> st
     if not detail:
         return f"{headline}\nexit={proc.returncode}"
     return f"{headline}\nexit={proc.returncode}\n{detail}"
+
+
+_FAILED_RE = re.compile(r"^(?:FAILED|ERROR)\s+(\S+)", re.MULTILINE)
+
+
+def _parse_failed_ids(stdout: str, stderr: str, returncode: int) -> frozenset[str] | None:
+    """Parse pytest failing node-ids from a command's output.
+
+    Returns an empty set when the command passed, the set of failing node-ids
+    when the pytest summary can be parsed, or ``None`` for an opaque failure
+    (non-zero exit with no parseable node-ids, e.g. a lint error or a collection
+    crash). Tokens without a ``.py`` segment are dropped so generic ``ERROR``
+    log lines are not mistaken for tests.
+    """
+    if returncode == 0:
+        return frozenset()
+    ids = frozenset(
+        tok for m in _FAILED_RE.finditer(f"{stdout}\n{stderr}") if ".py" in (tok := m.group(1))
+    )
+    return ids or None
 
 
 class CommandVerifier:
@@ -99,8 +120,9 @@ class CommandVerifier:
                 ),
             )
 
-        verify_commands_ran = bool(self.repo.verify_commands)
-        for cmd in self.repo.verify_commands:
+        commands = self.repo.verify_commands_for(persona)
+        verify_commands_ran = bool(commands)
+        for cmd in commands:
             proc = subprocess.run(
                 cmd,
                 shell=True,
@@ -179,12 +201,28 @@ class CommandVerifier:
                     if rerun_proc.returncode == 0:
                         continue
                     proc = rerun_proc
+                preexisting, new_ids = self._preexisting_only(worktree, cmd, verify_env, proc)
+                if preexisting:
+                    checks[-1]["passed"] = True
+                    checks[-1]["attributed_preexisting"] = True
+                    emit_fleet_event(
+                        "verify.preexisting_skipped",
+                        data={"command": cmd, "exit_code": proc.returncode},
+                    )
+                    continue
+                headline = f"Verification failed: {cmd}"
+                if new_ids:
+                    shown = ", ".join(sorted(new_ids)[:20])
+                    headline = (
+                        f"Verification failed: {cmd}\n"
+                        f"New failures introduced by this change ({len(new_ids)}): {shown}"
+                    )
                 return VerifyResult(
                     severity=VerifySeverity.RETRY,
                     checks=checks,
                     violating_paths=[],
                     files_changed=rel_changed,
-                    message=_format_failure(f"Verification failed: {cmd}", proc),
+                    message=_format_failure(headline, proc),
                 )
 
         if not verify_commands_ran:
@@ -202,7 +240,7 @@ class CommandVerifier:
                     message=f"Modified protected paths: {', '.join(blocked)}",
                 )
 
-        if not self.repo.verify_commands and not rel_changed:
+        if not commands and not rel_changed:
             return VerifyResult(
                 severity=VerifySeverity.OK,
                 checks=checks,
@@ -218,3 +256,68 @@ class CommandVerifier:
             files_changed=rel_changed,
             message="All verification checks passed",
         )
+
+    def _preexisting_only(
+        self,
+        worktree: Path,
+        cmd: str,
+        env: dict[str, str],
+        head_proc: subprocess.CompletedProcess[str],
+    ) -> tuple[bool, frozenset[str]]:
+        """Re-run a failed command against the base tree to attribute failures.
+
+        Stashes the agent's uncommitted edits, re-runs *cmd*, then restores them,
+        so failures already present without this change do not block. Returns
+        ``(is_preexisting_only, newly_introduced_ids)``. Falls back to a
+        conservative block (``False``) when no base can be established (a clean
+        tree, a stash failure, or any git error), preserving prior behavior.
+        """
+        try:
+            status = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=str(worktree),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if not status.stdout.strip():
+                return False, frozenset()
+            stash = subprocess.run(
+                ["git", "stash", "push", "--include-untracked", "--quiet"],
+                cwd=str(worktree),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if stash.returncode != 0:
+                return False, frozenset()
+            try:
+                base_proc = subprocess.run(
+                    cmd,
+                    shell=True,
+                    cwd=str(worktree),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    env=env,
+                )
+            finally:
+                subprocess.run(
+                    ["git", "stash", "pop", "--quiet"],
+                    cwd=str(worktree),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+        except Exception:
+            return False, frozenset()
+
+        head_ids = _parse_failed_ids(head_proc.stdout, head_proc.stderr, head_proc.returncode)
+        base_ids = _parse_failed_ids(base_proc.stdout, base_proc.stderr, base_proc.returncode)
+        if head_ids is not None and base_ids is not None:
+            new = head_ids - base_ids
+            return (not new), new
+        # No parseable node-ids (lint, a collection crash). Fall back to exit codes.
+        if base_proc.returncode == 0:
+            return False, frozenset()
+        return True, frozenset()
