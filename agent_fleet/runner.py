@@ -952,7 +952,12 @@ class LocalFleetRunner:
         )
         # Derive runtime parameters from complexity.  Falls back to the
         # FleetRunConfig value when no complexity is declared.
-        _runtime = derive_runtime(task_complexity)
+        _runtime = derive_runtime(
+            task_complexity,
+            tier_overrides=(self._fleet_config.complexity_tiers or None)
+            if self._fleet_config is not None
+            else None,
+        )
         effective_max_retries = (
             _runtime.retries if task_complexity is not None else self._config.max_verify_retries
         )

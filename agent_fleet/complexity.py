@@ -201,14 +201,33 @@ def coerce_complexity(value: str | None) -> Complexity:
     return cast("Complexity", upper)
 
 
-def derive_runtime(complexity: Complexity | str | None) -> RuntimeConfig:
+def derive_runtime(
+    complexity: Complexity | str | None,
+    *,
+    tier_overrides: dict[str, dict[str, Any]] | None = None,
+) -> RuntimeConfig:
     """Return the ``RuntimeConfig`` for *complexity*.
 
     Accepts ``None`` (treated as ``'MED'``) or any casing of the three valid
     levels.  Raises ``ValueError`` for other inputs.
+
+    *tier_overrides* may supply per-tier field overrides from fleet/repo config
+    (e.g. ``{"LOW": {"token_ceiling": 2_000_000}}``).  Only the keys present in
+    the override are changed; the Python defaults fill the rest.
     """
     level = coerce_complexity(complexity)
-    return _RUNTIME_MAP[level]
+    base = _RUNTIME_MAP[level]
+    if tier_overrides and level in tier_overrides:
+        raw = tier_overrides[level]
+        base = RuntimeConfig(
+            pipeline=str(raw["pipeline"]) if "pipeline" in raw else base.pipeline,
+            retries=int(raw["retries"]) if "retries" in raw else base.retries,
+            token_ceiling=int(raw["token_ceiling"])
+            if "token_ceiling" in raw
+            else base.token_ceiling,
+            loadout_size=str(raw["loadout_size"]) if "loadout_size" in raw else base.loadout_size,
+        )
+    return base
 
 
 def is_actionable_stderr(stderr: str, written_files: tuple[str, ...] | list[str]) -> bool:

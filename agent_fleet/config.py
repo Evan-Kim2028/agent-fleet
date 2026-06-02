@@ -75,6 +75,11 @@ class FleetConfig:
     max_redispatches: int = 1
     enforce_token_ceiling: bool = False
     persona_routing: PersonaRoutingConfig | None = None
+    # Per-tier runtime overrides: merged over the Python _RUNTIME_MAP defaults.
+    # Keys are "LOW"/"MED"/"HIGH"; values are partial RuntimeConfig field dicts.
+    complexity_tiers: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Skill-set overrides: keys "minimal_core" (list[str]) and "pr_loop" (list[str]).
+    skill_overrides: dict[str, list[str]] = field(default_factory=dict)
 
 
 def _expand_path(value: str) -> Path:
@@ -141,6 +146,41 @@ def _parse_persona_specs(
     return specs
 
 
+_VALID_TIER_KEYS = frozenset({"LOW", "MED", "HIGH"})
+_VALID_TIER_FIELDS = frozenset({"pipeline", "retries", "token_ceiling", "loadout_size"})
+
+
+def _parse_complexity_tiers(raw: Any) -> dict[str, dict[str, Any]]:  # noqa: ANN401
+    """Parse ``complexity_tiers`` YAML block into per-tier override dicts.
+
+    Only known tier names (LOW/MED/HIGH) and known fields are kept; unknown
+    keys are silently dropped to avoid hard failures on forward-compat config.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    for tier, fields in raw.items():
+        key = str(tier).strip().upper()
+        if key not in _VALID_TIER_KEYS or not isinstance(fields, dict):
+            continue
+        result[key] = {k: v for k, v in fields.items() if k in _VALID_TIER_FIELDS}
+    return result
+
+
+def _parse_skill_overrides(raw: Any) -> dict[str, list[str]]:  # noqa: ANN401
+    """Parse ``skills`` YAML block into a dict with optional ``minimal_core``
+    and ``pr_loop`` lists.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, list[str]] = {}
+    for key in ("minimal_core", "pr_loop"):
+        value = raw.get(key)
+        if isinstance(value, list):
+            result[key] = [str(s) for s in value]
+    return result
+
+
 def load_fleet_config(
     path: Path | str | None = None,
     *,
@@ -202,4 +242,6 @@ def load_fleet_config(
         max_redispatches=int(data.get("max_redispatches") or 1),
         enforce_token_ceiling=bool(data.get("enforce_token_ceiling", False)),
         persona_routing=parse_persona_routing(data.get("persona_routing")),
+        complexity_tiers=_parse_complexity_tiers(data.get("complexity_tiers")),
+        skill_overrides=_parse_skill_overrides(data.get("skills")),
     )

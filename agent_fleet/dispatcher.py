@@ -671,7 +671,10 @@ class FleetDispatcher:
 
                 # Derive runtime parameters from complexity.  If the task also
                 # carries an explicit pipeline override, warn and discard it.
-                runtime = derive_runtime(task.complexity)
+                runtime = derive_runtime(
+                    task.complexity,
+                    tier_overrides=self.config.complexity_tiers or None,
+                )
                 if task.complexity is not None and task.pipeline is not None:
                     logger.warning(
                         "Task has both complexity=%r and pipeline=%r; "
