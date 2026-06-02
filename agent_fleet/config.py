@@ -153,8 +153,9 @@ _VALID_TIER_FIELDS = frozenset({"pipeline", "retries", "token_ceiling", "loadout
 def _parse_complexity_tiers(raw: Any) -> dict[str, dict[str, Any]]:  # noqa: ANN401
     """Parse ``complexity_tiers`` YAML block into per-tier override dicts.
 
-    Only known tier names (LOW/MED/HIGH) and known fields are kept; unknown
-    keys are silently dropped to avoid hard failures on forward-compat config.
+    Unknown tier names (not LOW/MED/HIGH) are silently ignored for forward
+    compatibility.  Unknown field keys within a known tier raise ``ValueError``
+    so typos are surfaced immediately rather than silently dropped.
     """
     if not isinstance(raw, dict):
         return {}
@@ -163,7 +164,13 @@ def _parse_complexity_tiers(raw: Any) -> dict[str, dict[str, Any]]:  # noqa: ANN
         key = str(tier).strip().upper()
         if key not in _VALID_TIER_KEYS or not isinstance(fields, dict):
             continue
-        result[key] = {k: v for k, v in fields.items() if k in _VALID_TIER_FIELDS}
+        unknown = set(fields) - _VALID_TIER_FIELDS
+        if unknown:
+            raise ValueError(
+                f"complexity_tiers[{key!r}] contains unknown field(s) {sorted(unknown)}; "
+                f"valid fields: {sorted(_VALID_TIER_FIELDS)}"
+            )
+        result[key] = dict(fields)
     return result
 
 
