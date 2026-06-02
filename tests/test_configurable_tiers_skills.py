@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from agent_fleet.complexity import _RUNTIME_MAP, RuntimeConfig, derive_runtime
 from agent_fleet.config import load_fleet_config
 from agent_fleet.skills_lib import (
@@ -225,7 +227,7 @@ def test_absent_yaml_tier_override_preserves_defaults(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Parse helpers: invalid/unknown keys silently dropped
+# Parse helpers: unknown tier names dropped, unknown fields raise
 # ---------------------------------------------------------------------------
 
 
@@ -241,13 +243,26 @@ def test_parse_complexity_tiers_unknown_tier_ignored(tmp_path: Path) -> None:
     assert fc.complexity_tiers["LOW"]["retries"] == 2
 
 
-def test_parse_complexity_tiers_unknown_field_ignored(tmp_path: Path) -> None:
-    """Unknown field names within a tier are silently dropped."""
+def test_parse_complexity_tiers_unknown_field_raises(tmp_path: Path) -> None:
+    """Unknown field names within a tier raise ValueError (typo surfaced at load time)."""
     cfg_file = tmp_path / "fleet.yaml"
     cfg_file.write_text(
         "complexity_tiers:\n  MED:\n    token_ceiling: 3000000\n    unknown_field: oops\n",
         encoding="utf-8",
     )
-    fc = load_fleet_config(cfg_file)
-    assert "unknown_field" not in fc.complexity_tiers.get("MED", {})
-    assert fc.complexity_tiers["MED"]["token_ceiling"] == 3_000_000
+    with pytest.raises(ValueError, match="unknown_field"):
+        load_fleet_config(cfg_file)
+
+
+def test_parse_complexity_tiers_unknown_field_message_names_valid_fields(
+    tmp_path: Path,
+) -> None:
+    """ValueError message lists the valid fields so the user knows how to fix it."""
+    cfg_file = tmp_path / "fleet.yaml"
+    cfg_file.write_text(
+        "complexity_tiers:\n  LOW:\n    retriees: 2\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="retriees") as exc_info:
+        load_fleet_config(cfg_file)
+    assert "pipeline" in str(exc_info.value)
