@@ -587,6 +587,8 @@ class FleetDispatcher:
 
             token = None
             task_workspace = None
+            run_workspace: Path | None = None
+            phase_results: list[dict[str, object]] = []
             try:
                 token = self._gate.acquire_token(depth=depth)
             except AdmissionDenied:
@@ -701,7 +703,6 @@ class FleetDispatcher:
                 )
                 task = replace(task, equip=equip)
 
-                phase_results: list[dict[str, object]] = []
                 if task_workspace is not None and task_workspace.isolated:
                     phase_results.append(
                         {
