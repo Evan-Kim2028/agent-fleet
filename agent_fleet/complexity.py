@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 Complexity = Literal["LOW", "MED", "HIGH"]
 _VALID: frozenset[str] = frozenset({"LOW", "MED", "HIGH"})
 
+LoadoutSize = Literal["minimal", "standard", "full"]
+_VALID_LOADOUT_SIZES: frozenset[str] = frozenset({"minimal", "standard", "full"})
+
 
 @dataclass(frozen=True)
 class TokenCeilingBreach:
@@ -85,7 +88,7 @@ class RuntimeConfig:
     pipeline: str
     retries: int
     token_ceiling: int
-    loadout_size: str
+    loadout_size: LoadoutSize
 
 
 _RUNTIME_MAP: dict[str, RuntimeConfig] = {
@@ -219,13 +222,23 @@ def derive_runtime(
     base = _RUNTIME_MAP[level]
     if tier_overrides and level in tier_overrides:
         raw = tier_overrides[level]
+        if "loadout_size" in raw:
+            raw_ls = str(raw["loadout_size"])
+            if raw_ls not in _VALID_LOADOUT_SIZES:
+                raise ValueError(
+                    f"Invalid loadout_size {raw_ls!r} in tier override for {level!r}. "
+                    f"Must be one of {sorted(_VALID_LOADOUT_SIZES)}."
+                )
+            loadout_size: LoadoutSize = cast("LoadoutSize", raw_ls)
+        else:
+            loadout_size = base.loadout_size
         base = RuntimeConfig(
             pipeline=str(raw["pipeline"]) if "pipeline" in raw else base.pipeline,
             retries=int(raw["retries"]) if "retries" in raw else base.retries,
             token_ceiling=int(raw["token_ceiling"])
             if "token_ceiling" in raw
             else base.token_ceiling,
-            loadout_size=str(raw["loadout_size"]) if "loadout_size" in raw else base.loadout_size,
+            loadout_size=loadout_size,
         )
     return base
 
