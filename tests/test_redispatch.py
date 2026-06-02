@@ -30,6 +30,7 @@ class FakeResult:
         ("expired", 1, True),
         ("timeout", 1, True),
         ("scope_violation", 1, True),
+        ("token_ceiling_exceeded", 1, True),
         ("pipeline_nonzero", 2, True),
         ("verify_failed", 0, False),
         ("review_rejected", 0, False),

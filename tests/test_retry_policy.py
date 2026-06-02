@@ -38,6 +38,13 @@ def test_scope_violation_is_never_retried() -> None:
     assert policy.should_retry(result, attempt=0) is False
 
 
+def test_token_ceiling_exceeded_is_never_retried() -> None:
+    policy = RetryPolicy(max_attempts=5)
+    result = FakeResult(status="token_ceiling_exceeded", exit_code=1)
+    # a token-ceiling breach is deterministic, so a retry hits the same ceiling
+    assert policy.should_retry(result, attempt=0) is False
+
+
 def test_transient_failure_retries_within_budget() -> None:
     policy = RetryPolicy(max_attempts=3)
     result = FakeResult(status="expired", exit_code=1)
@@ -113,6 +120,20 @@ def test_dispatch_with_retry_does_not_retry_scope_violation() -> None:
 
     result = dispatch_with_retry({"id": 1}, dispatch=fake_dispatch, max_redispatches=5)
     assert result.status == "scope_violation"
+    assert calls == 1  # no retry for terminal status
+
+
+def test_dispatch_with_retry_does_not_retry_token_ceiling_exceeded() -> None:
+    """token_ceiling_exceeded must stop after one attempt, even with budget remaining."""
+    calls = 0
+
+    def fake_dispatch(task, *, handoff=None):  # noqa: ANN001, ANN202, ARG001
+        nonlocal calls
+        calls += 1
+        return FakeResult(status="token_ceiling_exceeded", exit_code=1)
+
+    result = dispatch_with_retry({"id": 1}, dispatch=fake_dispatch, max_redispatches=5)
+    assert result.status == "token_ceiling_exceeded"
     assert calls == 1  # no retry for terminal status
 
 

@@ -115,6 +115,24 @@ def test_resolve_pipeline_outcome_scope_violation() -> None:
     assert "infra/x.yaml" in (error or "")
 
 
+def test_resolve_pipeline_outcome_token_ceiling_exceeded() -> None:
+    status, error = resolve_pipeline_outcome(
+        [
+            {"phase": "execute", "exit_code": 0},
+            {"phase": "scope", "passed": True},
+            {
+                "phase": "ceiling_abort",
+                "enforced": True,
+                "observed_total_tokens": 904185,
+                "ceiling": 750000,
+            },
+        ],
+        1,
+    )
+    assert status == "token_ceiling_exceeded"
+    assert "904185" in (error or "")
+
+
 def test_resolve_pipeline_outcome_review_blocked() -> None:
     status, _ = resolve_pipeline_outcome(
         [

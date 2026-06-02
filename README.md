@@ -217,7 +217,7 @@ MCP + persistent sessions: [docs/SESSIONS.md](docs/SESSIONS.md) · [docs/MCP.md]
 | `pr_review` | analyze | PR diff only (no implement) |
 | `full` | PLAN → … → REVIEW → TECH_LEAD? | Large features, branch + PR |
 
-Outcomes: `completed`, `scope_violation`, `verify_failed`, `review_changes_requested`, `review_blocked`, `error`, `decompose_partial`, `decompose_failed`, `dag_partial`, `dag_failed`.
+Outcomes: `completed`, `scope_violation`, `token_ceiling_exceeded`, `verify_failed`, `review_changes_requested`, `review_blocked`, `error`, `decompose_partial`, `decompose_failed`, `dag_partial`, `dag_failed`.
 
 **Orchestration (v0.6.4+):** When the planner returns `decompose`, the fleet automatically fans out `child_issues_proposed` as parallel scoped tasks (default pipeline: `code_review`). Enable via `.agent-fleet.yaml`:
 
