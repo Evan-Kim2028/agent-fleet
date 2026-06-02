@@ -733,6 +733,7 @@ class FleetDispatcher:
                     max_retries=runtime.retries,
                     token_ceiling=runtime.token_ceiling,
                     declared_complexity=task.complexity,
+                    enforce_token_ceiling=task_config.enforce_token_ceiling,
                 )
                 phase_results.extend(pipeline_results)
 
