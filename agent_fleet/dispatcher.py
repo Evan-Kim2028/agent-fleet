@@ -25,11 +25,10 @@ from agent_fleet.dispatcher_task import (
     maybe_publish_and_pr_loop,
     prepare_task_workspace_if_needed,
     read_observed_total_tokens,
-    record_completed_task_experience,
     run_configured_pipeline,
 )
 from agent_fleet.handoff_context import apply_handoff_to_task
-from agent_fleet.hooks import FleetTask, FleetTaskResult
+from agent_fleet.hooks import ExperienceRecorder, FleetTask, FleetTaskResult, LevelUpRecorder
 from agent_fleet.level_up.paths import repo_key as level_up_repo_key
 from agent_fleet.level_up.record import review_verdict_from_runner_result
 from agent_fleet.observability.context import get_run_log
@@ -145,11 +144,13 @@ class FleetDispatcher:
         config: FleetConfig | None = None,
         *,
         progress_callback: Callable[..., None] | None = None,
+        experience_recorder: ExperienceRecorder | None = None,
     ) -> None:
         self.config = config or load_fleet_config()
         self.resolver = YamlPersonaResolver(self.config)
         self.backend = make_backend(self.config)
         self.progress_callback = progress_callback
+        self._experience_recorder: ExperienceRecorder = experience_recorder or LevelUpRecorder()
         self._admission = AdmissionController(
             ram_budget_gb=self.config.ram_budget_gb,
             tiers={
@@ -805,7 +806,7 @@ class FleetDispatcher:
                         pr_loop_status=pr_loop_status,
                     )
 
-                record_completed_task_experience(
+                self._experience_recorder.record_completed_task_experience(
                     task_index=task_index,
                     task=task,
                     status=result.status,
@@ -836,7 +837,7 @@ class FleetDispatcher:
                 if task_workspace is not None:
                     task_workspace.teardown(keep=True)
                 fleet_log.emit("fleet.task.error", error=str(exc))
-                record_completed_task_experience(
+                self._experience_recorder.record_completed_task_experience(
                     task_index=task_index,
                     task=task,
                     status="error",

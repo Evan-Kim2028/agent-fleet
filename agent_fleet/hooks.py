@@ -14,6 +14,8 @@ if TYPE_CHECKING:
     from agent_fleet.contracts.mcp_requirement import McpRequirement
     from agent_fleet.contracts.verify_result import VerifyResult
     from agent_fleet.level_up.models import DispatchEquip
+    from agent_fleet.observability.fleet_logger import FleetLogger
+    from agent_fleet.runner import FleetRunResult
 
 
 @runtime_checkable
@@ -276,3 +278,96 @@ class FleetTaskResult:
     declared_complexity: str | None = None
     observed_total_tokens: int | None = None
     ceiling: int | None = None
+
+
+@runtime_checkable
+class ExperienceRecorder(Protocol):
+    """Seam for recording experience after runner and dispatcher task completions.
+
+    Implementations may write to the level_up store, a test spy, or /dev/null.
+    The default concrete implementation is LevelUpRecorder.
+    """
+
+    def record_runner_experience(
+        self,
+        *,
+        result: FleetRunResult,
+        title: str,
+        persona: str,
+        repo_root: Path,
+        experience_source: str = "full_pipeline",
+        pr_loop_round: int | None = None,
+        dispatch_equip: DispatchEquip | None = None,
+    ) -> None: ...
+
+    def record_completed_task_experience(
+        self,
+        *,
+        task_index: int,
+        task: FleetTask,
+        status: str,
+        phase_results: list[dict[str, object]],
+        changed_files: list[str] | None,
+        workspace: Path | None,
+        fleet_log: FleetLogger,
+        duration_seconds: float | None = None,
+        error: str | None = None,
+    ) -> None: ...
+
+
+class LevelUpRecorder:
+    """Default ExperienceRecorder — delegates to the level_up.record functions."""
+
+    def record_runner_experience(
+        self,
+        *,
+        result: FleetRunResult,
+        title: str,
+        persona: str,
+        repo_root: Path,
+        experience_source: str = "full_pipeline",
+        pr_loop_round: int | None = None,
+        dispatch_equip: DispatchEquip | None = None,
+    ) -> None:
+        from agent_fleet.level_up.record import (
+            record_runner_experience as _record_runner_experience,
+        )
+
+        _record_runner_experience(
+            result=result,
+            title=title,
+            persona=persona,
+            repo_root=repo_root,
+            experience_source=experience_source,
+            pr_loop_round=pr_loop_round,
+            dispatch_equip=dispatch_equip,
+        )
+
+    def record_completed_task_experience(
+        self,
+        *,
+        task_index: int,
+        task: FleetTask,
+        status: str,
+        phase_results: list[dict[str, object]],
+        changed_files: list[str] | None,
+        workspace: Path | None,
+        fleet_log: FleetLogger,
+        duration_seconds: float | None = None,
+        error: str | None = None,
+    ) -> None:
+        from agent_fleet.dispatcher_task import (
+            record_completed_task_experience as _record_completed_task_experience,
+        )
+
+        _record_completed_task_experience(
+            task_index=task_index,
+            task=task,
+            status=status,
+            phase_results=phase_results,
+            changed_files=changed_files,
+            workspace=workspace,
+            fleet_log=fleet_log,
+            duration_seconds=duration_seconds,
+            error=error,
+        )
