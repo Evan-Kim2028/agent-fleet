@@ -72,9 +72,7 @@ def _seed_runner_repo(tmpdir: Path, marker: str) -> RepoConfig:
 
 
 def _check(repo: RepoConfig, worktree: Path, persona: str = "coder") -> VerifyResult:
-    return CommandVerifier(repo).check(
-        worktree, persona=persona, changed_files=[], task_id=1
-    )
+    return CommandVerifier(repo).check(worktree, persona=persona, changed_files=[], task_id=1)
 
 
 def test_parse_failed_ids_passing_returns_empty() -> None:
@@ -116,9 +114,7 @@ def test_introduced_failure_blocks_with_new_node_id(tmp_path: Path) -> None:
     result = _check(repo, tmp_path)
 
     assert result.severity is VerifySeverity.RETRY
-    introduced = next(
-        ln for ln in result.message.splitlines() if "New failures introduced" in ln
-    )
+    introduced = next(ln for ln in result.message.splitlines() if "New failures introduced" in ln)
     # The introduced-failures line names only the new node-id, not the pre-existing one.
     assert "tests/test_x.py::test_b" in introduced
     assert "::test_a" not in introduced
