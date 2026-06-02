@@ -7,7 +7,7 @@ import sys
 import textwrap
 from pathlib import Path
 
-from agent_fleet.backends import make_backend
+from agent_fleet.backends import backend_env_var, make_backend
 from agent_fleet.config import load_fleet_config
 from agent_fleet.pr_review.analyzer import analyze_changes
 from agent_fleet.pr_review.config import PrReviewConfig, load_pr_review_config
@@ -37,11 +37,9 @@ def main() -> int:
         return 1
 
     backend_name = os.environ.get("AGENT_FLEET_BACKEND", "cursor").lower()
-    if backend_name == "cursor" and not os.environ.get("CURSOR_API_KEY"):
-        print("Error: CURSOR_API_KEY required for cursor backend", file=sys.stderr)
-        return 1
-    if backend_name == "kimi" and not os.environ.get("KIMI_API_KEY"):
-        print("Error: KIMI_API_KEY required for kimi backend", file=sys.stderr)
+    env = backend_env_var(backend_name)
+    if env and not os.environ.get(env):
+        print(f"Error: {env} required for {backend_name} backend", file=sys.stderr)
         return 1
 
     event = load_github_event()
