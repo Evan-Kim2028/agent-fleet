@@ -83,6 +83,7 @@ def _emit_captured(result: object, fmt: str = "json") -> tuple[int, str]:
         ("error", 1),
         ("rejected", 1),
         ("scope_violation", 1),
+        ("token_ceiling_exceeded", 1),
         ("decompose_failed", 1),
         ("complexity_underestimated", 1),
     ],

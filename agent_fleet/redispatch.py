@@ -11,12 +11,21 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 _HARD_STATUSES = frozenset(
-    {"error", "cancelled", "expired", "timeout", "scope_violation", "pipeline_nonzero"}
+    {
+        "error",
+        "cancelled",
+        "expired",
+        "timeout",
+        "scope_violation",
+        "pipeline_nonzero",
+        "token_ceiling_exceeded",
+    }
 )
 
-# scope_violation is a deterministic outcome: retrying the same task into the same
-# scope constraint will produce the same result. Never retry these.
-_TERMINAL_STATUSES = frozenset({"scope_violation"})
+# scope_violation and token_ceiling_exceeded are deterministic outcomes: retrying the
+# same task into the same scope constraint or token ceiling produces the same result.
+# Never retry these.
+_TERMINAL_STATUSES = frozenset({"scope_violation", "token_ceiling_exceeded"})
 
 
 @dataclass

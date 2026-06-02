@@ -9,7 +9,14 @@ from agent_fleet.hooks import FleetTaskResult
 SUCCESS_STATUSES = frozenset({"completed", "merged"})
 PARTIAL_OK = frozenset({"review_changes_requested"})
 FAILURE_STATUSES = frozenset(
-    {"error", "verify_failed", "scope_violation", "review_blocked", "rejected"}
+    {
+        "error",
+        "verify_failed",
+        "scope_violation",
+        "review_blocked",
+        "rejected",
+        "token_ceiling_exceeded",
+    }
 )
 
 _TERMINAL = SUCCESS_STATUSES | PARTIAL_OK | {"skipped"}

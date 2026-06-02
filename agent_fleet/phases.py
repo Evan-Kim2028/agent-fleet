@@ -629,6 +629,12 @@ def resolve_pipeline_outcome(
         violating = scope.get("violating_files") or []
         return "scope_violation", f"Files outside persona scope: {violating}"
 
+    ceiling = by_phase.get("ceiling_abort")
+    if ceiling and ceiling.get("enforced"):
+        observed = ceiling.get("observed_total_tokens")
+        limit = ceiling.get("ceiling")
+        return "token_ceiling_exceeded", f"Token ceiling exceeded: {observed} > {limit}"
+
     for verify in [item for item in phase_results if item.get("phase") == "verify"]:
         if not verify.get("passed", True):
             command = verify.get("command", "verify")
