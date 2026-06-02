@@ -750,6 +750,7 @@ class FleetDispatcher:
                     task_config,
                     repo_config or git_repo,
                     run_id=fleet_log.run_id,
+                    loadout_size=runtime.loadout_size,
                 )
                 task = replace(task, equip=equip)
 
