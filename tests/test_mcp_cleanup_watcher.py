@@ -14,7 +14,10 @@ def test_orphan_cleanup_skips_when_visual_audit_in_flight() -> None:
             "1824": [{"pid": 1, "persona": "frontend", "visual_audit": True}],
         }
     }
-    with patch("agent_fleet.issue_loop.watcher.cleanup_playwright_mcp_processes") as cleanup:
+    with (
+        patch("agent_fleet.issue_loop.watcher.count_visual_in_flight", return_value=1),
+        patch("agent_fleet.issue_loop.watcher.cleanup_playwright_mcp_processes") as cleanup,
+    ):
         _cleanup_orphaned_playwright_mcp(state)
     cleanup.assert_not_called()
 
