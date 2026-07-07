@@ -1,4 +1,4 @@
-"""Cursor agent mode literals and validation."""
+"""Agent mode literals and validation (agent vs plan)."""
 
 from __future__ import annotations
 

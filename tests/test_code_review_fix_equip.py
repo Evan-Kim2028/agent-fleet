@@ -11,10 +11,10 @@ import pytest
 
 from agent_fleet.code_review.fix import run_fix_phase
 from agent_fleet.config import load_fleet_config
-from agent_fleet.cursor_backend import CursorLLMResult
 from agent_fleet.hooks import FleetTask
 from agent_fleet.level_up.models import DispatchEquip
 from agent_fleet.level_up.paths import persona_dir
+from agent_fleet.noop_session import NoopLLMResult
 from agent_fleet.personas import YamlPersonaResolver
 from agent_fleet.repo import load_repo_config
 
@@ -36,10 +36,10 @@ class _CapturingBackend:
         cwd: Path | None = None,
         model: str | None = None,
         mode: object | None = None,
-    ) -> CursorLLMResult:
+    ) -> NoopLLMResult:
         del max_tokens, timeout_s, memory_limit, allowed_tools, cwd, model, mode
         self.prompts.append(prompt)
-        return CursorLLMResult(
+        return NoopLLMResult(
             stdout="fixed",
             stderr="",
             exit_code=0,

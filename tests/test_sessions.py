@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from agent_fleet.contracts.mcp import StdioMcpServerSpec
-from agent_fleet.cursor_backend import CursorLLMResult
+from agent_fleet.noop_session import NoopLLMResult
 from agent_fleet.sessions import AgentSession, NoopSession
 
 
@@ -16,7 +16,7 @@ def test_noop_session_satisfies_protocol() -> None:
 def test_noop_session_send_returns_static_error() -> None:
     sess = NoopSession()
     result = sess.send("hi", max_tokens=100, timeout_s=10)
-    assert isinstance(result, CursorLLMResult)
+    assert isinstance(result, NoopLLMResult)
     assert result.exit_code == 1
     assert "NoopSession" in result.stderr
 

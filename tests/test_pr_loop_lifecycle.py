@@ -11,8 +11,8 @@ from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 from agent_fleet.config import load_fleet_config
-from agent_fleet.cursor_backend import CursorLLMResult
 from agent_fleet.hooks import Persona
+from agent_fleet.noop_session import NoopLLMResult
 from agent_fleet.pr_loop.config import PrLoopConfig
 from agent_fleet.pr_loop.lifecycle import (
     _commit_preflight_commands,
@@ -78,10 +78,10 @@ class _CapturingBackend:
         cwd: Path | None = None,
         model: str | None = None,
         mode: object | None = None,
-    ) -> CursorLLMResult:
+    ) -> NoopLLMResult:
         del max_tokens, timeout_s, memory_limit, allowed_tools, cwd, model, mode
         self.prompts.append(prompt)
-        return CursorLLMResult(
+        return NoopLLMResult(
             stdout="done",
             stderr="",
             exit_code=0,

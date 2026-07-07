@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from agent_fleet.cursor_backend import CursorLLMResult
+from agent_fleet.noop_session import NoopLLMResult
 from agent_fleet.planner import plan
 
 
@@ -21,13 +21,13 @@ class _FakePersonaResolver:
 
 @dataclass
 class _FakeSession:
-    """LLMSession stub that returns canned CursorLLMResults."""
+    """LLMSession stub that returns canned NoopLLMResults."""
 
-    result: CursorLLMResult
+    result: NoopLLMResult
     sends: list[str] = field(default_factory=list)
     agent_id: str | None = "agent-fake"
 
-    def send(self, prompt: str, **_: object) -> CursorLLMResult:
+    def send(self, prompt: str, **_: object) -> NoopLLMResult:
         self.sends.append(prompt)
         return self.result
 
@@ -36,21 +36,19 @@ class _FakeSession:
 
 
 class _FakeBackend:
-    def run(self, *_a: object, **_kw: object) -> CursorLLMResult:
+    def run(self, *_a: object, **_kw: object) -> NoopLLMResult:
         raise AssertionError("backend.run should not be called when session is provided")
 
 
 def test_plan_raises_with_diagnostics_on_nonzero_exit_code() -> None:
     """When the LLM call fails (exit_code != 0), plan() must surface the
     backend's stderr instead of masking it as 'no JSON in output'."""
-    boom = RuntimeError("cursor SDK auth failure")
     session = _FakeSession(
-        result=CursorLLMResult(
+        result=NoopLLMResult(
             stdout="",
             stderr="RuntimeError: cursor SDK auth failure",
             exit_code=1,
             duration_s=0.1,
-            cause=boom,
         )
     )
     with pytest.raises(ValueError) as excinfo:
@@ -76,7 +74,7 @@ def test_plan_raises_with_diagnostics_on_empty_stdout() -> None:
     """Empty stdout with exit_code=0 (rare but possible) must still surface as
     a backend-call failure, not the misleading 'no JSON' error."""
     session = _FakeSession(
-        result=CursorLLMResult(
+        result=NoopLLMResult(
             stdout="   \n  ",
             stderr="",
             exit_code=0,
@@ -100,7 +98,7 @@ def test_plan_still_retries_on_unparseable_prose() -> None:
     """When the model returns non-JSON prose with exit_code=0, the old retry
     loop must still kick in — that's the original use case."""
     session = _FakeSession(
-        result=CursorLLMResult(
+        result=NoopLLMResult(
             stdout="here is some prose without any json structure",
             stderr="",
             exit_code=0,
@@ -144,7 +142,7 @@ def test_plan_preserves_program_source_for_program_decision() -> None:
         }
     )
     session = _FakeSession(
-        result=CursorLLMResult(stdout=spec_json, stderr="", exit_code=0, duration_s=0.1)
+        result=NoopLLMResult(stdout=spec_json, stderr="", exit_code=0, duration_s=0.1)
     )
 
     spec = plan(

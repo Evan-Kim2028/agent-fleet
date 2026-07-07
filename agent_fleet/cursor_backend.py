@@ -26,6 +26,8 @@ from agent_fleet.telemetry import span as _telemetry_span
 logger = logging.getLogger(__name__)
 mcp_logger = logging.getLogger("agent_fleet.mcp")
 
+DEFAULT_MODEL = "composer-2.5"
+
 
 @dataclass(frozen=True)
 class CursorLLMResult:

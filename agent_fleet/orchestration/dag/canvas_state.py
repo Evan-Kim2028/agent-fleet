@@ -9,17 +9,16 @@ from typing import Any
 
 from agent_fleet.orchestration.dag.schema import DagSpec, DagTask
 
-_DEFAULT_MODELS: dict[str, str] = {
-    "HIGH": "composer-2.5",
-    "MED": "composer-2.5",
-    "LOW": "composer-2.5",
-}
+# Canvas display default: "inherit" means the task uses the fleet's configured
+# default model (resolved per-backend at dispatch time), rather than hardcoding a
+# Cursor slug. A DAG spec can override per complexity tier via `models:`.
+_CANVAS_INHERIT_MODEL = "inherit"
 
 _CANVAS_STATUS = frozenset({"PENDING", "RUNNING", "FINISHED", "ERROR"})
 
 
 def model_for_task(task: DagTask, models: dict[str, str]) -> str:
-    return models.get(task.complexity) or _DEFAULT_MODELS.get(task.complexity, "composer-2.5")
+    return models.get(task.complexity) or _CANVAS_INHERIT_MODEL
 
 
 def fleet_status_to_canvas(status: str) -> str:

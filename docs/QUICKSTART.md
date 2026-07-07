@@ -2,12 +2,13 @@
 
 Get from zero to a first fleet run in ~15 minutes.
 
-Agent Fleet runs scoped personas through review pipelines against a git workspace. Pick an **execution backend** in `fleet.yaml` (Cursor SDK is the default; Kimi Code CLI is optional).
+Agent Fleet runs scoped personas through review pipelines against a git workspace. Pick an **execution backend** in `fleet.yaml` (Cursor SDK is the default; Kimi Code CLI and OpenRouter are optional).
 
 | Backend | Key | Setup section |
 |---------|-----|---------------|
 | **Cursor SDK** (default) | `CURSOR_API_KEY` | [§2 Default backend](#2-global-fleet-config) · [§3 First run](#3-first-run) |
 | **Kimi Code CLI** (optional) | `KIMI_API_KEY` | [§2 Kimi backend](#kimi-backend-optional) · [§3b First run](#3b-first-run-kimi-backend-optional) · [KIMI.md](KIMI.md) |
+| **OpenRouter** (optional) | `OPENROUTER_API_KEY` | [§2c OpenRouter backend](#2c-openrouter-backend-optional) · [OPENROUTER.md](OPENROUTER.md) |
 
 ## 1. Install
 
@@ -55,7 +56,24 @@ default_model: kimi-for-coding
 
 See **[KIMI.md](KIMI.md)** for full Kimi Code CLI setup.
 
-Verify personas load with either backend:
+### 2c. OpenRouter backend (optional)
+
+```bash
+export OPENROUTER_API_KEY=sk-or-...    # https://openrouter.ai/keys
+# No binary to install — HTTP via stdlib urllib
+```
+
+Edit `~/.agent-fleet/fleet.yaml`:
+
+```yaml
+default_backend: openrouter
+# default_model is unset: inherits tencent/hy3:free
+# default_model: anthropic/claude-3.5-sonnet  # to pin a different model
+```
+
+See **[OPENROUTER.md](OPENROUTER.md)** for full OpenRouter setup.
+
+Verify personas load with any backend:
 
 ```bash
 fleet personas
@@ -194,8 +212,9 @@ fleet summon
 
 | Problem | Fix |
 |---------|-----|
-| `CURSOR_API_KEY is not set` | Export key or set `default_backend: kimi` |
+| `CURSOR_API_KEY is not set` | Export key or set `default_backend: kimi` / `openrouter` |
 | `KIMI_API_KEY is not set` | Export key or set `default_backend: cursor` — see [KIMI.md](KIMI.md) |
+| `OPENROUTER_API_KEY is not set` | Export key or set `default_backend: cursor` — see [OPENROUTER.md](OPENROUTER.md) |
 | `kimi-cli failed` | Install Kimi Code CLI; set `kimi_bin` in `fleet.yaml` |
 | `fleet: command not found` | Re-run `pip install -e ".[dev]"` |
 | Persona not found | Run `fleet personas`; check `fleet.yaml` |
@@ -207,6 +226,7 @@ fleet summon
 - [NEW-REPO.md](NEW-REPO.md) — full repo integration (GitHub PR analyzer, PR loop)
 - [PERSONAS.md](PERSONAS.md) — customize personas and fleets
 - [KIMI.md](KIMI.md) — Kimi Code CLI backend
+- [OPENROUTER.md](OPENROUTER.md) — OpenRouter HTTP backend
 - [../examples/repo.agent-fleet.yaml](../examples/repo.agent-fleet.yaml) — minimal repo config
 - [../examples/repo-full.agent-fleet.yaml](../examples/repo-full.agent-fleet.yaml) — PR review + PR loop
 - [../examples/monorepo.agent-fleet.yaml](../examples/monorepo.agent-fleet.yaml) — multi-persona monorepo

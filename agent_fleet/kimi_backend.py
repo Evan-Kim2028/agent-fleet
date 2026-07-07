@@ -22,6 +22,9 @@ def _find_kimi_bin() -> str:
     return "kimi-cli"
 
 
+DEFAULT_MODEL = "kimi-for-coding"
+
+
 def call_kimi(
     prompt: str,
     *,

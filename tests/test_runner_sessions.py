@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from agent_fleet.cursor_backend import CursorLLMResult
+from agent_fleet.noop_session import NoopLLMResult
 
 
 class FakeBackend:
@@ -13,7 +13,7 @@ class FakeBackend:
     def __init__(self) -> None:
         self.session = MagicMock()
         self.session.agent_id = "agent-test"
-        self.session.send.return_value = CursorLLMResult(
+        self.session.send.return_value = NoopLLMResult(
             stdout="ok", stderr="", exit_code=0, duration_s=0.1, agent_id="agent-test"
         )
         self.create_session_calls: list[dict] = []
@@ -22,7 +22,7 @@ class FakeBackend:
         self.create_session_calls.append(kwargs)
         return self.session
 
-    def run(self, *_args: object, **_kwargs: object) -> CursorLLMResult:
+    def run(self, *_args: object, **_kwargs: object) -> NoopLLMResult:
         raise AssertionError("FakeBackend should route through session.send(), not run()")
 
 
@@ -48,7 +48,7 @@ def test_runner_falls_back_to_backend_run_when_no_create_session(
 ) -> None:
     """Backends without create_session() must still work (legacy path)."""
     legacy = MagicMock(spec=["run"])  # no create_session attribute
-    legacy.run.return_value = CursorLLMResult(
+    legacy.run.return_value = NoopLLMResult(
         stdout="ok", stderr="", exit_code=0, duration_s=0.1, agent_id=None
     )
     runner = fleet_config_with_session_backend(legacy)

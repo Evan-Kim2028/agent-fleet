@@ -56,7 +56,11 @@ class PersonaSpec:
 
 @dataclass
 class FleetConfig:
-    default_model: str = "composer-2.5"
+    # default_model is None so each backend can supply its own DEFAULT_MODEL
+    # (cursor → composer-2.5, kimi → kimi-for-coding, openrouter → tencent/hy3:free)
+    # without a Cursor slug leaking into the shared config default. The factory
+    # resolves `config.default_model or <BACKEND>.DEFAULT_MODEL`.
+    default_model: str | None = None
     default_mode: AgentMode = "agent"
     default_backend: str = "cursor"
     kimi_bin: str | None = None
@@ -231,7 +235,7 @@ def load_fleet_config(
     mcp_catalog = _parse_mcp_catalog(data.get("mcp_servers") or {})
 
     return FleetConfig(
-        default_model=str(default_model or data.get("default_model") or "composer-2.5"),
+        default_model=default_model or data.get("default_model"),
         default_mode=coerce_agent_mode(str(default_mode or data.get("default_mode") or "agent")),
         default_backend=str(default_backend or data.get("default_backend") or "cursor"),
         kimi_bin=kimi_bin or data.get("kimi_bin"),

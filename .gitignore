@@ -9,6 +9,9 @@ build/
 .ruff_cache/
 .venv/
 venv/
+# Local secrets — never commit API keys. Live smoke tests load from .env.
+.env
+.env.*
 *.egg
 .DS_Store
 .coverage

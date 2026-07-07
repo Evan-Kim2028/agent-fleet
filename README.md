@@ -328,13 +328,14 @@ Requires `gh` auth + `CURSOR_API_KEY`. Systemd example: [`examples/agent-fleet-p
 
 ---
 
-## Optional: Kimi · gateway plugin
+## Optional: Kimi · OpenRouter · gateway plugin
 
 Cursor-first. Same personas/pipelines if you swap backend or add a Discord gateway plugin:
 
 | | Setup |
 |---|--------|
 | [Kimi Code CLI](docs/KIMI.md) | `default_backend: kimi`, `KIMI_API_KEY` |
+| [OpenRouter](docs/OPENROUTER.md) | `default_backend: openrouter`, `OPENROUTER_API_KEY` — no binary to install (HTTP via stdlib) |
 | [cursor-fleet plugin](integrations/hermes/) | `./scripts/deploy-hermes.sh` — fleet config stays in `~/.agent-fleet/fleet.yaml` |
 
 Not required for CLI, Python, or watcher workflows.

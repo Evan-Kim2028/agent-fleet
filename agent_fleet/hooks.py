@@ -173,7 +173,7 @@ class Persona:
     skill_slots_review: tuple[str, ...] = ()
     level_up_generation: int = 0
     allowed_paths: tuple[str, ...] = ()
-    model: str = "composer-2.5"
+    model: str | None = None
     mode: str = "agent"
     extra_instructions: str = ""
     mcp_servers: list[str] = field(default_factory=list)

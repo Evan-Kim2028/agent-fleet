@@ -1,4 +1,4 @@
-"""Dataclasses describing MCP server configurations forwarded to the Cursor SDK."""
+"""Dataclasses describing MCP server configurations forwarded to session-capable backends."""
 
 from __future__ import annotations
 

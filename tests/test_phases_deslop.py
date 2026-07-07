@@ -9,9 +9,9 @@ from pathlib import Path
 import pytest
 
 from agent_fleet.config import load_fleet_config
-from agent_fleet.cursor_backend import CursorLLMResult
 from agent_fleet.hooks import FleetTask
 from agent_fleet.level_up.models import DispatchEquip
+from agent_fleet.noop_session import NoopLLMResult
 from agent_fleet.personas import YamlPersonaResolver
 from agent_fleet.phases import run_pipeline
 
@@ -43,10 +43,10 @@ class _CapturingBackend:
         cwd: Path | None = None,
         model: str | None = None,
         mode: object | None = None,
-    ) -> CursorLLMResult:
+    ) -> NoopLLMResult:
         del max_tokens, timeout_s, memory_limit, allowed_tools, cwd, model, mode
         self.prompts.append(prompt)
-        return CursorLLMResult(
+        return NoopLLMResult(
             stdout=_REVIEW_JSON,
             stderr="",
             exit_code=0,

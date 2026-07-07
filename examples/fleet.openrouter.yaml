@@ -1,0 +1,36 @@
+# OpenRouter fleet config — copy to ~/.agent-fleet/fleet.yaml
+# Requires: export OPENROUTER_API_KEY=sk-or-...
+# No binary to install — this backend talks to OpenRouter over HTTP (urllib).
+
+default_backend: openrouter
+# default_model is unset: the backend supplies its own default (tencent/hy3:free).
+# To pin a different OpenRouter model, uncomment:
+# default_model: anthropic/claude-3.5-sonnet
+default_persona: coder
+default_mode: agent
+max_parallel: 3
+timeout_seconds: 900
+default_pipeline: code_review
+
+personas:
+  coder:
+    prompt: coder.md
+  reviewer:
+    prompt: reviewer.md
+  explorer:
+    prompt: explorer.md
+    mode: plan
+
+pipelines:
+  simple:
+    - execute
+  code_review:
+    - execute
+    - review
+  full:
+    - plan
+    - research
+    - synthesize
+    - implement
+    - verify
+    - review

@@ -1,4 +1,11 @@
-"""Backend factory — registry-driven; Cursor SDK (default) and Kimi Code CLI built-in."""
+"""Backend factory — registry-driven; Cursor SDK (default), Kimi Code CLI, and OpenRouter.
+
+Backends are imported lazily inside their factory functions so that selecting one
+backend (e.g. ``default_backend: openrouter``) does not import the others' modules
+or their SDK dependencies. An all-in-on-openrouter install never imports
+``cursor_backend`` or ``kimi_backend``. See ``test_import_isolation`` for the
+regression gate on this invariant.
+"""
 
 from __future__ import annotations
 
@@ -6,8 +13,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from agent_fleet.agent_mode import coerce_agent_mode
-from agent_fleet.cursor_backend import CursorBackend
-from agent_fleet.kimi_backend import KimiBackend
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -18,11 +23,19 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class _BackendSpec:
-    """A backend's factory plus the env contract its preflight checks read."""
+    """A backend's factory plus the env/SDK contracts its preflight checks read.
+
+    ``sdk_import_check`` is the importable module name the doctor probes for SDK
+    availability (``None`` for backends with no SDK dependency, e.g. HTTP backends).
+    Like ``env_var``/``key_hint``, it lives here as the single source the preflight
+    layer reads, so a new backend wires its SDK contract once at the ``register()``
+    call rather than in doctor.
+    """
 
     factory: Callable[[FleetConfig], LLMBackend]
     env_var: str | None = None
     key_hint: str = ""
+    sdk_import_check: str | None = None
 
 
 # name → spec; mutate via register() to add backends at import time.
@@ -35,15 +48,20 @@ def register(
     *,
     env_var: str | None = None,
     key_hint: str = "",
+    sdk_import_check: str | None = None,
 ) -> None:
     """Register a backend factory under *name* (lower-cased).
 
     ``env_var`` is the API-key variable the doctor and CLI preflights check, and
-    ``key_hint`` is extra guidance shown when it is missing. Both live here as the
-    single source the preflight layer reads, so a new backend wires its key
-    contract once rather than in doctor, cli_env, and pr_review.github_action.
+    ``key_hint`` is extra guidance shown when it is missing. ``sdk_import_check``
+    is the importable module name the doctor probes for SDK availability (``None``
+    for backends with no SDK dependency). All three live here as the single source
+    the preflight layer reads, so a new backend wires its key + SDK contract once
+    rather than in doctor, cli_env, and pr_review.github_action.
     """
-    _REGISTRY[name.lower()] = _BackendSpec(factory, env_var=env_var, key_hint=key_hint)
+    _REGISTRY[name.lower()] = _BackendSpec(
+        factory, env_var=env_var, key_hint=key_hint, sdk_import_check=sdk_import_check
+    )
 
 
 def backend_env_var(name: str) -> str | None:
@@ -58,27 +76,68 @@ def backend_key_hint(name: str) -> str:
     return spec.key_hint if spec else ""
 
 
+def backend_sdk_import_check(name: str) -> str | None:
+    """Importable module name the doctor probes for SDK availability, or None."""
+    spec = _REGISTRY.get(name.lower())
+    return spec.sdk_import_check if spec else None
+
+
 def _make_cursor(config: FleetConfig) -> LLMBackend:
+    # Lazy import: an openrouter-only or kimi-only install never imports cursor_backend
+    # (and therefore never needs cursor_sdk importable at module load).
+    from agent_fleet.cursor_backend import DEFAULT_MODEL as CURSOR_DEFAULT_MODEL
+    from agent_fleet.cursor_backend import CursorBackend
+
     return CursorBackend(
-        default_model=config.default_model,
+        default_model=config.default_model or CURSOR_DEFAULT_MODEL,
         default_mode=coerce_agent_mode(config.default_mode),
     )
 
 
 def _make_kimi(config: FleetConfig) -> LLMBackend:
-    model = config.default_model
-    if model == "composer-2.5":
-        model = "kimi-for-coding"
+    from agent_fleet.kimi_backend import DEFAULT_MODEL as KIMI_DEFAULT_MODEL
+    from agent_fleet.kimi_backend import KimiBackend
+
     return KimiBackend(
-        model=model,
+        model=config.default_model or KIMI_DEFAULT_MODEL,
         kimi_bin=getattr(config, "kimi_bin", None),
     )
 
 
+def _make_openrouter(config: FleetConfig) -> LLMBackend:
+    from agent_fleet.openrouter_backend import DEFAULT_MODEL as OPENROUTER_DEFAULT_MODEL
+    from agent_fleet.openrouter_backend import OPENROUTER_BASE_URL as OPENROUTER_DEFAULT_BASE_URL
+    from agent_fleet.openrouter_backend import OpenRouterBackend
+
+    return OpenRouterBackend(
+        model=config.default_model or OPENROUTER_DEFAULT_MODEL,
+        base_url=getattr(config, "openrouter_base_url", None) or OPENROUTER_DEFAULT_BASE_URL,
+    )
+
+
+# coerce_agent_mode is imported eagerly at the top (pure helper, no SDK dep).
+
 register(
-    "cursor", _make_cursor, env_var="CURSOR_API_KEY", key_hint="create one at cursor.com/dashboard"
+    "cursor",
+    _make_cursor,
+    env_var="CURSOR_API_KEY",
+    key_hint="create one at cursor.com/dashboard",
+    sdk_import_check="cursor_sdk",
 )
-register("kimi", _make_kimi, env_var="KIMI_API_KEY", key_hint="Kimi Code subscription")
+register(
+    "kimi",
+    _make_kimi,
+    env_var="KIMI_API_KEY",
+    key_hint="Kimi Code subscription",
+    sdk_import_check=None,
+)
+register(
+    "openrouter",
+    _make_openrouter,
+    env_var="OPENROUTER_API_KEY",
+    key_hint="create one at openrouter.ai/keys",
+    sdk_import_check=None,
+)
 
 
 def make_backend(config: FleetConfig) -> LLMBackend:

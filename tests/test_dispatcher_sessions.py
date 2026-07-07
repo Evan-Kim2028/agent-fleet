@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
-from agent_fleet.cursor_backend import CursorLLMResult
+from agent_fleet.noop_session import NoopLLMResult
 
 if TYPE_CHECKING:
     import pytest
@@ -20,7 +20,7 @@ class _SessionBackend:
     def __init__(self) -> None:
         self.session = MagicMock()
         self.session.agent_id = "agent-test"
-        self.session.send.return_value = CursorLLMResult(
+        self.session.send.return_value = NoopLLMResult(
             stdout="ok", stderr="", exit_code=0, duration_s=0.1, agent_id="agent-test"
         )
         self.create_session_calls: list[dict] = []
@@ -30,9 +30,9 @@ class _SessionBackend:
         self.create_session_calls.append(kwargs)
         return self.session
 
-    def run(self, prompt, **kwargs) -> CursorLLMResult:  # noqa: ANN001, ANN003, ARG002
+    def run(self, prompt, **kwargs) -> NoopLLMResult:  # noqa: ANN001, ANN003, ARG002
         self.run_calls.append(kwargs)
-        return CursorLLMResult(stdout="ok", stderr="", exit_code=0, duration_s=0.1, agent_id=None)
+        return NoopLLMResult(stdout="ok", stderr="", exit_code=0, duration_s=0.1, agent_id=None)
 
 
 def _build_dispatcher(backend, tmp_path: Path):  # noqa: ANN001, ANN202
@@ -98,7 +98,7 @@ def test_dispatch_falls_back_to_backend_run_without_create_session(
     from agent_fleet.dispatcher import FleetDispatcher
 
     legacy = MagicMock(spec=["run"])
-    legacy.run.return_value = CursorLLMResult(
+    legacy.run.return_value = NoopLLMResult(
         stdout="ok", stderr="", exit_code=0, duration_s=0.1, agent_id=None
     )
     fc = load_fleet_config(ROOT / "fleet.example.yaml")

@@ -70,15 +70,28 @@ def _check_backend_key(backend: str) -> DoctorCheck:
     return DoctorCheck(env, "fail", "not set", fix)
 
 
-def _check_cursor_sdk(backend: str) -> DoctorCheck:
-    if importlib.util.find_spec("cursor_sdk") is not None:
-        return DoctorCheck("cursor-sdk", "pass", "cursor_sdk importable")
-    status = "fail" if backend.lower() == "cursor" else "warn"
+def _check_backend_sdk(backend: str) -> DoctorCheck | None:
+    """Probe the selected backend's SDK importability, if it declares one.
+
+    Registry-driven: reads ``backend_sdk_import_check(backend)``. A backend with
+    ``sdk_import_check=None`` (kimi, openrouter) gets no SDK check at all — an
+    openrouter-only install never sees a cursor_sdk warning. A backend that
+    declares a module (cursor → ``cursor_sdk``) gets a fail when it is the
+    selected backend and the module is missing. We never warn about another
+    backend's SDK: only the selected backend's contract is checked.
+    """
+    from agent_fleet.backends import backend_sdk_import_check
+
+    module = backend_sdk_import_check(backend)
+    if module is None:
+        return None
+    if importlib.util.find_spec(module) is not None:
+        return DoctorCheck(module, "pass", f"{module} importable")
     return DoctorCheck(
-        "cursor-sdk",
-        status,
-        "cursor_sdk not importable",
-        "Reinstall dependencies with `uv sync` (or `uv pip install cursor-sdk`).",
+        module,
+        "fail",
+        f"{module} not importable",
+        f"Reinstall dependencies with `uv sync` (or `uv pip install {module}`).",
     )
 
 
@@ -142,10 +155,12 @@ def run_doctor_checks(
     checks = [
         _check_python(),
         _check_backend_key(backend),
-        _check_cursor_sdk(backend),
         _check_gh(),
         _check_fleet_config(),
     ]
+    sdk = _check_backend_sdk(backend)
+    if sdk is not None:
+        checks.append(sdk)
     repo = _check_repo_config(repo_present)
     if repo is not None:
         checks.append(repo)

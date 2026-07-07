@@ -1,4 +1,4 @@
-"""agent_fleet — generic agentic coding fleet with Cursor SDK backend."""
+"""agent_fleet — generic agentic coding fleet with pluggable LLM backends."""
 
 from agent_fleet.config import FleetConfig, load_fleet_config
 from agent_fleet.dispatcher import FleetDispatcher, dispatch_tasks

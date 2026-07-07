@@ -240,6 +240,10 @@ def test_init_creates_directory_and_config(tmp_path: Path) -> None:
 
 
 def test_make_backend_cursor_default(fleet_config: FleetConfig) -> None:
+    import importlib.util
+
+    if importlib.util.find_spec("cursor_sdk") is None:
+        pytest.skip("cursor_sdk not installed — openrouter-only/kimi-only env")
     backend = make_backend(fleet_config)
     assert isinstance(backend, CursorBackend)
 
@@ -248,6 +252,9 @@ def test_make_backend_kimi(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KIMI_API_KEY", "sk-kimi-test")
     cfg = load_fleet_config(ROOT / "fleet.example.yaml")
     cfg.default_backend = "kimi"
+    # Clear the example yaml's cursor slug so the kimi factory supplies its own
+    # default (kimi-for-coding). The old slug-translation band-aid is gone.
+    cfg.default_model = None
     backend = make_backend(cfg)
     from agent_fleet.kimi_backend import KimiBackend
 

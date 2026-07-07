@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from agent_fleet.config import load_fleet_config
-from agent_fleet.cursor_backend import CursorLLMResult
+from agent_fleet.noop_session import NoopLLMResult
 from agent_fleet.pr_loop.config import PrLoopConfig
 from agent_fleet.pr_loop.lifecycle import address_review_findings, attempt_ci_fix
 from agent_fleet.repo import RepoConfig, load_repo_config
@@ -32,10 +32,10 @@ class _CapturingBackend:
         cwd: Path | None = None,
         model: str | None = None,
         mode: object | None = None,
-    ) -> CursorLLMResult:
+    ) -> NoopLLMResult:
         del max_tokens, timeout_s, memory_limit, allowed_tools, cwd, model, mode
         self.prompts.append(prompt)
-        return CursorLLMResult(
+        return NoopLLMResult(
             stdout="done",
             stderr="",
             exit_code=0,

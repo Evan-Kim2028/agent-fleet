@@ -3,7 +3,7 @@
 # Copy to ~/.agent-fleet/fleet.yaml (see docs/FLEET-CONFIG.md)
 # See docs/FLEET-CONFIG.md for paths, personas_dir rules, and import-shadow checks.
 
-# Default backend: cursor (Cursor SDK) or kimi (Kimi Code CLI)
+# Default backend: cursor (Cursor SDK), kimi (Kimi Code CLI), or openrouter (OpenRouter HTTP)
 default_backend: cursor
 # composer-2.5 maps to the slow (non-fast) Cursor tier — agent-fleet
 # explicitly sends {fast=false} so you don't get silently routed to the
@@ -28,6 +28,13 @@ max_redispatches: 1
 # default_backend: kimi
 # default_model: kimi-for-coding
 # kimi_bin: ~/.local/bin/kimi-cli
+
+# --- Optional: OpenRouter HTTP execution backend ---
+# Requires: no binary to install — uses stdlib urllib.request
+# export OPENROUTER_API_KEY=sk-or-...   # https://openrouter.ai/keys
+# default_backend: openrouter
+# default_model: null  # inherits tencent/hy3:free (the backend default)
+# default_model: anthropic/claude-3.5-sonnet  # to pin a different model
 
 # personas_dir — bundled personas ship in the installed package (agent_fleet/personas/).
 # Leave UNSET in this global file so fleet uses the package defaults.

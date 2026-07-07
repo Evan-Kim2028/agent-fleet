@@ -31,7 +31,11 @@ class PrLoopConfig:
     fix_persona: str | None = None
     ci_fix_persona: str | None = None
     ignored_ci_checks: tuple[str, ...] = field(
-        default_factory=lambda: ("composer pr analysis", "kimi pr analysis")
+        default_factory=lambda: (
+            "composer pr analysis",
+            "kimi pr analysis",
+            "openrouter pr analysis",
+        )
     )
     drift_check: bool = True
 
@@ -47,6 +51,7 @@ def load_pr_loop_config(_repo_root: Path, raw: dict[str, Any] | None) -> PrLoopC
     ignored = section.get("ignored_ci_checks") or [
         "composer pr analysis",
         "kimi pr analysis",
+        "openrouter pr analysis",
     ]
     return PrLoopConfig(
         enabled=bool(section.get("enabled", False)),

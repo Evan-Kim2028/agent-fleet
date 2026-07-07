@@ -70,7 +70,7 @@ class PersonaFoundry:
         *,
         personas_dir: Path,
         backend: LLMBackend,
-        model: str,
+        model: str | None,
         fleet_log: FleetLogger | None = None,
     ) -> None:
         self._personas_dir = personas_dir
