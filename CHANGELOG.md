@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.11.3 — 2026-07-07
+
+### Summary
+
+Added OpenRouter as a third execution backend (HTTP via stdlib `urllib`,
+default model `tencent/hy3:free`) and made the entire fleet backend-agnostic
+so an openrouter-only or kimi-only install never imports `cursor_backend`.
+
+### Changes
+
+- **OpenRouter backend:** new `agent_fleet/openrouter_backend.py` — talks to
+  OpenRouter's `/api/v1/chat/completions` endpoint using only `urllib.request`
+  (no new runtime dependency). Default model `tencent/hy3:free`. Handles
+  reasoning models (surfaces a clear error when `max_tokens` is too low for
+  the model to produce content after reasoning).
+- **Lazy backend imports:** the three backend modules are imported lazily
+  inside their factory functions in `backends.py`. Selecting `openrouter`
+  never imports `cursor_backend` or `kimi_backend` — the "all or nothing"
+  import-graph guarantee. Keystone `test_import_isolation` gates this.
+- **NoopSession decoupled:** `noop_session.py` owns `NoopLLMResult` (a
+  protocol-compliant `LLMResult` dataclass) instead of importing
+  `CursorLLMResult`. 8 stub test files migrated to `NoopLLMResult`.
+- **Registry-driven doctor SDK check:** `doctor.py` reads
+  `backend_sdk_import_check(backend)` from the registry. Cursor declares
+  `sdk_import_check="cursor_sdk"`; kimi and openrouter declare `None`. An
+  openrouter-only install never sees a `cursor_sdk` warning.
+- **Config defaults are backend-agnostic:** `FleetConfig.default_model` and
+  `Persona.model` default to `None`; each backend supplies its own
+  `DEFAULT_MODEL` constant. The cursor slug band-aids in the kimi and
+  openrouter factories are deleted — switching backends now requires
+  switching `default_model` (or unsetting it to inherit the backend default).
+- **DAG canvas and pr_loop defaults:** `dag/canvas_state.py` uses `"inherit"`
+  instead of a cursor slug; `pr_loop/config.py` includes `openrouter pr
+  analysis` in the default ignored CI checks.
+
 ## 0.11.2 — 2026-06-01
 
 ### Summary
