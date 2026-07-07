@@ -12,8 +12,10 @@ Use this backend when your fleet should run via OpenRouter's `/api/v1/chat/compl
 | API key | `OPENROUTER_API_KEY` (from openrouter.ai/keys) |
 | Default model | `tencent/hy3:free` (295B MoE reasoning model) |
 | Runtime | HTTP via stdlib `urllib.request` — no binary to install |
+| Tool calling | Yes — built-in file/shell tools (read_file, write_file, run_command, list_files) |
+| Session support | Yes — `OpenRouterSession` maintains conversation history across phases |
 
-Personas, `code_review`, `.agent-fleet.yaml`, and batch dispatch work the same as with the default backend.
+Personas, `code_review`, `.agent-fleet.yaml`, and batch dispatch work the same as with the default backend. The backend implements `SessionCapableBackend` — when the fleet runner creates a session, `OpenRouterSession` drives a standard OpenAI-compatible tool-calling loop so the model can actually read files, write files, and run commands in the workspace. This mirrors what the Cursor SDK provides natively.
 
 ## Prerequisites
 
@@ -181,8 +183,11 @@ Persona `model` is passed through to the backend.
 - `default_backend: openrouter` → `OpenRouterBackend` (`agent_fleet/openrouter_backend.py`)
 - Sends POST to `https://openrouter.ai/api/v1/chat/completions` with `Authorization: Bearer <key>`
 - Uses model `tencent/hy3:free` by default
-- Implements the same `LLMBackend` protocol as `CursorBackend`
-- No `create_session` — this is a non-session backend; `NoopSession` is used as the fallback
+- Implements both `LLMBackend` (stateless `run()`) and `SessionCapableBackend` (`create_session()`)
+- **Session path:** `OpenRouterSession` drives a tool-calling loop — sends the prompt with `tools` (read_file, write_file, run_command, list_files), executes tool calls locally, feeds results back as `tool` role messages, and loops until `finish_reason: "stop"` (max 25 iterations). Conversation history persists across `send()` calls so the model retains context across phases.
+- **Stateless path:** `run()` sends a single prompt without tools — used by persona generation, PR analysis, and other non-coding callers.
+- **Observability:** usage (input_tokens, output_tokens, cache_read_tokens) is normalized from OpenRouter's response and emitted to the fleet's `RunLog` — same as the Cursor backend.
+- **Security:** file tools enforce path traversal protection (paths can't escape the workspace) and scope constraints from `allowed_tools` (`path:` prefixes restrict where `write_file` can create files). `run_command` is sandboxed to the workspace directory with a 60-second timeout.
 
 All three backends share the same adapter pattern and registry-driven factory; the standalone package ships all three. Backend modules are imported lazily — selecting `openrouter` never imports `cursor_backend` or `kimi_backend`.
 

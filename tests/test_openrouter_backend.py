@@ -26,6 +26,11 @@ from agent_fleet.openrouter_backend import (
     OPENROUTER_BASE_URL,
     OpenRouterBackend,
     OpenRouterLLMResult,
+    OpenRouterSession,
+    _is_within_scope,
+    _normalize_openrouter_usage,
+    _OpenRouterErrorSession,
+    _safe_resolve,
 )
 
 # --- Registry resolution -------------------------------------------------
@@ -240,3 +245,295 @@ def test_live_openrouter_hy3_call(tmp_path: Path) -> None:
     assert result.exit_code == 0, f"live call failed: {result.stderr}"
     assert result.stdout, "live call returned empty stdout"
     assert result.duration_s > 0.0
+
+
+# --- Session / tool-use loop ---------------------------------------------
+#
+# These tests mock ``_call_openrouter_raw`` (the low-level HTTP function the
+# session loops over) so no network is involved. Each ``side_effect`` is a list
+# of responses consumed in order, simulating the multi-turn tool-calling loop.
+
+
+def _tool_call_response(
+    tool_name: str,
+    args_dict: dict[str, Any],
+    *,
+    call_id: str = "call-1",
+    content: str | None = None,
+) -> dict[str, Any]:
+    """Build an OpenRouter chat-completion response that requests a tool call."""
+    return {
+        "id": "gen-test-123",
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": [
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": tool_name,
+                                "arguments": json.dumps(args_dict),
+                            },
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "prompt_tokens_details": {"cached_tokens": 30},
+        },
+    }
+
+
+def _stop_response(content: str = "Done.") -> dict[str, Any]:
+    """Build an OpenRouter chat-completion response that ends the loop."""
+    return {
+        "id": "gen-test-456",
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }
+
+
+def test_create_session_returns_openrouter_session(tmp_path: Path) -> None:
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
+
+
+def test_create_session_returns_error_session_when_no_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    backend = OpenRouterBackend(api_key="")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, _OpenRouterErrorSession)
+
+
+def test_error_session_send_returns_error() -> None:
+    session = _OpenRouterErrorSession("OPENROUTER_API_KEY is not set")
+    result = session.send("do something", max_tokens=100, timeout_s=30)
+    assert isinstance(result, OpenRouterLLMResult)
+    assert result.exit_code == 1
+    assert "OPENROUTER_API_KEY" in result.stderr
+    assert result.stdout == ""
+
+
+def test_session_send_tool_use_loop(tmp_path: Path) -> None:
+    # Create a real file for read_file to read.
+    (tmp_path / "hello.txt").write_text("hello world", encoding="utf-8")
+
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    responses = [
+        _tool_call_response("read_file", {"path": "hello.txt"}),
+        _stop_response("I read the file."),
+    ]
+    with patch(
+        "agent_fleet.openrouter_backend._call_openrouter_raw",
+        side_effect=responses,
+    ):
+        result = session.send("read hello.txt", max_tokens=100, timeout_s=30)
+
+    assert result.exit_code == 0
+    assert result.stdout == "I read the file."
+    assert "read_file" in result.mcp_tool_calls
+
+
+def test_session_send_write_file_creates_file(tmp_path: Path) -> None:
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    responses = [
+        _tool_call_response("write_file", {"path": "out.txt", "content": "hello world"}),
+        _stop_response("File written."),
+    ]
+    with patch(
+        "agent_fleet.openrouter_backend._call_openrouter_raw",
+        side_effect=responses,
+    ):
+        result = session.send("write out.txt", max_tokens=100, timeout_s=30)
+
+    assert result.exit_code == 0
+    written = (tmp_path / "out.txt").read_text(encoding="utf-8")
+    assert written == "hello world"
+    assert "write_file" in result.mcp_tool_calls
+
+
+def test_session_send_scope_enforcement_blocks_write(tmp_path: Path) -> None:
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    responses = [
+        # Write outside the allowed "src/" prefix.
+        _tool_call_response("write_file", {"path": "tests/bad.txt", "content": "nope"}),
+        _stop_response("Done."),
+    ]
+    with patch(
+        "agent_fleet.openrouter_backend._call_openrouter_raw",
+        side_effect=responses,
+    ):
+        session.send(
+            "write tests/bad.txt",
+            max_tokens=100,
+            timeout_s=30,
+            allowed_tools=["path:src/"],
+        )
+
+    # The file must not have been created.
+    assert not (tmp_path / "tests" / "bad.txt").exists()
+    # The tool result (appended to history) should contain an error message.
+    tool_msgs = [m for m in session._messages if m.get("role") == "tool"]
+    assert tool_msgs
+    assert "error" in tool_msgs[0]["content"]
+
+
+def test_session_send_path_traversal_blocked(tmp_path: Path) -> None:
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    responses = [
+        _tool_call_response("read_file", {"path": "../../../etc/passwd"}),
+        _stop_response("Done."),
+    ]
+    with patch(
+        "agent_fleet.openrouter_backend._call_openrouter_raw",
+        side_effect=responses,
+    ):
+        result = session.send("read passwd", max_tokens=100, timeout_s=30)
+
+    # The tool result should report an error (file outside workspace).
+    tool_msgs = [m for m in session._messages if m.get("role") == "tool"]
+    assert tool_msgs
+    assert "error" in tool_msgs[0]["content"]
+    # read_file was still "called" (recorded), even though it was rejected.
+    assert "read_file" in result.mcp_tool_calls
+
+
+def test_session_send_max_iterations_cap(tmp_path: Path) -> None:
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    # Always return a tool_calls response — the loop never terminates naturally.
+    endless = _tool_call_response("read_file", {"path": "missing.txt"})
+
+    with patch(
+        "agent_fleet.openrouter_backend._call_openrouter_raw",
+        side_effect=lambda *a, **k: endless,  # noqa: ARG005
+    ):
+        result = session.send("loop forever", max_tokens=100, timeout_s=30)
+
+    assert result.exit_code == 1
+    assert "max tool iterations" in result.stderr
+
+
+def test_session_conversation_history_persists(tmp_path: Path) -> None:
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    initial_len = len(session._messages)
+
+    with patch(
+        "agent_fleet.openrouter_backend._call_openrouter_raw",
+        side_effect=[_stop_response("first answer")],
+    ):
+        session.send("first prompt", max_tokens=100, timeout_s=30)
+    after_first = len(session._messages)
+    assert after_first > initial_len
+
+    with patch(
+        "agent_fleet.openrouter_backend._call_openrouter_raw",
+        side_effect=[_stop_response("second answer")],
+    ):
+        session.send("second prompt", max_tokens=100, timeout_s=30)
+    after_second = len(session._messages)
+    # History grew again and retains the first turn's messages.
+    assert after_second > after_first
+    contents = [m.get("content") for m in session._messages]
+    assert "first answer" in contents
+    assert "second answer" in contents
+
+
+# --- Observability: usage normalization ----------------------------------
+
+
+def test_normalize_openrouter_usage_maps_fields() -> None:
+    raw = {
+        "prompt_tokens": 100,
+        "completion_tokens": 50,
+        "prompt_tokens_details": {"cached_tokens": 30},
+    }
+    out = _normalize_openrouter_usage(raw)
+    assert out is not None
+    assert out["input_tokens"] == 100
+    assert out["output_tokens"] == 50
+    assert out["cache_read_tokens"] == 30
+    assert out["cache_write_tokens"] == 0
+
+
+def test_normalize_openrouter_usage_returns_none_for_empty() -> None:
+    assert _normalize_openrouter_usage(None) is None
+    assert _normalize_openrouter_usage({}) is None
+
+
+def test_run_emits_llm_usage_to_run_log(tmp_path: Path) -> None:
+    payload = {
+        "id": "gen-usage-1",
+        "choices": [{"message": {"content": "ok"}}],
+        "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "prompt_tokens_details": {"cached_tokens": 30},
+        },
+    }
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    mock_log = MagicMock()
+    with (
+        patch(
+            "agent_fleet.openrouter_backend._call_openrouter_raw",
+            return_value=payload,
+        ),
+        patch("agent_fleet.openrouter_backend.get_run_log", return_value=mock_log),
+    ):
+        result = backend.run("prompt", max_tokens=100, timeout_s=30, cwd=tmp_path)
+
+    assert result.exit_code == 0
+    mock_log.llm_usage.assert_called_once()
+    kwargs = mock_log.llm_usage.call_args.kwargs
+    assert kwargs["input_tokens"] == 100
+    assert kwargs["output_tokens"] == 50
+    # call_openrouter returns the raw usage dict (including nested
+    # prompt_tokens_details), so _normalize_openrouter_usage can extract
+    # cache hits from the run() path.
+    assert kwargs["cache_read_tokens"] == 30
+    assert kwargs["cache_write_tokens"] == 0
+
+
+# --- Path / scope helpers -------------------------------------------------
+
+
+def test_safe_resolve_rejects_traversal(tmp_path: Path) -> None:
+    assert _safe_resolve("../../../etc/passwd", tmp_path) is None
+
+
+def test_safe_resolve_accepts_valid_path(tmp_path: Path) -> None:
+    resolved = _safe_resolve("src/file.py", tmp_path)
+    assert resolved is not None
+    assert resolved.is_relative_to(tmp_path.resolve())
+
+
+def test_is_within_scope_dot_matches_everything(tmp_path: Path) -> None:
+    target = (tmp_path / "anywhere" / "deep" / "file.py").resolve()
+    assert _is_within_scope(target, ["."], tmp_path) is True
+
+
+def test_is_within_scope_specific_prefix(tmp_path: Path) -> None:
+    src_file = (tmp_path / "src" / "mod.py").resolve()
+    test_file = (tmp_path / "tests" / "test_x.py").resolve()
+    assert _is_within_scope(src_file, ["src/"], tmp_path) is True
+    assert _is_within_scope(test_file, ["src/"], tmp_path) is False
