@@ -24,6 +24,7 @@ gives us for free.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -34,6 +35,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.observability.context import get_run_context, get_run_log
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -563,6 +566,92 @@ def _strip_fabricated_responses(content: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Repetition + hallucination guards
+# ---------------------------------------------------------------------------
+
+# Phrases that indicate the model claims to have completed work without tools.
+_COMPLETION_PHRASES = (
+    "changes made",
+    "file changed",
+    "files changed",
+    "i edited",
+    "i've edited",
+    "i have edited",
+    "i updated",
+    "i've updated",
+    "i have updated",
+    "i added",
+    "i've added",
+    "i have added",
+    "i modified",
+    "i've modified",
+    "i have modified",
+    "i created",
+    "i've created",
+    "i have created",
+    "i wrote",
+    "i've written",
+    "i have written",
+    "the task is complete",
+    "task complete",
+    "changes are correct",
+    "edits are correct",
+    "both edits",
+    "both changes",
+    "follow-up needed: none",
+    "follow up needed: none",
+    "no follow-up",
+    "no follow up",
+)
+
+# Max corrective prompts before accepting the answer as-is.
+_MAX_CORRECTIONS = 3
+
+
+def _is_repetitive(content: str, *, min_repeats: int = 5) -> bool:
+    """Detect if content is a repetition loop (same phrase repeated many times).
+
+    Models like tencent/hy3:free sometimes get stuck repeating the same
+    narration ("I'll read the target file to locate the exact lines") hundreds
+    of times without ever calling a tool.
+    """
+    if len(content) < 100:
+        return False
+    # Check if any 50-char substring appears 5+ times.
+    # Sample at a few offsets to avoid O(n²) on very long content.
+    sample_offsets = [0, 50, 100, 200, 500]
+    for offset in sample_offsets:
+        if offset + 50 > len(content):
+            continue
+        snippet = content[offset : offset + 50]
+        if len(snippet) < 50:
+            continue
+        count = content.count(snippet)
+        if count >= min_repeats:
+            return True
+    return False
+
+
+def _claims_completion_without_tools(content: str) -> bool:
+    """Detect if the model claims to have completed file edits without tools.
+
+    Checks for phrases like "Changes made", "I edited", "Both edits" that
+    indicate the model is narrating completion rather than actually calling
+    tools.
+    """
+    lower = content.lower()
+    return any(phrase in lower for phrase in _COMPLETION_PHRASES)
+
+
+_CORRECTIVE_PROMPT = (
+    "You have NOT called any tools yet. Do not describe what you would do — "
+    "actually CALL the tools. Use read_file to read the target file first, "
+    "then use write_file to make the changes. You must use the structured "
+    "tool_calls mechanism. Respond with tool calls, not narration."
+)
+
+
+# ---------------------------------------------------------------------------
 # Agentic session with tool-use loop
 # ---------------------------------------------------------------------------
 
@@ -632,6 +721,7 @@ class OpenRouterSession:
         t0 = time.monotonic()
         tool_calls_made: list[str] = []
         total_usage: dict[str, int] = {}
+        corrections = 0
 
         try:
             for _iteration in range(_MAX_TOOL_ITERATIONS):
@@ -750,6 +840,32 @@ class OpenRouterSession:
                                 "content": result,
                             }
                         )
+                    continue
+
+                # Guard: detect repetition loops and hallucinated completions.
+                # If the model hasn't called any tools yet but claims completion,
+                # or if the content is a repetition loop, inject a corrective
+                # prompt and continue instead of accepting a bad final answer.
+                needs_correction = False
+                correction_reason = ""
+                if _is_repetitive(content):
+                    needs_correction = True
+                    correction_reason = "repetition loop detected"
+                elif not tool_calls_made and _claims_completion_without_tools(content):
+                    needs_correction = True
+                    correction_reason = "claims completion without calling tools"
+
+                if needs_correction and corrections < _MAX_CORRECTIONS:
+                    corrections += 1
+                    logger.warning(
+                        "OpenRouter session corrective prompt %d/%d: %s (model=%s)",
+                        corrections,
+                        _MAX_CORRECTIONS,
+                        correction_reason,
+                        self._model,
+                    )
+                    self._messages.append({"role": "assistant", "content": content})
+                    self._messages.append({"role": "user", "content": _CORRECTIVE_PROMPT})
                     continue
 
                 self._messages.append({"role": "assistant", "content": content})

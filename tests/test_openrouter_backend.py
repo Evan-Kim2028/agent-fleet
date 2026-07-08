@@ -22,11 +22,14 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 from agent_fleet.openrouter_backend import (
+    _MAX_CORRECTIONS,
     DEFAULT_MODEL,
     OPENROUTER_BASE_URL,
     OpenRouterBackend,
     OpenRouterLLMResult,
     OpenRouterSession,
+    _claims_completion_without_tools,
+    _is_repetitive,
     _is_within_scope,
     _normalize_openrouter_usage,
     _OpenRouterErrorSession,
@@ -667,3 +670,144 @@ def test_session_send_text_mode_tool_calls_executed(tmp_path: Path) -> None:
     assert result.exit_code == 0
     assert "read_file" in result.mcp_tool_calls
     assert result.stdout == "Done. The file contains hello."
+
+
+# --- Repetition / hallucination guards -----------------------------------
+
+
+def test_is_repetitive_detects_loop() -> None:
+    content = "I'll read the target file to locate the exact lines. " * 20
+    assert _is_repetitive(content) is True
+
+
+def test_is_repetitive_returns_false_for_normal_text() -> None:
+    content = "I read the file and made the changes. The task is complete."
+    assert _is_repetitive(content) is False
+
+
+def test_is_repetitive_returns_false_for_short_content() -> None:
+    assert _is_repetitive("short") is False
+
+
+def test_claims_completion_without_tools_detects_phrases() -> None:
+    for content in (
+        "Changes made: edited docs/NEW-REPO.md",
+        "I edited the file",
+        "Both edits are correct",
+        "The task is complete",
+        "Follow-up needed: None",
+    ):
+        assert _claims_completion_without_tools(content) is True, content
+
+
+def test_claims_completion_without_tools_returns_false_for_normal() -> None:
+    assert _claims_completion_without_tools("I need to read the file first.") is False
+
+
+def test_session_corrective_prompt_on_hallucinated_completion(tmp_path: Path) -> None:
+    # Create a real file for read_file to read on the corrective turn.
+    (tmp_path / "hello.txt").write_text("hello world", encoding="utf-8")
+
+    response_1 = {
+        "id": "gen-1",
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": (
+                        "Changes made: Added the OpenRouter line to "
+                        "docs/NEW-REPO.md. The task is complete."
+                    ),
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 50, "completion_tokens": 20},
+    }
+    response_2 = _tool_call_response("read_file", {"path": "hello.txt"})
+    response_3 = {
+        "id": "gen-3",
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "Done. The file has been read and edited.",
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 80, "completion_tokens": 10},
+    }
+
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    with patch(
+        "agent_fleet.openrouter_backend._call_openrouter_raw",
+        side_effect=[response_1, response_2, response_3],
+    ):
+        result = session.send("edit docs/NEW-REPO.md", max_tokens=100, timeout_s=30)
+
+    assert result.exit_code == 0
+    assert "read_file" in result.mcp_tool_calls
+    assert result.stdout == "Done. The file has been read and edited."
+
+
+def test_session_corrective_prompt_on_repetition(tmp_path: Path) -> None:
+    # Create a real file for read_file to read on the corrective turn.
+    (tmp_path / "hello.txt").write_text("hello world", encoding="utf-8")
+
+    response_1 = {
+        "id": "gen-1",
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "I'll read the target file. " * 20,
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 50, "completion_tokens": 20},
+    }
+    response_2 = _tool_call_response("read_file", {"path": "hello.txt"})
+    response_3 = _stop_response("Done.")
+
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    with patch(
+        "agent_fleet.openrouter_backend._call_openrouter_raw",
+        side_effect=[response_1, response_2, response_3],
+    ):
+        result = session.send("read hello.txt", max_tokens=100, timeout_s=30)
+
+    assert result.exit_code == 0
+    assert "read_file" in result.mcp_tool_calls
+    assert result.stdout == "Done."
+
+
+def test_session_accepts_after_max_corrections(tmp_path: Path) -> None:
+    # Always return a hallucinated completion with no tool calls. After
+    # _MAX_CORRECTIONS corrective prompts the guard gives up and accepts.
+    hallucinated = {
+        "id": "gen-loop",
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "Changes made. Task complete.",
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 50, "completion_tokens": 20},
+    }
+
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    mock_raw = MagicMock(side_effect=lambda *a, **k: hallucinated)  # noqa: ARG005
+    with patch("agent_fleet.openrouter_backend._call_openrouter_raw", new=mock_raw):
+        result = session.send("edit the file", max_tokens=100, timeout_s=30)
+
+    assert result.exit_code == 0
+    # 3 corrective prompts + 1 final acceptance.
+    assert mock_raw.call_count == _MAX_CORRECTIONS + 1
