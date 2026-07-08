@@ -50,6 +50,13 @@ issues.
   `--loadout {minimal,standard}` let the dispatching host assign a smaller
   skill set per task instead of always loading the full execute loadout;
   `default_loadout_size` in `fleet.yaml` sets the fleet-wide default.
+- **VERIFY fails closed on indeterminate git state:** `get_changed_files`
+  no longer fails open — it resolves the diff base through a fallback chain
+  (origin → local `main`/`master` → fork point) so committed changes are
+  detected even without an `origin` remote, and reports whether detection was
+  determinate. When change detection genuinely cannot tell what changed,
+  VERIFY now returns `RETRY` instead of silently reporting a false-clean
+  "No changes detected" pass; a legitimately empty diff still passes.
 
 ## 0.11.3 — 2026-07-07
 
