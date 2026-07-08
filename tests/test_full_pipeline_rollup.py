@@ -58,3 +58,39 @@ def test_run_end_kwargs_rollup_none_without_usage(tmp_path: Path) -> None:
         _run_end_kwargs(result, None)
 
     assert result.usage_rollup is None
+
+
+def test_run_end_success_path_does_not_duplicate_pr_number(tmp_path: Path) -> None:
+    """Happy path after OPEN_PR: pr_number comes only from _run_end_kwargs."""
+    from agent_fleet.observability.sinks import MemoryRingSink
+
+    ring = MemoryRingSink(max_events=20)
+    run_log = RunLog.create(
+        run_id="pr-dup-test",
+        task_id=2454,
+        persona="coder",
+        runs_dir=tmp_path,
+        include_memory_ring=False,
+    )
+    run_log._sinks.append(ring)
+    terminal = FleetRunResult(
+        run_id="pr-dup-test",
+        task_id=2454,
+        persona="coder",
+        outcome="completed",
+        pr_number=2460,
+    )
+
+    with bind_run(run_log, run_log.context):
+        run_log.run_end(
+            outcome=terminal.outcome,
+            changed_lines=42,
+            jsonl=str(run_log.jsonl_path) if run_log.jsonl_path else None,
+            **_run_end_kwargs(terminal, None),
+        )
+
+    end_events = [e for e in ring.events if e.event == "run.end"]
+    assert len(end_events) == 1
+    payload = end_events[0].data
+    assert payload is not None
+    assert payload["pr_number"] == 2460

@@ -915,7 +915,6 @@ class LocalFleetRunner:
                 run_log.run_end(
                     outcome=terminal.outcome,
                     changed_lines=_changed_lines(worktree),
-                    pr_number=pr_number,
                     jsonl=str(run_log.jsonl_path) if run_log.jsonl_path else None,
                     **_run_end_kwargs(terminal, find_repo_config(repo_root)),
                 )
