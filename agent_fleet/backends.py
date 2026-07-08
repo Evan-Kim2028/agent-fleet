@@ -1,4 +1,4 @@
-"""Backend factory — registry-driven; Cursor SDK (default), Kimi Code CLI, and OpenRouter.
+"""Backend factory — registry-driven; Cursor, Kimi, OpenRouter, and Grok Build CLI.
 
 Backends are imported lazily inside their factory functions so that selecting one
 backend (e.g. ``default_backend: openrouter``) does not import the others' modules
@@ -23,19 +23,22 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class _BackendSpec:
-    """A backend's factory plus the env/SDK contracts its preflight checks read.
+    """A backend's factory plus the env/SDK/auth contracts its preflight checks read.
 
     ``sdk_import_check`` is the importable module name the doctor probes for SDK
     availability (``None`` for backends with no SDK dependency, e.g. HTTP backends).
-    Like ``env_var``/``key_hint``, it lives here as the single source the preflight
-    layer reads, so a new backend wires its SDK contract once at the ``register()``
-    call rather than in doctor.
+    ``auth_probe`` is an optional callable returning ``(ok, detail, fix)`` for
+    backends that authenticate outside env vars (e.g. Grok subscription via
+    ``~/.grok/auth.json``). Like ``env_var``/``key_hint``, these live here as the
+    single source the preflight layer reads, so a new backend wires its contract
+    once at the ``register()`` call rather than in doctor.
     """
 
     factory: Callable[[FleetConfig], LLMBackend]
     env_var: str | None = None
     key_hint: str = ""
     sdk_import_check: str | None = None
+    auth_probe: Callable[[], tuple[bool, str, str]] | None = None
 
 
 # name → spec; mutate via register() to add backends at import time.
@@ -49,18 +52,25 @@ def register(
     env_var: str | None = None,
     key_hint: str = "",
     sdk_import_check: str | None = None,
+    auth_probe: Callable[[], tuple[bool, str, str]] | None = None,
 ) -> None:
     """Register a backend factory under *name* (lower-cased).
 
     ``env_var`` is the API-key variable the doctor and CLI preflights check, and
     ``key_hint`` is extra guidance shown when it is missing. ``sdk_import_check``
     is the importable module name the doctor probes for SDK availability (``None``
-    for backends with no SDK dependency). All three live here as the single source
-    the preflight layer reads, so a new backend wires its key + SDK contract once
-    rather than in doctor, cli_env, and pr_review.github_action.
+    for backends with no SDK dependency). ``auth_probe`` is an optional callable
+    returning ``(ok, detail, fix)`` for subscription/file-based auth (e.g. Grok).
+    All live here as the single source the preflight layer reads, so a new backend
+    wires its key + SDK + auth contract once rather than in doctor, cli_env, and
+    pr_review.github_action.
     """
     _REGISTRY[name.lower()] = _BackendSpec(
-        factory, env_var=env_var, key_hint=key_hint, sdk_import_check=sdk_import_check
+        factory,
+        env_var=env_var,
+        key_hint=key_hint,
+        sdk_import_check=sdk_import_check,
+        auth_probe=auth_probe,
     )
 
 
@@ -80,6 +90,17 @@ def backend_sdk_import_check(name: str) -> str | None:
     """Importable module name the doctor probes for SDK availability, or None."""
     spec = _REGISTRY.get(name.lower())
     return spec.sdk_import_check if spec else None
+
+
+def backend_auth_probe(name: str) -> Callable[[], tuple[bool, str, str]] | None:
+    """Optional auth probe for a registered backend (subscription/file auth)."""
+    spec = _REGISTRY.get(name.lower())
+    return spec.auth_probe if spec else None
+
+
+def backend_is_registered(name: str) -> bool:
+    """True if *name* is present in the backend registry."""
+    return name.lower() in _REGISTRY
 
 
 def _make_cursor(config: FleetConfig) -> LLMBackend:
@@ -115,6 +136,22 @@ def _make_openrouter(config: FleetConfig) -> LLMBackend:
     )
 
 
+def _make_grok(config: FleetConfig) -> LLMBackend:
+    from agent_fleet.grok_backend import DEFAULT_MODEL as GROK_DEFAULT_MODEL
+    from agent_fleet.grok_backend import GrokBackend
+
+    return GrokBackend(
+        model=config.default_model or GROK_DEFAULT_MODEL,
+        grok_bin=getattr(config, "grok_bin", None),
+    )
+
+
+def _grok_auth_probe() -> tuple[bool, str, str]:
+    from agent_fleet.grok_backend import check_grok_auth
+
+    return check_grok_auth()
+
+
 # coerce_agent_mode is imported eagerly at the top (pure helper, no SDK dep).
 
 register(
@@ -137,6 +174,14 @@ register(
     env_var="OPENROUTER_API_KEY",
     key_hint="create one at openrouter.ai/keys",
     sdk_import_check=None,
+)
+register(
+    "grok",
+    _make_grok,
+    env_var=None,
+    key_hint="run `grok login` (SuperGrok / X Premium+)",
+    sdk_import_check=None,
+    auth_probe=_grok_auth_probe,
 )
 
 

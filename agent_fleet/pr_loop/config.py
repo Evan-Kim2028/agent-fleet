@@ -33,8 +33,10 @@ class PrLoopConfig:
     ignored_ci_checks: tuple[str, ...] = field(
         default_factory=lambda: (
             "composer pr analysis",
+            "grok pr analysis",
             "kimi pr analysis",
             "openrouter pr analysis",
+            "fleet pr analysis",
         )
     )
     drift_check: bool = True
@@ -50,8 +52,10 @@ def load_pr_loop_config(_repo_root: Path, raw: dict[str, Any] | None) -> PrLoopC
     branch_prefixes = section.get("branch_prefixes") or ["fleet/"]
     ignored = section.get("ignored_ci_checks") or [
         "composer pr analysis",
+        "grok pr analysis",
         "kimi pr analysis",
         "openrouter pr analysis",
+        "fleet pr analysis",
     ]
     return PrLoopConfig(
         enabled=bool(section.get("enabled", False)),

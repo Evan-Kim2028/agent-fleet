@@ -88,7 +88,7 @@ See [PERSONAS.md](PERSONAS.md) for persona authoring.
 
 ## Level 3 — GitHub PR analyzer
 
-Posts a structured PR review comment on every pull request using Composer (multi-pass: backend/security, frontend, optional quality pass).
+Posts a structured PR review comment on every pull request using the fleet `default_backend` (multi-pass: backend/security, frontend, optional quality pass).
 
 ### 1. Add `pr_review` to `.agent-fleet.yaml`
 
@@ -123,15 +123,27 @@ Copy `examples/github/pr-analyzer.yml` → `.github/workflows/pr-analyzer.yml`.
 
 Replace `@v0.6.0` with the version you tested, or `@<40-char-commit-sha>`.
 
-### 3. GitHub secret
+### 3. Backend and secrets
 
-In repo **Settings → Secrets → Actions**, add:
+The analyzer uses `default_backend` from the runner's fleet config
+(`~/.agent-fleet/fleet.yaml` or `AGENT_FLEET_CONFIG`). **Do not hardcode**
+`AGENT_FLEET_BACKEND=cursor` unless you intentionally override.
 
-| Secret | Value |
-|--------|--------|
-| `CURSOR_API_KEY` | Your Cursor API key |
+Optional override env vars (only when set): `AGENT_FLEET_BACKEND`, `AGENT_FLEET_MODEL`.
 
-For Kimi backend instead of Cursor, set `AGENT_FLEET_BACKEND=kimi` in the workflow and use `KIMI_API_KEY`.
+In repo **Settings → Secrets → Actions**, add keys for backends you may use:
+
+| Secret | When needed |
+|--------|-------------|
+| `CURSOR_API_KEY` | `default_backend: cursor` |
+| `KIMI_API_KEY` | `default_backend: kimi` |
+| `OPENROUTER_API_KEY` | `default_backend: openrouter` |
+
+For **Grok** (`default_backend: grok`): no API-key secret — the runner must have
+`grok login` completed (`~/.grok/auth.json`). See [GROK.md](GROK.md).
+
+Comment titles follow the backend (Composer / Grok / Kimi / OpenRouter PR Analysis)
+unless you set a custom `pr_review.comment_title` in `.agent-fleet.yaml`.
 
 ### 4. Permissions
 
@@ -139,7 +151,7 @@ The workflow needs `pull-requests: write` (included in the example). If PR comme
 
 ### 5. Test
 
-Open a pull request. Within a few minutes you should see a **Composer PR Analysis** comment from the workflow.
+Open a pull request. Within a few minutes you should see a PR analysis comment (title depends on `default_backend`: Composer / Grok / Kimi / OpenRouter).
 
 Local test (no GitHub):
 

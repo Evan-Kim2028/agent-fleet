@@ -70,16 +70,21 @@ default_model: composer-2.5
 # default_backend: kimi
 # default_model: kimi-for-coding
 # kimi_bin: ~/.local/bin/kimi-cli
+
+# Optional — Grok Build CLI, SuperGrok / X Premium+ via `grok login`
+# default_backend: grok
+# default_model: grok-4.5
+# grok_bin: ~/.grok/bin/grok
 ```
 
-| Setting | Cursor SDK (default) | Kimi Code CLI |
-|---------|----------------------|---------------|
-| `default_backend` | `cursor` | `kimi` |
-| API key env | `CURSOR_API_KEY` | `KIMI_API_KEY` |
-| Default model | `composer-2.5` | `kimi-for-coding` |
-| Runtime | `cursor-sdk` (pip) | `kimi-cli` binary |
+| Setting | Cursor SDK (default) | Kimi Code CLI | Grok Build CLI |
+|---------|----------------------|---------------|----------------|
+| `default_backend` | `cursor` | `kimi` | `grok` |
+| Auth | `CURSOR_API_KEY` | `KIMI_API_KEY` | `grok login` → `~/.grok/auth.json` |
+| Default model | `composer-2.5` | `kimi-for-coding` | `grok-4.5` |
+| Runtime | `cursor-sdk` (pip) | `kimi-cli` binary | `grok` binary |
 
-Personas, pipelines, and repo scope are **backend-agnostic**. Kimi setup: **[KIMI.md](KIMI.md)**.
+Personas, pipelines, and repo scope are **backend-agnostic**. Kimi setup: **[KIMI.md](KIMI.md)**. Grok setup: **[GROK.md](GROK.md)**.
 
 ## Global fleet (`fleet.yaml`)
 

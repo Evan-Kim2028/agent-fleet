@@ -1,0 +1,37 @@
+# Grok Build CLI fleet config — copy to ~/.agent-fleet/fleet.yaml
+# Requires: grok on PATH (or ~/.grok/bin/grok), run `grok login` (SuperGrok / X Premium+)
+# No XAI_API_KEY required — subscription auth via ~/.grok/auth.json
+
+default_backend: grok
+default_model: grok-4.5
+default_persona: coder
+default_mode: agent
+max_parallel: 3
+timeout_seconds: 900
+default_pipeline: code_review
+
+# Optional if grok is not on PATH:
+# grok_bin: ~/.grok/bin/grok
+
+personas:
+  coder:
+    prompt: coder.md
+  reviewer:
+    prompt: reviewer.md
+  explorer:
+    prompt: explorer.md
+    mode: plan
+
+pipelines:
+  simple:
+    - execute
+  code_review:
+    - execute
+    - review
+  full:
+    - plan
+    - research
+    - synthesize
+    - implement
+    - verify
+    - review

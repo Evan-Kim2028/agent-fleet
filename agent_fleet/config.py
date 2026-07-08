@@ -57,13 +57,15 @@ class PersonaSpec:
 @dataclass
 class FleetConfig:
     # default_model is None so each backend can supply its own DEFAULT_MODEL
-    # (cursor → composer-2.5, kimi → kimi-for-coding, openrouter → tencent/hy3:free)
+    # (cursor → composer-2.5, kimi → kimi-for-coding, openrouter → tencent/hy3:free,
+    #  grok → grok-4.5)
     # without a Cursor slug leaking into the shared config default. The factory
     # resolves `config.default_model or <BACKEND>.DEFAULT_MODEL`.
     default_model: str | None = None
     default_mode: AgentMode = "agent"
     default_backend: str = "cursor"
     kimi_bin: str | None = None
+    grok_bin: str | None = None
     default_persona: str = "coder"
     max_parallel: int = 3
     timeout_seconds: int = 900
@@ -205,6 +207,7 @@ def load_fleet_config(
     default_mode: str | None = None,
     default_backend: str | None = None,
     kimi_bin: str | None = None,
+    grok_bin: str | None = None,
     max_parallel: int | None = None,
     timeout_seconds: int | None = None,
     ram_budget_gb: int | None = None,
@@ -243,6 +246,7 @@ def load_fleet_config(
         default_mode=coerce_agent_mode(str(default_mode or data.get("default_mode") or "agent")),
         default_backend=str(default_backend or data.get("default_backend") or "cursor"),
         kimi_bin=kimi_bin or data.get("kimi_bin"),
+        grok_bin=grok_bin or data.get("grok_bin"),
         max_parallel=int(max_parallel or data.get("max_parallel") or 3),
         timeout_seconds=int(timeout_seconds or data.get("timeout_seconds") or 900),
         ram_budget_gb=int(ram_budget_gb or data.get("ram_budget_gb") or 24),

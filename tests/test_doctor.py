@@ -171,3 +171,63 @@ def test_cmd_doctor_falls_back_to_cursor_on_malformed_config(
     # Must not raise; must return an int exit code
     result = cmd_doctor(args)
     assert isinstance(result, int)
+
+# --- grok auth_probe ---
+
+
+def test_grok_backend_auth_probe_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent_fleet import backends
+
+    monkeypatch.setattr(
+        "agent_fleet.grok_backend.check_grok_auth",
+        lambda: (True, "authenticated (~/.grok/auth.json)", ""),
+    )
+    # Rebind registry probe to pick up monkeypatched function path used by doctor
+    def _probe() -> tuple[bool, str, str]:
+        from agent_fleet.grok_backend import check_grok_auth
+
+        return check_grok_auth()
+
+    # Patch the registered probe on the live spec
+    spec = backends._REGISTRY["grok"]
+    monkeypatch.setitem(
+        backends._REGISTRY,
+        "grok",
+        type(spec)(
+            factory=spec.factory,
+            env_var=spec.env_var,
+            key_hint=spec.key_hint,
+            sdk_import_check=spec.sdk_import_check,
+            auth_probe=_probe,
+        ),
+    )
+    checks = run_doctor_checks(backend="grok")
+    match = next(c for c in checks if c.name == "Grok auth")
+    assert match.status == "pass"
+    assert "authenticated" in match.detail
+
+
+def test_grok_backend_auth_probe_fail(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent_fleet import backends
+
+    def _probe() -> tuple[bool, str, str]:
+        return (False, "~/.grok/auth.json missing", "run `grok login` (SuperGrok / X Premium+)")
+
+    spec = backends._REGISTRY["grok"]
+    monkeypatch.setitem(
+        backends._REGISTRY,
+        "grok",
+        type(spec)(
+            factory=spec.factory,
+            env_var=spec.env_var,
+            key_hint=spec.key_hint,
+            sdk_import_check=spec.sdk_import_check,
+            auth_probe=_probe,
+        ),
+    )
+    checks = run_doctor_checks(backend="grok")
+    match = next(c for c in checks if c.name == "Grok auth")
+    assert match.status == "fail"
+    assert "missing" in match.detail
+    assert "grok login" in match.fix
+

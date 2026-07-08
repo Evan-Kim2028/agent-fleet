@@ -54,20 +54,35 @@ def _check_python() -> DoctorCheck:
 
 
 def _check_backend_key(backend: str) -> DoctorCheck:
-    from agent_fleet.backends import backend_env_var, backend_key_hint
+    from agent_fleet.backends import (
+        backend_auth_probe,
+        backend_env_var,
+        backend_is_registered,
+        backend_key_hint,
+    )
+
+    probe = backend_auth_probe(backend)
+    if probe is not None:
+        ok, detail, fix = probe()
+        name = "Grok auth" if backend == "grok" else f"{backend} auth"
+        return DoctorCheck(name, "pass" if ok else "fail", detail, fix if not ok else "")
 
     env = backend_env_var(backend)
-    if env is None:
-        return DoctorCheck(
-            f"{backend} API key", "warn", f"unknown backend '{backend}'; cannot verify a key"
-        )
-    if os.environ.get(env):
-        return DoctorCheck(env, "pass", "set")
-    fix = f"export {env}=<your key>"
-    hint = backend_key_hint(backend)
-    if hint:
-        fix += f"  ({hint})"
-    return DoctorCheck(env, "fail", "not set", fix)
+    if env is not None:
+        if os.environ.get(env):
+            return DoctorCheck(env, "pass", "set")
+        fix = f"export {env}=<your key>"
+        hint = backend_key_hint(backend)
+        if hint:
+            fix += f"  ({hint})"
+        return DoctorCheck(env, "fail", "not set", fix)
+
+    if backend_is_registered(backend):
+        return DoctorCheck(f"{backend} auth", "pass", "no auth required")
+
+    return DoctorCheck(
+        f"{backend} API key", "warn", f"unknown backend '{backend}'; cannot verify a key"
+    )
 
 
 def _check_backend_sdk(backend: str) -> DoctorCheck | None:

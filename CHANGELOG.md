@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.12.1 — 2026-07-08
+
+### Summary
+
+PR analyzer follows the fleet `default_backend` (same as `fleet run`). No more
+hard-coded Cursor: Grok, Kimi, and OpenRouter runners use their own auth and
+comment labels. The pr_loop watcher accepts analyses from any backend title.
+
+### Changes
+
+- **PR analyzer backend:** `github_action.py` loads `load_fleet_config()`, applies
+  optional `AGENT_FLEET_BACKEND` / `AGENT_FLEET_MODEL` overrides only when set,
+  authenticates via `require_backend_env` (env keys **and** Grok `auth_probe`),
+  and builds the backend with `make_backend` — matching fleet run.
+- **Comment titles / footers:** backend-derived labels (Composer / Grok Build /
+  Kimi Code / OpenRouter) when `pr_review.comment_title` is still the stock
+  value; custom titles are preserved.
+- **pr_loop markers:** `find_reviewer_comment` matches Composer/Grok/Kimi/
+  OpenRouter/Agent Fleet titles plus the stable `**Risk Level:**` line;
+  `ignored_ci_checks` includes `fleet pr analysis` and `grok pr analysis`.
+- **Workflows:** example + docs no longer hardcode `AGENT_FLEET_BACKEND=cursor`.
+
+## 0.12.0 — 2026-07-08
+
+### Summary
+
+Grok Build CLI is now a first-class execution backend. Fleet runs can use the
+official `grok` binary with **subscription-only** auth (`grok login` →
+`~/.grok/auth.json`). No `XAI_API_KEY` is required. Doctor and CLI preflight
+support a registry `auth_probe` for backends that authenticate outside env vars.
+
+### Changes
+
+- **Grok Build backend:** new `agent_fleet/grok_backend.py` — headless `grok`
+  subprocess with `--prompt-file`, `--output-format plain`, model `grok-4.5`,
+  `--yolo` (agent) or `--permission-mode plan` (plan), and durable sessions
+  (`-s` UUID on first send, `-r` on subsequent). Scope notes for `path:`
+  allowed_tools match the Kimi adapter.
+- **Subscription auth probe:** `check_grok_auth()` verifies the `grok` binary
+  and a non-empty valid JSON object at `~/.grok/auth.json`. Registered as
+  `auth_probe` on the backend (no `env_var`).
+- **Registry:** `_BackendSpec.auth_probe`, `backend_auth_probe()`,
+  `backend_is_registered()`; `default_backend: grok` with optional `grok_bin`.
+- **Doctor / CLI:** `_check_backend_key` and `require_backend_env` prefer
+  `auth_probe` when present, then env-var keys, then pass for registered
+  backends with neither.
+- **Docs / examples:** `docs/GROK.md`, `examples/fleet.grok.yaml`, README /
+  PERSONAS / fleet.example.yaml rows for Grok.
+
+
 ## 0.11.4 — 2026-07-08
 
 ### Summary

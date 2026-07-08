@@ -1,9 +1,16 @@
-# Agent Fleet PR analyzer (Composer default, repo-tuned via .agent-fleet.yaml)
+# Agent Fleet PR analyzer
 #
 # Copy to .github/workflows/pr-analyzer.yml
-# Secrets: CURSOR_API_KEY (or KIMI_API_KEY with AGENT_FLEET_BACKEND=kimi)
 #
-# Pin agent-fleet to a release tag or commit SHA — replace v0.6.0 before deploying.
+# Backend comes from the runner fleet config (`default_backend` in
+# AGENT_FLEET_CONFIG / CODING_FLEET_CONFIG / ~/.agent-fleet/fleet.yaml).
+# Do NOT hardcode AGENT_FLEET_BACKEND unless you intentionally override.
+#
+# Pass secrets for whichever backends the runner might use (optional):
+#   CURSOR_API_KEY, KIMI_API_KEY, OPENROUTER_API_KEY
+# For grok: runner must have `grok login` done (subscription → ~/.grok/auth.json).
+#
+# Pin agent-fleet to a release tag or commit SHA — replace v0.12.1 before deploying.
 # Tag format and release process: docs/RELEASE.md in the agent-fleet repo.
 
 name: pr-analyzer
@@ -11,6 +18,7 @@ name: pr-analyzer
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+  workflow_dispatch:
 
 concurrency:
   group: pr-analyzer-${{ github.event.pull_request.number || github.ref }}
@@ -23,7 +31,7 @@ permissions:
 
 jobs:
   analyze:
-    name: composer pr analysis
+    name: fleet pr analysis
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -37,13 +45,19 @@ jobs:
           python-version: "3.14"
 
       - name: Install agent-fleet
-        run: uv pip install "git+https://github.com/Evan-Kim2028/agent-fleet.git@v0.6.0"
+        run: uv pip install --system "git+https://github.com/Evan-Kim2028/agent-fleet.git@v0.12.1"
 
       - name: Analyze PR
         env:
-          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_EVENT_PATH: ${{ github.event_path }}
-          AGENT_FLEET_BACKEND: cursor
+          AGENT_FLEET_WORKSPACE: ${{ github.workspace }}
+          # Optional: point at a fleet config on the runner (defaults to ~/.agent-fleet/fleet.yaml)
+          # AGENT_FLEET_CONFIG: /home/runner/.agent-fleet/fleet.yaml
+          # Do NOT set AGENT_FLEET_BACKEND — use fleet.yaml default_backend
+          # Optional secrets for env-key backends (only needed if that backend is selected):
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: agent-fleet-pr-analyzer

@@ -3,7 +3,7 @@
 # Copy to ~/.agent-fleet/fleet.yaml (see docs/FLEET-CONFIG.md)
 # See docs/FLEET-CONFIG.md for paths, personas_dir rules, and import-shadow checks.
 
-# Default backend: cursor (Cursor SDK), kimi (Kimi Code CLI), or openrouter (OpenRouter HTTP)
+# Default backend: cursor (Cursor SDK), kimi (Kimi Code CLI), openrouter (OpenRouter HTTP), or grok (Grok Build CLI)
 default_backend: cursor
 # composer-2.5 maps to the slow (non-fast) Cursor tier — agent-fleet
 # explicitly sends {fast=false} so you don't get silently routed to the
@@ -41,6 +41,13 @@ max_redispatches: 1
 # default_backend: openrouter
 # default_model: null  # inherits tencent/hy3:free (the backend default)
 # default_model: anthropic/claude-3.5-sonnet  # to pin a different model
+
+# --- Optional: Grok Build CLI execution backend ---
+# Requires: grok binary (https://x.ai/cli); run `grok login` (SuperGrok / X Premium+)
+# No XAI_API_KEY required — uses ~/.grok/auth.json
+# default_backend: grok
+# default_model: grok-4.5
+# grok_bin: ~/.grok/bin/grok
 
 # personas_dir — bundled personas ship in the installed package (agent_fleet/personas/).
 # Leave UNSET in this global file so fleet uses the package defaults.

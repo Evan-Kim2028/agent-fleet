@@ -57,6 +57,16 @@ def test_openrouter_resolves(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(backend, OpenRouterBackend)
 
 
+def test_grok_resolves(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent_fleet.backends import make_backend
+    from agent_fleet.grok_backend import GrokBackend
+
+    cfg = _config()
+    monkeypatch.setattr(cfg, "default_backend", "grok", raising=False)
+    backend = make_backend(cfg)
+    assert isinstance(backend, GrokBackend)
+
+
 def test_registered_backend_resolves(monkeypatch: pytest.MonkeyPatch) -> None:
     from agent_fleet import backends
 
@@ -85,6 +95,7 @@ def test_unknown_backend_raises_helpful_error(monkeypatch: pytest.MonkeyPatch) -
     # Error message must list known backends so the user knows what to use.
     assert "cursor" in str(exc_info.value)
     assert "kimi" in str(exc_info.value)
+    assert "grok" in str(exc_info.value)
 
 
 def test_builtin_backend_env_vars() -> None:
@@ -93,6 +104,7 @@ def test_builtin_backend_env_vars() -> None:
     assert backend_env_var("cursor") == "CURSOR_API_KEY"
     assert backend_env_var("kimi") == "KIMI_API_KEY"
     assert backend_env_var("openrouter") == "OPENROUTER_API_KEY"
+    assert backend_env_var("grok") is None
     assert backend_env_var("unregistered") is None
 
 
@@ -103,7 +115,21 @@ def test_builtin_backend_sdk_import_checks() -> None:
     assert backend_sdk_import_check("cursor") == "cursor_sdk"
     assert backend_sdk_import_check("kimi") is None
     assert backend_sdk_import_check("openrouter") is None
+    assert backend_sdk_import_check("grok") is None
     assert backend_sdk_import_check("unregistered") is None
+
+
+def test_builtin_backend_auth_probes() -> None:
+    """Grok declares an auth_probe; env-key backends do not."""
+    from agent_fleet.backends import backend_auth_probe, backend_is_registered
+
+    assert backend_auth_probe("grok") is not None
+    assert backend_auth_probe("cursor") is None
+    assert backend_auth_probe("kimi") is None
+    assert backend_auth_probe("openrouter") is None
+    assert backend_auth_probe("unregistered") is None
+    assert backend_is_registered("grok") is True
+    assert backend_is_registered("zzz") is False
 
 
 def test_doctor_derives_key_check_from_registry(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -269,3 +295,34 @@ def test_import_isolation_kimi_does_not_import_cursor_or_openrouter() -> None:
         for m, obj in saved.items():
             if obj is not None:
                 sys.modules[m] = obj
+
+
+def test_import_isolation_grok_does_not_import_others() -> None:
+    """Selecting grok imports only grok_backend."""
+    _backend_mods = (
+        "agent_fleet.cursor_backend",
+        "agent_fleet.kimi_backend",
+        "agent_fleet.openrouter_backend",
+        "agent_fleet.grok_backend",
+    )
+    saved = {m: sys.modules.get(m) for m in _backend_mods}
+    for m in _backend_mods:
+        sys.modules.pop(m, None)
+    try:
+        from agent_fleet.backends import make_backend
+        from agent_fleet.config import FleetConfig
+
+        cfg = FleetConfig(default_backend="grok", default_model=None)
+        make_backend(cfg)
+
+        assert "agent_fleet.grok_backend" in sys.modules
+        assert "agent_fleet.cursor_backend" not in sys.modules
+        assert "agent_fleet.kimi_backend" not in sys.modules
+        assert "agent_fleet.openrouter_backend" not in sys.modules
+    finally:
+        for m in _backend_mods:
+            sys.modules.pop(m, None)
+        for m, obj in saved.items():
+            if obj is not None:
+                sys.modules[m] = obj
+

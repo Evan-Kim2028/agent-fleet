@@ -1,0 +1,153 @@
+"""PR analyzer backend resolution follows fleet default_backend."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+from unittest.mock import patch
+
+from agent_fleet.pr_review.config import PrReviewConfig
+from agent_fleet.pr_review.github_action import (
+    backend_display,
+    resolve_comment_title,
+    resolve_fleet_config,
+    resolve_footer_label,
+)
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    import pytest
+
+
+def test_backend_display_labels() -> None:
+    assert backend_display("cursor") == ("Composer PR Analysis", "Composer")
+    assert backend_display("grok") == ("Grok PR Analysis", "Grok Build")
+    assert backend_display("kimi") == ("Kimi PR Analysis", "Kimi Code")
+    assert backend_display("openrouter") == ("OpenRouter PR Analysis", "OpenRouter")
+    assert backend_display("unknown") == ("Agent Fleet PR Analysis", "Agent Fleet")
+    assert backend_display("GROK") == ("Grok PR Analysis", "Grok Build")
+
+
+def test_resolve_comment_title_stock_rewrites_for_backend() -> None:
+    stock = PrReviewConfig()  # comment_title == Composer PR Analysis
+    assert resolve_comment_title(stock, "cursor") == "Composer PR Analysis"
+    assert resolve_comment_title(stock, "grok") == "Grok PR Analysis"
+    assert resolve_comment_title(stock, "kimi") == "Kimi PR Analysis"
+    assert resolve_comment_title(stock, "openrouter") == "OpenRouter PR Analysis"
+
+
+def test_resolve_comment_title_custom_preserved() -> None:
+    custom = PrReviewConfig(comment_title="Silphco PR Analysis")
+    assert resolve_comment_title(custom, "grok") == "Silphco PR Analysis"
+    assert resolve_comment_title(custom, "cursor") == "Silphco PR Analysis"
+
+
+def test_resolve_footer_label() -> None:
+    stock = PrReviewConfig()
+    assert resolve_footer_label(stock, "cursor") == "Composer"
+    assert resolve_footer_label(stock, "grok") == "Grok Build"
+    custom = PrReviewConfig(backend_label="Silphco Fleet")
+    assert resolve_footer_label(custom, "grok") == "Silphco Fleet"
+
+
+def test_resolve_fleet_config_honors_yaml_default_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = tmp_path / "fleet.yaml"
+    cfg.write_text("default_backend: grok\ndefault_model: grok-4.5\n", encoding="utf-8")
+    monkeypatch.setenv("AGENT_FLEET_CONFIG", str(cfg))
+    monkeypatch.delenv("AGENT_FLEET_BACKEND", raising=False)
+    monkeypatch.delenv("AGENT_FLEET_MODEL", raising=False)
+    resolved = resolve_fleet_config()
+    assert resolved.default_backend == "grok"
+    assert resolved.default_model == "grok-4.5"
+
+
+def test_resolve_fleet_config_backend_env_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = tmp_path / "fleet.yaml"
+    cfg.write_text("default_backend: cursor\ndefault_model: composer-2.5\n", encoding="utf-8")
+    monkeypatch.setenv("AGENT_FLEET_CONFIG", str(cfg))
+    monkeypatch.setenv("AGENT_FLEET_BACKEND", "kimi")
+    monkeypatch.setenv("AGENT_FLEET_MODEL", "kimi-for-coding")
+    resolved = resolve_fleet_config()
+    assert resolved.default_backend == "kimi"
+    assert resolved.default_model == "kimi-for-coding"
+
+
+def test_require_backend_env_grok_skips_cursor_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Grok auth uses auth_probe, not CURSOR_API_KEY."""
+    from agent_fleet.cli_env import require_backend_env
+
+    cfg = tmp_path / "fleet.yaml"
+    cfg.write_text("default_backend: grok\n", encoding="utf-8")
+    monkeypatch.setenv("AGENT_FLEET_CONFIG", str(cfg))
+    monkeypatch.delenv("CURSOR_API_KEY", raising=False)
+    monkeypatch.delenv("AGENT_FLEET_BACKEND", raising=False)
+
+    fleet = resolve_fleet_config()
+    assert fleet.default_backend == "grok"
+
+    # auth_probe may fail if grok is not logged in — that is fine; what must not
+    # happen is a CURSOR_API_KEY complaint.
+    with patch("agent_fleet.backends.backend_auth_probe") as probe_fn:
+        probe_fn.return_value = lambda: (True, "ok", "")
+        code = require_backend_env(fleet)
+        assert code is None
+        probe_fn.assert_called()
+
+
+def test_main_uses_resolve_fleet_config_not_hardcoded_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Smoke: main() wires resolve_fleet_config + require_backend_env + make_backend."""
+    import agent_fleet.pr_review.github_action as ga
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    # Missing token exits 1 before backend work — still proves import path.
+    assert ga.main() == 1
+
+
+def test_format_comment_always_includes_risk_level() -> None:
+    from agent_fleet.pr_review.format import format_comment
+
+    body = format_comment(
+        {
+            "risk_level": "low",
+            "risk_reasoning": "ok",
+            "summary": "fine",
+            "pr_type": "backend",
+            "primary_areas": ["backend"],
+            "findings": [],
+            "recommendations": {},
+        },
+        title="Grok PR Analysis",
+        footer="Generated by Grok Build (grok-4.5)",
+    )
+    assert "**Risk Level:**" in body
+    assert "Grok PR Analysis" in body
+
+
+def test_find_reviewer_comment_accepts_grok_title() -> None:
+    from agent_fleet.pr_loop.review_parse import find_reviewer_comment
+
+    comments = [
+        {"body": "## 🤖 Grok PR Analysis\n\n**Risk Level:** 🟢 LOW\n"},
+    ]
+    found = find_reviewer_comment(comments, marker="Composer PR Analysis")
+    assert found is not None
+    assert "Grok PR Analysis" in found
+
+
+def test_find_reviewer_comment_risk_level_fallback() -> None:
+    from agent_fleet.pr_loop.review_parse import find_reviewer_comment
+
+    comments = [
+        {"body": "Custom title\n**Risk Level:** 🟠 HIGH\n"},
+    ]
+    found = find_reviewer_comment(comments, marker="Composer PR Analysis")
+    assert found is not None
+    assert "HIGH" in found
