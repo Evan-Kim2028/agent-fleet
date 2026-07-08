@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import re
 import subprocess
 import time
@@ -52,6 +53,21 @@ DEFAULT_MODEL = "tencent/hy3:free"
 _MAX_TOOL_ITERATIONS = 25
 # Timeout for run_command tool calls.
 _COMMAND_TIMEOUT_S = 60
+
+# Retry policy for transport/rate-limit/server errors in _call_openrouter_raw.
+_MAX_RETRIES = 3
+_RETRY_BASE_DELAY_S = 1.0
+_RETRY_MAX_DELAY_S = 30.0
+
+# Injectable sleep so tests don't actually block.
+_sleep = time.sleep
+
+# Char budget for the serialized conversation history before we start
+# eliding old tool-result bodies to save context.
+_MAX_HISTORY_CHARS = 400_000
+# Never touch the system message or the most recent N messages when trimming.
+_HISTORY_KEEP_RECENT = 10
+_HISTORY_ELIDED_STUB = "[tool result elided to save context]"
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +224,37 @@ def _is_within_scope(path: Path, scope_prefixes: list[str], cwd: Path) -> bool:
     return False
 
 
+_RM_RF_RE = re.compile(r"(?:^|[;&|]\s*)rm\s+(?:-\w*[rf]\w*\s+)+(\S+)")
+_GIT_CLEAN_RE = re.compile(r"(?:^|[;&|]\s*)git\s+clean\b")
+_GIT_RESET_HARD_RE = re.compile(r"(?:^|[;&|]\s*)git\s+reset\s+(?:--\S+\s+)*--hard\b")
+
+
+def _command_violates_scope(command: str, scope_prefixes: list[str]) -> str | None:
+    """Heuristically detect destructive commands that could reach outside *scope_prefixes*.
+
+    Not a full shell parser — a conservative regex/heuristic guard. Returns a
+    human-readable reason string if the command should be blocked, or ``None``
+    if it looks safe (or no scope was configured).
+    """
+    if not scope_prefixes:
+        return None
+    # "." / "" scope means "the entire workspace" — nothing to guard against.
+    if any(p.rstrip("/") in ("", ".") for p in scope_prefixes):
+        return None
+
+    if _GIT_CLEAN_RE.search(command):
+        return "git clean can delete files outside the allowed scope"
+    if _GIT_RESET_HARD_RE.search(command):
+        return "git reset --hard can discard changes outside the allowed scope"
+
+    for match in _RM_RF_RE.finditer(command):
+        target = match.group(1).strip("'\"")
+        if target.startswith(("/", "..")):
+            return f"rm -rf/-r targeting '{target}' is outside the allowed scope"
+
+    return None
+
+
 def _execute_tool(
     name: str,
     args: dict[str, Any],
@@ -247,6 +294,16 @@ def _execute_tool(
         command = str(args.get("command", ""))
         if not command:
             return json.dumps({"error": "Empty command"})
+        violation = _command_violates_scope(command, scope_prefixes)
+        if violation is not None:
+            return json.dumps(
+                {
+                    "error": (
+                        f"Command blocked: {violation}. "
+                        "Restrict the command to the allowed scope."
+                    )
+                }
+            )
         try:
             proc = subprocess.run(
                 command,
@@ -322,20 +379,68 @@ def _call_openrouter_raw(
         "X-Title": "agent-fleet",
     }
     payload = json.dumps(body).encode("utf-8")
-    request = urllib.request.Request(url, data=payload, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:500]
-        raise RuntimeError(f"OpenRouter HTTP {exc.code}: {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"OpenRouter transport error: {exc.reason}") from exc
+
+    attempt = 0
+    while True:
+        request = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                raw = response.read().decode("utf-8")
+            break
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:500]
+            retryable = exc.code == 429 or 500 <= exc.code < 600
+            if not retryable or attempt >= _MAX_RETRIES:
+                raise RuntimeError(f"OpenRouter HTTP {exc.code}: {detail}") from exc
+            retry_after = exc.headers.get("Retry-After") if exc.headers else None
+            delay = _retry_delay(attempt, retry_after=retry_after)
+            attempt += 1
+            logger.warning(
+                "OpenRouter HTTP %s (retryable), retry %d/%d in %.1fs",
+                exc.code,
+                attempt,
+                _MAX_RETRIES,
+                delay,
+            )
+            _sleep(delay)
+            continue
+        except urllib.error.URLError as exc:
+            if attempt >= _MAX_RETRIES:
+                raise RuntimeError(f"OpenRouter transport error: {exc.reason}") from exc
+            delay = _retry_delay(attempt)
+            attempt += 1
+            logger.warning(
+                "OpenRouter transport error (retryable): %s, retry %d/%d in %.1fs",
+                exc.reason,
+                attempt,
+                _MAX_RETRIES,
+                delay,
+            )
+            _sleep(delay)
+            continue
 
     try:
         return json.loads(raw)
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"OpenRouter returned non-JSON body: {raw[:200]}") from exc
+
+
+def _retry_delay(attempt: int, *, retry_after: str | None = None) -> float:
+    """Compute the backoff delay for retry *attempt* (0-indexed).
+
+    Exponential backoff (1s, 2s, 4s, ...) plus small jitter, capped at
+    ``_RETRY_MAX_DELAY_S``. Honors a ``Retry-After`` header when present
+    (also capped).
+    """
+    if retry_after:
+        try:
+            header_delay = float(retry_after)
+        except ValueError:
+            header_delay = _RETRY_BASE_DELAY_S * (2**attempt)
+        return min(header_delay, _RETRY_MAX_DELAY_S)
+    base = _RETRY_BASE_DELAY_S * (2**attempt)
+    jitter = random.uniform(0, 0.25)
+    return min(base + jitter, _RETRY_MAX_DELAY_S)
 
 
 def call_openrouter(
@@ -696,6 +801,44 @@ class OpenRouterSession:
     def agent_id(self) -> str | None:
         return self._agent_id
 
+    def _trim_history(self) -> None:
+        """Compact the conversation history if it exceeds ``_MAX_HISTORY_CHARS``.
+
+        Keeps the system message and the most recent ``_HISTORY_KEEP_RECENT``
+        messages untouched. Replaces the ``content`` of older ``role: "tool"``
+        messages (oldest first) with a short stub until the serialized
+        history fits under budget. Never drops messages entirely, so
+        tool_call/tool pairing stays intact for the API.
+        """
+        serialized_len = sum(len(json.dumps(m, default=str)) for m in self._messages)
+        if serialized_len <= _MAX_HISTORY_CHARS:
+            return
+
+        protected_start = 1  # system message
+        protected_recent = max(len(self._messages) - _HISTORY_KEEP_RECENT, protected_start)
+
+        elided = 0
+        for idx in range(protected_start, protected_recent):
+            msg = self._messages[idx]
+            if msg.get("role") != "tool":
+                continue
+            if msg.get("content") == _HISTORY_ELIDED_STUB:
+                continue
+            msg["content"] = _HISTORY_ELIDED_STUB
+            elided += 1
+            serialized_len = sum(len(json.dumps(m, default=str)) for m in self._messages)
+            if serialized_len <= _MAX_HISTORY_CHARS:
+                break
+
+        if elided:
+            logger.info(
+                "OpenRouter session history trimmed: elided %d old tool result(s), "
+                "history now ~%d chars (budget %d)",
+                elided,
+                serialized_len,
+                _MAX_HISTORY_CHARS,
+            )
+
     def send(
         self,
         prompt: str,
@@ -725,6 +868,7 @@ class OpenRouterSession:
 
         try:
             for _iteration in range(_MAX_TOOL_ITERATIONS):
+                self._trim_history()
                 data = _call_openrouter_raw(
                     self._messages,
                     api_key=self._backend.api_key,
@@ -805,6 +949,14 @@ class OpenRouterSession:
                         f"Increase max_tokens.]"
                     )
                     self._messages.append({"role": "assistant", "content": content})
+                    ctx = get_run_context()
+                    _log_llm_usage(
+                        phase=ctx.phase if ctx is not None else None,
+                        model=self._model,
+                        usage=total_usage or None,
+                        duration_s=time.monotonic() - t0,
+                        agent_id=self._agent_id,
+                    )
                     return OpenRouterLLMResult(
                         stdout="",
                         stderr=content,
@@ -877,6 +1029,25 @@ class OpenRouterSession:
                     duration_s=time.monotonic() - t0,
                     agent_id=self._agent_id,
                 )
+
+                if needs_correction:
+                    # Correction limit reached — don't accept this as a
+                    # successful final answer. Fail loudly so callers can
+                    # tell the difference between a genuine result and a
+                    # session that gave up on guiding the model.
+                    return OpenRouterLLMResult(
+                        stdout=content,
+                        stderr=(
+                            "OpenRouter session unreliable: correction limit "
+                            f"reached ({correction_reason})"
+                        ),
+                        exit_code=1,
+                        duration_s=time.monotonic() - t0,
+                        agent_id=self._agent_id,
+                        usage=total_usage or None,
+                        mcp_tool_calls=tuple(tool_calls_made),
+                    )
+
                 return OpenRouterLLMResult(
                     stdout=content,
                     stderr="",
@@ -888,6 +1059,14 @@ class OpenRouterSession:
                 )
 
             # Hit the iteration cap.
+            ctx = get_run_context()
+            _log_llm_usage(
+                phase=ctx.phase if ctx is not None else None,
+                model=self._model,
+                usage=total_usage or None,
+                duration_s=time.monotonic() - t0,
+                agent_id=self._agent_id,
+            )
             return OpenRouterLLMResult(
                 stdout="",
                 stderr=f"OpenRouter session hit max tool iterations ({_MAX_TOOL_ITERATIONS})",

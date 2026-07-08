@@ -12,23 +12,26 @@ from __future__ import annotations
 import json
 import os
 import urllib.error
+import urllib.request
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 if TYPE_CHECKING:
-    import urllib.request
     from pathlib import Path
 
 from agent_fleet.openrouter_backend import (
     _MAX_CORRECTIONS,
+    _MAX_HISTORY_CHARS,
+    _MAX_RETRIES,
     DEFAULT_MODEL,
     OPENROUTER_BASE_URL,
     OpenRouterBackend,
     OpenRouterLLMResult,
     OpenRouterSession,
     _claims_completion_without_tools,
+    _command_violates_scope,
     _is_repetitive,
     _is_within_scope,
     _normalize_openrouter_usage,
@@ -785,9 +788,10 @@ def test_session_corrective_prompt_on_repetition(tmp_path: Path) -> None:
     assert result.stdout == "Done."
 
 
-def test_session_accepts_after_max_corrections(tmp_path: Path) -> None:
+def test_session_fails_after_max_corrections(tmp_path: Path) -> None:
     # Always return a hallucinated completion with no tool calls. After
-    # _MAX_CORRECTIONS corrective prompts the guard gives up and accepts.
+    # _MAX_CORRECTIONS corrective prompts the guard gives up — but now it must
+    # NOT accept the content as a successful final answer.
     hallucinated = {
         "id": "gen-loop",
         "choices": [
@@ -808,6 +812,311 @@ def test_session_accepts_after_max_corrections(tmp_path: Path) -> None:
     with patch("agent_fleet.openrouter_backend._call_openrouter_raw", new=mock_raw):
         result = session.send("edit the file", max_tokens=100, timeout_s=30)
 
-    assert result.exit_code == 0
-    # 3 corrective prompts + 1 final acceptance.
+    assert result.exit_code == 1
+    assert "correction limit reached" in result.stderr
+    # The content is still surfaced in stdout so it can be inspected.
+    assert result.stdout == "Changes made. Task complete."
+    # 3 corrective prompts + 1 final (failed) attempt.
     assert mock_raw.call_count == _MAX_CORRECTIONS + 1
+
+
+# --- Retry with backoff (_call_openrouter_raw) ----------------------------
+
+
+def test_retry_on_429_then_succeeds(tmp_path: Path) -> None:
+    import email.message
+
+    err = urllib.error.HTTPError(
+        url=f"{OPENROUTER_BASE_URL}/chat/completions",
+        code=429,
+        msg="Too Many Requests",
+        hdrs=email.message.Message(),
+        fp=None,
+    )
+    payload = {"id": "gen-1", "choices": [{"message": {"content": "ok"}}]}
+    backend = OpenRouterBackend(api_key="sk-or-test")
+
+    with (
+        patch(
+            "agent_fleet.openrouter_backend.urllib.request.urlopen",
+            side_effect=[err, _fake_urlopen_response(payload)],
+        ) as mock_open,
+        patch("agent_fleet.openrouter_backend._sleep") as mock_sleep,
+    ):
+        result = backend.run("prompt", max_tokens=10, timeout_s=30, cwd=tmp_path)
+
+    assert result.exit_code == 0
+    assert result.stdout == "ok"
+    assert mock_open.call_count == 2
+    mock_sleep.assert_called_once()
+
+
+def test_retry_on_5xx_then_succeeds(tmp_path: Path) -> None:
+    import email.message
+
+    err = urllib.error.HTTPError(
+        url=f"{OPENROUTER_BASE_URL}/chat/completions",
+        code=503,
+        msg="Service Unavailable",
+        hdrs=email.message.Message(),
+        fp=None,
+    )
+    payload = {"id": "gen-1", "choices": [{"message": {"content": "ok"}}]}
+    backend = OpenRouterBackend(api_key="sk-or-test")
+
+    with (
+        patch(
+            "agent_fleet.openrouter_backend.urllib.request.urlopen",
+            side_effect=[err, err, _fake_urlopen_response(payload)],
+        ),
+        patch("agent_fleet.openrouter_backend._sleep") as mock_sleep,
+    ):
+        result = backend.run("prompt", max_tokens=10, timeout_s=30, cwd=tmp_path)
+
+    assert result.exit_code == 0
+    assert mock_sleep.call_count == 2
+
+
+def test_no_retry_on_non_retryable_4xx(tmp_path: Path) -> None:
+    import email.message
+
+    err = urllib.error.HTTPError(
+        url=f"{OPENROUTER_BASE_URL}/chat/completions",
+        code=400,
+        msg="Bad Request",
+        hdrs=email.message.Message(),
+        fp=None,
+    )
+    backend = OpenRouterBackend(api_key="sk-or-test")
+
+    with (
+        patch(
+            "agent_fleet.openrouter_backend.urllib.request.urlopen", side_effect=err
+        ) as mock_open,
+        patch("agent_fleet.openrouter_backend._sleep") as mock_sleep,
+    ):
+        result = backend.run("prompt", max_tokens=10, timeout_s=30, cwd=tmp_path)
+
+    assert result.exit_code == 1
+    assert "400" in result.stderr
+    mock_open.assert_called_once()
+    mock_sleep.assert_not_called()
+
+
+def test_retry_exhausted_raises_after_max_retries(tmp_path: Path) -> None:
+    err = urllib.error.URLError("connection refused")
+    backend = OpenRouterBackend(api_key="sk-or-test")
+
+    with (
+        patch(
+            "agent_fleet.openrouter_backend.urllib.request.urlopen", side_effect=err
+        ) as mock_open,
+        patch("agent_fleet.openrouter_backend._sleep") as mock_sleep,
+    ):
+        result = backend.run("prompt", max_tokens=10, timeout_s=30, cwd=tmp_path)
+
+    assert result.exit_code == 1
+    assert "transport error" in result.stderr
+    assert mock_open.call_count == _MAX_RETRIES + 1
+    assert mock_sleep.call_count == _MAX_RETRIES
+
+
+def test_retry_honors_retry_after_header(tmp_path: Path) -> None:
+    err = urllib.error.HTTPError(
+        url=f"{OPENROUTER_BASE_URL}/chat/completions",
+        code=429,
+        msg="Too Many Requests",
+        hdrs={"Retry-After": "5"},
+        fp=None,
+    )
+    payload = {"id": "gen-1", "choices": [{"message": {"content": "ok"}}]}
+    backend = OpenRouterBackend(api_key="sk-or-test")
+
+    with (
+        patch(
+            "agent_fleet.openrouter_backend.urllib.request.urlopen",
+            side_effect=[err, _fake_urlopen_response(payload)],
+        ),
+        patch("agent_fleet.openrouter_backend._sleep") as mock_sleep,
+    ):
+        result = backend.run("prompt", max_tokens=10, timeout_s=30, cwd=tmp_path)
+
+    assert result.exit_code == 0
+    mock_sleep.assert_called_once_with(5.0)
+
+
+# --- Usage logged on all exit paths ---------------------------------------
+
+
+def test_session_logs_usage_on_max_iterations_exit(tmp_path: Path) -> None:
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    endless = _tool_call_response("read_file", {"path": "missing.txt"})
+    mock_log = MagicMock()
+
+    with (
+        patch(
+            "agent_fleet.openrouter_backend._call_openrouter_raw",
+            side_effect=lambda *a, **k: endless,  # noqa: ARG005
+        ),
+        patch("agent_fleet.openrouter_backend.get_run_log", return_value=mock_log),
+    ):
+        result = session.send("loop forever", max_tokens=100, timeout_s=30)
+
+    assert result.exit_code == 1
+    mock_log.llm_usage.assert_called_once()
+
+
+def test_session_logs_usage_on_reasoning_without_content_exit(tmp_path: Path) -> None:
+    response = {
+        "id": "gen-1",
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": None, "reasoning": "thinking..."},
+                "finish_reason": "length",
+            }
+        ],
+        "usage": {"prompt_tokens": 50, "completion_tokens": 20},
+    }
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    mock_log = MagicMock()
+
+    with (
+        patch("agent_fleet.openrouter_backend._call_openrouter_raw", return_value=response),
+        patch("agent_fleet.openrouter_backend.get_run_log", return_value=mock_log),
+    ):
+        result = session.send("do something", max_tokens=100, timeout_s=30)
+
+    assert result.exit_code == 1
+    mock_log.llm_usage.assert_called_once()
+
+
+# --- Bounded conversation history -------------------------------------------
+
+
+def test_trim_history_elides_old_tool_results(tmp_path: Path) -> None:
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+
+    big_blob = "x" * (_MAX_HISTORY_CHARS + 1000)
+    # Old tool message that should get elided, followed by plenty of recent
+    # messages so it falls outside the protected "recent" window.
+    session._messages.append({"role": "user", "content": "do stuff"})
+    session._messages.append(
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "c1"}]}
+    )
+    session._messages.append({"role": "tool", "tool_call_id": "c1", "content": big_blob})
+    for i in range(15):
+        session._messages.append({"role": "user", "content": f"filler {i}"})
+
+    session._trim_history()
+
+    tool_msgs = [m for m in session._messages if m.get("role") == "tool"]
+    assert tool_msgs[0]["content"] == "[tool result elided to save context]"
+
+
+def test_trim_history_noop_under_budget(tmp_path: Path) -> None:
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    session._messages.append({"role": "tool", "tool_call_id": "c1", "content": "small"})
+
+    before = [dict(m) for m in session._messages]
+    session._trim_history()
+
+    assert session._messages == before
+
+
+def test_trim_history_never_touches_recent_messages(tmp_path: Path) -> None:
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+
+    big_blob = "x" * (_MAX_HISTORY_CHARS + 1000)
+    # Tool message within the protected "recent" window — must survive.
+    for i in range(3):
+        session._messages.append({"role": "user", "content": f"filler {i}"})
+    session._messages.append({"role": "tool", "tool_call_id": "recent", "content": big_blob})
+
+    session._trim_history()
+
+    recent_tool = next(m for m in session._messages if m.get("tool_call_id") == "recent")
+    assert recent_tool["content"] == big_blob
+
+
+# --- Scope-aware run_command guard ------------------------------------------
+
+
+def test_command_violates_scope_blocks_rm_rf_absolute() -> None:
+    reason = _command_violates_scope("rm -rf /etc/passwd", ["src/"])
+    assert reason is not None
+    assert "rm" in reason.lower()
+
+
+def test_command_violates_scope_blocks_rm_r_parent_traversal() -> None:
+    reason = _command_violates_scope("rm -r ../outside", ["src/"])
+    assert reason is not None
+
+
+def test_command_violates_scope_blocks_git_clean() -> None:
+    reason = _command_violates_scope("git clean -fd", ["src/"])
+    assert reason is not None
+    assert "git clean" in reason.lower()
+
+
+def test_command_violates_scope_blocks_git_reset_hard() -> None:
+    reason = _command_violates_scope("git reset --hard HEAD~1", ["src/"])
+    assert reason is not None
+    assert "reset --hard" in reason.lower()
+
+
+def test_command_violates_scope_allows_relative_rm_within_scope() -> None:
+    assert _command_violates_scope("rm -rf src/build", ["src/"]) is None
+
+
+def test_command_violates_scope_noop_without_scope_prefixes() -> None:
+    assert _command_violates_scope("rm -rf /", []) is None
+
+
+def test_command_violates_scope_noop_for_dot_scope() -> None:
+    assert _command_violates_scope("rm -rf /", ["."]) is None
+
+
+def test_session_run_command_blocked_by_scope_guard(tmp_path: Path) -> None:
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    responses = [
+        _tool_call_response("run_command", {"command": "rm -rf /etc/passwd"}),
+        _stop_response("Done."),
+    ]
+    with patch(
+        "agent_fleet.openrouter_backend._call_openrouter_raw",
+        side_effect=responses,
+    ):
+        session.send(
+            "clean up",
+            max_tokens=100,
+            timeout_s=30,
+            allowed_tools=["path:src/"],
+        )
+
+    tool_msgs = [m for m in session._messages if m.get("role") == "tool"]
+    assert tool_msgs
+    assert "blocked" in tool_msgs[0]["content"].lower()
+
+
+def test_session_run_command_unaffected_without_scope(tmp_path: Path) -> None:
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    responses = [
+        _tool_call_response("run_command", {"command": "echo hi"}),
+        _stop_response("Done."),
+    ]
+    with patch(
+        "agent_fleet.openrouter_backend._call_openrouter_raw",
+        side_effect=responses,
+    ):
+        result = session.send("say hi", max_tokens=100, timeout_s=30)
+
+    assert "run_command" in result.mcp_tool_calls
+    tool_msgs = [m for m in session._messages if m.get("role") == "tool"]
+    assert "blocked" not in tool_msgs[0]["content"].lower()
