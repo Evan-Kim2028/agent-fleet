@@ -25,6 +25,9 @@ def _format_failure(headline: str, proc: subprocess.CompletedProcess[str]) -> st
     return f"{headline}\nexit={proc.returncode}\n{detail}"
 
 
+_INFRASTRUCTURE_EXIT_CODES = frozenset({126, 127})
+
+
 _FAILED_RE = re.compile(r"^(?:FAILED|ERROR)\s+(\S+)", re.MULTILINE)
 
 
@@ -143,6 +146,17 @@ class CommandVerifier:
                 }
             )
             if proc.returncode != 0:
+                if proc.returncode in _INFRASTRUCTURE_EXIT_CODES:
+                    return VerifyResult(
+                        severity=VerifySeverity.FATAL,
+                        checks=checks,
+                        violating_paths=[],
+                        files_changed=rel_changed,
+                        message=_format_failure(
+                            f"Verification command not found or not executable: {cmd}",
+                            proc,
+                        ),
+                    )
                 # Auto-apply `ruff check --fix` once before counting this as a
                 # failure. This prevents the fix loop from burning attempts on
                 # import-sorting (I001) and other auto-fixable lint issues.

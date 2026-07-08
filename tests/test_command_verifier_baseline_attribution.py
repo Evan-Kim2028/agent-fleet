@@ -161,6 +161,23 @@ def test_clean_tree_failure_still_blocks(tmp_path: Path) -> None:
     assert result.severity is VerifySeverity.RETRY
 
 
+def test_command_not_found_exit_127_is_fatal_not_preexisting(tmp_path: Path) -> None:
+    """127 on head and base must not be attributed as pre-existing lane debt."""
+    _git_init(tmp_path)
+    (tmp_path / "keep.txt").write_text("seed\n", encoding="utf-8")
+    _commit_all(tmp_path, "seed")
+    repo = RepoConfig(repo_root=tmp_path, state_root=tmp_path)
+    repo.verify_commands = ["bash -c 'exit 127'"]
+    repo.worktree_bootstrap_commands = []
+    repo.critical_path_prefixes = ()
+    (tmp_path / "feature.py").write_text("x = 1\n", encoding="utf-8")
+
+    result = _check(repo, tmp_path)
+
+    assert result.severity is VerifySeverity.FATAL
+    assert "exit=127" in result.message
+
+
 def test_persona_scoping_runs_lane_command(tmp_path: Path) -> None:
     repo = RepoConfig(repo_root=tmp_path, state_root=tmp_path)
     repo.verify_commands = ["bash -c 'exit 1'"]
