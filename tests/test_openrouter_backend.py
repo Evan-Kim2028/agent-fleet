@@ -553,14 +553,17 @@ def test_session_send_max_iterations_cap(tmp_path: Path) -> None:
     # Always return a tool_calls response — the loop never terminates naturally.
     endless = _tool_call_response("read_file", {"path": "missing.txt"})
 
-    with patch(
-        "agent_fleet.openrouter_backend._call_openrouter_raw",
-        side_effect=lambda *a, **k: endless,  # noqa: ARG005
+    with (
+        patch("agent_fleet.openrouter_backend._MAX_TOOL_ITERATIONS", 3),
+        patch(
+            "agent_fleet.openrouter_backend._call_openrouter_raw",
+            side_effect=lambda *a, **k: endless,  # noqa: ARG005
+        ),
     ):
         result = session.send("loop forever", max_tokens=100, timeout_s=30)
 
     assert result.exit_code == 1
-    assert "max tool iterations" in result.stderr
+    assert "max tool iterations (3)" in result.stderr
 
 
 def test_session_conversation_history_persists(tmp_path: Path) -> None:

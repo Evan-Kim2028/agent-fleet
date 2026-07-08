@@ -50,7 +50,19 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_MODEL = "tencent/hy3:free"
 
 # Cap the tool-use loop so a misbehaving model can't run forever.
-_MAX_TOOL_ITERATIONS = 25
+# Overridable via OPENROUTER_MAX_TOOL_ITERATIONS (falls back to the default on
+# invalid/missing values).
+def _default_max_tool_iterations() -> int:
+    raw = os.environ.get("OPENROUTER_MAX_TOOL_ITERATIONS")
+    if raw is None:
+        return 300
+    try:
+        return int(raw)
+    except ValueError:
+        return 300
+
+
+_MAX_TOOL_ITERATIONS = _default_max_tool_iterations()
 # Timeout for run_command tool calls.
 _COMMAND_TIMEOUT_S = 60
 
