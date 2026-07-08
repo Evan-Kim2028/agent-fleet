@@ -198,6 +198,18 @@ def _parse_skill_overrides(raw: Any) -> dict[str, list[str]]:  # noqa: ANN401
     return result
 
 
+def _env_backend_override() -> str | None:
+    """Global backend override from AGENT_FLEET_BACKEND (all entry points)."""
+    raw = os.environ.get("AGENT_FLEET_BACKEND", "").strip()
+    return raw.lower() if raw else None
+
+
+def _env_model_override() -> str | None:
+    """Global model override from AGENT_FLEET_MODEL (all entry points)."""
+    raw = os.environ.get("AGENT_FLEET_MODEL", "").strip()
+    return raw if raw else None
+
+
 def load_fleet_config(
     path: Path | str | None = None,
     *,
@@ -215,6 +227,17 @@ def load_fleet_config(
     default_persona: str | None = None,
     default_workspace: str | None = None,
 ) -> FleetConfig:
+    """Load fleet.yaml and apply global env overrides.
+
+    Backend / model resolution order (first non-empty wins):
+      1. Explicit kwargs (``default_backend`` / ``default_model``)
+      2. ``AGENT_FLEET_BACKEND`` / ``AGENT_FLEET_MODEL`` env
+      3. Values from fleet.yaml
+      4. Built-in defaults (``cursor`` backend; model left ``None`` for backend default)
+
+    Applying env overrides here means every caller (CLI, pr-analyzer, issue
+    dispatch, pr_loop) sees the same backend without per-entry-point wiring.
+    """
     config_path = _expand_path(str(path)) if path else default_fleet_config_path()
     data: dict[str, Any] = {}
     if config_path.exists():
@@ -241,10 +264,16 @@ def load_fleet_config(
 
     mcp_catalog = _parse_mcp_catalog(data.get("mcp_servers") or {})
 
+    # Kwargs > env > yaml > defaults (see docstring).
+    resolved_backend = (
+        default_backend or _env_backend_override() or data.get("default_backend") or "cursor"
+    )
+    resolved_model = default_model or _env_model_override() or data.get("default_model")
+
     return FleetConfig(
-        default_model=default_model or data.get("default_model"),
+        default_model=resolved_model,
         default_mode=coerce_agent_mode(str(default_mode or data.get("default_mode") or "agent")),
-        default_backend=str(default_backend or data.get("default_backend") or "cursor"),
+        default_backend=str(resolved_backend),
         kimi_bin=kimi_bin or data.get("kimi_bin"),
         grok_bin=grok_bin or data.get("grok_bin"),
         max_parallel=int(max_parallel or data.get("max_parallel") or 3),

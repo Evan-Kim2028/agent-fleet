@@ -94,6 +94,24 @@ default_model: composer-2.5
 
 And export `CURSOR_API_KEY`.
 
+## Switch to Grok in one line
+
+```bash
+# Permanent for this machine
+fleet config set-backend grok
+
+# Or session-wide (CLI + pr-analyzer + issue dispatch + pr_loop)
+export AGENT_FLEET_BACKEND=grok
+export AGENT_FLEET_MODEL=grok-4.5
+
+# Or a single run / doctor check
+fleet run "..." --backend grok --pipeline code_review
+fleet doctor --backend grok
+```
+
+`AGENT_FLEET_BACKEND` is applied inside `load_fleet_config()` — every entry point
+inherits it. No need to set it only for the PR analyzer.
+
 ## First run (CLI)
 
 ```bash
@@ -102,7 +120,7 @@ grok login
 
 fleet run "Add a one-line project description to README" \
   --workspace /absolute/path/to/your/repo \
-  --config examples/fleet.grok.yaml \
+  --backend grok \
   --pipeline code_review
 ```
 

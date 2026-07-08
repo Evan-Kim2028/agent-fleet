@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.12.2 — 2026-07-08
+
+### Summary
+
+One-place backend selection for every entry point. `AGENT_FLEET_BACKEND` /
+`AGENT_FLEET_MODEL` apply inside `load_fleet_config()` so CLI, pr-analyzer,
+issue dispatch, and pr_loop all share the same override. CLI gains
+`--backend` / `--model` on `fleet run` and `fleet doctor`, plus
+`fleet config set-backend`.
+
+### Changes
+
+- **load_fleet_config:** resolves backend/model as kwargs → env → yaml → defaults.
+- **CLI:** `fleet run --backend grok`, `fleet doctor --backend grok` (prints
+  active backend/model), `fleet config set-backend grok`.
+- **PR analyzer:** `resolve_fleet_config()` is a thin wrapper; env already
+  applied by the loader.
+- **Docs:** FLEET-CONFIG.md + GROK.md one-line backend switch section.
+
 ## 0.12.1 — 2026-07-08
 
 ### Summary

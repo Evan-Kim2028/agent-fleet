@@ -2,7 +2,8 @@
 
 Backend selection follows the fleet config (``default_backend`` in
 ``AGENT_FLEET_CONFIG`` / ``CODING_FLEET_CONFIG`` / ``~/.agent-fleet/fleet.yaml``),
-the same path as ``fleet run``. Optional env overrides:
+the same path as ``fleet run``. Optional env overrides are applied inside
+``load_fleet_config`` for every entry point:
 
 - ``AGENT_FLEET_BACKEND`` — replace ``default_backend`` when set
 - ``AGENT_FLEET_MODEL`` — replace ``default_model`` when set
@@ -15,7 +16,6 @@ from __future__ import annotations
 import os
 import sys
 import textwrap
-from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -82,18 +82,8 @@ def resolve_footer_label(pr_config: PrReviewConfig, backend: str) -> str:
 
 
 def resolve_fleet_config() -> FleetConfig:
-    """Load fleet.yaml, then apply optional AGENT_FLEET_BACKEND / AGENT_FLEET_MODEL."""
-    fleet_config = load_fleet_config()
-    overrides: dict[str, str] = {}
-    backend_override = os.environ.get("AGENT_FLEET_BACKEND", "").strip()
-    if backend_override:
-        overrides["default_backend"] = backend_override.lower()
-    model_override = os.environ.get("AGENT_FLEET_MODEL", "").strip()
-    if model_override:
-        overrides["default_model"] = model_override
-    if overrides:
-        fleet_config = replace(fleet_config, **overrides)
-    return fleet_config
+    """Load fleet.yaml (env AGENT_FLEET_BACKEND / AGENT_FLEET_MODEL applied in loader)."""
+    return load_fleet_config()
 
 
 def main() -> int:

@@ -27,10 +27,37 @@ Environment variables:
 |----------|---------|
 | `AGENT_FLEET_CONFIG` | Global fleet.yaml path (issue dispatch watcher) |
 | `CODING_FLEET_CONFIG` | Global fleet.yaml path (gateway plugin tools) |
+| `AGENT_FLEET_BACKEND` | **Global** override for `default_backend` — applies to **all** entry points (`fleet run`, pr-analyzer, issue dispatch, pr_loop) via `load_fleet_config()` |
+| `AGENT_FLEET_MODEL` | **Global** override for `default_model` — same scope as `AGENT_FLEET_BACKEND` |
 
 Repo-level settings (verify commands, scope, PR loop) always come from `.agent-fleet.yaml` in the target git repo — not from the global file.
 
-See also: [NEW-REPO.md](NEW-REPO.md), [PERSONAS.md](PERSONAS.md), [AGENT-FLEET-DEV.md](AGENT-FLEET-DEV.md).
+## Switching backends (one line)
+
+Resolution order for backend and model (first non-empty wins):
+
+1. CLI flags: `fleet run --backend grok --model grok-4.5`
+2. Env: `export AGENT_FLEET_BACKEND=grok` / `export AGENT_FLEET_MODEL=grok-4.5`
+3. Global config: `default_backend` / `default_model` in `~/.agent-fleet/fleet.yaml`
+4. Built-in default: `cursor` (model left unset so each backend supplies its default)
+
+One-line switches:
+
+```bash
+# Permanent (writes ~/.agent-fleet/fleet.yaml)
+fleet config set-backend grok
+# or: fleet config set-backend grok --model grok-4.5
+
+# Session / CI (all entry points)
+export AGENT_FLEET_BACKEND=grok
+export AGENT_FLEET_MODEL=grok-4.5
+
+# Single command
+fleet run "..." --backend grok
+fleet doctor --backend grok   # prints active backend + model, checks Grok auth
+```
+
+See also: [GROK.md](GROK.md), [KIMI.md](KIMI.md), [OPENROUTER.md](OPENROUTER.md), [NEW-REPO.md](NEW-REPO.md), [PERSONAS.md](PERSONAS.md), [AGENT-FLEET-DEV.md](AGENT-FLEET-DEV.md).
 
 ## default_loadout_size
 

@@ -123,6 +123,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             workspace_arg=args.workspace,
             config_arg=args.config,
             persona_arg=args.persona,
+            backend_arg=getattr(args, "backend", None),
+            model_arg=getattr(args, "model", None),
             require_env=False,
             personas_dir_from_repo=True,
         )
@@ -640,19 +642,67 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     from agent_fleet.doctor import doctor_exit_code, render_doctor, run_doctor_checks
 
     backend = "cursor"
+    model = None
     try:
-        config = load_fleet_config(args.config) if args.config else load_fleet_config()
+        backend_arg = getattr(args, "backend", None)
+        model_arg = getattr(args, "model", None)
+        config = load_fleet_config(
+            args.config if args.config else None,
+            default_backend=backend_arg.lower().strip() if backend_arg else None,
+            default_model=model_arg.strip() if model_arg else None,
+        )
         backend = config.default_backend
+        model = config.default_model
     except OSError, ValueError, yaml.YAMLError:
-        pass
+        if getattr(args, "backend", None):
+            backend = str(args.backend).lower().strip()
     workspace = Path(args.workspace).resolve() if args.workspace else Path.cwd()
     repo_present = find_repo_config(workspace) is not None
     checks = run_doctor_checks(backend=backend, repo_present=repo_present)
     if args.json:
-        print(json.dumps([c.to_dict() for c in checks], indent=2))
+        payload = {
+            "backend": backend,
+            "model": model,
+            "checks": [c.to_dict() for c in checks],
+        }
+        print(json.dumps(payload, indent=2))
     else:
+        model_s = model or "(backend default)"
+        print(f"backend: {backend}  model: {model_s}")
         print(render_doctor(checks))
     return doctor_exit_code(checks)
+
+
+
+def cmd_config_set_backend(args: argparse.Namespace) -> int:
+    """Write default_backend (and optional default_model) into fleet.yaml."""
+    import yaml
+
+    from agent_fleet.fleet_paths import default_fleet_config_path
+
+    backend = str(args.backend).lower().strip()
+    if not backend:
+        print("Error: backend name required", file=sys.stderr)
+        return 1
+
+    path = Path(args.config).expanduser().resolve() if args.config else default_fleet_config_path()
+    data: dict = {}
+    if path.exists():
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        if isinstance(loaded, dict):
+            data = loaded
+    data["default_backend"] = backend
+    if getattr(args, "model", None):
+        data["default_model"] = str(args.model).strip()
+    elif backend == "grok" and not data.get("default_model"):
+        data["default_model"] = "grok-4.5"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(data, sort_keys=False, default_flow_style=False), encoding="utf-8")
+    model = data.get("default_model") or "(backend default)"
+    print(f"Wrote {path}")
+    print(f"default_backend: {backend}")
+    print(f"default_model: {model}")
+    return 0
 
 
 def cmd_runs(args: argparse.Namespace) -> int:
@@ -747,6 +797,8 @@ def cmd_summon(args: argparse.Namespace) -> int:
     doctor_args = argparse.Namespace(
         workspace=str(workspace),
         config=getattr(args, "config", None),
+        backend=None,
+        model=None,
         json=False,
     )
     doctor_rc = cmd_doctor(doctor_args)
@@ -795,6 +847,15 @@ def main(argv: list[str] | None = None) -> int:
     run_p.add_argument("--context", default="", help="Extra context")
     run_p.add_argument("--title", help="Short title for full pipeline")
     run_p.add_argument("--persona", help="Persona id (default: repo or fleet config)")
+    run_p.add_argument(
+        "--backend",
+        help="Execution backend for this run (cursor|grok|kimi|openrouter). "
+        "Overrides AGENT_FLEET_BACKEND and fleet.yaml default_backend.",
+    )
+    run_p.add_argument(
+        "--model",
+        help="Model id for this run. Overrides AGENT_FLEET_MODEL and fleet.yaml default_model.",
+    )
     run_p.add_argument("--workspace", help="Repo path")
     run_p.add_argument(
         "--pipeline",
@@ -878,8 +939,36 @@ def main(argv: list[str] | None = None) -> int:
 
     doctor_p = sub.add_parser("doctor", help="Preflight environment checks with actionable fixes")
     doctor_p.add_argument("--workspace", help="Repo path (checks for .agent-fleet.yaml)")
+    doctor_p.add_argument(
+        "--backend",
+        help="Check auth for this backend (cursor|grok|kimi|openrouter). "
+        "Overrides AGENT_FLEET_BACKEND and fleet.yaml.",
+    )
+    doctor_p.add_argument(
+        "--model",
+        help="Model id to display (does not change auth checks).",
+    )
     doctor_p.add_argument("--json", action="store_true", help="Emit checks as JSON")
     doctor_p.set_defaults(func=cmd_doctor)
+
+    config_p = sub.add_parser(
+        "config",
+        help="Inspect or update global fleet.yaml settings",
+    )
+    config_sub = config_p.add_subparsers(dest="config_command", required=True)
+    set_backend_p = config_sub.add_parser(
+        "set-backend",
+        help="Set default_backend (and optional default_model) in fleet.yaml",
+    )
+    set_backend_p.add_argument(
+        "backend",
+        help="Backend name: cursor | grok | kimi | openrouter",
+    )
+    set_backend_p.add_argument(
+        "--model",
+        help="Also set default_model (grok defaults to grok-4.5 if unset)",
+    )
+    set_backend_p.set_defaults(func=cmd_config_set_backend)
 
     runs_p = sub.add_parser("runs", help="List recorded fleet runs (newest first)")
     runs_p.add_argument("--limit", type=int, default=20, help="Max rows to show (default 20)")

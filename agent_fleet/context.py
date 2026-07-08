@@ -54,6 +54,12 @@ class ContextOptions:
     persona_arg: str | None = None
     """CLI --persona value (None → repo default → fleet config default)."""
 
+    backend_arg: str | None = None
+    """CLI --backend value (None → env AGENT_FLEET_BACKEND → fleet.yaml)."""
+
+    model_arg: str | None = None
+    """CLI --model value (None → env AGENT_FLEET_MODEL → fleet.yaml / backend default)."""
+
     require_env: bool = False
     """When True, check that the backend's required API key is present.
 
@@ -98,8 +104,12 @@ def build_fleet_context(
     workspace = Path(opts.workspace_arg or Path.cwd()).resolve()
 
     # 2. Config: always call load_fleet_config — accepts None as "use default".
-    #    No redundant `if args.config else load_fleet_config()` guard here.
-    config = load_fleet_config(opts.config_arg)
+    #    CLI --backend / --model kwargs beat env + yaml (see load_fleet_config).
+    config = load_fleet_config(
+        opts.config_arg,
+        default_backend=opts.backend_arg.lower().strip() if opts.backend_arg else None,
+        default_model=opts.model_arg.strip() if opts.model_arg else None,
+    )
 
     # 3. Repo discovery: env-target path vs. standard walk-up search.
     if opts.use_env_target_config:
