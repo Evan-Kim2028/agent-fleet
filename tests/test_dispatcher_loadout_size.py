@@ -83,7 +83,9 @@ def _dispatch_with_stub_equip(
     dispatcher: FleetDispatcher,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    **dispatch_kwargs: object,
+    *,
+    complexity: str | None = None,
+    loadout_size: str | None = None,
 ) -> list[str | None]:
     captured: list[str | None] = []
 
@@ -114,7 +116,8 @@ def _dispatch_with_stub_equip(
             goal="test task",
             persona="coder",
             workspace=str(tmp_path),
-            **dispatch_kwargs,
+            complexity=complexity,
+            loadout_size=loadout_size,
         )
     return captured
 

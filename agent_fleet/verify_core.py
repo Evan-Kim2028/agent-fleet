@@ -124,8 +124,7 @@ def _resolve_diff_base(worktree_path: Path) -> str | None:
             capture_output=True,
             text=True,
             check=False,
-        )
-        .stdout.strip()
+        ).stdout.strip()
         or None
     )
     for candidate in (default_branch_name, "main", "master"):

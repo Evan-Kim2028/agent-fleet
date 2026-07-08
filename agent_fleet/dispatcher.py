@@ -61,6 +61,12 @@ def _optional_entry_str(value: object | None, fallback: str | None) -> str | Non
     return str(value)
 
 
+def _entry_skills(value: object | None, fallback: tuple[str, ...]) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        return fallback
+    return tuple(str(s) for s in value)
+
+
 def _resolve_persona(
     explicit: str | None,
     goal: str,
@@ -120,10 +126,7 @@ def _normalize_tasks(
                 fallback=default_persona,
                 scope=entry_scope,
             )
-            entry_skills_raw = entry.get("skills")
-            entry_skills = (
-                tuple(str(s) for s in entry_skills_raw) if entry_skills_raw is not None else skills
-            )
+            entry_skills = _entry_skills(entry.get("skills"), skills)
             entry_skills_mode = str(entry.get("skills_mode") or skills_mode)
             normalized.append(
                 FleetTask(

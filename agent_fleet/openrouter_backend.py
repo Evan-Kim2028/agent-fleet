@@ -49,6 +49,7 @@ if TYPE_CHECKING:
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_MODEL = "tencent/hy3:free"
 
+
 # Cap the tool-use loop so a misbehaving model can't run forever.
 # Overridable via OPENROUTER_MAX_TOOL_ITERATIONS (falls back to the default on
 # invalid/missing values).
@@ -315,15 +316,11 @@ def _execute_tool(
     """
     try:
         return _execute_tool_inner(name, args, cwd=cwd, scope_prefixes=scope_prefixes)
-    except (KeyboardInterrupt, SystemExit):
+    except KeyboardInterrupt, SystemExit:
         raise
     except Exception as exc:  # deliberately broad to protect the session loop
-        logger.warning(
-            "OpenRouter tool %r raised %s: %s", name, type(exc).__name__, exc
-        )
-        return json.dumps(
-            {"error": f"tool error: {name} raised {type(exc).__name__}: {exc}"}
-        )
+        logger.warning("OpenRouter tool %r raised %s: %s", name, type(exc).__name__, exc)
+        return json.dumps({"error": f"tool error: {name} raised {type(exc).__name__}: {exc}"})
 
 
 def _execute_tool_inner(
@@ -370,8 +367,7 @@ def _execute_tool_inner(
             return json.dumps(
                 {
                     "error": (
-                        f"Command blocked: {violation}. "
-                        "Restrict the command to the allowed scope."
+                        f"Command blocked: {violation}. Restrict the command to the allowed scope."
                     )
                 }
             )
@@ -535,7 +531,7 @@ def _call_with_reasoning_escalation(
     timeout: int,
     max_tokens: int | None,
     tools: list[dict[str, Any]] | None = None,
-) -> tuple[dict[str, Any], dict[str, int]]:
+) -> tuple[dict[str, Any], dict[str, int], int | None]:
     """Call ``_call_openrouter_raw``, escalating ``max_tokens`` on reasoning-exhaustion.
 
     When a response comes back with reasoning content but empty message
@@ -592,9 +588,7 @@ def _call_with_reasoning_escalation(
         if new_max <= base:
             # Already at (or above) the ceiling — escalating further is pointless.
             return data, wasted_usage, attempt_max_tokens
-        logger.warning(
-            "reasoning exhausted output budget, retrying with max_tokens=%d", new_max
-        )
+        logger.warning("reasoning exhausted output budget, retrying with max_tokens=%d", new_max)
         attempt_max_tokens = new_max
 
     return data, wasted_usage, attempt_max_tokens
@@ -655,9 +649,11 @@ def call_openrouter(
         merged["completion_tokens"] = int(
             merged.get("completion_tokens", 0) or 0
         ) + wasted_usage.get("output_tokens", 0)
-        merged["total_tokens"] = int(merged.get("total_tokens", 0) or 0) + wasted_usage.get(
-            "input_tokens", 0
-        ) + wasted_usage.get("output_tokens", 0)
+        merged["total_tokens"] = (
+            int(merged.get("total_tokens", 0) or 0)
+            + wasted_usage.get("input_tokens", 0)
+            + wasted_usage.get("output_tokens", 0)
+        )
         usage = merged
     agent_id = data.get("id")
     return content, usage, (str(agent_id) if agent_id else None)
@@ -1055,9 +1051,7 @@ class OpenRouterSession:
         try:
             for _iteration in range(_MAX_TOOL_ITERATIONS):
                 self._trim_history()
-                call_base_max_tokens = max(
-                    effective_max_tokens, self._reasoning_floor or 0
-                )
+                call_base_max_tokens = max(effective_max_tokens, self._reasoning_floor or 0)
                 data, wasted_usage, successful_max_tokens = _call_with_reasoning_escalation(
                     self._messages,
                     api_key=self._backend.api_key,
@@ -1067,7 +1061,10 @@ class OpenRouterSession:
                     max_tokens=call_base_max_tokens,
                     tools=_FILE_TOOLS,
                 )
-                if successful_max_tokens > call_base_max_tokens:
+                if (
+                    successful_max_tokens is not None
+                    and successful_max_tokens > call_base_max_tokens
+                ):
                     self._reasoning_floor = min(successful_max_tokens, _MAX_TOKENS_CEILING)
                 if wasted_usage:
                     for k, v in wasted_usage.items():

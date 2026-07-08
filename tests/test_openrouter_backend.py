@@ -9,11 +9,12 @@ network.
 
 from __future__ import annotations
 
+import email.message
 import json
 import os
 import urllib.error
 import urllib.request
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -222,6 +223,7 @@ def test_run_payload_includes_reasoning_effort_by_default(
     captured: dict[str, Any] = {}
 
     def _capture(req: urllib.request.Request, timeout: int) -> MagicMock:  # noqa: ARG001
+        assert isinstance(req.data, bytes)
         captured["body"] = json.loads(req.data.decode("utf-8"))
         return _fake_urlopen_response(payload)
 
@@ -240,6 +242,7 @@ def test_run_payload_omits_reasoning_when_env_is_none(
     captured: dict[str, Any] = {}
 
     def _capture(req: urllib.request.Request, timeout: int) -> MagicMock:  # noqa: ARG001
+        assert isinstance(req.data, bytes)
         captured["body"] = json.loads(req.data.decode("utf-8"))
         return _fake_urlopen_response(payload)
 
@@ -406,6 +409,7 @@ def test_session_send_tool_use_loop(tmp_path: Path) -> None:
 
     backend = OpenRouterBackend(api_key="sk-or-test")
     session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
     responses = [
         _tool_call_response("read_file", {"path": "hello.txt"}),
         _stop_response("I read the file."),
@@ -424,6 +428,7 @@ def test_session_send_tool_use_loop(tmp_path: Path) -> None:
 def test_session_send_write_file_creates_file(tmp_path: Path) -> None:
     backend = OpenRouterBackend(api_key="sk-or-test")
     session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
     responses = [
         _tool_call_response("write_file", {"path": "out.txt", "content": "hello world"}),
         _stop_response("File written."),
@@ -460,12 +465,12 @@ def test_execute_tool_list_files_sorts_mixed_entries_without_raising(tmp_path: P
     assert entries == sorted(entries, key=lambda e: (e["type"], e["name"]))
 
 
-def test_execute_tool_catches_handler_exception_and_returns_tool_error() -> None:
+def test_execute_tool_catches_handler_exception_and_returns_tool_error(tmp_path: Path) -> None:
     with patch(
         "agent_fleet.openrouter_backend._execute_tool_inner",
         side_effect=RuntimeError("boom"),
     ):
-        result = _execute_tool("read_file", {"path": "x"}, cwd=None, scope_prefixes=["."])
+        result = _execute_tool("read_file", {"path": "x"}, cwd=tmp_path, scope_prefixes=["."])
 
     payload = json.loads(result)
     assert "error" in payload
@@ -478,6 +483,7 @@ def test_session_send_continues_after_tool_handler_exception(tmp_path: Path) -> 
     # continue to the next iteration.
     backend = OpenRouterBackend(api_key="sk-or-test")
     session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
     responses = [
         _tool_call_response("read_file", {"path": "hello.txt"}),
         _stop_response("Recovered after the tool error."),
@@ -504,6 +510,7 @@ def test_session_send_continues_after_tool_handler_exception(tmp_path: Path) -> 
 def test_session_send_scope_enforcement_blocks_write(tmp_path: Path) -> None:
     backend = OpenRouterBackend(api_key="sk-or-test")
     session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
     responses = [
         # Write outside the allowed "src/" prefix.
         _tool_call_response("write_file", {"path": "tests/bad.txt", "content": "nope"}),
@@ -531,6 +538,7 @@ def test_session_send_scope_enforcement_blocks_write(tmp_path: Path) -> None:
 def test_session_send_path_traversal_blocked(tmp_path: Path) -> None:
     backend = OpenRouterBackend(api_key="sk-or-test")
     session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
     responses = [
         _tool_call_response("read_file", {"path": "../../../etc/passwd"}),
         _stop_response("Done."),
@@ -552,6 +560,7 @@ def test_session_send_path_traversal_blocked(tmp_path: Path) -> None:
 def test_session_send_max_iterations_cap(tmp_path: Path) -> None:
     backend = OpenRouterBackend(api_key="sk-or-test")
     session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
     # Always return a tool_calls response — the loop never terminates naturally.
     endless = _tool_call_response("read_file", {"path": "missing.txt"})
 
@@ -571,6 +580,7 @@ def test_session_send_max_iterations_cap(tmp_path: Path) -> None:
 def test_session_conversation_history_persists(tmp_path: Path) -> None:
     backend = OpenRouterBackend(api_key="sk-or-test")
     session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
     initial_len = len(session._messages)
 
     with patch(
@@ -728,6 +738,7 @@ def test_parse_text_tool_calls_multiple_xml_calls() -> None:
         "</tool_calls:x>"
     )
     result = _parse_text_tool_calls(content)
+    assert result is not None
     assert result == [
         ("read_file", {"path": "a.txt"}),
         ("write_file", {"path": "b.txt", "content": "hi"}),
@@ -787,6 +798,7 @@ def test_session_send_text_mode_tool_calls_executed(tmp_path: Path) -> None:
 
     backend = OpenRouterBackend(api_key="sk-or-test")
     session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
     with patch(
         "agent_fleet.openrouter_backend._call_openrouter_raw",
         side_effect=[first_response, second_response],
@@ -867,6 +879,7 @@ def test_session_corrective_prompt_on_hallucinated_completion(tmp_path: Path) ->
 
     backend = OpenRouterBackend(api_key="sk-or-test")
     session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
     with patch(
         "agent_fleet.openrouter_backend._call_openrouter_raw",
         side_effect=[response_1, response_2, response_3],
@@ -900,6 +913,7 @@ def test_session_corrective_prompt_on_repetition(tmp_path: Path) -> None:
 
     backend = OpenRouterBackend(api_key="sk-or-test")
     session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
     with patch(
         "agent_fleet.openrouter_backend._call_openrouter_raw",
         side_effect=[response_1, response_2, response_3],
@@ -931,6 +945,7 @@ def test_session_fails_after_max_corrections(tmp_path: Path) -> None:
 
     backend = OpenRouterBackend(api_key="sk-or-test")
     session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
     mock_raw = MagicMock(side_effect=lambda *a, **k: hallucinated)  # noqa: ARG005
     with patch("agent_fleet.openrouter_backend._call_openrouter_raw", new=mock_raw):
         result = session.send("edit the file", max_tokens=100, timeout_s=30)
@@ -1045,11 +1060,13 @@ def test_retry_exhausted_raises_after_max_retries(tmp_path: Path) -> None:
 
 
 def test_retry_honors_retry_after_header(tmp_path: Path) -> None:
+    hdrs = email.message.Message()
+    hdrs["Retry-After"] = "5"
     err = urllib.error.HTTPError(
         url=f"{OPENROUTER_BASE_URL}/chat/completions",
         code=429,
         msg="Too Many Requests",
-        hdrs={"Retry-After": "5"},
+        hdrs=hdrs,
         fp=None,
     )
     payload = {"id": "gen-1", "choices": [{"message": {"content": "ok"}}]}
@@ -1074,6 +1091,7 @@ def test_retry_honors_retry_after_header(tmp_path: Path) -> None:
 def test_session_logs_usage_on_max_iterations_exit(tmp_path: Path) -> None:
     backend = OpenRouterBackend(api_key="sk-or-test")
     session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
     endless = _tool_call_response("read_file", {"path": "missing.txt"})
     mock_log = MagicMock()
 
@@ -1103,6 +1121,7 @@ def test_session_logs_usage_on_reasoning_without_content_exit(tmp_path: Path) ->
     }
     backend = OpenRouterBackend(api_key="sk-or-test")
     session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
     mock_log = MagicMock()
 
     with (
@@ -1137,11 +1156,12 @@ def test_session_send_escalates_max_tokens_and_succeeds(tmp_path: Path) -> None:
 
     backend = OpenRouterBackend(api_key="sk-or-test")
     session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
 
     captured_max_tokens: list[int | None] = []
 
     def _fake_raw(*_a: object, **kwargs: object) -> dict[str, Any]:
-        captured_max_tokens.append(kwargs.get("max_tokens"))
+        captured_max_tokens.append(cast("int | None", kwargs.get("max_tokens")))
         return exhausted if len(captured_max_tokens) == 1 else success
 
     with patch(
@@ -1165,11 +1185,12 @@ def test_session_send_reasoning_escalation_exhausted_fails(tmp_path: Path) -> No
 
     backend = OpenRouterBackend(api_key="sk-or-test")
     session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
 
     captured_max_tokens: list[int | None] = []
 
     def _fake_raw(*_a: object, **kwargs: object) -> dict[str, Any]:
-        captured_max_tokens.append(kwargs.get("max_tokens"))
+        captured_max_tokens.append(cast("int | None", kwargs.get("max_tokens")))
         return exhausted
 
     with patch(
@@ -1192,11 +1213,12 @@ def test_reasoning_escalation_caps_at_ceiling(tmp_path: Path) -> None:
     exhausted = _reasoning_exhausted_response()
     backend = OpenRouterBackend(api_key="sk-or-test")
     session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
 
     captured_max_tokens: list[int | None] = []
 
     def _fake_raw(*_a: object, **kwargs: object) -> dict[str, Any]:
-        captured_max_tokens.append(kwargs.get("max_tokens"))
+        captured_max_tokens.append(cast("int | None", kwargs.get("max_tokens")))
         return exhausted
 
     with patch(
@@ -1221,7 +1243,7 @@ def test_call_with_reasoning_escalation_returns_successful_max_tokens() -> None:
     calls: list[int | None] = []
 
     def _fake_raw(*_a: object, **kwargs: object) -> dict[str, Any]:
-        calls.append(kwargs.get("max_tokens"))
+        calls.append(cast("int | None", kwargs.get("max_tokens")))
         return exhausted if len(calls) == 1 else success
 
     with patch(
@@ -1251,6 +1273,7 @@ def test_session_send_reuses_sticky_reasoning_floor_across_iterations(tmp_path: 
 
     backend = OpenRouterBackend(api_key="sk-or-test")
     session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
 
     captured_max_tokens: list[int | None] = []
     # Iteration 1: base (1000) exhausts -> escalate to 2000 -> tool call issued.
@@ -1258,7 +1281,7 @@ def test_session_send_reuses_sticky_reasoning_floor_across_iterations(tmp_path: 
     responses = [exhausted, tool_call, success]
 
     def _fake_raw(*_a: object, **kwargs: object) -> dict[str, Any]:
-        captured_max_tokens.append(kwargs.get("max_tokens"))
+        captured_max_tokens.append(cast("int | None", kwargs.get("max_tokens")))
         return responses.pop(0)
 
     with patch(
@@ -1283,14 +1306,13 @@ def test_session_send_reuses_sticky_reasoning_floor_across_iterations(tmp_path: 
 def test_trim_history_elides_old_tool_results(tmp_path: Path) -> None:
     backend = OpenRouterBackend(api_key="sk-or-test")
     session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
 
     big_blob = "x" * (_MAX_HISTORY_CHARS + 1000)
     # Old tool message that should get elided, followed by plenty of recent
     # messages so it falls outside the protected "recent" window.
     session._messages.append({"role": "user", "content": "do stuff"})
-    session._messages.append(
-        {"role": "assistant", "content": None, "tool_calls": [{"id": "c1"}]}
-    )
+    session._messages.append({"role": "assistant", "content": None, "tool_calls": [{"id": "c1"}]})
     session._messages.append({"role": "tool", "tool_call_id": "c1", "content": big_blob})
     for i in range(15):
         session._messages.append({"role": "user", "content": f"filler {i}"})
@@ -1304,6 +1326,7 @@ def test_trim_history_elides_old_tool_results(tmp_path: Path) -> None:
 def test_trim_history_noop_under_budget(tmp_path: Path) -> None:
     backend = OpenRouterBackend(api_key="sk-or-test")
     session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
     session._messages.append({"role": "tool", "tool_call_id": "c1", "content": "small"})
 
     before = [dict(m) for m in session._messages]
@@ -1315,6 +1338,7 @@ def test_trim_history_noop_under_budget(tmp_path: Path) -> None:
 def test_trim_history_never_touches_recent_messages(tmp_path: Path) -> None:
     backend = OpenRouterBackend(api_key="sk-or-test")
     session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
 
     big_blob = "x" * (_MAX_HISTORY_CHARS + 1000)
     # Tool message within the protected "recent" window — must survive.
@@ -1369,6 +1393,7 @@ def test_command_violates_scope_noop_for_dot_scope() -> None:
 def test_session_run_command_blocked_by_scope_guard(tmp_path: Path) -> None:
     backend = OpenRouterBackend(api_key="sk-or-test")
     session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
     responses = [
         _tool_call_response("run_command", {"command": "rm -rf /etc/passwd"}),
         _stop_response("Done."),
@@ -1392,6 +1417,7 @@ def test_session_run_command_blocked_by_scope_guard(tmp_path: Path) -> None:
 def test_session_run_command_unaffected_without_scope(tmp_path: Path) -> None:
     backend = OpenRouterBackend(api_key="sk-or-test")
     session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
     responses = [
         _tool_call_response("run_command", {"command": "echo hi"}),
         _stop_response("Done."),

@@ -30,9 +30,7 @@ if TYPE_CHECKING:
 
 
 def _git_init(tmpdir: Path, *, branch: str = "main") -> None:
-    subprocess.run(
-        ["git", "init", "-b", branch], cwd=str(tmpdir), check=True, capture_output=True
-    )
+    subprocess.run(["git", "init", "-b", branch], cwd=str(tmpdir), check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
         cwd=str(tmpdir),
@@ -71,7 +69,8 @@ def test_committed_change_with_no_origin_remote_is_detected(tmp_path: Path) -> N
 
 
 def test_committed_change_with_origin_remote_still_detected(
-    tmp_path: Path, tmp_path_factory  # noqa: ANN001
+    tmp_path: Path,
+    tmp_path_factory,  # noqa: ANN001
 ) -> None:
     """No-regression check: a repo WITH an origin remote still resolves the
     real changed files via the origin/<default> merge-base path."""
@@ -81,9 +80,7 @@ def test_committed_change_with_origin_remote_still_detected(
     _commit_all(origin, "initial")
 
     clone = tmp_path / "clone"
-    subprocess.run(
-        ["git", "clone", str(origin), str(clone)], check=True, capture_output=True
-    )
+    subprocess.run(["git", "clone", str(origin), str(clone)], check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
         cwd=str(clone),
@@ -164,9 +161,7 @@ def test_verify_ok_on_genuinely_empty_determinate_repo(tmp_path: Path) -> None:
     repo.worktree_bootstrap_commands = []
     repo.critical_path_prefixes = ()
 
-    result = CommandVerifier(repo).check(
-        tmp_path, persona="coder", changed_files=[], task_id=1
-    )
+    result = CommandVerifier(repo).check(tmp_path, persona="coder", changed_files=[], task_id=1)
 
     assert result.severity is VerifySeverity.OK
     assert result.message == "No changes detected"
@@ -182,9 +177,7 @@ def test_verify_fails_closed_on_indeterminate_repo(tmp_path: Path) -> None:
     repo.worktree_bootstrap_commands = []
     repo.critical_path_prefixes = ()
 
-    result = CommandVerifier(repo).check(
-        tmp_path, persona="coder", changed_files=[], task_id=1
-    )
+    result = CommandVerifier(repo).check(tmp_path, persona="coder", changed_files=[], task_id=1)
 
     assert result.severity is VerifySeverity.RETRY
     assert "indeterminate" in result.message.lower()

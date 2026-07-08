@@ -248,10 +248,7 @@ class CommandVerifier:
                     checks=checks,
                     violating_paths=[],
                     files_changed=[],
-                    message=(
-                        "VERIFY could not determine changed files "
-                        "(indeterminate git state)"
-                    ),
+                    message=("VERIFY could not determine changed files (indeterminate git state)"),
                 )
             return VerifyResult(
                 severity=VerifySeverity.OK,
