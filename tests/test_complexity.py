@@ -502,3 +502,72 @@ def test_classify_complexity_explicit_single_goal_overrides() -> None:
         complexity="LOW",
     )
     assert tasks[0].complexity == "LOW"
+
+
+def test_normalize_tasks_single_goal_defaults_to_extend_empty_skills() -> None:
+    """Existing behavior preserved: no skills/skills_mode args -> extend, empty skills."""
+    from agent_fleet.dispatcher import _normalize_tasks
+
+    tasks, _ = _normalize_tasks(
+        goal="fix bug",
+        context=None,
+        persona=None,
+        workspace=None,
+        pipeline=None,
+        tasks=None,
+    )
+    assert tasks[0].skills == ()
+    assert tasks[0].skills_mode == "extend"
+
+
+def test_normalize_tasks_single_goal_forwards_skills_and_mode() -> None:
+    from agent_fleet.dispatcher import _normalize_tasks
+
+    tasks, _ = _normalize_tasks(
+        goal="fix bug",
+        context=None,
+        persona=None,
+        workspace=None,
+        pipeline=None,
+        tasks=None,
+        skills=("cursor-team-kit/verify-this",),
+        skills_mode="replace",
+    )
+    assert tasks[0].skills == ("cursor-team-kit/verify-this",)
+    assert tasks[0].skills_mode == "replace"
+
+
+def test_normalize_tasks_batch_entry_uses_fleet_level_skills_default() -> None:
+    """Batch entries without their own 'skills' key inherit the fleet-level default."""
+    from agent_fleet.dispatcher import _normalize_tasks
+
+    tasks, _ = _normalize_tasks(
+        goal=None,
+        context=None,
+        persona=None,
+        workspace=None,
+        pipeline=None,
+        tasks=[{"goal": "task A"}],
+        skills=("a/skill",),
+        skills_mode="replace",
+    )
+    assert tasks[0].skills == ("a/skill",)
+    assert tasks[0].skills_mode == "replace"
+
+
+def test_normalize_tasks_batch_entry_overrides_fleet_level_skills() -> None:
+    """A per-entry 'skills' key overrides the fleet-level default."""
+    from agent_fleet.dispatcher import _normalize_tasks
+
+    tasks, _ = _normalize_tasks(
+        goal=None,
+        context=None,
+        persona=None,
+        workspace=None,
+        pipeline=None,
+        tasks=[{"goal": "task A", "skills": ["b/skill"], "skills_mode": "extend"}],
+        skills=("a/skill",),
+        skills_mode="replace",
+    )
+    assert tasks[0].skills == ("b/skill",)
+    assert tasks[0].skills_mode == "extend"

@@ -84,6 +84,10 @@ class FleetConfig:
     complexity_tiers: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Skill-set overrides: keys "minimal_core" (list[str]) and "pr_loop" (list[str]).
     skill_overrides: dict[str, list[str]] = field(default_factory=dict)
+    # Fleet-wide default loadout size ("minimal"/"standard"/"full"), used by
+    # derive_runtime when a complexity tier does not explicitly set loadout_size.
+    # A per-tier complexity_tiers override or a CLI --loadout flag take precedence.
+    default_loadout_size: str | None = None
 
 
 def _expand_path(value: str) -> Path:
@@ -255,4 +259,7 @@ def load_fleet_config(
         persona_routing=parse_persona_routing(data.get("persona_routing")),
         complexity_tiers=_parse_complexity_tiers(data.get("complexity_tiers")),
         skill_overrides=_parse_skill_overrides(data.get("skills")),
+        default_loadout_size=(
+            str(data["default_loadout_size"]) if data.get("default_loadout_size") else None
+        ),
     )

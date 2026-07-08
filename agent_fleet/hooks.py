@@ -253,6 +253,10 @@ class FleetTask:
     complexity: str | None = None  # LOW | MED | HIGH; None → MED default
     allowed_paths: tuple[str, ...] = ()  # If non-empty, agent may only modify these prefixes
     skills: tuple[str, ...] = ()  # Catalog skill ids equipped into this task's execute slots
+    # "extend" (default): task.skills append to the persona loadout's execute skills.
+    # "replace": task.skills become the exact execute skill list (before conditional
+    # pstack/why + PR-loop extras), ignoring the persona loadout's execute skills.
+    skills_mode: str = "extend"
 
 
 @dataclass(frozen=True)

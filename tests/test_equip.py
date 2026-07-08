@@ -208,6 +208,170 @@ def test_level_up_root_default() -> None:
     assert LEVEL_UP_ROOT.name == "level_up"
 
 
+# ---------------------------------------------------------------------------
+# skills_mode: "extend" (default, current behavior) vs "replace"
+# ---------------------------------------------------------------------------
+
+
+def test_skills_mode_default_is_extend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_level_up_root(monkeypatch, tmp_path / "level_up")
+
+    repo_yaml = tmp_path / ".agent-fleet.yaml"
+    repo_yaml.write_text("name: extend-default\n", encoding="utf-8")
+    repo = load_repo_config(repo_yaml)
+    fleet_config = load_fleet_config(ROOT / "fleet.example.yaml")
+    task = FleetTask(goal="Fix bug", persona="coder", workspace=str(tmp_path))
+    assert task.skills_mode == "extend"
+
+    equip = resolve_dispatch_equip(task, fleet_config, repo)
+
+    # Persona loadout's own skills are still present (unchanged behavior).
+    assert "pstack/tdd" in equip.skill_slots_execute
+
+
+def test_skills_mode_extend_appends_task_skills(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_level_up_root(monkeypatch, tmp_path / "level_up")
+
+    repo_yaml = tmp_path / ".agent-fleet.yaml"
+    repo_yaml.write_text("name: extend-append\n", encoding="utf-8")
+    repo = load_repo_config(repo_yaml)
+    fleet_config = load_fleet_config(ROOT / "fleet.example.yaml")
+    task = FleetTask(
+        goal="Fix bug",
+        persona="coder",
+        workspace=str(tmp_path),
+        skills=("cursor-team-kit/verify-this",),
+        skills_mode="extend",
+    )
+
+    equip = resolve_dispatch_equip(task, fleet_config, repo)
+
+    # Loadout's own skills are preserved AND the extra skill is appended.
+    assert "pstack/tdd" in equip.skill_slots_execute
+    assert "cursor-team-kit/verify-this" in equip.skill_slots_execute
+
+
+def test_skills_mode_replace_uses_exactly_task_skills(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_level_up_root(monkeypatch, tmp_path / "level_up")
+
+    repo_yaml = tmp_path / ".agent-fleet.yaml"
+    repo_yaml.write_text("name: replace-mode\n", encoding="utf-8")
+    repo = load_repo_config(repo_yaml)
+    fleet_config = load_fleet_config(ROOT / "fleet.example.yaml")
+    task = FleetTask(
+        goal="Fix bug",
+        persona="coder",
+        workspace=str(tmp_path),
+        skills=("cursor-team-kit/verify-this",),
+        skills_mode="replace",
+    )
+
+    equip = resolve_dispatch_equip(task, fleet_config, repo)
+
+    # Only the explicit skill list is present — the persona loadout's own
+    # execute skills (e.g. pstack/tdd) are dropped.
+    assert equip.skill_slots_execute == ("cursor-team-kit/verify-this",)
+    assert "pstack/tdd" not in equip.skill_slots_execute
+    assert "verify-this" in equip.compose_body
+
+
+def test_skills_mode_replace_empty_skills_yields_empty_execute_loadout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_level_up_root(monkeypatch, tmp_path / "level_up")
+
+    repo_yaml = tmp_path / ".agent-fleet.yaml"
+    repo_yaml.write_text("name: replace-empty\n", encoding="utf-8")
+    repo = load_repo_config(repo_yaml)
+    fleet_config = load_fleet_config(ROOT / "fleet.example.yaml")
+    task = FleetTask(
+        goal="Fix bug", persona="coder", workspace=str(tmp_path), skills=(), skills_mode="replace"
+    )
+
+    equip = resolve_dispatch_equip(task, fleet_config, repo)
+
+    assert equip.skill_slots_execute == ()
+    assert "pstack/tdd" not in equip.compose_body
+
+
+def test_skills_mode_replace_still_appends_pr_loop_skills(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Conditional PR-loop extras still get appended after a replace-mode base."""
+    _patch_level_up_root(monkeypatch, tmp_path / "level_up")
+
+    repo_yaml = tmp_path / ".agent-fleet.yaml"
+    repo_yaml.write_text(
+        "name: replace-pr-loop\npr_loop:\n  enabled: true\n",
+        encoding="utf-8",
+    )
+    repo = load_repo_config(repo_yaml)
+    fleet_config = load_fleet_config(ROOT / "fleet.example.yaml")
+    task = FleetTask(
+        goal="Fix CI",
+        persona="coder",
+        workspace=str(tmp_path),
+        skills=("cursor-team-kit/verify-this",),
+        skills_mode="replace",
+    )
+
+    equip = resolve_dispatch_equip(task, fleet_config, repo)
+
+    assert "cursor-team-kit/verify-this" in equip.skill_slots_execute
+    for skill_id in PR_LOOP_EXECUTE_SKILLS:
+        assert skill_id in equip.skill_slots_execute
+
+
+def test_skills_mode_replace_drops_invalid_skill_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Invalid skill ids in replace mode are dropped, matching current extend-mode behavior."""
+    _patch_level_up_root(monkeypatch, tmp_path / "level_up")
+
+    repo_yaml = tmp_path / ".agent-fleet.yaml"
+    repo_yaml.write_text("name: replace-invalid\n", encoding="utf-8")
+    repo = load_repo_config(repo_yaml)
+    fleet_config = load_fleet_config(ROOT / "fleet.example.yaml")
+    task = FleetTask(
+        goal="Fix bug",
+        persona="coder",
+        workspace=str(tmp_path),
+        skills=("cursor-team-kit/verify-this", "does/not-exist"),
+        skills_mode="replace",
+    )
+
+    equip = resolve_dispatch_equip(task, fleet_config, repo)
+
+    assert equip.skill_slots_execute == ("cursor-team-kit/verify-this",)
+
+
+def test_skills_mode_extend_drops_invalid_skill_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Existing behavior preserved: invalid skill ids are silently dropped in extend mode."""
+    _patch_level_up_root(monkeypatch, tmp_path / "level_up")
+
+    repo_yaml = tmp_path / ".agent-fleet.yaml"
+    repo_yaml.write_text("name: extend-invalid\n", encoding="utf-8")
+    repo = load_repo_config(repo_yaml)
+    fleet_config = load_fleet_config(ROOT / "fleet.example.yaml")
+    task = FleetTask(
+        goal="Fix bug",
+        persona="coder",
+        workspace=str(tmp_path),
+        skills=("does/not-exist",),
+        skills_mode="extend",
+    )
+
+    equip = resolve_dispatch_equip(task, fleet_config, repo)
+
+    assert "does/not-exist" not in equip.skill_slots_execute
+
+
 def test_minimal_loadout_size_reduces_compose_body(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

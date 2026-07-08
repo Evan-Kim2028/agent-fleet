@@ -180,13 +180,23 @@ def compose_persona_body(
     level_up_generation: int = 0,
     loadout_size: str | None = None,
     minimal_core: frozenset[str] | None = None,
+    base_skill_ids: list[str] | None = None,
 ) -> str:
-    """Layer base-kit skills, persona stub, fleet/repo overlays into one prompt body."""
+    """Layer base-kit skills, persona stub, fleet/repo overlays into one prompt body.
+
+    ``base_skill_ids``, when given, replaces the loadout's own execute skill ids
+    (used for ``skills_mode == "replace"``); the minimal-loadout filter does not
+    apply to an explicit ``base_skill_ids`` list since the caller already chose
+    the exact set.
+    """
     dirs = skill_dirs or base_kit_skill_dirs()
-    skill_ids = _loadout_execute_skill_ids(loadout)
-    if loadout_size == "minimal":
-        _core = minimal_core if minimal_core is not None else MINIMAL_EXECUTE_SKILL_CORE
-        skill_ids = [s for s in skill_ids if s in _core]
+    if base_skill_ids is not None:
+        skill_ids = list(base_skill_ids)
+    else:
+        skill_ids = _loadout_execute_skill_ids(loadout)
+        if loadout_size == "minimal":
+            _core = minimal_core if minimal_core is not None else MINIMAL_EXECUTE_SKILL_CORE
+            skill_ids = [s for s in skill_ids if s in _core]
     if extra_skills:
         skill_ids.extend(extra_skills)
 

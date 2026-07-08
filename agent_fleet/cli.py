@@ -93,6 +93,29 @@ def cmd_scout(args: argparse.Namespace) -> int:
     return emit(result)
 
 
+def _split_skills_csv(raw: str) -> tuple[str, ...]:
+    return tuple(s.strip() for s in raw.split(",") if s.strip())
+
+
+def _parse_skills_args(args: argparse.Namespace) -> tuple[tuple[str, ...], str]:
+    """Return (skills, skills_mode) from --skills/--add-skills CLI flags.
+
+    --skills is replace mode ("none" or "" -> empty loadout); --add-skills is
+    extend mode (appends to the persona loadout's execute skills, current
+    default behavior when neither flag is given).
+    """
+    skills_arg = getattr(args, "skills", None)
+    add_skills_arg = getattr(args, "add_skills", None)
+    if skills_arg is not None:
+        stripped = skills_arg.strip()
+        if not stripped or stripped.lower() == "none":
+            return (), "replace"
+        return _split_skills_csv(stripped), "replace"
+    if add_skills_arg is not None:
+        return _split_skills_csv(add_skills_arg), "extend"
+    return (), "extend"
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     # Build context with require_env=False so dry_run can early-return first.
     ctx, err = build_fleet_context(
@@ -150,6 +173,9 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     if args.max_redispatches is not None:
         ctx.config.max_redispatches = args.max_redispatches
+
+    skills, skills_mode = _parse_skills_args(args)
+
     dispatcher = FleetDispatcher(config=ctx.config)
     results = dispatcher.dispatch(
         goal=args.goal,
@@ -157,6 +183,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         persona=args.persona,
         workspace=str(ctx.workspace),
         pipeline=args.pipeline,
+        skills=skills,
+        skills_mode=skills_mode,
+        loadout_size=getattr(args, "loadout", None),
     )
     # Dispatcher result is a list; emit() uses the dispatcher ok-set (status
     # field) which does NOT include completed_noop or review_changes_requested.
@@ -782,6 +811,27 @@ def main(argv: list[str] | None = None) -> int:
         "--dry-run",
         action="store_true",
         help="Resolve and print the run plan (persona, pipeline, workspace) without dispatching.",
+    )
+    run_p.add_argument(
+        "--loadout",
+        choices=("minimal", "standard"),
+        default=None,
+        help="Override the complexity-tier-derived loadout size for this run.",
+    )
+    skills_group = run_p.add_mutually_exclusive_group()
+    skills_group.add_argument(
+        "--skills",
+        default=None,
+        help=(
+            "Comma-separated catalog skill ids that REPLACE the persona loadout's "
+            "execute skills (before conditional pstack/why / PR-loop extras). "
+            "Use --skills none (or an empty string) for an empty base loadout."
+        ),
+    )
+    skills_group.add_argument(
+        "--add-skills",
+        default=None,
+        help="Comma-separated catalog skill ids to ADD to the persona loadout's execute skills.",
     )
     run_p.set_defaults(func=cmd_run)
 

@@ -91,11 +91,19 @@ def resolve_dispatch_equip(
         touch_overlay_rules(repo_key_value, persona, repo_rule_ids)
 
     loadout_execute = loadout_execute_skill_ids(loadout)
+    skills_mode = task.skills_mode if task.skills_mode in ("extend", "replace") else "extend"
+    # In "replace" mode, task.skills becomes the exact execute base (dropping the
+    # persona loadout's own skills); "extend" (default) preserves current behavior.
+    replace_execute: list[str] | None = None
+    if skills_mode == "replace":
+        replace_execute = [s for s in task.skills if skill_exists_in_base_kit(s)]
+    current_execute = replace_execute if replace_execute is not None else loadout_execute
+
     extra_execute: list[str] = []
     if (
         last_experience_shows_verify_failed(repo_key_value, persona)
         and skill_exists_in_base_kit(SYSTEMATIC_DEBUGGING_SKILL)
-        and SYSTEMATIC_DEBUGGING_SKILL not in loadout_execute
+        and SYSTEMATIC_DEBUGGING_SKILL not in current_execute
     ):
         extra_execute.append(SYSTEMATIC_DEBUGGING_SKILL)
 
@@ -103,27 +111,33 @@ def resolve_dispatch_equip(
         for skill_id in effective_pr_loop_skills(fleet_config):
             if (
                 skill_exists_in_base_kit(skill_id)
-                and skill_id not in loadout_execute
+                and skill_id not in current_execute
                 and skill_id not in extra_execute
             ):
                 extra_execute.append(skill_id)
 
-    for skill_id in task.skills:
-        if (
-            skill_exists_in_base_kit(skill_id)
-            and skill_id not in loadout_execute
-            and skill_id not in extra_execute
-        ):
-            extra_execute.append(skill_id)
+    if skills_mode != "replace":
+        for skill_id in task.skills:
+            if (
+                skill_exists_in_base_kit(skill_id)
+                and skill_id not in current_execute
+                and skill_id not in extra_execute
+            ):
+                extra_execute.append(skill_id)
 
     # Mirror compose_persona_body's minimal filter so the journaled equip matches
     # the skills actually composed into the body (filter the loadout, keep extras).
+    # The minimal filter only applies to the persona loadout's own skills; an
+    # explicit "replace" skill list is used exactly as given.
     _minimal_core = effective_minimal_core(fleet_config)
-    filtered_execute = (
-        [s for s in loadout_execute if s in _minimal_core]
-        if loadout_size == "minimal"
-        else loadout_execute
-    )
+    if replace_execute is not None:
+        filtered_execute = replace_execute
+    else:
+        filtered_execute = (
+            [s for s in loadout_execute if s in _minimal_core]
+            if loadout_size == "minimal"
+            else loadout_execute
+        )
     skill_slots_execute = [*filtered_execute, *extra_execute]
     skill_slots_review = loadout_review_skill_ids(loadout)
     parent_run_id = task.equip.parent_run_id if task.equip else None
@@ -137,6 +151,7 @@ def resolve_dispatch_equip(
         skill_dirs=skill_dirs,
         loadout_size=loadout_size,
         minimal_core=_minimal_core,
+        base_skill_ids=replace_execute,
     )
 
     equip = DispatchEquip(
@@ -159,6 +174,7 @@ def resolve_dispatch_equip(
             "skill_slots_execute": list(equip.skill_slots_execute),
             "skill_slots_review": list(equip.skill_slots_review),
             "parent_run_id": parent_run_id,
+            "skills_mode": skills_mode,
         },
     )
     append_journal(

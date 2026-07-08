@@ -478,3 +478,97 @@ def test_allow_abbrev_false_prefix_is_not_a_subcommand(
     # and the '--dry-run' flag would be rejected by doctor (it has no such flag), exit != 0.
     rc = main(["doc", "--dry-run"])
     assert rc == 0, "normalize_argv must route 'doc' to 'run', not to 'doctor'"
+
+
+# ---------------------------------------------------------------------------
+# CLI: --skills / --add-skills / --loadout argument parsing
+# ---------------------------------------------------------------------------
+
+
+def test_run_dry_run_accepts_skills_and_loadout_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The argparse wiring accepts --skills and --loadout together (dry-run, no backend needed)."""
+    monkeypatch.chdir(tmp_path)
+    from agent_fleet.cli import main
+
+    rc = main(
+        [
+            "run",
+            "fix bug",
+            "--dry-run",
+            "--skills",
+            "cursor-team-kit/verify-this,pstack/tdd",
+            "--loadout",
+            "minimal",
+        ]
+    )
+    assert rc == 0
+
+
+def test_run_skills_and_add_skills_are_mutually_exclusive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    from agent_fleet.cli import main
+
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "run",
+                "fix bug",
+                "--dry-run",
+                "--skills",
+                "a/b",
+                "--add-skills",
+                "c/d",
+            ]
+        )
+
+
+def test_run_loadout_rejects_invalid_choice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    from agent_fleet.cli import main
+
+    with pytest.raises(SystemExit):
+        main(["run", "fix bug", "--dry-run", "--loadout", "full"])
+
+
+def test_parse_skills_args_default_extend_empty() -> None:
+    from agent_fleet.cli import _parse_skills_args
+
+    args = argparse.Namespace(skills=None, add_skills=None)
+    skills, mode = _parse_skills_args(args)
+    assert skills == ()
+    assert mode == "extend"
+
+
+def test_parse_skills_args_skills_none_string_is_empty_replace() -> None:
+    """--skills none (or an empty string) means an empty replace-mode loadout."""
+    from agent_fleet.cli import _parse_skills_args
+
+    for raw in ("none", "None", "", "  "):
+        args = argparse.Namespace(skills=raw, add_skills=None)
+        skills, mode = _parse_skills_args(args)
+        assert skills == ()
+        assert mode == "replace"
+
+
+def test_parse_skills_args_skills_csv_is_replace() -> None:
+    from agent_fleet.cli import _parse_skills_args
+
+    args = argparse.Namespace(skills="a/b, c/d ,, e/f", add_skills=None)
+    skills, mode = _parse_skills_args(args)
+    assert skills == ("a/b", "c/d", "e/f")
+    assert mode == "replace"
+
+
+def test_parse_skills_args_add_skills_csv_is_extend() -> None:
+    from agent_fleet.cli import _parse_skills_args
+
+    args = argparse.Namespace(skills=None, add_skills="a/b,c/d")
+    skills, mode = _parse_skills_args(args)
+    assert skills == ("a/b", "c/d")
+    assert mode == "extend"

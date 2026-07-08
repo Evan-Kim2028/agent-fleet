@@ -254,6 +254,72 @@ def test_parse_complexity_tiers_unknown_field_raises(tmp_path: Path) -> None:
         load_fleet_config(cfg_file)
 
 
+# ---------------------------------------------------------------------------
+# derive_runtime: default_loadout_size param
+# ---------------------------------------------------------------------------
+
+
+def test_derive_runtime_default_loadout_size_applies_without_tier_override() -> None:
+    """default_loadout_size overrides loadout_size when no complexity_tiers block exists."""
+    rt = derive_runtime("HIGH", default_loadout_size="minimal")
+    assert rt.loadout_size == "minimal"
+    # Other fields stay at the Python defaults for that tier.
+    default = _RUNTIME_MAP["HIGH"]
+    assert rt.pipeline == default.pipeline
+    assert rt.retries == default.retries
+    assert rt.token_ceiling == default.token_ceiling
+
+
+def test_derive_runtime_tier_override_wins_over_default_loadout_size() -> None:
+    """An explicit per-tier loadout_size override always wins over the fleet-wide default."""
+    overrides = {"LOW": {"loadout_size": "full"}}
+    rt = derive_runtime("LOW", tier_overrides=overrides, default_loadout_size="minimal")
+    assert rt.loadout_size == "full"
+
+
+def test_derive_runtime_tier_override_other_fields_fall_back_to_default_loadout_size() -> None:
+    """A tier override that doesn't touch loadout_size still picks up the fleet-wide default."""
+    overrides = {"LOW": {"retries": 5}}
+    rt = derive_runtime("LOW", tier_overrides=overrides, default_loadout_size="full")
+    assert rt.retries == 5
+    assert rt.loadout_size == "full"
+
+
+def test_derive_runtime_no_default_loadout_size_preserves_tier_default() -> None:
+    """Without default_loadout_size, tier's own default loadout_size is unchanged."""
+    rt = derive_runtime("MED", default_loadout_size=None)
+    assert rt.loadout_size == _RUNTIME_MAP["MED"].loadout_size
+
+
+def test_derive_runtime_invalid_default_loadout_size_raises() -> None:
+    with pytest.raises(ValueError, match="loadout_size"):
+        derive_runtime("LOW", default_loadout_size="bogus")
+
+
+# ---------------------------------------------------------------------------
+# load_fleet_config: default_loadout_size parsed from YAML
+# ---------------------------------------------------------------------------
+
+
+def test_load_fleet_config_no_default_loadout_size_is_none(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "fleet.yaml"
+    cfg_file.write_text("default_model: composer-2.5\n", encoding="utf-8")
+    fc = load_fleet_config(cfg_file)
+    assert fc.default_loadout_size is None
+
+
+def test_load_fleet_config_default_loadout_size_parsed(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "fleet.yaml"
+    cfg_file.write_text("default_loadout_size: minimal\n", encoding="utf-8")
+    fc = load_fleet_config(cfg_file)
+    assert fc.default_loadout_size == "minimal"
+
+
+def test_load_fleet_config_example_yaml_default_loadout_size_absent() -> None:
+    fc = load_fleet_config(ROOT / "fleet.example.yaml")
+    assert fc.default_loadout_size is None
+
+
 def test_parse_complexity_tiers_unknown_field_message_names_valid_fields(
     tmp_path: Path,
 ) -> None:

@@ -204,10 +204,19 @@ def coerce_complexity(value: str | None) -> Complexity:
     return cast("Complexity", upper)
 
 
+def _coerce_loadout_size(raw_ls: str) -> LoadoutSize:
+    if raw_ls not in _VALID_LOADOUT_SIZES:
+        raise ValueError(
+            f"Invalid loadout_size {raw_ls!r}. Must be one of {sorted(_VALID_LOADOUT_SIZES)}."
+        )
+    return cast("LoadoutSize", raw_ls)
+
+
 def derive_runtime(
     complexity: Complexity | str | None,
     *,
     tier_overrides: dict[str, dict[str, Any]] | None = None,
+    default_loadout_size: str | None = None,
 ) -> RuntimeConfig:
     """Return the ``RuntimeConfig`` for *complexity*.
 
@@ -217,19 +226,19 @@ def derive_runtime(
     *tier_overrides* may supply per-tier field overrides from fleet/repo config
     (e.g. ``{"LOW": {"token_ceiling": 2_000_000}}``).  Only the keys present in
     the override are changed; the Python defaults fill the rest.
+
+    *default_loadout_size*, when given, is used as the tier's ``loadout_size``
+    only when *tier_overrides* does not explicitly set ``loadout_size`` for this
+    tier — an explicit per-tier override always wins over the fleet-wide default.
     """
     level = coerce_complexity(complexity)
     base = _RUNTIME_MAP[level]
-    if tier_overrides and level in tier_overrides:
-        raw = tier_overrides[level]
+    raw = tier_overrides.get(level) if tier_overrides else None
+    if raw is not None:
         if "loadout_size" in raw:
-            raw_ls = str(raw["loadout_size"])
-            if raw_ls not in _VALID_LOADOUT_SIZES:
-                raise ValueError(
-                    f"Invalid loadout_size {raw_ls!r} in tier override for {level!r}. "
-                    f"Must be one of {sorted(_VALID_LOADOUT_SIZES)}."
-                )
-            loadout_size: LoadoutSize = cast("LoadoutSize", raw_ls)
+            loadout_size: LoadoutSize = _coerce_loadout_size(str(raw["loadout_size"]))
+        elif default_loadout_size is not None:
+            loadout_size = _coerce_loadout_size(default_loadout_size)
         else:
             loadout_size = base.loadout_size
         base = RuntimeConfig(
@@ -239,6 +248,13 @@ def derive_runtime(
             if "token_ceiling" in raw
             else base.token_ceiling,
             loadout_size=loadout_size,
+        )
+    elif default_loadout_size is not None:
+        base = RuntimeConfig(
+            pipeline=base.pipeline,
+            retries=base.retries,
+            token_ceiling=base.token_ceiling,
+            loadout_size=_coerce_loadout_size(default_loadout_size),
         )
     return base
 

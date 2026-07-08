@@ -22,6 +22,12 @@ default_pipeline: simple
 # Recommended: 0 in CI (fail fast), 1-2 in interactive use.
 max_redispatches: 1
 
+# --- Optional: fleet-wide default loadout size ---
+# One of: minimal | standard | full. Used by derive_runtime when a
+# complexity_tiers entry does not explicitly set loadout_size for that tier.
+# A per-tier complexity_tiers override or the CLI `--loadout` flag win over this.
+# default_loadout_size: standard
+
 # --- Optional: Kimi Code CLI execution backend ---
 # Requires: pip install not needed; install kimi-cli from Kimi Code
 # export KIMI_API_KEY=sk-kimi-...   # https://platform.kimi.ai

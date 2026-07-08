@@ -91,6 +91,8 @@ def _normalize_tasks(
     complexity: str | None = None,
     routing: PersonaRoutingConfig | None = None,
     default_persona: str = "coder",
+    skills: tuple[str, ...] = (),
+    skills_mode: str = "extend",
 ) -> tuple[list[FleetTask], list[str | None]]:
     router = PersonaRouter(routing, fallback=default_persona) if routing is not None else None
     # caller-supplied persona is the fleet-level default; tasks may override per entry
@@ -118,6 +120,11 @@ def _normalize_tasks(
                 fallback=default_persona,
                 scope=entry_scope,
             )
+            entry_skills_raw = entry.get("skills")
+            entry_skills = (
+                tuple(str(s) for s in entry_skills_raw) if entry_skills_raw is not None else skills
+            )
+            entry_skills_mode = str(entry.get("skills_mode") or skills_mode)
             normalized.append(
                 FleetTask(
                     goal=task_goal,
@@ -126,6 +133,8 @@ def _normalize_tasks(
                     workspace=_optional_entry_str(entry.get("workspace"), workspace),
                     pipeline=_optional_entry_str(entry.get("pipeline"), pipeline),
                     complexity=entry_complexity,
+                    skills=entry_skills,
+                    skills_mode=entry_skills_mode,
                 )
             )
         if normalized:
@@ -148,6 +157,8 @@ def _normalize_tasks(
                 workspace=workspace,
                 pipeline=pipeline,
                 complexity=effective_complexity,
+                skills=skills,
+                skills_mode=skills_mode,
             )
         ], [None]
     raise ValueError("Provide either 'goal' (single task) or 'tasks' (batch).")
@@ -205,6 +216,10 @@ class FleetDispatcher:
         )
         self._gate = AdmissionGate(self._admission, tier="agent")
         self._worktree_lock = threading.Lock()
+        # Set per-call by dispatch() from an explicit loadout_size arg (e.g. CLI
+        # --loadout); overrides the complexity-tier-derived loadout_size for
+        # every task in that dispatch() call.
+        self._loadout_size_override: str | None = None
 
     def _workspace_key(self, task: FleetTask) -> str:
         return str(self._resolve_workspace(task))
@@ -674,7 +689,10 @@ class FleetDispatcher:
                 runtime = derive_runtime(
                     task.complexity,
                     tier_overrides=self.config.complexity_tiers or None,
+                    default_loadout_size=self.config.default_loadout_size,
                 )
+                if self._loadout_size_override is not None:
+                    runtime = replace(runtime, loadout_size=self._loadout_size_override)
                 if task.complexity is not None and task.pipeline is not None:
                     logger.warning(
                         "Task has both complexity=%r and pipeline=%r; "
@@ -923,6 +941,9 @@ class FleetDispatcher:
         pipeline: str | None = None,
         tasks: list[dict[str, object]] | None = None,
         complexity: str | None = None,
+        skills: tuple[str, ...] = (),
+        skills_mode: str = "extend",
+        loadout_size: str | None = None,
     ) -> list[FleetTaskResult]:
         normalized, base_branches = _normalize_tasks(
             goal=goal,
@@ -934,7 +955,12 @@ class FleetDispatcher:
             complexity=complexity,
             routing=self.config.persona_routing,
             default_persona=self.config.default_persona,
+            skills=skills,
+            skills_mode=skills_mode,
         )
+        # Explicit CLI/caller loadout_size wins over complexity-tier-derived sizing
+        # for the duration of this dispatch call (see _run_one's derive_runtime call).
+        self._loadout_size_override = loadout_size
         if len(normalized) > self.config.max_parallel:
             raise ValueError(
                 f"Too many tasks ({len(normalized)}). max_parallel={self.config.max_parallel}"
