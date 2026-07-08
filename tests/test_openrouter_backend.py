@@ -25,6 +25,7 @@ from agent_fleet.openrouter_backend import (
     _MAX_CORRECTIONS,
     _MAX_HISTORY_CHARS,
     _MAX_RETRIES,
+    _MAX_TOKENS_CEILING,
     DEFAULT_MODEL,
     OPENROUTER_BASE_URL,
     OpenRouterBackend,
@@ -38,6 +39,7 @@ from agent_fleet.openrouter_backend import (
     _normalize_openrouter_usage,
     _OpenRouterErrorSession,
     _parse_text_tool_calls,
+    _reasoning_config,
     _safe_resolve,
 )
 
@@ -189,6 +191,60 @@ def test_run_omits_max_tokens_when_zero(tmp_path: Path) -> None:
         backend.run("prompt", max_tokens=0, timeout_s=30, cwd=tmp_path)
 
     assert "max_tokens" not in captured["body"]
+
+
+# --- Reasoning effort configuration --------------------------------------
+
+
+def test_reasoning_config_defaults_to_high(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OPENROUTER_REASONING_EFFORT", raising=False)
+    assert _reasoning_config() == {"effort": "high"}
+
+
+def test_reasoning_config_none_disables_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENROUTER_REASONING_EFFORT", "none")
+    assert _reasoning_config() is None
+
+
+def test_reasoning_config_respects_valid_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENROUTER_REASONING_EFFORT", "low")
+    assert _reasoning_config() == {"effort": "low"}
+
+
+def test_run_payload_includes_reasoning_effort_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("OPENROUTER_REASONING_EFFORT", raising=False)
+    payload = {"id": "gen-1", "choices": [{"message": {"content": "ok"}}]}
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    captured: dict[str, Any] = {}
+
+    def _capture(req: urllib.request.Request, timeout: int) -> MagicMock:  # noqa: ARG001
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _fake_urlopen_response(payload)
+
+    with patch("agent_fleet.openrouter_backend.urllib.request.urlopen", side_effect=_capture):
+        backend.run("prompt", max_tokens=50, timeout_s=30, cwd=tmp_path)
+
+    assert captured["body"]["reasoning"] == {"effort": "high"}
+
+
+def test_run_payload_omits_reasoning_when_env_is_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENROUTER_REASONING_EFFORT", "none")
+    payload = {"id": "gen-1", "choices": [{"message": {"content": "ok"}}]}
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    captured: dict[str, Any] = {}
+
+    def _capture(req: urllib.request.Request, timeout: int) -> MagicMock:  # noqa: ARG001
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _fake_urlopen_response(payload)
+
+    with patch("agent_fleet.openrouter_backend.urllib.request.urlopen", side_effect=_capture):
+        backend.run("prompt", max_tokens=50, timeout_s=30, cwd=tmp_path)
+
+    assert "reasoning" not in captured["body"]
 
 
 # --- Mocked HTTP: error paths -------------------------------------------
@@ -1052,6 +1108,99 @@ def test_session_logs_usage_on_reasoning_without_content_exit(tmp_path: Path) ->
 
     assert result.exit_code == 1
     mock_log.llm_usage.assert_called_once()
+
+
+def _reasoning_exhausted_response(
+    *, prompt_tokens: int = 50, completion_tokens: int = 20
+) -> dict[str, Any]:
+    return {
+        "id": "gen-1",
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": None, "reasoning": "thinking..."},
+                "finish_reason": "length",
+            }
+        ],
+        "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens},
+    }
+
+
+def test_session_send_escalates_max_tokens_and_succeeds(tmp_path: Path) -> None:
+    """First attempt exhausts output budget; escalated retry succeeds."""
+    exhausted = _reasoning_exhausted_response()
+    success = _stop_response("finally answered")
+
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+
+    captured_max_tokens: list[int | None] = []
+
+    def _fake_raw(*_a: object, **kwargs: object) -> dict[str, Any]:
+        captured_max_tokens.append(kwargs.get("max_tokens"))
+        return exhausted if len(captured_max_tokens) == 1 else success
+
+    with patch(
+        "agent_fleet.openrouter_backend._call_openrouter_raw",
+        side_effect=_fake_raw,
+    ):
+        result = session.send("do something", max_tokens=1000, timeout_s=30)
+
+    assert result.exit_code == 0
+    assert result.stdout == "finally answered"
+    # First call used the caller-supplied max_tokens, the escalated retry doubled it.
+    assert captured_max_tokens == [1000, 2000]
+    # Usage from the discarded first attempt is still accounted for.
+    assert result.usage is not None
+    assert result.usage["output_tokens"] >= 20
+
+
+def test_session_send_reasoning_escalation_exhausted_fails(tmp_path: Path) -> None:
+    """All escalation attempts exhaust output budget → the original failure path fires."""
+    exhausted = _reasoning_exhausted_response()
+
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+
+    captured_max_tokens: list[int | None] = []
+
+    def _fake_raw(*_a: object, **kwargs: object) -> dict[str, Any]:
+        captured_max_tokens.append(kwargs.get("max_tokens"))
+        return exhausted
+
+    with patch(
+        "agent_fleet.openrouter_backend._call_openrouter_raw",
+        side_effect=_fake_raw,
+    ):
+        result = session.send("do something", max_tokens=1000, timeout_s=30)
+
+    assert result.exit_code == 1
+    assert "reasoning but no content" in result.stderr
+    # base -> 2x -> 4x, three total attempts (base + 2 escalations).
+    assert captured_max_tokens == [1000, 2000, 4000]
+    # Usage from all three exhausted attempts (50+20 tokens each) is accumulated.
+    assert result.usage is not None
+    assert result.usage["input_tokens"] == 150
+    assert result.usage["output_tokens"] == 60
+
+
+def test_reasoning_escalation_caps_at_ceiling(tmp_path: Path) -> None:
+    exhausted = _reasoning_exhausted_response()
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+
+    captured_max_tokens: list[int | None] = []
+
+    def _fake_raw(*_a: object, **kwargs: object) -> dict[str, Any]:
+        captured_max_tokens.append(kwargs.get("max_tokens"))
+        return exhausted
+
+    with patch(
+        "agent_fleet.openrouter_backend._call_openrouter_raw",
+        side_effect=_fake_raw,
+    ):
+        session.send("do something", max_tokens=_MAX_TOKENS_CEILING, timeout_s=30)
+
+    assert all(mt <= _MAX_TOKENS_CEILING for mt in captured_max_tokens if mt is not None)
 
 
 # --- Bounded conversation history -------------------------------------------

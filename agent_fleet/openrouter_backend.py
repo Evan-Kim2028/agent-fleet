@@ -59,6 +59,18 @@ _MAX_RETRIES = 3
 _RETRY_BASE_DELAY_S = 1.0
 _RETRY_MAX_DELAY_S = 30.0
 
+# Reasoning-model output-exhaustion handling: when a response comes back with
+# reasoning content but no message content and finish_reason == "length", the
+# model ran out of output budget before it finished reasoning. Rather than
+# fail immediately, retry with a larger max_tokens a bounded number of times.
+_REASONING_ESCALATION_RETRIES = 2
+_MAX_TOKENS_CEILING = 65536
+# Floor used when the caller didn't pass a usable max_tokens (None/0) and we
+# need a concrete base to escalate from, and the default OpenRouterSession
+# uses when a caller doesn't specify one at all.
+_DEFAULT_SESSION_MAX_TOKENS = 16384
+_VALID_REASONING_EFFORTS = {"low", "medium", "high"}
+
 # Injectable sleep so tests don't actually block.
 _sleep = time.sleep
 
@@ -68,6 +80,26 @@ _MAX_HISTORY_CHARS = 400_000
 # Never touch the system message or the most recent N messages when trimming.
 _HISTORY_KEEP_RECENT = 10
 _HISTORY_ELIDED_STUB = "[tool result elided to save context]"
+
+
+# ---------------------------------------------------------------------------
+# Reasoning effort configuration
+# ---------------------------------------------------------------------------
+
+
+def _reasoning_config() -> dict[str, Any] | None:
+    """Build the OpenRouter ``reasoning`` request field from env configuration.
+
+    Controlled by ``OPENROUTER_REASONING_EFFORT`` (``low``/``medium``/``high``/
+    ``none``). Defaults to ``"high"``. ``"none"`` omits the ``reasoning``
+    field from the request entirely (lets the model/provider decide).
+    """
+    effort = os.environ.get("OPENROUTER_REASONING_EFFORT", "high").strip().lower()
+    if effort == "none":
+        return None
+    if effort not in _VALID_REASONING_EFFORTS:
+        effort = "high"
+    return {"effort": effort}
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +433,9 @@ def _call_openrouter_raw(
     if tools:
         body["tools"] = tools
         body["tool_choice"] = "auto"
+    reasoning_cfg = _reasoning_config()
+    if reasoning_cfg is not None:
+        body["reasoning"] = reasoning_cfg
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -473,6 +508,82 @@ def _retry_delay(attempt: int, *, retry_after: str | None = None) -> float:
     return min(base + jitter, _RETRY_MAX_DELAY_S)
 
 
+def _is_reasoning_exhausted(message: dict[str, Any], finish_reason: str) -> bool:
+    """True if *message* has reasoning output but no content because it ran out of budget."""
+    has_reasoning = bool(message.get("reasoning"))
+    return not message.get("content") and has_reasoning and finish_reason == "length"
+
+
+def _call_with_reasoning_escalation(
+    messages: list[dict[str, Any]],
+    *,
+    api_key: str,
+    model: str,
+    base_url: str,
+    timeout: int,
+    max_tokens: int | None,
+    tools: list[dict[str, Any]] | None = None,
+) -> tuple[dict[str, Any], dict[str, int]]:
+    """Call ``_call_openrouter_raw``, escalating ``max_tokens`` on reasoning-exhaustion.
+
+    When a response comes back with reasoning content but empty message
+    content and ``finish_reason == "length"``, the model ran out of output
+    budget before finishing. Retries the same call up to
+    ``_REASONING_ESCALATION_RETRIES`` more times, doubling ``max_tokens`` each
+    time (capped at ``_MAX_TOKENS_CEILING``), instead of failing immediately.
+
+    Returns ``(final_response_data, wasted_usage)`` where *wasted_usage* is
+    the accumulated normalized usage from any exhausted (discarded) attempts
+    prior to the returned response — so callers can still account for those
+    tokens even though the attempt's output was thrown away.
+    """
+    attempt_max_tokens = max_tokens
+    wasted_usage: dict[str, int] = {}
+    data: dict[str, Any] = {}
+
+    for escalation in range(_REASONING_ESCALATION_RETRIES + 1):
+        data = _call_openrouter_raw(
+            messages,
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            timeout=timeout,
+            max_tokens=attempt_max_tokens,
+            tools=tools,
+        )
+        choices = data.get("choices") or []
+        if not choices:
+            return data, wasted_usage
+
+        message = choices[0].get("message") or {}
+        finish_reason = choices[0].get("finish_reason") or ""
+        if not _is_reasoning_exhausted(message, finish_reason):
+            return data, wasted_usage
+        if escalation >= _REASONING_ESCALATION_RETRIES:
+            return data, wasted_usage
+
+        turn_usage = _normalize_openrouter_usage(data.get("usage"))
+        if turn_usage:
+            for k, v in turn_usage.items():
+                wasted_usage[k] = wasted_usage.get(k, 0) + v
+
+        base = (
+            attempt_max_tokens
+            if attempt_max_tokens and attempt_max_tokens > 0
+            else _DEFAULT_SESSION_MAX_TOKENS
+        )
+        new_max = min(base * 2, _MAX_TOKENS_CEILING)
+        if new_max <= base:
+            # Already at (or above) the ceiling — escalating further is pointless.
+            return data, wasted_usage
+        logger.warning(
+            "reasoning exhausted output budget, retrying with max_tokens=%d", new_max
+        )
+        attempt_max_tokens = new_max
+
+    return data, wasted_usage
+
+
 def call_openrouter(
     prompt: str,
     *,
@@ -485,13 +596,16 @@ def call_openrouter(
     """Call OpenRouter chat completions (stateless). Returns ``(content, usage, agent_id)``.
 
     ``usage`` is the raw OpenRouter usage dict (includes nested
-    ``prompt_tokens_details.cached_tokens``). Callers normalize via
-    ``_normalize_openrouter_usage``.
+    ``prompt_tokens_details.cached_tokens``), plus any wasted usage from
+    reasoning-exhaustion escalation retries folded into the top-level token
+    counts. Callers normalize via ``_normalize_openrouter_usage``.
     ``agent_id`` is OpenRouter's response ``id`` (e.g. ``gen-...``) when present.
-    Raises ``RuntimeError`` on non-2xx responses or transport errors so the
-    backend's ``run()`` can fold them into an error ``LLMResult``.
+    Raises ``RuntimeError`` on non-2xx responses, transport errors, or when
+    the model exhausts its output budget on reasoning across all escalation
+    attempts, so the backend's ``run()`` can fold them into an error
+    ``LLMResult``.
     """
-    data = _call_openrouter_raw(
+    data, wasted_usage = _call_with_reasoning_escalation(
         [{"role": "user", "content": prompt}],
         api_key=api_key,
         model=model,
@@ -505,7 +619,8 @@ def call_openrouter(
         message = choices[0].get("message") or {}
         content = str(message.get("content") or "")
         # Reasoning models (e.g. tencent/hy3:free) may put output in `reasoning`
-        # when cut off by max_tokens before producing a `content` field.
+        # when cut off by max_tokens before producing a `content` field, even
+        # after escalation attempts were exhausted.
         if not content and message.get("reasoning"):
             finish = choices[0].get("finish_reason") or ""
             raise RuntimeError(
@@ -513,9 +628,21 @@ def call_openrouter(
                 f"Increase max_tokens — the model ran out before producing output."
             )
     usage_raw = data.get("usage")
-    # Return the raw usage dict (including nested prompt_tokens_details.cached_tokens)
-    # so _normalize_openrouter_usage can extract cache hits. The caller normalizes.
     usage: dict[str, Any] | None = usage_raw if isinstance(usage_raw, dict) else None
+    if wasted_usage:
+        # Fold wasted-attempt tokens into the raw usage dict's top-level counts
+        # so total_usage accounting reflects everything actually spent.
+        merged = dict(usage) if usage else {}
+        merged["prompt_tokens"] = int(merged.get("prompt_tokens", 0) or 0) + wasted_usage.get(
+            "input_tokens", 0
+        )
+        merged["completion_tokens"] = int(
+            merged.get("completion_tokens", 0) or 0
+        ) + wasted_usage.get("output_tokens", 0)
+        merged["total_tokens"] = int(merged.get("total_tokens", 0) or 0) + wasted_usage.get(
+            "input_tokens", 0
+        ) + wasted_usage.get("output_tokens", 0)
+        usage = merged
     agent_id = data.get("id")
     return content, usage, (str(agent_id) if agent_id else None)
 
@@ -895,19 +1022,29 @@ class OpenRouterSession:
         tool_calls_made: list[str] = []
         total_usage: dict[str, int] = {}
         corrections = 0
+        # A missing/zero max_tokens leaves the request's max_tokens key
+        # omitted, which falls back to whatever small default OpenRouter (or
+        # the underlying provider) picks — too small for reasoning models.
+        # Use a reasonable floor instead.
+        effective_max_tokens = (
+            max_tokens if max_tokens and max_tokens > 0 else _DEFAULT_SESSION_MAX_TOKENS
+        )
 
         try:
             for _iteration in range(_MAX_TOOL_ITERATIONS):
                 self._trim_history()
-                data = _call_openrouter_raw(
+                data, wasted_usage = _call_with_reasoning_escalation(
                     self._messages,
                     api_key=self._backend.api_key,
                     model=self._model,
                     base_url=self._backend.base_url,
                     timeout=timeout_s if timeout_s > 0 else 720,
-                    max_tokens=max_tokens,
+                    max_tokens=effective_max_tokens,
                     tools=_FILE_TOOLS,
                 )
+                if wasted_usage:
+                    for k, v in wasted_usage.items():
+                        total_usage[k] = total_usage.get(k, 0) + v
                 if not self._agent_id:
                     raw_id = data.get("id")
                     if raw_id:
