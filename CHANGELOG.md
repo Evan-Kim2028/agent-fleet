@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.12.3 — 2026-07-08
+
+### Summary
+
+Worktree commit path no longer dies with `No such file or directory: 'pre-commit'`.
+Fleet ensures the `pre-commit` binary (PATH + best-effort `uv tool install`),
+bootstrap installs hooks, and pr_loop re-runs worktree bootstrap before review/CI
+fix commits so auto-merge can complete when CI is green.
+
+### Changes
+
+- **tool_env:** new helper — PATH augmentation (`~/.local/bin`), `which_tool`,
+  `ensure_pre_commit` (auto-install via uv/pipx/pip --user).
+- **github_ops:** commit preflight resolves pre-commit absolute path; clear error
+  if missing; `_git_run` uses augmented PATH and distinguishes command-not-found
+  from vanished worktree.
+- **local_git:** git subprocesses inherit augmented PATH so hook scripts find
+  pre-commit.
+- **worktree-bootstrap.sh:** install pre-commit when config present; run
+  `pre-commit install --install-hooks`.
+- **pr_loop lifecycle:** re-run `worktree_bootstrap_commands` before commit/push
+  on review-fix and CI-fix paths.
+- **tests:** tool_env unit tests + preflight missing-binary coverage.
+
+
 ## 0.12.2 — 2026-07-08
 
 ### Summary

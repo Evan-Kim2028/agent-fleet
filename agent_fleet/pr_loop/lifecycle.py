@@ -257,6 +257,26 @@ def _commit_push(
     persona: str | None = None,
 ) -> CommitPushResult:
     resolved_persona = persona or persona_from_branch(branch, repo.default_persona)
+    # Re-run worktree bootstrap so review-fix / CI-fix commits have pre-commit
+    # and frontend node_modules even when the worktree was recreated without verify.
+    for cmd in repo.worktree_bootstrap_commands:
+        proc = subprocess.run(
+            cmd,
+            shell=True,
+            cwd=str(worktree),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=900,
+        )
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or f"bootstrap failed: {cmd}").strip()
+            logger.warning("worktree bootstrap before commit failed: %s", detail[:400])
+            return CommitPushResult(
+                False,
+                "preflight_failed",
+                f"Worktree bootstrap failed: {cmd}\n{detail[:3000]}",
+            )
     return github_ops.commit_and_push(
         worktree,
         message,

@@ -55,6 +55,8 @@ class LocalGitOps:
         cwd: Path,
         timeout: int | None = None,
     ) -> subprocess.CompletedProcess[str]:
+        from agent_fleet.tool_env import augment_path
+
         effective_timeout = timeout if timeout is not None else self._DEFAULT_GIT_TIMEOUT_S
         try:
             return subprocess.run(
@@ -64,6 +66,7 @@ class LocalGitOps:
                 text=True,
                 check=False,
                 timeout=effective_timeout,
+                env=augment_path(),
             )
         except subprocess.TimeoutExpired as exc:
             stdout = (

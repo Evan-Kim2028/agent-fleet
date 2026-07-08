@@ -34,7 +34,10 @@ def _git_run(
     cwd: Path,
     timeout: int = 120,
     check: bool = False,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    from agent_fleet.tool_env import augment_path
+
     if not Path(cwd).is_dir():
         return subprocess.CompletedProcess(
             args=args,
@@ -42,6 +45,7 @@ def _git_run(
             stdout="",
             stderr=f"workspace does not exist: {cwd}",
         )
+    run_env = augment_path(env)
     try:
         return subprocess.run(
             args,
@@ -50,8 +54,17 @@ def _git_run(
             text=True,
             check=check,
             timeout=timeout,
+            env=run_env,
         )
-    except (FileNotFoundError, NotADirectoryError) as exc:
+    except FileNotFoundError as exc:
+        cmd0 = args[0] if args else "<empty>"
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=127,
+            stdout="",
+            stderr=f"command not found: {cmd0}: {exc}",
+        )
+    except NotADirectoryError as exc:
         return subprocess.CompletedProcess(
             args=args,
             returncode=128,
@@ -109,18 +122,27 @@ def run_commit_preflight(
     commands: list[str],
 ) -> tuple[bool, str]:
     """Run repo verify/preflight commands and pre-commit on changed paths."""
+    from agent_fleet.tool_env import ensure_pre_commit
+
     errors: list[str] = []
 
     precommit_cfg = worktree / ".pre-commit-config.yaml"
     if precommit_cfg.exists() and changed_files:
-        pc = _git_run(
-            ["pre-commit", "run", "--files", *changed_files],
-            cwd=worktree,
-            timeout=600,
-        )
-        if pc.returncode != 0:
-            combined = "\n".join(part for part in (pc.stdout, pc.stderr) if part).strip()
-            errors.append(combined[:4000] or "pre-commit failed")
+        pre_commit_bin = ensure_pre_commit(install=True)
+        if not pre_commit_bin:
+            errors.append(
+                "pre-commit binary not found on PATH (and auto-install failed). "
+                "Install with: uv tool install pre-commit"
+            )
+        else:
+            pc = _git_run(
+                [pre_commit_bin, "run", "--files", *changed_files],
+                cwd=worktree,
+                timeout=600,
+            )
+            if pc.returncode != 0:
+                combined = "\n".join(part for part in (pc.stdout, pc.stderr) if part).strip()
+                errors.append(combined[:4000] or "pre-commit failed")
 
     allowed_paths = tuple(changed_files)
     for command in commands:
@@ -645,6 +667,13 @@ def commit_and_push(
             return CommitPushResult(True, "ok", "Pushed existing commit(s)")
         push_detail = (push.stderr or push.stdout or "git push failed").strip()
         return CommitPushResult(False, "push_failed", push_detail[:500])
+
+    # Ensure pre-commit is on PATH before hooks / preflight (systemd hosts often
+    # omit ~/.local/bin). Best-effort install when the repo uses pre-commit.
+    if (worktree / ".pre-commit-config.yaml").exists():
+        from agent_fleet.tool_env import ensure_pre_commit
+
+        ensure_pre_commit(install=True)
 
     preflight_cmds = list(preflight_commands or [])
     if preflight_cmds:
