@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.11.4 — 2026-07-08
+
+### Summary
+
+OpenRouter backend hardening: the fleet now runs fully autonomous, end-to-end
+tool-use sessions on OpenRouter models, with the guards, retries, and budget
+controls needed to make that reliable in practice. Validated live — the free
+`tencent/hy3:free` model completed a real multi-file bug fix (silphco #2312)
+through the entire pipeline, and two such tasks ran concurrently without
+issues.
+
+### Changes
+
+- **Repetition + hallucination guards:** `OpenRouterSession.send()` detects
+  repetition loops (a 50-char substring repeated 5+ times) and hallucinated
+  completion claims made before any tool has been called, and injects a
+  corrective prompt. Up to 3 corrections are attempted; if the model still
+  hasn't produced usable output, the run now fails loudly with `exit_code=1`
+  instead of silently accepting bad output.
+- **Text-mode tool-call fallback + usage normalization:** models that emit
+  tool calls as plain text (instead of the structured tool-call API) are
+  still parsed and dispatched; `llm.usage` reporting is normalized across
+  response shapes.
+- **Retry/backoff on transport errors:** 429s, 5xx responses, and transport
+  failures are retried up to 3x with exponential backoff, honoring
+  `Retry-After` when present.
+- **Bounded conversation history:** once history exceeds 400K chars, older
+  tool-result bodies are elided to keep long sessions under the context
+  limit.
+- **Scope-guarded `run_command`:** obviously destructive invocations (`rm -rf`
+  outside scope, `git clean`, `git reset --hard`) are blocked when write
+  scopes are configured.
+- **Exception-safe tool execution:** `_execute_tool` now wraps handler
+  exceptions and returns a JSON tool-error the model can recover from instead
+  of killing the session. Fixed a `list_files` crash from sorting raw dicts
+  (now sorts by `(type, name)`).
+- **Reasoning-effort control + adaptive `max_tokens`:** `OPENROUTER_REASONING_EFFORT`
+  (default `high`) is sent to reasoning models; on reasoning exhaustion,
+  `max_tokens` escalates (doubling up to 65536) before failing. The escalated
+  floor is now sticky per session, so subsequent iterations start there
+  instead of re-exhausting the low base budget every turn — eliminating a
+  doomed low-budget retry per iteration on long sessions. On a real IMPLEMENT
+  task this took a run from ~1hr (previously killed) down to ~4 minutes.
+- **Configurable tool-iteration cap:** `OPENROUTER_MAX_TOOL_ITERATIONS`
+  (default 80) bounds the tool-use loop; history trimming keeps long
+  sessions bounded even at higher caps.
+- **Dynamic per-task skill loadouts:** `--skills`, `--add-skills`, and
+  `--loadout {minimal,standard}` let the dispatching host assign a smaller
+  skill set per task instead of always loading the full execute loadout;
+  `default_loadout_size` in `fleet.yaml` sets the fleet-wide default.
+
 ## 0.11.3 — 2026-07-07
 
 ### Summary

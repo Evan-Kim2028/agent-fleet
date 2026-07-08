@@ -1,14 +1,14 @@
-"""P6 — Docs hard-update + version 0.11.3.
+"""P6 — Docs hard-update + version 0.11.4.
 
 Tests cover:
-- pyproject.toml and agent_fleet/__init__.py are both at 0.11.3.
+- pyproject.toml and agent_fleet/__init__.py are both at 0.11.4.
 - README.md uses ``fleet`` (not ``agent-fleet``) for every user-facing command example.
 - docs/QUICKSTART.md uses ``fleet`` command surface.
 - docs/NEW-REPO.md uses ``fleet`` command surface.
 - docs/FLEET-CONFIG.md uses ``fleet`` command surface.
 - docs/SCHEDULES.md uses ``fleet schedule`` (not ``agent-fleet-schedule``).
 - docs/PERSONAS.md uses ``fleet`` command surface.
-- CHANGELOG.md exists and mentions 0.11.3.
+- CHANGELOG.md exists and mentions 0.11.4.
 - No doc file contains a migration table (old-name → new-name).
 """
 
@@ -28,14 +28,14 @@ DOCS = ROOT / "docs"
 # ---------------------------------------------------------------------------
 
 
-def test_pyproject_version_is_0_11_3() -> None:
+def test_pyproject_version_is_0_11_4() -> None:
     content = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'version = "0.11.3"' in content, "pyproject.toml version must be 0.11.3"
+    assert 'version = "0.11.4"' in content, "pyproject.toml version must be 0.11.4"
 
 
-def test_init_version_is_0_11_3() -> None:
+def test_init_version_is_0_11_4() -> None:
     content = (ROOT / "agent_fleet" / "__init__.py").read_text(encoding="utf-8")
-    assert '__version__ = "0.11.3"' in content, "agent_fleet/__init__.py __version__ must be 0.11.3"
+    assert '__version__ = "0.11.4"' in content, "agent_fleet/__init__.py __version__ must be 0.11.4"
 
 
 def test_versions_match() -> None:
@@ -61,9 +61,9 @@ def test_changelog_exists() -> None:
     assert (ROOT / "CHANGELOG.md").exists(), "CHANGELOG.md must exist after P6"
 
 
-def test_changelog_mentions_0_11_3() -> None:
+def test_changelog_mentions_0_11_4() -> None:
     content = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    assert "0.11.3" in content, "CHANGELOG.md must mention version 0.11.3"
+    assert "0.11.4" in content, "CHANGELOG.md must mention version 0.11.4"
 
 
 # ---------------------------------------------------------------------------
