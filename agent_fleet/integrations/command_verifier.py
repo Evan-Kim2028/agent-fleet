@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from agent_fleet.contracts.verify_result import VerifyResult, VerifySeverity
 from agent_fleet.observability.fleet_logger import emit_fleet_event
-from agent_fleet.verify_core import get_changed_files
+from agent_fleet.verify_core import get_changed_files_result
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -60,7 +60,8 @@ class CommandVerifier:
         task_id: int,
     ) -> VerifyResult:
         del changed_files
-        rel_changed = get_changed_files(worktree)
+        changed_result = get_changed_files_result(worktree)
+        rel_changed = changed_result.files
         checks: list[dict] = []
         verify_env = {
             **os.environ,
@@ -241,6 +242,17 @@ class CommandVerifier:
                 )
 
         if not commands and not rel_changed:
+            if not changed_result.determinate:
+                return VerifyResult(
+                    severity=VerifySeverity.RETRY,
+                    checks=checks,
+                    violating_paths=[],
+                    files_changed=[],
+                    message=(
+                        "VERIFY could not determine changed files "
+                        "(indeterminate git state)"
+                    ),
+                )
             return VerifyResult(
                 severity=VerifySeverity.OK,
                 checks=checks,

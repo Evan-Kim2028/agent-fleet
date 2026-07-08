@@ -8,6 +8,7 @@ import subprocess
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 
 from agent_fleet.contracts.verify_result import VerifyResult, VerifySeverity
 
@@ -37,44 +38,130 @@ Check = Callable[[Path, list[str], int], CheckResult]
 DEFAULT_TEST_SEARCH_ROOTS: tuple[str, ...] = ("tests",)
 
 
-def get_changed_files(worktree_path: Path) -> list[str]:
-    """Return repo-relative paths of changed files introduced by this branch.
+class ChangedFilesResult(NamedTuple):
+    """Result of resolving changed files, distinguishing "no changes" from
+    "could not tell".
 
-    Includes tracked-diffs (git diff against merge-base) and untracked files
-    (git ls-files --others). Uses merge-base so that commits merged to main
-    after the branch was created are not falsely attributed to the agent.
+    ``determinate=False`` means every base-resolution strategy failed and the
+    diff could not be computed at all -- callers MUST NOT treat this the same
+    as a genuinely empty change set.
     """
-    default_branch = (
-        subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"],
-            capture_output=True,
-            text=True,
-            cwd=worktree_path,
-            check=False,
-        )
-        .stdout.strip()
-        .replace("refs/heads/", "")
-        or "main"
-    )
-    default_branch_name = default_branch.split("/")[-1]
-    subprocess.run(
-        ["git", "fetch", "origin", default_branch_name],
-        cwd=worktree_path,
-        capture_output=True,
-        check=False,
-    )
 
-    # Use merge-base so we only see THIS branch's changes, not missing main commits.
-    merge_base_result = subprocess.run(
-        ["git", "merge-base", f"origin/{default_branch_name}", "HEAD"],
+    files: list[str]
+    determinate: bool
+
+
+_EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"  # git's canonical empty tree object
+
+
+def _git_rev_parse(worktree_path: Path, ref: str) -> str | None:
+    """Return the resolved SHA for *ref*, or None if it does not resolve."""
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", ref],
         cwd=worktree_path,
         capture_output=True,
         text=True,
         check=False,
     )
-    diff_target = merge_base_result.stdout.strip() or f"origin/{default_branch_name}"
+    sha = result.stdout.strip()
+    return sha if result.returncode == 0 and sha else None
 
-    files: set[str] = set()
+
+def _git_merge_base(worktree_path: Path, a: str, b: str = "HEAD") -> str | None:
+    result = subprocess.run(
+        ["git", "merge-base", a, b],
+        cwd=worktree_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    sha = result.stdout.strip()
+    return sha if result.returncode == 0 and sha else None
+
+
+def _resolve_diff_base(worktree_path: Path) -> str | None:
+    """Resolve the ref/SHA to diff HEAD against, trying progressively weaker
+    fallbacks. Never fabricates a ref that doesn't exist.
+
+    Order:
+      (a) merge-base against origin/<default>, if that remote-tracking ref exists.
+      (b) merge-base against a local <default> branch (main, then master), if it
+          exists and isn't the branch we're already on.
+      (c) the parent of HEAD (the branch's own most recent commit), or -- for a
+          repo whose only commit is the root commit -- git's empty-tree object.
+    Returns None only when none of the above can be resolved (e.g. HEAD itself
+    doesn't exist yet -- a repo with zero commits).
+    """
+    origin_head = (
+        subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"],
+            cwd=worktree_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        .stdout.strip()
+        .replace("refs/heads/", "")
+    )
+    default_branch_name = origin_head.split("/")[-1] if origin_head else "main"
+
+    if origin_head:
+        subprocess.run(
+            ["git", "fetch", "origin", default_branch_name],
+            cwd=worktree_path,
+            capture_output=True,
+            check=False,
+        )
+        if _git_rev_parse(worktree_path, f"origin/{default_branch_name}") is not None:
+            base = _git_merge_base(worktree_path, f"origin/{default_branch_name}")
+            if base is not None:
+                return base
+
+    current_branch = (
+        subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=worktree_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        .stdout.strip()
+        or None
+    )
+    for candidate in (default_branch_name, "main", "master"):
+        if not candidate or candidate == current_branch:
+            continue
+        if _git_rev_parse(worktree_path, f"refs/heads/{candidate}") is None:
+            continue
+        base = _git_merge_base(worktree_path, candidate)
+        if base is not None:
+            return base
+
+    head_parent = _git_rev_parse(worktree_path, "HEAD^")
+    if head_parent is not None:
+        return head_parent
+
+    # Root commit (no parent): diff against the empty tree so a fresh branch's
+    # own commits still show up as "changed" instead of silently vanishing.
+    if _git_rev_parse(worktree_path, "HEAD") is not None:
+        return _EMPTY_TREE_SHA
+
+    return None
+
+
+def get_changed_files_result(worktree_path: Path) -> ChangedFilesResult:
+    """Return changed files plus whether detection was determinate.
+
+    Includes tracked diffs (against the resolved base, see
+    ``_resolve_diff_base``) and untracked files (git ls-files --others).
+    ``determinate=False`` means no base could be resolved at all, or the diff
+    against a resolved base failed to run -- i.e. we genuinely cannot tell
+    what changed, as opposed to having verified there is nothing to report.
+    """
+    diff_target = _resolve_diff_base(worktree_path)
+    if diff_target is None:
+        return ChangedFilesResult(files=[], determinate=False)
+
     diff_result = subprocess.run(
         ["git", "diff", "--name-only", diff_target, "--"],
         cwd=worktree_path,
@@ -82,8 +169,10 @@ def get_changed_files(worktree_path: Path) -> list[str]:
         text=True,
         check=False,
     )
-    if diff_result.returncode == 0:
-        files.update(diff_result.stdout.splitlines())
+    if diff_result.returncode != 0:
+        return ChangedFilesResult(files=[], determinate=False)
+
+    files: set[str] = {f for f in diff_result.stdout.splitlines() if f}
 
     untracked_result = subprocess.run(
         ["git", "ls-files", "--others", "--exclude-standard"],
@@ -93,9 +182,21 @@ def get_changed_files(worktree_path: Path) -> list[str]:
         check=False,
     )
     if untracked_result.returncode == 0:
-        files.update(untracked_result.stdout.splitlines())
+        files.update(f for f in untracked_result.stdout.splitlines() if f)
 
-    return sorted(f for f in files if f)
+    return ChangedFilesResult(files=sorted(files), determinate=True)
+
+
+def get_changed_files(worktree_path: Path) -> list[str]:
+    """Return repo-relative paths of changed files introduced by this branch.
+
+    Thin wrapper over :func:`get_changed_files_result` for existing callers
+    that only want the file list. See that function's docstring for the
+    fallback chain used to resolve the diff base, and use
+    ``get_changed_files_result`` directly when the caller needs to
+    distinguish "genuinely no changes" from "could not determine".
+    """
+    return get_changed_files_result(worktree_path).files
 
 
 def is_git_repo(workspace: Path) -> bool:
