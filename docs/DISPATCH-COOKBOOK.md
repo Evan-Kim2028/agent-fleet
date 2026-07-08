@@ -78,6 +78,8 @@ Enable `auto_fix` in `.agent-fleet.yaml` for self-dispatch buildouts.
 
 `scripts/dispatch-skills-buildout.py` remains for the 5-PR stack; new cleanup work uses workstreams only.
 
+To size a single dispatch's skill set instead of loading the full persona loadout, use the per-task `fleet run` flags `--skills`, `--add-skills`, and `--loadout {minimal,standard}`. See [PERSONAS.md — Per-task skill loadouts](PERSONAS.md#per-task-skill-loadouts).
+
 ## Integration checklist
 
 For self-hosted batches on agent-fleet:

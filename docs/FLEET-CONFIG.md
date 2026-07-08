@@ -32,6 +32,22 @@ Repo-level settings (verify commands, scope, PR loop) always come from `.agent-f
 
 See also: [NEW-REPO.md](NEW-REPO.md), [PERSONAS.md](PERSONAS.md), [AGENT-FLEET-DEV.md](AGENT-FLEET-DEV.md).
 
+## default_loadout_size
+
+Sets the fleet-wide default skill loadout size when a `complexity_tiers` entry does not explicitly set `loadout_size` for that tier.
+
+```yaml
+# ~/.agent-fleet/fleet.yaml
+default_loadout_size: standard   # one of: minimal | standard
+```
+
+| Value | Meaning |
+|-------|---------|
+| `minimal` | Smaller base skill set per dispatch |
+| `standard` | Fuller execute loadout (default when derived) |
+
+Precedence: a per-tier `complexity_tiers` override wins over `default_loadout_size`, and the CLI `--loadout {minimal,standard}` flag wins over both for a single run (see [PERSONAS.md — Per-task skill loadouts](PERSONAS.md#per-task-skill-loadouts)).
+
 ## personas_dir
 
 Bundled personas ship inside the installed package at `agent_fleet/personas/`. **Leave `personas_dir` unset in global `fleet.yaml`** unless you maintain a separate persona tree with an **absolute** path.

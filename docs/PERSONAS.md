@@ -28,6 +28,35 @@ Every first-class bundled persona ships with a `*.loadout.yaml` in `agent_fleet/
 
 At dispatch, orchestration composes: loadout skills + stub markdown + fleet/repo overlays. See `agent_fleet/personas/*.loadout.yaml`.
 
+### Per-task skill loadouts
+
+The persona loadout is the default skill set, but the dispatching host can size the loadout per task instead of always loading the full execute set. Three `fleet run` flags control this:
+
+| Flag | Effect |
+|------|--------|
+| `--skills a,b,c` | REPLACE the persona's execute skills with exactly this comma-separated list (before conditional pstack/why / PR-loop extras). `--skills none` (or an empty string) gives a bare base loadout. |
+| `--add-skills a,b,c` | EXTEND the persona's execute skills with these ids (mutually exclusive with `--skills`). |
+| `--loadout {minimal,standard}` | Override the complexity-tier-derived loadout size for this run. |
+
+```bash
+# Trim a coder run down to a two-skill base loadout
+fleet run "Fix the typo in the CLI help text" \
+  --workspace /path/to/repo \
+  --skills tdd,boundary-discipline
+
+# Add a skill on top of the persona default
+fleet run "Investigate the flaky test" \
+  --workspace /path/to/repo \
+  --add-skills pstack/why
+
+# Force the smaller loadout size for a simple task
+fleet run "Bump the version string" \
+  --workspace /path/to/repo \
+  --loadout minimal
+```
+
+`--loadout` overrides the fleet-wide `default_loadout_size` (see [FLEET-CONFIG.md](FLEET-CONFIG.md)) for a single run.
+
 ## Execution backends
 
 Agent Fleet runs the same personas and pipelines through a pluggable execution backend. Set `default_backend` in `fleet.yaml`:
