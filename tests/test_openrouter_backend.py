@@ -30,6 +30,7 @@ from agent_fleet.openrouter_backend import (
     _is_within_scope,
     _normalize_openrouter_usage,
     _OpenRouterErrorSession,
+    _parse_text_tool_calls,
     _safe_resolve,
 )
 
@@ -120,7 +121,12 @@ def test_run_parses_chat_completion_response(tmp_path: Path) -> None:
     assert result.stdout == "Hello from hy3"
     assert result.stderr == ""
     assert result.agent_id == "gen-abc123"
-    assert result.usage == {"prompt_tokens": 12, "completion_tokens": 5, "total_tokens": 17}
+    assert result.usage == {
+        "input_tokens": 12,
+        "output_tokens": 5,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+    }
     assert result.duration_s >= 0.0
 
     # Verify the request shape: URL, method, auth header, body.
@@ -537,3 +543,127 @@ def test_is_within_scope_specific_prefix(tmp_path: Path) -> None:
     test_file = (tmp_path / "tests" / "test_x.py").resolve()
     assert _is_within_scope(src_file, ["src/"], tmp_path) is True
     assert _is_within_scope(test_file, ["src/"], tmp_path) is False
+
+
+# --- Text-mode tool call fallback parser ---------------------------------
+
+
+def test_parse_text_tool_calls_pseudo_xml() -> None:
+    """Pseudo-XML format observed from tencent/hy3:free."""
+    content = (
+        "I'll read the target file.\n"
+        "<tool_calls:abc123>\n"
+        "<tool_call:abc123>read_file\n"
+        "parameter: path: docs/NEW-REPO.md\n"
+        "</tool_call:abc123>\n"
+        "</tool_calls:abc123>"
+    )
+    assert _parse_text_tool_calls(content) == [("read_file", {"path": "docs/NEW-REPO.md"})]
+
+
+def test_parse_text_tool_calls_json_block() -> None:
+    """JSON code block format."""
+    content = (
+        "```json\n"
+        '{"name": "write_file", "arguments": '
+        '{"path": "test.txt", "content": "hello"}}\n'
+        "```"
+    )
+    assert _parse_text_tool_calls(content) == [
+        ("write_file", {"path": "test.txt", "content": "hello"})
+    ]
+
+
+def test_parse_text_tool_calls_returns_none_for_plain_text() -> None:
+    """Normal text without tool calls returns None (genuine final answer)."""
+    content = "I've completed the task. The file has been updated."
+    assert _parse_text_tool_calls(content) is None
+
+
+def test_parse_text_tool_calls_returns_none_for_empty() -> None:
+    """Empty string returns None."""
+    assert _parse_text_tool_calls("") is None
+
+
+def test_parse_text_tool_calls_multiple_xml_calls() -> None:
+    """Multiple pseudo-XML tool calls in one response."""
+    content = (
+        "<tool_calls:x>\n"
+        "<tool_call:x>read_file\n"
+        "parameter: path: a.txt\n"
+        "</tool_call:x>\n"
+        "<tool_call:x>write_file\n"
+        "parameter: path: b.txt\n"
+        "parameter: content: hi\n"
+        "</tool_call:x>\n"
+        "</tool_calls:x>"
+    )
+    result = _parse_text_tool_calls(content)
+    assert result == [
+        ("read_file", {"path": "a.txt"}),
+        ("write_file", {"path": "b.txt", "content": "hi"}),
+    ]
+    assert len(result) == 2
+
+
+def test_parse_text_tool_calls_ignores_unknown_tools() -> None:
+    """A pseudo-XML block with an unknown tool name yields None."""
+    content = (
+        "<tool_calls:x>\n"
+        "<tool_call:x>search_web\n"
+        "parameter: query: hello\n"
+        "</tool_call:x>\n"
+        "</tool_calls:x>"
+    )
+    assert _parse_text_tool_calls(content) is None
+
+
+def test_session_send_text_mode_tool_calls_executed(tmp_path: Path) -> None:
+    """finish_reason='stop' with text-mode tool calls still executes the tool."""
+    (tmp_path / "hello.txt").write_text("hello", encoding="utf-8")
+
+    first_response = {
+        "id": "gen-1",
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": (
+                        "Reading file.\n"
+                        "<tool_calls:x>\n"
+                        "<tool_call:x>read_file\n"
+                        "parameter: path: hello.txt\n"
+                        "</tool_call:x>\n"
+                        "</tool_calls:x>"
+                    ),
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 50, "completion_tokens": 20},
+    }
+    second_response = {
+        "id": "gen-1",
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "Done. The file contains hello.",
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 80, "completion_tokens": 10},
+    }
+
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    with patch(
+        "agent_fleet.openrouter_backend._call_openrouter_raw",
+        side_effect=[first_response, second_response],
+    ):
+        result = session.send("read hello.txt", max_tokens=100, timeout_s=30)
+
+    assert result.exit_code == 0
+    assert "read_file" in result.mcp_tool_calls
+    assert result.stdout == "Done. The file contains hello."

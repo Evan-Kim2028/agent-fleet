@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import time
 import urllib.error
@@ -393,8 +394,172 @@ class OpenRouterLLMResult:
     exit_code: int
     duration_s: float
     agent_id: str | None = None
-    usage: dict[str, Any] | None = None
+    usage: dict[str, int] | None = None
     mcp_tool_calls: tuple[str, ...] = field(default_factory=tuple)
+
+
+# ---------------------------------------------------------------------------
+# Text-mode tool call fallback parser
+# ---------------------------------------------------------------------------
+
+# Matches <tool_call:ID>Name\nparameter: key: value\n</tool_call:ID>
+# and <tool_call>Name\nparameter: key: value\n</tool_call>
+_TOOL_CALL_XML_RE = re.compile(
+    r"<tool_call(?::[a-zA-Z0-9_-]+)?>\s*\n?(.*?)\n?</tool_call(?::[a-zA-Z0-9_-]+)?>",
+    re.DOTALL,
+)
+# Matches <tool_calls:ID>...</tool_calls:ID> wrapper (skip — we parse inner calls)
+_TOOL_CALLS_WRAPPER_RE = re.compile(
+    r"</?tool_calls(?::[a-zA-Z0-9_-]+)?>",
+)
+# Matches parameter lines: "parameter: key: value" or "parameter: key=value"
+_PARAM_LINE_RE = re.compile(
+    r"^parameter:\s*(\w+):\s*(.*)$|^parameter:\s*(\w+)\s*=\s*(.*)$",
+)
+# Matches JSON code blocks containing a tool call
+_JSON_TOOL_CALL_RE = re.compile(
+    r"```(?:json)?\s*\n(\{[^`]*?\})\s*\n```",
+    re.DOTALL,
+)
+
+_KNOWN_TOOLS = {"read_file", "write_file", "run_command", "list_files"}
+
+# Some models use Cursor/Claude-Code-style tool names instead of our defined
+# names. Map common aliases to our canonical tool names.
+_TOOL_ALIASES = {
+    "read": "read_file",
+    "readfile": "read_file",
+    "cat": "read_file",
+    "write": "write_file",
+    "writefile": "write_file",
+    "edit": "write_file",
+    "bash": "run_command",
+    "shell": "run_command",
+    "cmd": "run_command",
+    "command": "run_command",
+    "run": "run_command",
+    "ls": "list_files",
+    "list": "list_files",
+    "listfiles": "list_files",
+    "list_dir": "list_files",
+    "lsdir": "list_files",
+}
+
+
+def _canonical_tool_name(name: str) -> str | None:
+    """Resolve a tool name (case-insensitive) to a canonical name, or None."""
+    lower = name.lower().strip()
+    if lower in _KNOWN_TOOLS:
+        return lower
+    return _TOOL_ALIASES.get(lower)
+
+
+def _parse_text_tool_calls(content: str) -> list[tuple[str, dict[str, Any]]] | None:
+    """Detect and parse tool calls emitted as text in the content field.
+
+    Some models (notably tencent/hy3:free under complex prompts) emit tool
+    calls as pseudo-XML or JSON text in the ``content`` field instead of using
+    the structured ``tool_calls`` response field. This parser detects common
+    text-mode formats and converts them to ``(name, args)`` tuples so the
+    session loop can execute them.
+
+    Returns ``None`` if no text-mode tool calls were found (the content is a
+    genuine final answer). Returns a list (possibly empty) if text-mode tool
+    calls were detected.
+    """
+    if not content:
+        return None
+
+    found: list[tuple[str, dict[str, Any]]] = []
+
+    # Format 1: Pseudo-XML — <tool_call:ID>Name\nparameter: key: value\n</tool_call:ID>
+    # Strip the wrapper tags first, then parse inner <tool_call> blocks.
+    stripped = _TOOL_CALLS_WRAPPER_RE.sub("", content)
+    for match in _TOOL_CALL_XML_RE.finditer(stripped):
+        body = match.group(1).strip()
+        lines = body.split("\n")
+        if not lines:
+            continue
+        canonical = _canonical_tool_name(lines[0].strip())
+        if canonical is None:
+            continue
+        args: dict[str, Any] = {}
+        for line in lines[1:]:
+            line = line.strip()
+            if not line:
+                continue
+            pm = _PARAM_LINE_RE.match(line)
+            if pm:
+                key = pm.group(1) or pm.group(3)
+                val = (pm.group(2) or pm.group(4) or "").strip()
+                args[key] = val
+        found.append((canonical, _normalize_args(canonical, args)))
+
+    if found:
+        return found
+
+    # Format 2: JSON code blocks — ```json\n{"name": "read_file", "arguments": {...}}\n```
+    for match in _JSON_TOOL_CALL_RE.finditer(content):
+        try:
+            obj = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            continue
+        raw_name = obj.get("name") or obj.get("function") or obj.get("tool")
+        canonical = _canonical_tool_name(str(raw_name)) if raw_name else None
+        if canonical:
+            args = obj.get("arguments") or obj.get("parameters") or obj.get("args") or {}
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except json.JSONDecodeError:
+                    args = {}
+            found.append(
+                (canonical, _normalize_args(canonical, args if isinstance(args, dict) else {}))
+            )
+
+    return found if found else None
+
+
+# Parameter name aliases — models use different param names than our schema.
+_PARAM_ALIASES = {
+    "file_path": "path",
+    "file": "path",
+    "filename": "path",
+    "filepath": "path",
+    "cmd": "command",
+    "cmd_str": "command",
+    "shell_command": "command",
+    "dir": "path",
+    "directory": "path",
+    "folder": "path",
+}
+
+
+def _normalize_args(_tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Normalize parameter names to our canonical schema."""
+    normalized: dict[str, Any] = {}
+    for key, val in args.items():
+        canonical_key = _PARAM_ALIASES.get(key.lower(), key)
+        normalized[canonical_key] = val
+    return normalized
+
+
+# Matches fabricated tool responses and think blocks the model generates
+# in text mode: <tool_response:ID>...</tool_response:ID>, <think:ID>...</think:ID>,
+# <tool_responses:ID>...</tool_responses:ID>
+_FABRICATED_BLOCK_RE = re.compile(
+    r"</?(?:tool_response|tool_responses|think|thinking)(?::[a-zA-Z0-9_-]+)?>",
+)
+
+
+def _strip_fabricated_responses(content: str) -> str:
+    """Remove fabricated tool response/think tags from text-mode content.
+
+    Models in text mode sometimes generate both the tool call AND a fabricated
+    response in the same content block. Strip the fabricated response tags so
+    only the tool call remains (we execute it and feed back the real result).
+    """
+    return _FABRICATED_BLOCK_RE.sub("", content)
 
 
 # ---------------------------------------------------------------------------
@@ -428,7 +593,9 @@ class OpenRouterSession:
                 "role": "system",
                 "content": (
                     f"You are a {persona_name} agent working in a git workspace at {cwd}. "
-                    "Use the provided tools to read files, write files, and run commands. "
+                    "You have access to tools: read_file, write_file, run_command, list_files. "
+                    "You MUST call tools using the structured tool_calls mechanism — "
+                    "do NOT write tool calls as text in your response. "
                     "Always verify your changes by reading the file back after writing. "
                     "When the task is complete, respond with a summary of what you did."
                 ),
@@ -557,6 +724,33 @@ class OpenRouterSession:
                         usage=total_usage or None,
                         mcp_tool_calls=tuple(tool_calls_made),
                     )
+
+                # Text-mode tool call fallback: some models emit tool calls as
+                # text in the content field instead of using the structured
+                # tool_calls response field. Detect and execute them, then
+                # continue the loop instead of treating this as a final answer.
+                text_tool_calls = _parse_text_tool_calls(content)
+                if text_tool_calls is not None:
+                    # Strip fabricated tool responses/think blocks so the model
+                    # doesn't confuse its own imagined responses with real results.
+                    clean_content = _strip_fabricated_responses(content)
+                    self._messages.append({"role": "assistant", "content": clean_content})
+                    for idx, (tool_name, tool_args) in enumerate(text_tool_calls):
+                        tool_calls_made.append(tool_name)
+                        result = _execute_tool(
+                            tool_name,
+                            tool_args,
+                            cwd=self._cwd,
+                            scope_prefixes=scope_prefixes,
+                        )
+                        self._messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": f"text-call-{idx}",
+                                "content": result,
+                            }
+                        )
+                    continue
 
                 self._messages.append({"role": "assistant", "content": content})
                 ctx = get_run_context()
@@ -734,7 +928,7 @@ class OpenRouterBackend:
                 exit_code=0,
                 duration_s=duration_s,
                 agent_id=agent_id,
-                usage=usage,
+                usage=normalized,
             )
         except Exception as exc:
             return OpenRouterLLMResult(
