@@ -264,6 +264,33 @@ def _execute_tool(
 ) -> str:
     """Execute a tool call and return a JSON-serialized result string.
 
+    Any exception raised while executing the tool (other than
+    ``KeyboardInterrupt``/``SystemExit``) is caught here and converted into
+    a tool-error result string so a single misbehaving tool handler cannot
+    kill the whole session loop.
+    """
+    try:
+        return _execute_tool_inner(name, args, cwd=cwd, scope_prefixes=scope_prefixes)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception as exc:  # deliberately broad to protect the session loop
+        logger.warning(
+            "OpenRouter tool %r raised %s: %s", name, type(exc).__name__, exc
+        )
+        return json.dumps(
+            {"error": f"tool error: {name} raised {type(exc).__name__}: {exc}"}
+        )
+
+
+def _execute_tool_inner(
+    name: str,
+    args: dict[str, Any],
+    *,
+    cwd: Path,
+    scope_prefixes: list[str],
+) -> str:
+    """Execute a tool call and return a JSON-serialized result string.
+
     *scope_prefixes* restricts where ``write_file`` may create/modify files.
     ``read_file`` and ``list_files`` can read anywhere under *cwd*.
     """
@@ -332,9 +359,12 @@ def _execute_tool(
             return json.dumps({"error": f"Directory not found or outside workspace: {rel_path}"})
         try:
             entries = sorted(
-                {"type": "dir" if p.is_dir() else "file", "name": p.name}
-                for p in path.iterdir()
-                if not p.name.startswith(".git")
+                (
+                    {"type": "dir" if p.is_dir() else "file", "name": p.name}
+                    for p in path.iterdir()
+                    if not p.name.startswith(".git")
+                ),
+                key=lambda e: (e["type"], e["name"]),
             )
             return json.dumps({"entries": entries[:500]})
         except OSError as exc:

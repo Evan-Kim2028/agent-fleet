@@ -32,6 +32,7 @@ from agent_fleet.openrouter_backend import (
     OpenRouterSession,
     _claims_completion_without_tools,
     _command_violates_scope,
+    _execute_tool,
     _is_repetitive,
     _is_within_scope,
     _normalize_openrouter_usage,
@@ -379,6 +380,67 @@ def test_session_send_write_file_creates_file(tmp_path: Path) -> None:
     written = (tmp_path / "out.txt").read_text(encoding="utf-8")
     assert written == "hello world"
     assert "write_file" in result.mcp_tool_calls
+
+
+def test_execute_tool_list_files_sorts_mixed_entries_without_raising(tmp_path: Path) -> None:
+    # Regression test: list_files used to sort raw dicts (unorderable in
+    # Python 3), raising a TypeError that escaped _execute_tool and killed
+    # the whole session. A directory with 2+ entries of mixed type/name
+    # order must sort cleanly by (type, name) instead.
+    (tmp_path / "zeta.txt").write_text("z", encoding="utf-8")
+    (tmp_path / "alpha.txt").write_text("a", encoding="utf-8")
+    (tmp_path / "subdir").mkdir()
+
+    result = _execute_tool("list_files", {"path": "."}, cwd=tmp_path, scope_prefixes=["."])
+    payload = json.loads(result)
+
+    assert "error" not in payload
+    entries = payload["entries"]
+    names = [e["name"] for e in entries]
+    assert set(names) == {"zeta.txt", "alpha.txt", "subdir"}
+    # Sorted by (type, name): dirs before files, alphabetically within type.
+    assert entries == sorted(entries, key=lambda e: (e["type"], e["name"]))
+
+
+def test_execute_tool_catches_handler_exception_and_returns_tool_error() -> None:
+    with patch(
+        "agent_fleet.openrouter_backend._execute_tool_inner",
+        side_effect=RuntimeError("boom"),
+    ):
+        result = _execute_tool("read_file", {"path": "x"}, cwd=None, scope_prefixes=["."])
+
+    payload = json.loads(result)
+    assert "error" in payload
+    assert "tool error: read_file raised RuntimeError: boom" in payload["error"]
+
+
+def test_session_send_continues_after_tool_handler_exception(tmp_path: Path) -> None:
+    # If a tool handler raises, the session loop must not propagate the
+    # exception — it should feed a tool-error result back to the model and
+    # continue to the next iteration.
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    responses = [
+        _tool_call_response("read_file", {"path": "hello.txt"}),
+        _stop_response("Recovered after the tool error."),
+    ]
+    with (
+        patch(
+            "agent_fleet.openrouter_backend._call_openrouter_raw",
+            side_effect=responses,
+        ),
+        patch(
+            "agent_fleet.openrouter_backend._execute_tool_inner",
+            side_effect=RuntimeError("boom"),
+        ),
+    ):
+        result = session.send("read hello.txt", max_tokens=100, timeout_s=30)
+
+    assert result.exit_code == 0
+    assert result.stdout == "Recovered after the tool error."
+    tool_msgs = [m for m in session._messages if m.get("role") == "tool"]
+    assert tool_msgs
+    assert "tool error: read_file raised RuntimeError: boom" in tool_msgs[0]["content"]
 
 
 def test_session_send_scope_enforcement_blocks_write(tmp_path: Path) -> None:
