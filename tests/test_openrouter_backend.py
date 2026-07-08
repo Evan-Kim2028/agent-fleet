@@ -31,8 +31,10 @@ from agent_fleet.openrouter_backend import (
     OpenRouterBackend,
     OpenRouterLLMResult,
     OpenRouterSession,
+    _call_with_reasoning_escalation,
     _claims_completion_without_tools,
     _command_violates_scope,
+    _default_max_tool_iterations,
     _execute_tool,
     _is_repetitive,
     _is_within_scope,
@@ -1204,6 +1206,75 @@ def test_reasoning_escalation_caps_at_ceiling(tmp_path: Path) -> None:
         session.send("do something", max_tokens=_MAX_TOKENS_CEILING, timeout_s=30)
 
     assert all(mt <= _MAX_TOKENS_CEILING for mt in captured_max_tokens if mt is not None)
+
+
+def test_default_max_tool_iterations_is_80(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OPENROUTER_MAX_TOOL_ITERATIONS", raising=False)
+    assert _default_max_tool_iterations() == 80
+
+
+def test_call_with_reasoning_escalation_returns_successful_max_tokens() -> None:
+    """The successful max_tokens (the one that produced the returned data) is reported."""
+    exhausted = _reasoning_exhausted_response()
+    success = _stop_response("finally answered")
+
+    calls: list[int | None] = []
+
+    def _fake_raw(*_a: object, **kwargs: object) -> dict[str, Any]:
+        calls.append(kwargs.get("max_tokens"))
+        return exhausted if len(calls) == 1 else success
+
+    with patch(
+        "agent_fleet.openrouter_backend._call_openrouter_raw",
+        side_effect=_fake_raw,
+    ):
+        data, wasted_usage, successful_max_tokens = _call_with_reasoning_escalation(
+            [{"role": "user", "content": "hi"}],
+            api_key="sk-or-test",
+            model="some/model",
+            base_url=OPENROUTER_BASE_URL,
+            timeout=30,
+            max_tokens=1000,
+        )
+
+    assert data["choices"][0]["message"]["content"] == "finally answered"
+    assert successful_max_tokens == 2000
+    assert wasted_usage.get("output_tokens", 0) >= 20
+
+
+def test_session_send_reuses_sticky_reasoning_floor_across_iterations(tmp_path: Path) -> None:
+    """Once escalation raises max_tokens, later tool-loop iterations start there —
+    they should NOT repeat the doomed low-budget attempt."""
+    exhausted = _reasoning_exhausted_response()
+    tool_call = _tool_call_response("run_command", {"command": "echo hi"})
+    success = _stop_response("finally answered")
+
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+
+    captured_max_tokens: list[int | None] = []
+    # Iteration 1: base (1000) exhausts -> escalate to 2000 -> tool call issued.
+    # Iteration 2: sticky floor (2000) is used directly -> no exhaustion -> stop.
+    responses = [exhausted, tool_call, success]
+
+    def _fake_raw(*_a: object, **kwargs: object) -> dict[str, Any]:
+        captured_max_tokens.append(kwargs.get("max_tokens"))
+        return responses.pop(0)
+
+    with patch(
+        "agent_fleet.openrouter_backend._call_openrouter_raw",
+        side_effect=_fake_raw,
+    ):
+        result = session.send("do something", max_tokens=1000, timeout_s=30)
+
+    assert result.exit_code == 0
+    assert result.stdout == "finally answered"
+    # First iteration: base attempt (1000) exhausts, escalates to 2000 and
+    # succeeds with a tool call. Second iteration reuses the sticky floor
+    # (2000) directly instead of restarting from 1000 — only 3 calls total,
+    # not 4 (which a non-sticky implementation would make).
+    assert captured_max_tokens == [1000, 2000, 2000]
+    assert session._reasoning_floor == 2000
 
 
 # --- Bounded conversation history -------------------------------------------

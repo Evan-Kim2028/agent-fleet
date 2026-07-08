@@ -55,11 +55,11 @@ DEFAULT_MODEL = "tencent/hy3:free"
 def _default_max_tool_iterations() -> int:
     raw = os.environ.get("OPENROUTER_MAX_TOOL_ITERATIONS")
     if raw is None:
-        return 300
+        return 80
     try:
         return int(raw)
     except ValueError:
-        return 300
+        return 80
 
 
 _MAX_TOOL_ITERATIONS = _default_max_tool_iterations()
@@ -544,10 +544,14 @@ def _call_with_reasoning_escalation(
     ``_REASONING_ESCALATION_RETRIES`` more times, doubling ``max_tokens`` each
     time (capped at ``_MAX_TOKENS_CEILING``), instead of failing immediately.
 
-    Returns ``(final_response_data, wasted_usage)`` where *wasted_usage* is
-    the accumulated normalized usage from any exhausted (discarded) attempts
-    prior to the returned response — so callers can still account for those
-    tokens even though the attempt's output was thrown away.
+    Returns ``(final_response_data, wasted_usage, successful_max_tokens)``
+    where *wasted_usage* is the accumulated normalized usage from any
+    exhausted (discarded) attempts prior to the returned response — so
+    callers can still account for those tokens even though the attempt's
+    output was thrown away — and *successful_max_tokens* is the
+    ``max_tokens`` value that produced the returned ``data`` (i.e. the
+    floor a caller should start from next time to skip doomed low-budget
+    attempts).
     """
     attempt_max_tokens = max_tokens
     wasted_usage: dict[str, int] = {}
@@ -565,14 +569,14 @@ def _call_with_reasoning_escalation(
         )
         choices = data.get("choices") or []
         if not choices:
-            return data, wasted_usage
+            return data, wasted_usage, attempt_max_tokens
 
         message = choices[0].get("message") or {}
         finish_reason = choices[0].get("finish_reason") or ""
         if not _is_reasoning_exhausted(message, finish_reason):
-            return data, wasted_usage
+            return data, wasted_usage, attempt_max_tokens
         if escalation >= _REASONING_ESCALATION_RETRIES:
-            return data, wasted_usage
+            return data, wasted_usage, attempt_max_tokens
 
         turn_usage = _normalize_openrouter_usage(data.get("usage"))
         if turn_usage:
@@ -587,13 +591,13 @@ def _call_with_reasoning_escalation(
         new_max = min(base * 2, _MAX_TOKENS_CEILING)
         if new_max <= base:
             # Already at (or above) the ceiling — escalating further is pointless.
-            return data, wasted_usage
+            return data, wasted_usage, attempt_max_tokens
         logger.warning(
             "reasoning exhausted output budget, retrying with max_tokens=%d", new_max
         )
         attempt_max_tokens = new_max
 
-    return data, wasted_usage
+    return data, wasted_usage, attempt_max_tokens
 
 
 def call_openrouter(
@@ -617,7 +621,7 @@ def call_openrouter(
     attempts, so the backend's ``run()`` can fold them into an error
     ``LLMResult``.
     """
-    data, wasted_usage = _call_with_reasoning_escalation(
+    data, wasted_usage, _successful_max_tokens = _call_with_reasoning_escalation(
         [{"role": "user", "content": prompt}],
         api_key=api_key,
         model=model,
@@ -965,6 +969,12 @@ class OpenRouterSession:
             }
         ]
         self._agent_id: str | None = None
+        # Sticky floor: once a reasoning-exhaustion escalation raises
+        # max_tokens for this session, start subsequent send() tool-loop
+        # iterations at that raised value instead of resetting to the base
+        # each time — avoids repeating the same doomed low-budget attempt
+        # every iteration for models that consistently need more headroom.
+        self._reasoning_floor: int | None = None
 
     @property
     def agent_id(self) -> str | None:
@@ -1045,15 +1055,20 @@ class OpenRouterSession:
         try:
             for _iteration in range(_MAX_TOOL_ITERATIONS):
                 self._trim_history()
-                data, wasted_usage = _call_with_reasoning_escalation(
+                call_base_max_tokens = max(
+                    effective_max_tokens, self._reasoning_floor or 0
+                )
+                data, wasted_usage, successful_max_tokens = _call_with_reasoning_escalation(
                     self._messages,
                     api_key=self._backend.api_key,
                     model=self._model,
                     base_url=self._backend.base_url,
                     timeout=timeout_s if timeout_s > 0 else 720,
-                    max_tokens=effective_max_tokens,
+                    max_tokens=call_base_max_tokens,
                     tools=_FILE_TOOLS,
                 )
+                if successful_max_tokens > call_base_max_tokens:
+                    self._reasoning_floor = min(successful_max_tokens, _MAX_TOKENS_CEILING)
                 if wasted_usage:
                     for k, v in wasted_usage.items():
                         total_usage[k] = total_usage.get(k, 0) + v

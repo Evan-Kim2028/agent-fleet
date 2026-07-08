@@ -34,7 +34,7 @@ def implement(
     backend: LLMBackend,
     persona_resolver: PersonaResolver,
     persona_name: str,
-    max_tokens: int = 8192,
+    max_tokens: int = 16384,
     timeout_s: int = 1800,
     memory_limit: str = "4G",
     prompt_suffix: str | None = None,
