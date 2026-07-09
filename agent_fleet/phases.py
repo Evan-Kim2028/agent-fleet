@@ -375,13 +375,41 @@ def run_verify_phases(
     persona: str | None = None,
     allowed_paths: tuple[str, ...] = (),
 ) -> list[dict[str, Any]]:
+    """Run persona verify commands after optional worktree bootstrap.
+
+    ``worktree_bootstrap_commands`` (e.g. symlink frontend/node_modules) must
+    run before lint/typecheck/test so code_review worktrees match dispatch
+    (CommandVerifier). A bootstrap failure is returned as a failed verify
+    phase and stops the gate — it is not fixable by rewrite agents.
+    """
     if repo is None:
         return []
     commands = repo.verify_commands_for(persona)
-    if not commands:
+    if not commands and not repo.worktree_bootstrap_commands:
         return []
 
     results: list[dict[str, Any]] = []
+    for command in repo.worktree_bootstrap_commands:
+        outcome = run_shell_verify(workspace, command, timeout_s=timeout_s)
+        results.append(
+            {
+                "phase": "verify",
+                "command": f"bootstrap: {command}",
+                "exit_code": outcome.get("exit_code"),
+                "stdout": outcome.get("stdout", ""),
+                "stderr": outcome.get("stderr", ""),
+                "passed": outcome.get("passed", False),
+                "detail": outcome.get("detail")
+                or (
+                    f"Worktree bootstrap failed: {command}"
+                    if not outcome.get("passed")
+                    else "bootstrap ok"
+                ),
+            }
+        )
+        if not outcome.get("passed"):
+            return results
+
     for command in commands:
         outcome = run_scoped_lint_command(
             workspace, command, timeout_s=timeout_s, allowed_paths=allowed_paths
@@ -706,6 +734,9 @@ _BOOTSTRAP_VERIFY_SIGNALS: tuple[str, ...] = (
     "no module named",
     "_prepareconfig",
     "syntaxerror",
+    # missing worktree tooling (e.g. react-router not on PATH without node_modules)
+    "command not found",
+    ": not found",
 )
 
 

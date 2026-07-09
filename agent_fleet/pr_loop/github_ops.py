@@ -279,8 +279,6 @@ def pr_changed_files(pr_number: int, *, cwd: Path | None = None) -> list[str]:
     return [str(item.get("path", "")) for item in files if item.get("path")]
 
 
-
-
 def pr_head_oid(pr_number: int, *, cwd: Path | None = None) -> str:
     """Return the PR head commit OID, or empty string on failure."""
     result = _gh(
@@ -299,6 +297,7 @@ def pr_head_oid(pr_number: int, *, cwd: Path | None = None) -> str:
     except json.JSONDecodeError:
         return ""
     return str(payload.get("headRefOid") or "")
+
 
 def pr_diff(pr_number: int, *, cwd: Path | None = None) -> str:
     result = _gh("pr", "diff", str(pr_number), cwd=cwd, check=False)
@@ -508,14 +507,23 @@ def merge_tree_against(base: str, head: str, *, cwd: Path) -> MergeTreeResult:
     return MergeTreeResult(clean=False, conflict_files=(), git_error=True)
 
 
+def is_terminal_pr_state(state: str | None) -> bool:
+    """True when a GitHub PR ``state`` is terminal (CLOSED or MERGED).
+
+    Pure string check so callers (lifecycle, watcher, park) can short-circuit
+    post-merge races without re-parsing the full GraphQL/CLI payload.
+    """
+    return str(state or "").strip().upper() in {"CLOSED", "MERGED"}
+
+
 def is_pr_closed(pr_number: int, *, cwd: Path | None = None) -> bool:
     """Return True if the PR is in a closed or merged state on GitHub."""
     result = _gh("pr", "view", str(pr_number), "--json", "state", cwd=cwd, check=False)
     if result.returncode != 0:
         return False
     try:
-        state = json.loads(result.stdout).get("state", "").upper()
-        return state in {"CLOSED", "MERGED"}
+        state = json.loads(result.stdout).get("state", "")
+        return is_terminal_pr_state(state)
     except Exception:
         return False
 

@@ -167,3 +167,14 @@ def test_real_test_failure_still_triggers_fix() -> None:
     """A genuine assertion failure is still fixable, so the loop attempts a fix."""
     fix_mock = _run_auto_fix(_ASSERTION_FAILURE)
     fix_mock.assert_called_once()
+
+
+def test_command_not_found_is_bootstrap() -> None:
+    """Missing worktree tooling (e.g. react-router without node_modules) is bootstrap."""
+    detail = "bash: react-router: command not found"
+    assert classify_verify_failure(_verify(detail)) == "bootstrap"
+
+
+def test_shell_not_found_colon_form_is_bootstrap() -> None:
+    detail = "/bin/sh: 1: react-router: not found"
+    assert classify_verify_failure(_verify(detail)) == "bootstrap"

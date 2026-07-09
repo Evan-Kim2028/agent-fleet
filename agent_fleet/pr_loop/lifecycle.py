@@ -192,6 +192,15 @@ def park_for_human(
     repo_root: Path,
 ) -> None:
     """Post a one-time human-review comment; parked state is tracked in state file."""
+    # Post-merge race: list/open snapshot can still include a PR that just merged.
+    # Never park (or spam comments on) a terminal PR.
+    if github_ops.is_pr_closed(pr_number, cwd=repo_root):
+        logger.info(
+            "skip park for PR #%s — already closed/merged (%s)",
+            pr_number,
+            reason[:120],
+        )
+        return
     comments = github_ops.pr_comments(pr_number, cwd=repo_root)
     if any(_PARK_MARKER in str(c.get("body") or "") for c in comments):
         return
@@ -581,7 +590,6 @@ def attempt_ci_fix(
     )
 
 
-
 def _build_autonomy_evidence(
     *,
     pr_number: int,
@@ -682,9 +690,7 @@ def try_merge(
     pr_state = get_pr_state(load_state(state_path(repo_root)), pr_number)
 
     if loop_config.use_autonomy_decide:
-        marker = (
-            repo.pr_review.comment_title if repo.pr_review else "Composer PR Analysis"
-        )
+        marker = repo.pr_review.comment_title if repo.pr_review else "Composer PR Analysis"
         comments = github_ops.pr_comments(pr_number, cwd=repo_root)
         review_body = find_reviewer_comment(comments, marker=marker)
         addressed_sha = pr_state.get("review_addressed_for_sha")
@@ -1082,6 +1088,9 @@ def _run_pr_lifecycle_body(
 ) -> LifecycleResult:
     """Inner PR lifecycle implementation (expects bound FleetLogger)."""
     repo_root = repo.repo_root
+    # Post-merge / already-closed race: do not run fix or park on terminal PRs.
+    if github_ops.is_pr_closed(pr_number, cwd=repo_root):
+        return LifecycleResult("merged", "PR already closed or merged")
     pr_config = repo.pr_review
     marker = pr_config.comment_title if pr_config else "Composer PR Analysis"
 

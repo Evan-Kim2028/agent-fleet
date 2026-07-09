@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.13.1 — 2026-07-08
+
+### Summary
+
+code_review verify path runs `worktree_bootstrap_commands` before lint/test
+(parity with CommandVerifier), so missing `node_modules` / `react-router` no
+longer fails as a fixable verify error. Post-merge race: lifecycle/watcher skip
+park/fix when the PR is already CLOSED/MERGED.
+
+### Changes
+
+- **phases.run_verify_phases:** run `worktree_bootstrap_commands` before persona
+  verify commands; bootstrap failure fails the gate and stops further verify.
+- **classify_verify_failure:** treat `command not found` / `: not found` as
+  bootstrap (missing worktree tooling).
+- **pr_loop:** pure `is_terminal_pr_state`; `park_for_human` and lifecycle body
+  no-op when PR is already closed/merged; watcher records merged instead of park
+  on decide PARK after terminal state.
+- **tests:** bootstrap ordering for `run_verify_phases`; terminal-state guards.
+
 ## 0.13.0 — 2026-07-08
 
 ### Summary

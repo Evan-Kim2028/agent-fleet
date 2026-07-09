@@ -225,6 +225,26 @@ class PrLoopWatcher:
                 )
                 decision = decide(evidence)
                 if decision.action == Action.PARK:
+                    # Post-merge race: open-list snapshot may lag GitHub MERGED.
+                    if github_ops.is_pr_closed(pr_number, cwd=self.repo.repo_root):
+                        new_entry = {
+                            **entry,
+                            "merged": True,
+                            "last_status": "merged",
+                            "last_detail": "PR already closed or merged",
+                        }
+                        if head_ref_oid:
+                            new_entry["last_head_oid"] = head_ref_oid
+                        set_pr_state(state, pr_number, new_entry)
+                        save_state(self.state_file, state)
+                        results.append(
+                            {
+                                "pr": str(pr_number),
+                                "status": "merged",
+                                "detail": "PR already closed or merged",
+                            }
+                        )
+                        continue
                     from agent_fleet.pr_loop.lifecycle import park_for_human
 
                     park_for_human(
