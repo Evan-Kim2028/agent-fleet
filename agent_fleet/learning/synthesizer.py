@@ -11,12 +11,23 @@ Design goals:
 
 from __future__ import annotations
 
+import json
+import logging
+import re
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from agent_fleet.learning.llm_synthesis import get_synthesis_context
 from agent_fleet.level_up.paths import FLEET_TIER, LEVEL_UP_ROOT
 from agent_fleet.level_up.train import train_persona
+
+logger = logging.getLogger(__name__)
+
+_FLEET_LEARNER_PERSONA_PATH = (
+    Path(__file__).resolve().parent.parent / "personas" / "fleet-learner.md"
+)
 
 
 @dataclass
@@ -32,7 +43,7 @@ def synthesize_fleet_skills(
     personas: list[str] | None = None,
     min_experience_rows: int = 20,
     dry_run: bool = False,
-    backend: Any = None,  # noqa: ANN401, ARG001
+    backend: Any = None,  # noqa: ANN401
     resolver: Any = None,  # noqa: ANN401, ARG001
     fleet_config: Any = None,  # noqa: ANN401, ARG001
 ) -> FleetSynthesisResult:
@@ -70,17 +81,31 @@ def synthesize_fleet_skills(
             continue
 
         # === Real LLM synthesis path ===
-        # Delegate to fleet-learner persona (dispatched via normal mechanisms or
-        # superpowers:subagent-driven-development). Use the helper for context.
-        try:
-            context = get_synthesis_context(persona, max_rows=120)
-            # In a full implementation, dispatch the fleet-learner persona here
-            # with a goal built from context["summary"] + context["recent_samples"].
-            # For now this is a no-op placeholder — the persona + existing level_up
-            # machinery does the real work when invoked properly.
-            _ = context  # consumed by caller when dispatching the persona
-        except Exception:
-            pass
+        # Dispatch the fleet-learner persona against ~/.agent-fleet/ to extract
+        # generalizable skills from accumulated experience. Persist the synthesized
+        # learning to _fleet/<persona>/learnings/<ts>.md (human-readable) and
+        # skills_queue.jsonl (machine-readable, future-promotable).
+        if backend is not None:
+            try:
+                context = get_synthesis_context(persona, max_rows=120)
+                synthesized = _run_llm_synthesis(
+                    backend=backend,
+                    persona=persona,
+                    context=context,
+                )
+                if synthesized:
+                    written = _persist_learning(
+                        persona=persona,
+                        skills=synthesized,
+                        context=context,
+                        dry_run=dry_run,
+                    )
+                    if written:
+                        if persona not in updated:
+                            updated.append(persona)
+                        total_proposed += len(synthesized)
+            except Exception:
+                logger.exception("LLM synthesis failed for persona=%s", persona)
 
         # Legacy high-signal hardcoded rules (still valuable)
         result = train_persona(
@@ -121,3 +146,138 @@ def trigger_fleet_learning_cycle(
         personas=personas,
         dry_run=dry_run,
     )
+
+
+def _run_llm_synthesis(
+    *,
+    backend: Any,  # noqa: ANN401
+    persona: str,
+    context: dict[str, str],
+    timeout_s: int = 300,
+) -> list[dict[str, Any]] | None:
+    """Dispatch fleet-learner persona against accumulated experience.
+
+    Returns parsed `skills` list, or None on failure / empty result.
+    """
+    if not _FLEET_LEARNER_PERSONA_PATH.is_file():
+        logger.warning("fleet-learner.md not found at %s", _FLEET_LEARNER_PERSONA_PATH)
+        return None
+    persona_body = _FLEET_LEARNER_PERSONA_PATH.read_text(encoding="utf-8")
+
+    prompt = (
+        f"{persona_body}\n\n"
+        f"## Target persona for this synthesis run\n\n`{persona}`\n\n"
+        f"## Accumulated experience summary\n\n{context.get('summary', '(none)')}\n\n"
+        f"## Recent samples\n\n{context.get('recent_samples', '(none)')}\n\n"
+        "Now produce the JSON object described in the Strict Output Format section. "
+        "Return ONLY the JSON — no prose, no markdown fence."
+    )
+
+    result = backend.run(
+        prompt,
+        max_tokens=0,
+        timeout_s=timeout_s,
+        cwd=LEVEL_UP_ROOT,
+        allowed_tools=[],
+    )
+    if getattr(result, "exit_code", 0) != 0:
+        logger.warning(
+            "fleet-learner run failed: exit=%s stderr=%s",
+            getattr(result, "exit_code", None),
+            (getattr(result, "stderr", "") or "")[:300],
+        )
+        return None
+
+    stdout = (getattr(result, "stdout", "") or "").strip()
+    if not stdout:
+        return None
+
+    parsed = _extract_json(stdout)
+    if not isinstance(parsed, dict):
+        return None
+    skills = parsed.get("skills")
+    if not isinstance(skills, list):
+        return None
+    cleaned: list[dict[str, Any]] = []
+    for s in skills:
+        if not isinstance(s, dict):
+            continue
+        text = str(s.get("text", "")).strip()
+        if not text:
+            continue
+        cleaned.append(
+            {
+                "kind": str(s.get("kind", "methodology")),
+                "text": text,
+                "evidence_summary": str(s.get("evidence_summary", "")).strip(),
+                "confidence": float(s.get("confidence", 0.0) or 0.0),
+            }
+        )
+    return cleaned or None
+
+
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+
+
+def _extract_json(text: str) -> Any:  # noqa: ANN401
+    """Best-effort JSON extraction from a model response."""
+    fence = _JSON_FENCE_RE.search(text)
+    if fence:
+        try:
+            return json.loads(fence.group(1))
+        except json.JSONDecodeError:
+            pass
+    # Fallback: locate the first { and matching brace span.
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    for i in range(start, len(text)):
+        ch = text[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start : i + 1])
+                except json.JSONDecodeError:
+                    return None
+    return None
+
+
+def _persist_learning(
+    *,
+    persona: str,
+    skills: list[dict[str, Any]],
+    context: dict[str, str],
+    dry_run: bool,
+) -> bool:
+    """Write synthesized skills to _fleet/<persona>/{learnings,skills_queue}."""
+    if dry_run:
+        return True
+    fleet_persona = LEVEL_UP_ROOT / FLEET_TIER / persona
+    learnings_dir = fleet_persona / "learnings"
+    learnings_dir.mkdir(parents=True, exist_ok=True)
+
+    ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    md_lines = [
+        f"# Fleet learning — {persona} — {ts}",
+        "",
+        f"Synthesized from {context.get('full_experience_count', '?')} recent experience rows.",
+        "",
+        "## Skills",
+        "",
+    ]
+    for s in skills:
+        md_lines.append(f"- **[{s['kind']}]** {s['text']}")
+        if s["evidence_summary"]:
+            md_lines.append(f"  - _evidence_: {s['evidence_summary']}")
+        md_lines.append(f"  - _confidence_: {s['confidence']:.2f}")
+    (learnings_dir / f"{ts}.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+
+    queue_path = fleet_persona / "skills_queue.jsonl"
+    with queue_path.open("a", encoding="utf-8") as fh:
+        for s in skills:
+            fh.write(json.dumps({"ts": ts, "persona": persona, **s}) + "\n")
+    return True
