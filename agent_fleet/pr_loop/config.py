@@ -40,6 +40,7 @@ class PrLoopConfig:
         )
     )
     drift_check: bool = True
+    use_autonomy_decide: bool = True
 
 
 def load_pr_loop_config(_repo_root: Path, raw: dict[str, Any] | None) -> PrLoopConfig | None:
@@ -77,4 +78,5 @@ def load_pr_loop_config(_repo_root: Path, raw: dict[str, Any] | None) -> PrLoopC
         ci_fix_persona=(str(section["ci_fix_persona"]) if section.get("ci_fix_persona") else None),
         ignored_ci_checks=tuple(str(c).lower() for c in ignored),
         drift_check=bool(section.get("drift_check", True)),
+        use_autonomy_decide=bool(section.get("use_autonomy_decide", True)),
     )

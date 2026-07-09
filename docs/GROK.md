@@ -235,3 +235,12 @@ stable `**Risk Level:**` line in the formatted comment body.
 - [QUICKSTART.md](QUICKSTART.md) — general setup
 - [PERSONAS.md](PERSONAS.md) — persona and scope configuration
 - [../examples/fleet.grok.yaml](../examples/fleet.grok.yaml) — Grok backend config template
+
+## Autonomy control plane (PR loop)
+
+PR loop merge/fix policy is centralized in `agent_fleet.autonomy.decide`.
+Evidence (review, CI, paths, `review_addressed_for_sha`) maps to an `Action`
+(`WAIT_REVIEW` / `FIX_REVIEW` / `FIX_CI` / `PARK` / `MERGE` / `NOOP`). See
+[ADR 0002](adr/0002-autonomy-control-plane.md). Toggle with
+`pr_loop.use_autonomy_decide` (default `true`).
+

@@ -279,6 +279,27 @@ def pr_changed_files(pr_number: int, *, cwd: Path | None = None) -> list[str]:
     return [str(item.get("path", "")) for item in files if item.get("path")]
 
 
+
+
+def pr_head_oid(pr_number: int, *, cwd: Path | None = None) -> str:
+    """Return the PR head commit OID, or empty string on failure."""
+    result = _gh(
+        "pr",
+        "view",
+        str(pr_number),
+        "--json",
+        "headRefOid",
+        cwd=cwd,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return ""
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return ""
+    return str(payload.get("headRefOid") or "")
+
 def pr_diff(pr_number: int, *, cwd: Path | None = None) -> str:
     result = _gh("pr", "diff", str(pr_number), cwd=cwd, check=False)
     if result.returncode != 0:

@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.13.0 — 2026-07-08
+
+### Summary
+
+Autonomy control plane for the PR loop: pure `decide(evidence) → Decision`
+policy with SHA-keyed review address, early critical-path PARK, and merge
+admission that never allows residual MEDIUM risk unless addressed for the
+current head.
+
+### Changes
+
+- **agent_fleet/autonomy/**: new module — `types`, `parse_review`, `decide`
+  (Phases 0–4). Invariants I1–I4 covered by unit tests.
+- **ADR 0002:** documents evaluation order and state (`review_addressed_for_sha`).
+- **pr_loop:** `use_autonomy_decide` (default true) wires lifecycle + watcher to
+  `decide()` for needs_fix, early PARK, and merge admissibility; stores
+  `review_addressed_for_sha` when review is addressed.
+- **parse parity:** autonomy review parser matches `has_blocking_findings`.
+
+
 ## 0.12.3 — 2026-07-08
 
 ### Summary

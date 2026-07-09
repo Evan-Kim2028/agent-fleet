@@ -13,6 +13,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from agent_fleet.agent_mode import parse_agent_mode
+from agent_fleet.autonomy import (
+    Action,
+    AutonomyEvidence,
+    CiEvidence,
+    PathEvidence,
+    decide,
+    parse_review_body,
+)
 from agent_fleet.backends import make_backend
 from agent_fleet.config import FleetConfig, load_fleet_config
 from agent_fleet.hooks import FleetTask
@@ -573,6 +581,62 @@ def attempt_ci_fix(
     )
 
 
+
+def _build_autonomy_evidence(
+    *,
+    pr_number: int,
+    repo: RepoConfig,
+    loop_config: PrLoopConfig,
+    review_body: str | None,
+    pr_head_sha: str | None = None,
+    review_addressed_for_sha: str | None = None,
+    deletion_only: bool | None = None,
+    ci_green: bool | None = None,
+    ci_pending: bool | None = None,
+) -> AutonomyEvidence:
+    """Assemble AutonomyEvidence for decide() from live PR + state."""
+    repo_root = repo.repo_root
+    head = pr_head_sha or github_ops.pr_head_oid(pr_number, cwd=repo_root) or None
+    if deletion_only is None:
+        deletion_only = _diff_is_deletion_only(github_ops.pr_diff(pr_number, cwd=repo_root))
+    changed = tuple(github_ops.pr_changed_files(pr_number, cwd=repo_root))
+    paths = PathEvidence(
+        changed_files=changed,
+        critical_prefixes=tuple(repo.critical_path_prefixes),
+    )
+    review = None
+    if review_body:
+        # Leave head_sha unset unless the caller/parser knows the reviewed commit.
+        # Stamping the live PR head here would hide true review/PR mismatches.
+        review = parse_review_body(review_body, head_sha=None)
+    if ci_green is None or ci_pending is None:
+        snap = github_ops.pr_checks(
+            pr_number,
+            cwd=repo_root,
+            ignored=loop_config.ignored_ci_checks,
+        )
+        if ci_pending is None:
+            ci_pending = bool(snap.pending)
+        if ci_green is None:
+            ci_green = not snap.pending and not snap.failed
+    required: dict[str, str] = {}
+    ci = CiEvidence(
+        head_sha=head,
+        required_checks=required,
+        all_non_ignored_green=bool(ci_green),
+        pending=bool(ci_pending),
+        ready=not bool(ci_pending),
+    )
+    return AutonomyEvidence(
+        review=review,
+        ci=ci,
+        paths=paths,
+        review_addressed_for_sha=review_addressed_for_sha,
+        pr_head_sha=head,
+        deletion_only=bool(deletion_only),
+    )
+
+
 def tiered_merge_allowed(
     *,
     ci_green: bool,
@@ -615,37 +679,92 @@ def try_merge(
         return LifecycleResult("blocked", "PR parked for human review")
 
     changed = github_ops.pr_changed_files(pr_number, cwd=repo_root)
-    protected = _protected_paths(changed, repo)
-    if protected:
-        park_for_human(
-            pr_number,
-            f"Touches protected paths: {', '.join(protected[:5])}",
-            repo_root=repo_root,
-        )
-        return LifecycleResult("blocked", "Protected paths touched")
+    pr_state = get_pr_state(load_state(state_path(repo_root)), pr_number)
 
-    if loop_config.tiered_merge_gate:
+    if loop_config.use_autonomy_decide:
+        marker = (
+            repo.pr_review.comment_title if repo.pr_review else "Composer PR Analysis"
+        )
         comments = github_ops.pr_comments(pr_number, cwd=repo_root)
-        pr_state = get_pr_state(
-            load_state(state_path(repo_root)),
-            pr_number,
-        )
-        review_addressed = bool(pr_state.get("review_addressed"))
-        risk = None if review_addressed else parse_review_risk(comments)
-        oos = _merge_scope_out_of_scope(persona, changed, repo)
-        allowed, reason = tiered_merge_allowed(
+        review_body = find_reviewer_comment(comments, marker=marker)
+        addressed_sha = pr_state.get("review_addressed_for_sha")
+        if not addressed_sha and pr_state.get("review_addressed"):
+            # Legacy boolean: treat as addressed only for current head if known.
+            addressed_sha = pr_state.get("last_head_oid") or github_ops.pr_head_oid(
+                pr_number, cwd=repo_root
+            )
+        evidence = _build_autonomy_evidence(
+            pr_number=pr_number,
+            repo=repo,
+            loop_config=loop_config,
+            review_body=review_body,
+            pr_head_sha=str(pr_state.get("last_head_oid") or "") or None,
+            review_addressed_for_sha=str(addressed_sha) if addressed_sha else None,
             ci_green=True,
-            risk=risk,
-            out_of_scope=oos,
-            parked=False,
+            ci_pending=False,
         )
-        if not allowed:
+        # Prefer live head when available.
+        live_head = github_ops.pr_head_oid(pr_number, cwd=repo_root) or evidence.pr_head_sha
+        if live_head and live_head != evidence.pr_head_sha:
+            evidence = AutonomyEvidence(
+                review=evidence.review,
+                ci=evidence.ci,
+                paths=evidence.paths,
+                review_addressed_for_sha=evidence.review_addressed_for_sha,
+                pr_head_sha=live_head,
+                deletion_only=evidence.deletion_only,
+            )
+        decision = decide(evidence)
+        if decision.action == Action.PARK:
             park_for_human(
                 pr_number,
-                reason,
+                decision.park_reason or decision.reason,
                 repo_root=repo_root,
             )
+            return LifecycleResult("blocked", decision.reason)
+        if decision.action != Action.MERGE:
+            if decision.action == Action.FIX_REVIEW:
+                park_for_human(
+                    pr_number,
+                    decision.reason,
+                    repo_root=repo_root,
+                )
+                return LifecycleResult("blocked", decision.reason)
+            return LifecycleResult("blocked", decision.reason)
+        # Scope gate still applies under autonomy decide.
+        oos = _merge_scope_out_of_scope(persona, list(changed), repo)
+        if oos:
+            reason = "out-of-scope files: " + ", ".join(oos)
+            park_for_human(pr_number, reason, repo_root=repo_root)
             return LifecycleResult("blocked", reason)
+    else:
+        protected = _protected_paths(changed, repo)
+        if protected:
+            park_for_human(
+                pr_number,
+                f"Touches protected paths: {', '.join(protected[:5])}",
+                repo_root=repo_root,
+            )
+            return LifecycleResult("blocked", "Protected paths touched")
+
+        if loop_config.tiered_merge_gate:
+            comments = github_ops.pr_comments(pr_number, cwd=repo_root)
+            review_addressed = bool(pr_state.get("review_addressed"))
+            risk = None if review_addressed else parse_review_risk(comments)
+            oos = _merge_scope_out_of_scope(persona, changed, repo)
+            allowed, reason = tiered_merge_allowed(
+                ci_green=True,
+                risk=risk,
+                out_of_scope=oos,
+                parked=False,
+            )
+            if not allowed:
+                park_for_human(
+                    pr_number,
+                    reason,
+                    repo_root=repo_root,
+                )
+                return LifecycleResult("blocked", reason)
 
     subject = f"[Fleet/{persona}] #{pr_number}"
     body = f"Squash merge via agent-fleet PR loop.\n\n{_AGENT_FOOTER} persona={persona}"
@@ -1013,16 +1132,47 @@ def _run_pr_lifecycle_body(
             poll_s=loop_config.review_poll_s,
         )
 
-    needs_fix = bool(
-        review_body
-        and has_blocking_findings(
-            review_body,
-            deletion_only=_diff_is_deletion_only(github_ops.pr_diff(pr_number, cwd=repo_root)),
-        )
+    prior = get_pr_state(load_state(state_path(repo_root)), pr_number)
+    head_sha = github_ops.pr_head_oid(pr_number, cwd=repo_root) or str(
+        prior.get("last_head_oid") or ""
     )
-    if needs_fix:
-        prior = get_pr_state(load_state(state_path(repo_root)), pr_number)
-        if prior.get("review_addressed"):
+    deletion_only = _diff_is_deletion_only(github_ops.pr_diff(pr_number, cwd=repo_root))
+
+    if loop_config.use_autonomy_decide:
+        addressed_sha = prior.get("review_addressed_for_sha")
+        if not addressed_sha and prior.get("review_addressed"):
+            # Legacy boolean: only honor if we have no head to compare, treat as
+            # addressed for current head (best-effort migration).
+            addressed_sha = head_sha or None
+        evidence = _build_autonomy_evidence(
+            pr_number=pr_number,
+            repo=repo,
+            loop_config=loop_config,
+            review_body=review_body,
+            pr_head_sha=head_sha or None,
+            review_addressed_for_sha=str(addressed_sha) if addressed_sha else None,
+            deletion_only=deletion_only,
+            ci_green=True,  # CI handled later in this function
+            ci_pending=False,
+        )
+        decision = decide(evidence)
+        if decision.action == Action.PARK:
+            park_for_human(
+                pr_number,
+                decision.park_reason or decision.reason,
+                repo_root=repo_root,
+            )
+            return LifecycleResult("parked", decision.reason)
+        needs_fix = decision.action == Action.FIX_REVIEW
+    else:
+        needs_fix = bool(
+            review_body
+            and has_blocking_findings(
+                review_body,
+                deletion_only=deletion_only,
+            )
+        )
+        if needs_fix and prior.get("review_addressed"):
             needs_fix = False
 
     if needs_fix and review_body:
@@ -1046,10 +1196,20 @@ def _run_pr_lifecycle_body(
                 state_file = state_path(repo_root)
                 state = load_state(state_file)
                 entry = get_pr_state(state, pr_number)
+                addressed = address.status == "addressed"
+                head_for_address = github_ops.pr_head_oid(pr_number, cwd=repo_root) or head_sha
+                update = {
+                    **entry,
+                    "review_addressed": addressed,
+                }
+                if addressed and head_for_address:
+                    update["review_addressed_for_sha"] = head_for_address
+                elif not addressed:
+                    update.pop("review_addressed_for_sha", None)
                 set_pr_state(
                     state,
                     pr_number,
-                    {**entry, "review_addressed": address.status == "addressed"},
+                    update,
                 )
                 save_state(state_file, state)
                 break

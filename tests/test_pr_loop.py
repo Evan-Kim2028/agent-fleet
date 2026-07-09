@@ -283,10 +283,12 @@ def test_maybe_unpark_pr_entry_on_new_commit() -> None:
         "parked": True,
         "last_head_oid": "abc123",
         "review_addressed": True,
+        "review_addressed_for_sha": "abc123",
     }
     updated = maybe_unpark_pr_entry(entry, head_ref_oid="def456")
     assert updated.get("parked") is False
     assert "review_addressed" not in updated
+    assert "review_addressed_for_sha" not in updated
     assert updated.get("last_head_oid") == "def456"
 
 

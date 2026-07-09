@@ -61,6 +61,7 @@ def maybe_unpark_pr_entry(
         )
         updated["parked"] = False
         updated.pop("review_addressed", None)
+        updated.pop("review_addressed_for_sha", None)
     return updated
 
 
@@ -199,7 +200,60 @@ class PrLoopWatcher:
             ci_timeout_attempts = _entry_int(entry, "ci_timeout_attempts")
 
             needs_fix = False
-            if review_body and not entry.get("review_addressed"):
+            if self.loop_config.use_autonomy_decide:
+                from agent_fleet.autonomy import Action, decide
+                from agent_fleet.pr_loop.lifecycle import (
+                    _build_autonomy_evidence,
+                    _diff_is_deletion_only,
+                )
+
+                addressed_sha = entry.get("review_addressed_for_sha")
+                if not addressed_sha and entry.get("review_addressed"):
+                    addressed_sha = head_ref_oid or None
+                evidence = _build_autonomy_evidence(
+                    pr_number=pr_number,
+                    repo=self.repo,
+                    loop_config=self.loop_config,
+                    review_body=review_body,
+                    pr_head_sha=head_ref_oid or None,
+                    review_addressed_for_sha=str(addressed_sha) if addressed_sha else None,
+                    deletion_only=_diff_is_deletion_only(
+                        github_ops.pr_diff(pr_number, cwd=self.repo.repo_root)
+                    ),
+                    ci_green=not pending and not failed,
+                    ci_pending=bool(pending),
+                )
+                decision = decide(evidence)
+                if decision.action == Action.PARK:
+                    from agent_fleet.pr_loop.lifecycle import park_for_human
+
+                    park_for_human(
+                        pr_number,
+                        decision.park_reason or decision.reason,
+                        repo_root=self.repo.repo_root,
+                    )
+                    new_entry = {
+                        **entry,
+                        "parked": True,
+                        "last_status": "parked",
+                        "last_detail": decision.reason,
+                    }
+                    if head_ref_oid:
+                        new_entry["last_head_oid"] = head_ref_oid
+                    set_pr_state(state, pr_number, new_entry)
+                    save_state(self.state_file, state)
+                    results.append(
+                        {"pr": str(pr_number), "status": "parked", "detail": decision.reason}
+                    )
+                    continue
+                needs_fix = decision.action == Action.FIX_REVIEW
+                if decision.action == Action.WAIT_REVIEW and not failed and not pending:
+                    results.append({"pr": str(pr_number), "status": "awaiting_review"})
+                    continue
+                if decision.action == Action.NOOP and pending and not needs_fix and not failed:
+                    results.append({"pr": str(pr_number), "status": "ci_pending"})
+                    continue
+            elif review_body and not entry.get("review_addressed"):
                 from agent_fleet.pr_loop.lifecycle import _diff_is_deletion_only
                 from agent_fleet.pr_loop.review_parse import has_blocking_findings
 
