@@ -71,13 +71,9 @@ def review_is_blocking(
     if deletion_only:
         return False
     for finding in review.findings:
-        if finding.severity in _BLOCKING_RISK and (
-            finding.count is None or finding.count > 0
-        ):
+        if finding.severity in _BLOCKING_RISK and (finding.count is None or finding.count > 0):
             return True
-    return bool(
-        review.overall_risk and review.overall_risk.upper() in _BLOCKING_RISK
-    )
+    return bool(review.overall_risk and review.overall_risk.upper() in _BLOCKING_RISK)
 
 
 def body_is_blocking(body: str, *, deletion_only: bool = False) -> bool:

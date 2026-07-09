@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
+from subprocess import CompletedProcess
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 from agent_fleet.tool_env import augment_path, ensure_pre_commit, which_tool
 
+if TYPE_CHECKING:
+    from pathlib import Path
 
-def test_augment_path_prepends_local_bin(tmp_path: Path, monkeypatch) -> None:
+    import pytest
+
+
+def test_augment_path_prepends_local_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     local = tmp_path / ".local" / "bin"
     local.mkdir(parents=True)
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -20,7 +26,9 @@ def test_augment_path_prepends_local_bin(tmp_path: Path, monkeypatch) -> None:
     assert parts.index(str(local)) < parts.index("/usr/bin")
 
 
-def test_which_tool_finds_binary_in_local_bin(tmp_path: Path, monkeypatch) -> None:
+def test_which_tool_finds_binary_in_local_bin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     local = tmp_path / ".local" / "bin"
     local.mkdir(parents=True)
     tool = local / "pre-commit"
@@ -33,7 +41,9 @@ def test_which_tool_finds_binary_in_local_bin(tmp_path: Path, monkeypatch) -> No
     assert found == str(tool)
 
 
-def test_ensure_pre_commit_returns_existing(tmp_path: Path, monkeypatch) -> None:
+def test_ensure_pre_commit_returns_existing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     local = tmp_path / ".local" / "bin"
     local.mkdir(parents=True)
     tool = local / "pre-commit"
@@ -44,7 +54,7 @@ def test_ensure_pre_commit_returns_existing(tmp_path: Path, monkeypatch) -> None
     assert ensure_pre_commit(install=False) == str(tool)
 
 
-def test_ensure_pre_commit_installs_via_uv(tmp_path: Path, monkeypatch) -> None:
+def test_ensure_pre_commit_installs_via_uv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     local = tmp_path / ".local" / "bin"
     local.mkdir(parents=True)
     uv = local / "uv"
@@ -55,21 +65,20 @@ def test_ensure_pre_commit_installs_via_uv(tmp_path: Path, monkeypatch) -> None:
 
     calls: list[list[str]] = []
 
-    def fake_run(cmd, **kwargs):  # type: ignore[no-untyped-def]
+    def fake_run(cmd: list[str], **_kwargs: object) -> CompletedProcess[str]:
         calls.append(list(cmd))
         # Simulate uv tool install creating pre-commit
         pc = local / "pre-commit"
         pc.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         pc.chmod(0o755)
-        from subprocess import CompletedProcess
-
         return CompletedProcess(cmd, 0, "", "")
 
     with patch("agent_fleet.tool_env.which_tool") as mock_which:
         # First calls: pre-commit missing, uv present; after install, pre-commit found.
         state = {"n": 0}
 
-        def side_effect(name, env=None):  # type: ignore[no-untyped-def]
+        def side_effect(name: str, env: object | None = None) -> str | None:
+            del env  # interface parity with which_tool
             state["n"] += 1
             if name == "pre-commit":
                 pc = local / "pre-commit"

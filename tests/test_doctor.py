@@ -172,6 +172,7 @@ def test_cmd_doctor_falls_back_to_cursor_on_malformed_config(
     result = cmd_doctor(args)
     assert isinstance(result, int)
 
+
 # --- grok auth_probe ---
 
 
@@ -182,6 +183,7 @@ def test_grok_backend_auth_probe_pass(monkeypatch: pytest.MonkeyPatch) -> None:
         "agent_fleet.grok_backend.check_grok_auth",
         lambda: (True, "authenticated (~/.grok/auth.json)", ""),
     )
+
     # Rebind registry probe to pick up monkeypatched function path used by doctor
     def _probe() -> tuple[bool, str, str]:
         from agent_fleet.grok_backend import check_grok_auth
@@ -230,4 +232,3 @@ def test_grok_backend_auth_probe_fail(monkeypatch: pytest.MonkeyPatch) -> None:
     assert match.status == "fail"
     assert "missing" in match.detail
     assert "grok login" in match.fix
-

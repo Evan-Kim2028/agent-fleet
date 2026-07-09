@@ -67,11 +67,7 @@ def decide(evidence: AutonomyEvidence) -> Decision:
 
     addressed = _review_addressed_for_current(evidence)
     # Stale review relative to PR head: do not treat as addressed for merge.
-    if (
-        review.head_sha
-        and evidence.pr_head_sha
-        and review.head_sha != evidence.pr_head_sha
-    ):
+    if review.head_sha and evidence.pr_head_sha and review.head_sha != evidence.pr_head_sha:
         addressed = False
 
     security_block = has_security_medium_plus(review)

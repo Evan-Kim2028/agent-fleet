@@ -45,9 +45,7 @@ def test_load_fleet_config_env_backend_case_normalized(
     assert fc.default_backend == "grok"
 
 
-def test_load_fleet_config_kwarg_beats_env(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_load_fleet_config_kwarg_beats_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = tmp_path / "fleet.yaml"
     cfg.write_text("default_backend: cursor\ndefault_model: composer-2.5\n", encoding="utf-8")
     monkeypatch.setenv("AGENT_FLEET_BACKEND", "kimi")

@@ -147,15 +147,10 @@ def call_grok(
         )
         if result.returncode != 0:
             err = (result.stderr or result.stdout or "").strip()
-            raise RuntimeError(
-                f"grok failed (exit {result.returncode}): {err[:500]}"
-            )
+            raise RuntimeError(f"grok failed (exit {result.returncode}): {err[:500]}")
         return (result.stdout or "").strip()
     finally:
-        try:
-            os.unlink(prompt_path)
-        except OSError:
-            pass
+        Path(prompt_path).unlink(missing_ok=True)
 
 
 @dataclass(frozen=True)

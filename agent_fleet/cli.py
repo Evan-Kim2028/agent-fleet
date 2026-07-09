@@ -673,7 +673,6 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return doctor_exit_code(checks)
 
 
-
 def cmd_config_set_backend(args: argparse.Namespace) -> int:
     """Write default_backend (and optional default_model) into fleet.yaml."""
     import yaml
@@ -697,7 +696,9 @@ def cmd_config_set_backend(args: argparse.Namespace) -> int:
     elif backend == "grok" and not data.get("default_model"):
         data["default_model"] = "grok-4.5"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(data, sort_keys=False, default_flow_style=False), encoding="utf-8")
+    path.write_text(
+        yaml.safe_dump(data, sort_keys=False, default_flow_style=False), encoding="utf-8"
+    )
     model = data.get("default_model") or "(backend default)"
     print(f"Wrote {path}")
     print(f"default_backend: {backend}")

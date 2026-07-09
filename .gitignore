@@ -20,6 +20,16 @@ htmlcov/
 .agent-fleet-state.json
 .codegraph/
 
+
+# Runtime junk / local experiments (never commit)
+.tmp*
+*.tmp
+*.log
+dispatch-*.log
+.dispatch*.log
+efficiency-trail.tsv
+*.tsv.bak
+
 # Per-target-repo configs and code stay local — agent-fleet is standalone.
 # Live targets (silphcoanalytics, etc.) are not committed here; see examples/
 # for committed templates.

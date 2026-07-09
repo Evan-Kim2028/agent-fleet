@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.13.2 — 2026-07-08
+
+### Summary
+
+Release hygiene: strip accidental runtime logs from the tree, tighten
+`.gitignore`, and fix test isolation / doctor JSON assertions so the suite
+is green for tagging.
+
+### Changes
+
+- **repo hygiene:** remove tracked dispatch/integration logs and root
+  `efficiency-trail.tsv`; ignore `.tmp*`, `*.log`, and local experiment trails.
+- **tests:** restore `agent_fleet.<backend>` package attrs after import-isolation
+  tests (fixes monkeypatch targeting the wrong grok_backend module); doctor
+  `--json` asserts payload shape `{backend, model, checks}`; ruff clean on
+  recent grok/tool_env/pr_loop tests.
+- **grok_backend:** use `Path.unlink(missing_ok=True)` for prompt-file cleanup.
+
 ## 0.13.1 — 2026-07-08
 
 ### Summary

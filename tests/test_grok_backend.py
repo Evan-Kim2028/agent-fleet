@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
+import sys
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 from agent_fleet.grok_backend import (
     DEFAULT_MODEL,
@@ -19,10 +22,6 @@ from agent_fleet.grok_backend import (
     call_grok,
     check_grok_auth,
 )
-
-if TYPE_CHECKING:
-    pass
-
 
 # --- Constants / registry -------------------------------------------------
 
@@ -154,7 +153,7 @@ def test_check_grok_auth_fails_when_auth_not_object(
     monkeypatch.setattr("agent_fleet.grok_backend.shutil.which", lambda _: str(bin_path))
     monkeypatch.setattr("agent_fleet.grok_backend.LOCAL_BIN", tmp_path / "missing-local")
     monkeypatch.setattr("agent_fleet.grok_backend.AUTH_JSON", auth)
-    ok, detail, fix = check_grok_auth()
+    ok, detail, _fix = check_grok_auth()
     assert ok is False
     assert "json object" in detail.lower() or "non-empty" in detail.lower()
 
@@ -190,7 +189,7 @@ def _fake_completed(stdout: str = "ok", returncode: int = 0) -> MagicMock:
 def test_call_grok_builds_yolo_argv(tmp_path: Path) -> None:
     captured: dict[str, Any] = {}
 
-    def _run(cmd: list[str], **kwargs: Any) -> MagicMock:
+    def _run(cmd: list[str], **kwargs: Any) -> MagicMock:  # noqa: ANN401
         captured["cmd"] = cmd
         captured["env"] = kwargs.get("env")
         return _fake_completed("hello")
@@ -224,7 +223,7 @@ def test_call_grok_builds_yolo_argv(tmp_path: Path) -> None:
 def test_call_grok_plan_mode_uses_permission_mode(tmp_path: Path) -> None:
     captured: dict[str, Any] = {}
 
-    def _run(cmd: list[str], **kwargs: Any) -> MagicMock:  # noqa: ARG001
+    def _run(cmd: list[str], **_kwargs: Any) -> MagicMock:  # noqa: ANN401
         captured["cmd"] = cmd
         return _fake_completed("plan")
 
@@ -239,7 +238,7 @@ def test_call_grok_plan_mode_uses_permission_mode(tmp_path: Path) -> None:
 def test_call_grok_session_flags(tmp_path: Path) -> None:
     captured: list[list[str]] = []
 
-    def _run(cmd: list[str], **kwargs: Any) -> MagicMock:  # noqa: ARG001
+    def _run(cmd: list[str], **_kwargs: Any) -> MagicMock:  # noqa: ANN401
         captured.append(list(cmd))
         return _fake_completed("ok")
 
@@ -273,17 +272,17 @@ def test_call_grok_raises_on_nonzero(tmp_path: Path) -> None:
         m.returncode = 1
         m.stdout = ""
         m.stderr = "boom"
-        with patch("agent_fleet.grok_backend.subprocess.run", return_value=m):
-            with pytest.raises(RuntimeError, match="grok failed"):
-                call_grok("x", work_dir=str(tmp_path), grok_bin="/bin/grok")
+        with (
+            patch("agent_fleet.grok_backend.subprocess.run", return_value=m),
+            pytest.raises(RuntimeError, match="grok failed"),
+        ):
+            call_grok("x", work_dir=str(tmp_path), grok_bin="/bin/grok")
 
 
 # --- GrokBackend.run / create_session -------------------------------------
 
 
-def test_run_returns_error_when_auth_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_run_returns_error_when_auth_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "agent_fleet.grok_backend.check_grok_auth",
         lambda: (False, "no auth", "run `grok login`"),
@@ -303,7 +302,7 @@ def test_run_success_and_scope_note(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     )
     captured: dict[str, Any] = {}
 
-    def _fake_call(prompt: str, **kwargs: Any) -> str:
+    def _fake_call(prompt: str, **kwargs: Any) -> str:  # noqa: ANN401
         captured["prompt"] = prompt
         captured["kwargs"] = kwargs
         return "done"
@@ -329,7 +328,7 @@ def test_session_first_send_uses_s_second_uses_r(
 ) -> None:
     calls: list[dict[str, Any]] = []
 
-    def _fake_call(prompt: str, **kwargs: Any) -> str:
+    def _fake_call(prompt: str, **kwargs: Any) -> str:  # noqa: ANN401
         calls.append({"prompt": prompt, **kwargs})
         return f"reply-{len(calls)}"
 
@@ -349,7 +348,9 @@ def test_session_first_send_uses_s_second_uses_r(
     assert session.agent_id == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
 
-def test_create_session_error_when_auth_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_create_session_error_when_auth_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setattr(
         "agent_fleet.grok_backend.check_grok_auth",
         lambda: (False, "missing auth", "run `grok login`"),
@@ -373,18 +374,51 @@ def test_create_session_ok(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
     assert session.agent_id is not None
 
 
-def test_import_isolation_grok_does_not_import_others() -> None:
-    import sys
+def _swap_backend_modules(mod_names: tuple[str, ...]) -> dict[str, object | None]:
+    """Pop backend modules (and package attrs) so make_backend re-imports cleanly.
 
+    Returns a restore map for :func:`_restore_backend_modules`.
+    """
+    import agent_fleet
+
+    saved: dict[str, object | None] = {m: sys.modules.get(m) for m in mod_names}
+    for m in mod_names:
+        sys.modules.pop(m, None)
+        short = m.rsplit(".", 1)[-1]
+        if hasattr(agent_fleet, short):
+            delattr(agent_fleet, short)
+    return saved
+
+
+def _restore_backend_modules(saved: dict[str, object | None]) -> None:
+    """Restore sys.modules *and* ``agent_fleet.<name>`` attrs after isolation tests.
+
+    Restoring only ``sys.modules`` leaves a stale package attribute pointing at the
+    re-imported module; subsequent monkeypatch strings like
+    ``agent_fleet.grok_backend.X`` then patch the wrong object.
+    """
+    import agent_fleet
+
+    for m in saved:
+        sys.modules.pop(m, None)
+        short = m.rsplit(".", 1)[-1]
+        if hasattr(agent_fleet, short):
+            delattr(agent_fleet, short)
+    for m, obj in saved.items():
+        short = m.rsplit(".", 1)[-1]
+        if obj is not None:
+            sys.modules[m] = obj
+            setattr(agent_fleet, short, obj)
+
+
+def test_import_isolation_grok_does_not_import_others() -> None:
     _backend_mods = (
         "agent_fleet.cursor_backend",
         "agent_fleet.kimi_backend",
         "agent_fleet.openrouter_backend",
         "agent_fleet.grok_backend",
     )
-    saved = {m: sys.modules.get(m) for m in _backend_mods}
-    for m in _backend_mods:
-        sys.modules.pop(m, None)
+    saved = _swap_backend_modules(_backend_mods)
     try:
         from agent_fleet.backends import make_backend
         from agent_fleet.config import FleetConfig
@@ -397,8 +431,4 @@ def test_import_isolation_grok_does_not_import_others() -> None:
         assert "agent_fleet.kimi_backend" not in sys.modules
         assert "agent_fleet.openrouter_backend" not in sys.modules
     finally:
-        for m in _backend_mods:
-            sys.modules.pop(m, None)
-        for m, obj in saved.items():
-            if obj is not None:
-                sys.modules[m] = obj
+        _restore_backend_modules(saved)

@@ -22,6 +22,43 @@ requires_cursor_sdk = pytest.mark.skipif(
 )
 
 
+def _swap_backend_modules(mod_names: tuple[str, ...]) -> dict[str, object | None]:
+    """Pop backend modules (and package attrs) so make_backend re-imports cleanly.
+
+    Returns a restore map for :func:`_restore_backend_modules`.
+    """
+    import agent_fleet
+
+    saved: dict[str, object | None] = {m: sys.modules.get(m) for m in mod_names}
+    for m in mod_names:
+        sys.modules.pop(m, None)
+        short = m.rsplit(".", 1)[-1]
+        if hasattr(agent_fleet, short):
+            delattr(agent_fleet, short)
+    return saved
+
+
+def _restore_backend_modules(saved: dict[str, object | None]) -> None:
+    """Restore sys.modules *and* ``agent_fleet.<name>`` attrs after isolation tests.
+
+    Restoring only ``sys.modules`` leaves a stale package attribute pointing at the
+    re-imported module; subsequent monkeypatch strings like
+    ``agent_fleet.grok_backend.X`` then patch the wrong object.
+    """
+    import agent_fleet
+
+    for m in saved:
+        sys.modules.pop(m, None)
+        short = m.rsplit(".", 1)[-1]
+        if hasattr(agent_fleet, short):
+            delattr(agent_fleet, short)
+    for m, obj in saved.items():
+        short = m.rsplit(".", 1)[-1]
+        if obj is not None:
+            sys.modules[m] = obj
+            setattr(agent_fleet, short, obj)
+
+
 def _config() -> FleetConfig:
     return load_fleet_config(ROOT / "fleet.example.yaml")
 
@@ -240,9 +277,7 @@ def test_import_isolation_openrouter_does_not_import_cursor_or_kimi() -> None:
         "agent_fleet.openrouter_backend",
     )
     # Save original sys.modules state so we don't poison other tests' isinstance checks.
-    saved = {m: sys.modules.get(m) for m in _backend_mods}
-    for m in _backend_mods:
-        sys.modules.pop(m, None)
+    saved = _swap_backend_modules(_backend_mods)
     try:
         from agent_fleet.backends import make_backend
         from agent_fleet.config import FleetConfig
@@ -260,13 +295,7 @@ def test_import_isolation_openrouter_does_not_import_cursor_or_kimi() -> None:
             "kimi_backend leaked into an openrouter-only make_backend call"
         )
     finally:
-        # Restore original module objects so subsequent tests' isinstance checks
-        # see the same class identity. Remove any re-imported fresh modules first.
-        for m in _backend_mods:
-            sys.modules.pop(m, None)
-        for m, obj in saved.items():
-            if obj is not None:
-                sys.modules[m] = obj
+        _restore_backend_modules(saved)
 
 
 def test_import_isolation_kimi_does_not_import_cursor_or_openrouter() -> None:
@@ -276,9 +305,7 @@ def test_import_isolation_kimi_does_not_import_cursor_or_openrouter() -> None:
         "agent_fleet.kimi_backend",
         "agent_fleet.openrouter_backend",
     )
-    saved = {m: sys.modules.get(m) for m in _backend_mods}
-    for m in _backend_mods:
-        sys.modules.pop(m, None)
+    saved = _swap_backend_modules(_backend_mods)
     try:
         from agent_fleet.backends import make_backend
         from agent_fleet.config import FleetConfig
@@ -290,11 +317,7 @@ def test_import_isolation_kimi_does_not_import_cursor_or_openrouter() -> None:
         assert "agent_fleet.cursor_backend" not in sys.modules
         assert "agent_fleet.openrouter_backend" not in sys.modules
     finally:
-        for m in _backend_mods:
-            sys.modules.pop(m, None)
-        for m, obj in saved.items():
-            if obj is not None:
-                sys.modules[m] = obj
+        _restore_backend_modules(saved)
 
 
 def test_import_isolation_grok_does_not_import_others() -> None:
@@ -305,9 +328,7 @@ def test_import_isolation_grok_does_not_import_others() -> None:
         "agent_fleet.openrouter_backend",
         "agent_fleet.grok_backend",
     )
-    saved = {m: sys.modules.get(m) for m in _backend_mods}
-    for m in _backend_mods:
-        sys.modules.pop(m, None)
+    saved = _swap_backend_modules(_backend_mods)
     try:
         from agent_fleet.backends import make_backend
         from agent_fleet.config import FleetConfig
@@ -320,9 +341,4 @@ def test_import_isolation_grok_does_not_import_others() -> None:
         assert "agent_fleet.kimi_backend" not in sys.modules
         assert "agent_fleet.openrouter_backend" not in sys.modules
     finally:
-        for m in _backend_mods:
-            sys.modules.pop(m, None)
-        for m, obj in saved.items():
-            if obj is not None:
-                sys.modules[m] = obj
-
+        _restore_backend_modules(saved)

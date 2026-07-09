@@ -45,7 +45,11 @@ def test_doctor_json_returns_list_of_checks(
     code = main(["doctor", "--json"])
     assert code == 0
     out = capsys.readouterr().out
-    rows = json.loads(out)
+    payload = json.loads(out)
+    assert isinstance(payload, dict)
+    assert "backend" in payload
+    assert "checks" in payload
+    rows = payload["checks"]
     assert isinstance(rows, list)
     assert len(rows) > 0
     for row in rows:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from agent_fleet.pr_loop import github_ops
 from agent_fleet.pr_loop.config import load_pr_loop_config
@@ -12,6 +13,9 @@ from agent_fleet.pr_loop.review_parse import (
     has_blocking_findings,
     parse_review_risk,
 )
+
+if TYPE_CHECKING:
+    import pytest
 
 SAMPLE_REVIEW = """\
 ## 🤖 Composer PR Analysis
@@ -426,7 +430,9 @@ def test_poll_once_parks_on_blocked_outcome(tmp_path: Path) -> None:
         assert results2 == [] or all(r.get("pr") != "99" for r in results2)
 
 
-def test_commit_preflight_missing_pre_commit_binary(tmp_path: Path, monkeypatch) -> None:
+def test_commit_preflight_missing_pre_commit_binary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """When .pre-commit-config.yaml exists but pre-commit is absent, preflight
     must fail with an actionable install message (not FileNotFoundError)."""
     from agent_fleet.pr_loop.github_ops import run_commit_preflight
@@ -437,7 +443,7 @@ def test_commit_preflight_missing_pre_commit_binary(tmp_path: Path, monkeypatch)
     (repo / "a.txt").write_text("x\n", encoding="utf-8")
     monkeypatch.setattr(
         "agent_fleet.tool_env.ensure_pre_commit",
-        lambda install=True: None,
+        lambda install=True: None,  # noqa: ARG005
     )
     ok, detail = run_commit_preflight(repo, ["a.txt"], commands=[])
     assert ok is False
@@ -445,8 +451,12 @@ def test_commit_preflight_missing_pre_commit_binary(tmp_path: Path, monkeypatch)
     assert "uv tool install pre-commit" in detail
 
 
-def test_commit_preflight_uses_resolved_pre_commit_path(tmp_path: Path, monkeypatch) -> None:
+def test_commit_preflight_uses_resolved_pre_commit_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """run_commit_preflight must invoke the absolute path from ensure_pre_commit."""
+    from subprocess import CompletedProcess
+
     from agent_fleet.pr_loop import github_ops
 
     repo = tmp_path / "repo"
@@ -456,13 +466,14 @@ def test_commit_preflight_uses_resolved_pre_commit_path(tmp_path: Path, monkeypa
     fake_bin = str(tmp_path / "fake-pre-commit")
     seen: list[list[str]] = []
 
-    def fake_git_run(args, **kwargs):  # type: ignore[no-untyped-def]
+    def fake_git_run(args: list[str], **_kwargs: object) -> CompletedProcess[str]:
         seen.append(list(args))
-        from subprocess import CompletedProcess
-
         return CompletedProcess(args, 0, "", "")
 
-    monkeypatch.setattr("agent_fleet.tool_env.ensure_pre_commit", lambda install=True: fake_bin)
+    monkeypatch.setattr(
+        "agent_fleet.tool_env.ensure_pre_commit",
+        lambda install=True: fake_bin,  # noqa: ARG005
+    )
     monkeypatch.setattr(github_ops, "_git_run", fake_git_run)
     ok, detail = github_ops.run_commit_preflight(repo, ["a.txt"], commands=[])
     assert ok is True
