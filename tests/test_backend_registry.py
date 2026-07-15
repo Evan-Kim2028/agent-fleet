@@ -12,6 +12,8 @@ import pytest
 from agent_fleet.config import load_fleet_config
 
 if TYPE_CHECKING:
+    from types import ModuleType
+
     from agent_fleet.config import FleetConfig
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -22,14 +24,14 @@ requires_cursor_sdk = pytest.mark.skipif(
 )
 
 
-def _swap_backend_modules(mod_names: tuple[str, ...]) -> dict[str, object | None]:
+def _swap_backend_modules(mod_names: tuple[str, ...]) -> dict[str, ModuleType | None]:
     """Pop backend modules (and package attrs) so make_backend re-imports cleanly.
 
     Returns a restore map for :func:`_restore_backend_modules`.
     """
     import agent_fleet
 
-    saved: dict[str, object | None] = {m: sys.modules.get(m) for m in mod_names}
+    saved: dict[str, ModuleType | None] = {m: sys.modules.get(m) for m in mod_names}
     for m in mod_names:
         sys.modules.pop(m, None)
         short = m.rsplit(".", 1)[-1]
@@ -38,7 +40,7 @@ def _swap_backend_modules(mod_names: tuple[str, ...]) -> dict[str, object | None
     return saved
 
 
-def _restore_backend_modules(saved: dict[str, object | None]) -> None:
+def _restore_backend_modules(saved: dict[str, ModuleType | None]) -> None:
     """Restore sys.modules *and* ``agent_fleet.<name>`` attrs after isolation tests.
 
     Restoring only ``sys.modules`` leaves a stale package attribute pointing at the

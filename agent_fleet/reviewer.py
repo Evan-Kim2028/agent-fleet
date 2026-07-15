@@ -150,7 +150,36 @@ def _call_backend(
             model=model,
             mode="plan",
         )
-    raw = _extract_json(result.stdout)
+    try:
+        raw = _extract_json(result.stdout)
+    except ValueError:
+        # Some backends (e.g. grok) occasionally return prose or an empty
+        # completion instead of the ReviewResult object. One strict retry
+        # recovers these without failing the whole review phase.
+        retry_prompt = (
+            prompt + "\n\nIMPORTANT: Your previous response contained no parseable JSON. "
+            "Respond with ONLY the ReviewResult JSON object — no prose, no "
+            "markdown fences, no explanation."
+        )
+        if session is not None:
+            result = session.send(
+                retry_prompt,
+                max_tokens=max_tokens,
+                timeout_s=timeout_s,
+                allowed_tools=allowed_tools,
+            )
+        else:
+            result = backend.run(
+                retry_prompt,
+                max_tokens=max_tokens,
+                timeout_s=timeout_s,
+                memory_limit=memory_limit,
+                allowed_tools=allowed_tools or [],
+                cwd=cwd,
+                model=model,
+                mode="plan",
+            )
+        raw = _extract_json(result.stdout)
     # Enforce shard_id matches what we requested.
     raw["shard_id"] = shard_id
     raw["pr_number"] = pr_number

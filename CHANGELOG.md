@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.14.0 — 2026-07-15
+
+### Summary
+
+Grok token-usage accounting and a review-parse resilience retry. Also
+un-breaks CI: the typecheck (`ty`) and version-consistency test jobs were
+red on `main` since v0.13.0.
+
+### Changes
+
+- **grok_backend:** account per-session token usage by reading the Grok CLI's
+  cumulative `updates.jsonl`, diffing consecutive reads into per-call deltas so
+  rollups don't double-count; graceful no-op on missing/corrupt session data.
+- **reviewer:** on a backend returning unparseable (prose/empty) output, do one
+  strict JSON-only retry before failing the review phase.
+- **ci fix — typecheck:** replace ineffective `# type: ignore` comments in
+  `autonomy/parse_review.py` with `typing.cast(Severity, …)`; correct test
+  annotations (`ModuleType | None`, `list[dict[str, object]]`) so `ty` passes.
+- **ci fix — tests:** update the version-consistency test to the current
+  release version.
+
 ## 0.13.2 — 2026-07-08
 
 ### Summary

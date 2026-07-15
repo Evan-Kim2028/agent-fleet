@@ -134,7 +134,7 @@ def test_format_comment_always_includes_risk_level() -> None:
 def test_find_reviewer_comment_accepts_grok_title() -> None:
     from agent_fleet.pr_loop.review_parse import find_reviewer_comment
 
-    comments = [
+    comments: list[dict[str, object]] = [
         {"body": "## 🤖 Grok PR Analysis\n\n**Risk Level:** 🟢 LOW\n"},
     ]
     found = find_reviewer_comment(comments, marker="Composer PR Analysis")
@@ -145,7 +145,7 @@ def test_find_reviewer_comment_accepts_grok_title() -> None:
 def test_find_reviewer_comment_risk_level_fallback() -> None:
     from agent_fleet.pr_loop.review_parse import find_reviewer_comment
 
-    comments = [
+    comments: list[dict[str, object]] = [
         {"body": "Custom title\n**Risk Level:** 🟠 HIGH\n"},
     ]
     found = find_reviewer_comment(comments, marker="Composer PR Analysis")

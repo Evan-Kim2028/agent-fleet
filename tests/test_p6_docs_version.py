@@ -30,12 +30,12 @@ DOCS = ROOT / "docs"
 
 def test_pyproject_version_is_current() -> None:
     content = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'version = "0.13.1"' in content, "pyproject.toml version must be 0.13.1"
+    assert 'version = "0.14.0"' in content, "pyproject.toml version must be 0.14.0"
 
 
 def test_init_version_is_current() -> None:
     content = (ROOT / "agent_fleet" / "__init__.py").read_text(encoding="utf-8")
-    assert '__version__ = "0.13.1"' in content, "agent_fleet/__init__.py __version__ must be 0.13.1"
+    assert '__version__ = "0.14.0"' in content, "agent_fleet/__init__.py __version__ must be 0.14.0"
 
 
 def test_versions_match() -> None:
@@ -63,7 +63,7 @@ def test_changelog_exists() -> None:
 
 def test_changelog_mentions_current_version() -> None:
     content = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    assert "0.13.1" in content, "CHANGELOG.md must mention version 0.13.1"
+    assert "0.14.0" in content, "CHANGELOG.md must mention version 0.14.0"
 
 
 # ---------------------------------------------------------------------------

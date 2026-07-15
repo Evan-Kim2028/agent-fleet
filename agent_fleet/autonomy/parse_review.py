@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from typing import cast
 
 from agent_fleet.autonomy.types import Finding, ReviewEvidence, Severity
 
@@ -35,7 +36,7 @@ def parse_review_body(
         count = int(match.group(2))
         findings.append(
             Finding(
-                severity=severity,  # type: ignore[arg-type]
+                severity=cast("Severity", severity),
                 count=count,
             )
         )
@@ -99,5 +100,5 @@ def severity_rank(level: str | None) -> int:
 def normalize_severity(level: str) -> Severity | None:
     upper = level.upper()
     if upper in {"LOW", "MEDIUM", "HIGH", "CRITICAL"}:
-        return upper  # type: ignore[return-value]
+        return cast("Severity", upper)
     return None
