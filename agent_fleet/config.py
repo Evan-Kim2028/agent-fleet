@@ -66,6 +66,7 @@ class FleetConfig:
     default_backend: str = "cursor"
     kimi_bin: str | None = None
     grok_bin: str | None = None
+    qwen_base_url: str | None = None
     default_persona: str = "coder"
     max_parallel: int = 3
     timeout_seconds: int = 900
@@ -220,6 +221,7 @@ def load_fleet_config(
     default_backend: str | None = None,
     kimi_bin: str | None = None,
     grok_bin: str | None = None,
+    qwen_base_url: str | None = None,
     max_parallel: int | None = None,
     timeout_seconds: int | None = None,
     ram_budget_gb: int | None = None,
@@ -264,11 +266,19 @@ def load_fleet_config(
 
     mcp_catalog = _parse_mcp_catalog(data.get("mcp_servers") or {})
 
-    # Kwargs > env > yaml > defaults (see docstring).
+    # Kwargs > env > yaml > defaults (see docstring). yaml's default_model is
+    # only inherited when the resolved backend still matches yaml's own
+    # default_backend -- otherwise a backend override (kwarg/env) would drag
+    # in a model id that belongs to a different backend.
     resolved_backend = (
         default_backend or _env_backend_override() or data.get("default_backend") or "cursor"
     )
-    resolved_model = default_model or _env_model_override() or data.get("default_model")
+    explicit_model = default_model or _env_model_override()
+    yaml_backend = str(data.get("default_backend") or "cursor").strip().lower()
+    backend_matches_yaml = str(resolved_backend).strip().lower() == yaml_backend
+    resolved_model = explicit_model or (
+        data.get("default_model") if backend_matches_yaml else None
+    )
 
     return FleetConfig(
         default_model=resolved_model,
@@ -276,6 +286,7 @@ def load_fleet_config(
         default_backend=str(resolved_backend),
         kimi_bin=kimi_bin or data.get("kimi_bin"),
         grok_bin=grok_bin or data.get("grok_bin"),
+        qwen_base_url=qwen_base_url or data.get("qwen_base_url"),
         max_parallel=int(max_parallel or data.get("max_parallel") or 3),
         timeout_seconds=int(timeout_seconds or data.get("timeout_seconds") or 900),
         ram_budget_gb=int(ram_budget_gb or data.get("ram_budget_gb") or 24),

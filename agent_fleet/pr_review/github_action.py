@@ -135,6 +135,23 @@ def main() -> int:
     files = get_changed_files(base_sha, head_sha, cwd=cwd)
     diff = get_diff(base_sha, head_sha, cwd=cwd)
 
+    if not files:
+        # No changed files at all is not "trivial" — surface it distinctly
+        # instead of silently posting the docs/locks/assets skip message.
+        body = textwrap.dedent(f"""\
+            ## 🤖 {marker}
+
+            No files were modified — empty changeset. Nothing to review.
+        """)
+        upsert_pr_comment(
+            repo=repo,
+            pr_number=pr_number,
+            token=token,
+            body=body,
+            marker=marker,
+        )
+        return 0
+
     if is_trivial_pr(files, pr_config.trivial_patterns):
         body = textwrap.dedent(f"""\
             ## 🤖 {marker}

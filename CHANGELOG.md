@@ -1,5 +1,92 @@
 # Changelog
 
+## 0.14.1 — 2026-07-22
+
+### Summary
+
+Qwen is now a supported execution backend, reusing the existing OpenRouter
+OpenAI-compatible HTTP client rather than shipping a separate module.
+
+Pointing a new backend at real multi-file work on a live repo surfaced nine
+pre-existing defects in the shared OpenRouter execution path — none of them
+Qwen-specific; all of them affect the `openrouter` backend identically. Those
+fixes are the bulk of this release. The most consequential: `backend.run()`
+sent the model an empty tool array, so any pipeline phase taking the non-session
+fallback path could not edit files at all.
+
+### Added
+
+- **Qwen backend:** `register("qwen", ...)` with `QWEN_API_KEY`, default model
+  `qwen3.8-max-preview`, optional `qwen_base_url` (Alibaba Bailian Token Plan,
+  OpenAI-compatible). Thin registration over `openrouter_backend` — no separate
+  module. The same key also serves ~14 other Bailian models (`deepseek-v4-pro`,
+  `kimi-k2.7-code`, `qwen3.7-max`, …) via `default_model`.
+- **`edit_file` tool:** replaces one exact occurrence of `old_string` (errors on
+  zero matches, and on multiple matches reports the count rather than silently
+  replacing the first). Previously every modification round-tripped the entire
+  file through the model twice via `read_file` + `write_file`.
+- **Per-iteration progress logging:** one line per tool iteration
+  (`iter 12/200: edit_file(path) | tokens=… elapsed=…s`) plus an exit summary
+  with iteration count, tokens, elapsed, file-mutation count and exit reason.
+  Runs previously produced no output at all until they finished, which made a
+  45-minute run impossible to diagnose while in flight.
+- **Thrash detection:** warnings at 25 and 50 consecutive iterations with no
+  file mutation. Optional hard abort via `AGENT_FLEET_STALL_ABORT`, **disabled
+  by default** so read-only/audit/plan personas are unaffected.
+- **`.env` auto-loading** for the `fleet` CLI (dependency-free; real environment
+  always wins; silent no-op when absent).
+
+### Fixed
+
+- **`OpenRouterBackend.run()` sent no tools.** It called the module-level
+  `call_openrouter()`, which has no `tools` parameter, so the model received an
+  empty tool array while `OpenRouterSession.send()` passed `_FILE_TOOLS`. Any
+  phase on the `run()` fallback path silently produced zero file changes.
+  `run()` now delegates to the session machinery.
+- **Empty changesets were auto-approved.** Two vacuous-truth sites:
+  `is_trivial_pr([])` returned `True` (an empty list trivially satisfies "all
+  files are trivial"), and `decide_disposition` never checked `changed_files` on
+  the `verify_ok` branch. An empty diff now routes to `completed_noop` and does
+  not earn an `approve`.
+- **The reviewer was never told the task goal.** `runner.py`'s `ReviewHandler`
+  called `reviewer.review()` without `task_goal`/`task_context`/
+  `implementation_summary`, so it judged diffs in isolation and could not detect
+  off-task or incomplete work by construction. (`phases.py` was already correct;
+  only the `code_review` pipeline path was affected.)
+- **Tests-only changesets were auto-approved.** A diff containing only test
+  files no longer earns a bare `approve` for a behaviour-change task; overridable
+  via `allow_tests_only_approval` for genuinely test-only work.
+- **`run_command` timed out at 60s** with no partial output — shorter than many
+  real test suites, so "run the tests and make them pass" was unachievable and
+  the model burned iterations retrying blind. Now defaults to 600s
+  (`AGENT_FLEET_COMMAND_TIMEOUT_S`) and returns partial stdout/stderr on timeout.
+- **Backend override inherited a mismatched `default_model`.** `--backend qwen`
+  against a `fleet.yaml` configured for `grok` kept `grok-4.5` as the model. The
+  yaml model is now inherited only when the resolved backend matches.
+- **`fleet run` never configured logging.** `configure_fleet_logging()` was
+  called only from `cmd_loop`, so `logger.info` output was dropped for the main
+  run path.
+- **Tool-iteration cap raised 80 → 200** (`OPENROUTER_MAX_TOOL_ITERATIONS`). 80
+  was not enough for wide mechanical sweeps across ~15 files.
+
+### Notes / known gaps
+
+- `OPENROUTER_REASONING_EFFORT` is accepted but **ignored** by the Bailian
+  endpoint — `low` and omitted produce identical output. It is a no-op for the
+  qwen backend, not merely a badly-named knob.
+- Qwen is verified on focused, well-specified tasks (a landing-header auth fix
+  landed correctly with passing tests). It is **not** yet validated on
+  discovery-heavy work: on tasks with an unknown root cause it explores without
+  converging, and token burn on wide tasks reached 8–12M per run.
+- `max_tokens=0` now floors to the session default (16384) rather than omitting
+  the field — reasoning models return empty content under small provider
+  defaults.
+
+### Docs / examples
+
+- `docs/QWEN.md`, `examples/fleet.qwen.yaml`, plus Qwen rows in `README.md`,
+  `docs/FLEET-CONFIG.md`, `docs/PERSONAS.md` and `fleet.example.yaml`.
+
 ## 0.14.0 — 2026-07-15
 
 ### Summary

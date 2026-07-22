@@ -44,6 +44,16 @@ class DispositionPolicy:
 def decide_disposition(facts: RunFacts, policy: DispositionPolicy) -> Disposition:
     """Map RunFacts + policy to a Disposition with no IO."""
     if facts.verify_ok:
+        if not facts.changed_files:
+            # Verify passing on an empty diff is not a real success signal — it
+            # just means nothing broke because nothing changed. Route through
+            # NOOP so callers don't treat a no-op run as a shipped change.
+            return Disposition(
+                kind=DispositionKind.NOOP,
+                draft=False,
+                outcome="completed_noop",
+                reason="implementer produced no code changes",
+            )
         return Disposition(
             kind=DispositionKind.OPEN_PR,
             draft=False,

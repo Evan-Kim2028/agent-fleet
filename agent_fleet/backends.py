@@ -9,6 +9,7 @@ regression gate on this invariant.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -152,6 +153,20 @@ def _grok_auth_probe() -> tuple[bool, str, str]:
     return check_grok_auth()
 
 
+QWEN_BASE_URL = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+QWEN_DEFAULT_MODEL = "qwen3.8-max-preview"
+
+
+def _make_qwen(config: FleetConfig) -> LLMBackend:
+    from agent_fleet.openrouter_backend import OpenRouterBackend
+
+    return OpenRouterBackend(
+        model=config.default_model or QWEN_DEFAULT_MODEL,
+        api_key=os.environ.get("QWEN_API_KEY", ""),
+        base_url=getattr(config, "qwen_base_url", None) or QWEN_BASE_URL,
+    )
+
+
 # coerce_agent_mode is imported eagerly at the top (pure helper, no SDK dep).
 
 register(
@@ -183,6 +198,42 @@ register(
     sdk_import_check=None,
     auth_probe=_grok_auth_probe,
 )
+register(
+    "qwen",
+    _make_qwen,
+    env_var="QWEN_API_KEY",
+    key_hint="Alibaba Bailian Token Plan key (OpenAI-compatible endpoint)",
+    sdk_import_check=None,
+)
+
+
+def backend_default_model(name: str) -> str | None:
+    """The built-in default model id a registered backend falls back to.
+
+    Lazy-imports the same module each backend's factory already imports, so
+    calling this (e.g. for display in ``fleet doctor``) does not pull in SDKs
+    for backends other than the one being queried.
+    """
+    lowered = name.lower()
+    if lowered == "cursor":
+        from agent_fleet.cursor_backend import DEFAULT_MODEL
+
+        return DEFAULT_MODEL
+    if lowered == "kimi":
+        from agent_fleet.kimi_backend import DEFAULT_MODEL
+
+        return DEFAULT_MODEL
+    if lowered == "openrouter":
+        from agent_fleet.openrouter_backend import DEFAULT_MODEL
+
+        return DEFAULT_MODEL
+    if lowered == "grok":
+        from agent_fleet.grok_backend import DEFAULT_MODEL
+
+        return DEFAULT_MODEL
+    if lowered == "qwen":
+        return QWEN_DEFAULT_MODEL
+    return None
 
 
 def make_backend(config: FleetConfig) -> LLMBackend:

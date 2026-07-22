@@ -106,6 +106,45 @@ def test_grok_resolves(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(backend, GrokBackend)
 
 
+def test_qwen_resolves(monkeypatch: pytest.MonkeyPatch) -> None:
+    """qwen reuses OpenRouterBackend (generic OpenAI-compatible client) as-is."""
+    from agent_fleet.backends import make_backend
+    from agent_fleet.openrouter_backend import OpenRouterBackend
+
+    monkeypatch.setenv("QWEN_API_KEY", "fake-qwen-key")
+    cfg = _config()
+    monkeypatch.setattr(cfg, "default_backend", "qwen", raising=False)
+    backend = make_backend(cfg)
+    assert isinstance(backend, OpenRouterBackend)
+
+
+def test_qwen_uses_default_base_url_and_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent_fleet.backends import QWEN_BASE_URL, QWEN_DEFAULT_MODEL, make_backend
+    from agent_fleet.config import FleetConfig
+
+    monkeypatch.setenv("QWEN_API_KEY", "fake-qwen-key")
+    cfg = FleetConfig(default_backend="qwen", default_model=None)
+    backend = make_backend(cfg)
+    assert backend.base_url == QWEN_BASE_URL
+    assert backend.model == QWEN_DEFAULT_MODEL
+    assert backend.api_key == "fake-qwen-key"
+
+
+def test_qwen_respects_custom_base_url_and_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent_fleet.backends import make_backend
+    from agent_fleet.config import FleetConfig
+
+    monkeypatch.setenv("QWEN_API_KEY", "fake-qwen-key")
+    cfg = FleetConfig(
+        default_backend="qwen",
+        default_model="qwen-custom-model",
+        qwen_base_url="https://example.invalid/v1",
+    )
+    backend = make_backend(cfg)
+    assert backend.base_url == "https://example.invalid/v1"
+    assert backend.model == "qwen-custom-model"
+
+
 def test_registered_backend_resolves(monkeypatch: pytest.MonkeyPatch) -> None:
     from agent_fleet import backends
 
@@ -135,6 +174,7 @@ def test_unknown_backend_raises_helpful_error(monkeypatch: pytest.MonkeyPatch) -
     assert "cursor" in str(exc_info.value)
     assert "kimi" in str(exc_info.value)
     assert "grok" in str(exc_info.value)
+    assert "qwen" in str(exc_info.value)
 
 
 def test_builtin_backend_env_vars() -> None:
@@ -144,6 +184,7 @@ def test_builtin_backend_env_vars() -> None:
     assert backend_env_var("kimi") == "KIMI_API_KEY"
     assert backend_env_var("openrouter") == "OPENROUTER_API_KEY"
     assert backend_env_var("grok") is None
+    assert backend_env_var("qwen") == "QWEN_API_KEY"
     assert backend_env_var("unregistered") is None
 
 
@@ -155,6 +196,7 @@ def test_builtin_backend_sdk_import_checks() -> None:
     assert backend_sdk_import_check("kimi") is None
     assert backend_sdk_import_check("openrouter") is None
     assert backend_sdk_import_check("grok") is None
+    assert backend_sdk_import_check("qwen") is None
     assert backend_sdk_import_check("unregistered") is None
 
 
@@ -166,8 +208,10 @@ def test_builtin_backend_auth_probes() -> None:
     assert backend_auth_probe("cursor") is None
     assert backend_auth_probe("kimi") is None
     assert backend_auth_probe("openrouter") is None
+    assert backend_auth_probe("qwen") is None
     assert backend_auth_probe("unregistered") is None
     assert backend_is_registered("grok") is True
+    assert backend_is_registered("qwen") is True
     assert backend_is_registered("zzz") is False
 
 
@@ -342,5 +386,36 @@ def test_import_isolation_grok_does_not_import_others() -> None:
         assert "agent_fleet.cursor_backend" not in sys.modules
         assert "agent_fleet.kimi_backend" not in sys.modules
         assert "agent_fleet.openrouter_backend" not in sys.modules
+    finally:
+        _restore_backend_modules(saved)
+
+
+def test_import_isolation_qwen_reuses_openrouter_backend_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Selecting qwen imports openrouter_backend (its generic HTTP client) and nothing else.
+
+    qwen intentionally reuses OpenRouterBackend rather than a dedicated module, so
+    unlike the other backends this test asserts openrouter_backend *is* imported.
+    """
+    monkeypatch.setenv("QWEN_API_KEY", "fake-qwen-key")
+    _backend_mods = (
+        "agent_fleet.cursor_backend",
+        "agent_fleet.kimi_backend",
+        "agent_fleet.openrouter_backend",
+        "agent_fleet.grok_backend",
+    )
+    saved = _swap_backend_modules(_backend_mods)
+    try:
+        from agent_fleet.backends import make_backend
+        from agent_fleet.config import FleetConfig
+
+        cfg = FleetConfig(default_backend="qwen", default_model=None)
+        make_backend(cfg)
+
+        assert "agent_fleet.openrouter_backend" in sys.modules
+        assert "agent_fleet.cursor_backend" not in sys.modules
+        assert "agent_fleet.kimi_backend" not in sys.modules
+        assert "agent_fleet.grok_backend" not in sys.modules
     finally:
         _restore_backend_modules(saved)

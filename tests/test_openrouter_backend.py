@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 from agent_fleet.openrouter_backend import (
+    _DEFAULT_SESSION_MAX_TOKENS,
     _MAX_CORRECTIONS,
     _MAX_HISTORY_CHARS,
     _MAX_RETRIES,
@@ -35,6 +36,8 @@ from agent_fleet.openrouter_backend import (
     _call_with_reasoning_escalation,
     _claims_completion_without_tools,
     _command_violates_scope,
+    _decode_partial_output,
+    _default_command_timeout_s,
     _default_max_tool_iterations,
     _execute_tool,
     _is_repetitive,
@@ -149,8 +152,13 @@ def test_run_parses_chat_completion_response(tmp_path: Path) -> None:
     assert request.headers["Authorization"] == "Bearer sk-or-test"
     body = json.loads(request.data.decode("utf-8"))
     assert body["model"] == "tencent/hy3:free"
-    assert body["messages"] == [{"role": "user", "content": "say hello"}]
+    # run() now delegates to the OpenRouterSession tool-calling machinery, so
+    # the request includes the session's system prompt ahead of the user
+    # turn, plus the file-tool definitions.
+    assert body["messages"][0]["role"] == "system"
+    assert body["messages"][-1] == {"role": "user", "content": "say hello"}
     assert body["max_tokens"] == 50
+    assert body["tools"], "run() must advertise tools so the model can act"
 
 
 def test_run_includes_scope_note_when_allowed_tools_given(tmp_path: Path) -> None:
@@ -173,7 +181,9 @@ def test_run_includes_scope_note_when_allowed_tools_given(tmp_path: Path) -> Non
             allowed_tools=["path:src/", "path:tests/"],
         )
 
-    content = captured["body"]["messages"][0]["content"]
+    # The scope note is appended to the user turn (last message), not the
+    # session's system message.
+    content = captured["body"]["messages"][-1]["content"]
     assert "Hard scope constraint" in content
     assert "src/" in content
     assert "tests/" in content
@@ -193,7 +203,61 @@ def test_run_omits_max_tokens_when_zero(tmp_path: Path) -> None:
     with patch("agent_fleet.openrouter_backend.urllib.request.urlopen", side_effect=_capture):
         backend.run("prompt", max_tokens=0, timeout_s=30, cwd=tmp_path)
 
-    assert "max_tokens" not in captured["body"]
+    # run() now delegates to OpenRouterSession.send(), which floors a
+    # missing/zero max_tokens to _DEFAULT_SESSION_MAX_TOKENS instead of
+    # omitting the field (avoids tiny provider-side default budgets for
+    # reasoning models). This matches OpenRouterSession's existing,
+    # already-tested behavior.
+    assert captured["body"]["max_tokens"] == _DEFAULT_SESSION_MAX_TOKENS
+
+
+# --- Regression: run() must be tool-aware (delegates to OpenRouterSession) -
+
+
+def test_run_sends_nonempty_tools_array(tmp_path: Path) -> None:
+    """run() must advertise tools to the model — regression for the bug where
+    run() called the tool-blind ``call_openrouter()`` helper directly and the
+    model was sent an empty tool list."""
+    payload = {"id": "gen-1", "choices": [{"message": {"content": "ok"}}]}
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    captured: dict[str, Any] = {}
+
+    def _capture(req: urllib.request.Request, timeout: int) -> MagicMock:  # noqa: ARG001
+        data = req.data
+        assert isinstance(data, bytes)
+        captured["body"] = json.loads(data.decode("utf-8"))
+        return _fake_urlopen_response(payload)
+
+    with patch("agent_fleet.openrouter_backend.urllib.request.urlopen", side_effect=_capture):
+        backend.run("do a task", max_tokens=100, timeout_s=30, cwd=tmp_path)
+
+    tools = captured["body"].get("tools")
+    assert tools, "run() sent an empty/missing tools array"
+    tool_names = {t["function"]["name"] for t in tools}
+    assert {"read_file", "write_file", "run_command", "list_files"} <= tool_names
+    assert captured["body"].get("tool_choice") == "auto"
+
+
+def test_run_executes_tool_call_and_writes_file(tmp_path: Path) -> None:
+    """End-to-end: run() drives the tool loop against a stubbed HTTP layer
+    that returns a tool_calls response, and the resulting write_file call
+    actually creates a file on disk."""
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    responses = [
+        _tool_call_response("write_file", {"path": "out.txt", "content": "hello from run()"}),
+        _stop_response("File written."),
+    ]
+    with patch(
+        "agent_fleet.openrouter_backend._call_openrouter_raw",
+        side_effect=responses,
+    ):
+        result = backend.run("write out.txt", max_tokens=100, timeout_s=30, cwd=tmp_path)
+
+    assert result.exit_code == 0
+    assert result.stdout == "File written."
+    assert "write_file" in result.mcp_tool_calls
+    written = (tmp_path / "out.txt").read_text(encoding="utf-8")
+    assert written == "hello from run()"
 
 
 # --- Reasoning effort configuration --------------------------------------
@@ -1230,9 +1294,21 @@ def test_reasoning_escalation_caps_at_ceiling(tmp_path: Path) -> None:
     assert all(mt <= _MAX_TOKENS_CEILING for mt in captured_max_tokens if mt is not None)
 
 
-def test_default_max_tool_iterations_is_80(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_default_max_tool_iterations_is_200(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OPENROUTER_MAX_TOOL_ITERATIONS", raising=False)
-    assert _default_max_tool_iterations() == 80
+    assert _default_max_tool_iterations() == 200
+
+
+def test_default_max_tool_iterations_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENROUTER_MAX_TOOL_ITERATIONS", "42")
+    assert _default_max_tool_iterations() == 42
+
+
+def test_default_max_tool_iterations_invalid_value_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_MAX_TOOL_ITERATIONS", "not-a-number")
+    assert _default_max_tool_iterations() == 200
 
 
 def test_call_with_reasoning_escalation_returns_successful_max_tokens() -> None:
@@ -1431,3 +1507,405 @@ def test_session_run_command_unaffected_without_scope(tmp_path: Path) -> None:
     assert "run_command" in result.mcp_tool_calls
     tool_msgs = [m for m in session._messages if m.get("role") == "tool"]
     assert "blocked" not in tool_msgs[0]["content"].lower()
+
+
+# --- edit_file tool -------------------------------------------------------
+
+
+def test_execute_tool_edit_file_replaces_single_occurrence(tmp_path: Path) -> None:
+    target = tmp_path / "code.py"
+    target.write_text("def foo():\n    return 1\n", encoding="utf-8")
+
+    result = _execute_tool(
+        "edit_file",
+        {"path": "code.py", "old_string": "return 1", "new_string": "return 2"},
+        cwd=tmp_path,
+        scope_prefixes=["."],
+    )
+    payload = json.loads(result)
+
+    assert payload.get("ok") is True
+    assert target.read_text(encoding="utf-8") == "def foo():\n    return 2\n"
+
+
+def test_execute_tool_edit_file_zero_matches_returns_error(tmp_path: Path) -> None:
+    target = tmp_path / "code.py"
+    target.write_text("def foo():\n    return 1\n", encoding="utf-8")
+
+    result = _execute_tool(
+        "edit_file",
+        {"path": "code.py", "old_string": "return 99", "new_string": "return 2"},
+        cwd=tmp_path,
+        scope_prefixes=["."],
+    )
+    payload = json.loads(result)
+
+    assert "error" in payload
+    assert "not found" in payload["error"].lower()
+    assert target.read_text(encoding="utf-8") == "def foo():\n    return 1\n"
+
+
+def test_execute_tool_edit_file_multiple_matches_returns_count_error(tmp_path: Path) -> None:
+    target = tmp_path / "code.py"
+    target.write_text("x = 1\nx = 1\nx = 1\n", encoding="utf-8")
+
+    result = _execute_tool(
+        "edit_file",
+        {"path": "code.py", "old_string": "x = 1", "new_string": "x = 2"},
+        cwd=tmp_path,
+        scope_prefixes=["."],
+    )
+    payload = json.loads(result)
+
+    assert "error" in payload
+    assert "3 occurrences" in payload["error"]
+    assert target.read_text(encoding="utf-8") == "x = 1\nx = 1\nx = 1\n"
+
+
+def test_execute_tool_edit_file_rejects_path_escape(tmp_path: Path) -> None:
+    outside = tmp_path.parent / "outside_edit_file_target.txt"
+    outside.write_text("secret", encoding="utf-8")
+    try:
+        result = _execute_tool(
+            "edit_file",
+            {"path": "../outside_edit_file_target.txt", "old_string": "secret", "new_string": "x"},
+            cwd=tmp_path,
+            scope_prefixes=["."],
+        )
+        payload = json.loads(result)
+
+        assert "error" in payload
+        assert outside.read_text(encoding="utf-8") == "secret"
+    finally:
+        outside.unlink(missing_ok=True)
+
+
+def test_execute_tool_edit_file_rejects_out_of_scope_write(tmp_path: Path) -> None:
+    (tmp_path / "tests").mkdir()
+    target = tmp_path / "tests" / "bad.txt"
+    target.write_text("nope", encoding="utf-8")
+
+    result = _execute_tool(
+        "edit_file",
+        {"path": "tests/bad.txt", "old_string": "nope", "new_string": "yep"},
+        cwd=tmp_path,
+        scope_prefixes=["src/"],
+    )
+    payload = json.loads(result)
+
+    assert "error" in payload
+    assert target.read_text(encoding="utf-8") == "nope"
+
+
+def test_session_send_edit_file_updates_file(tmp_path: Path) -> None:
+    target = tmp_path / "code.py"
+    target.write_text("def foo():\n    return 1\n", encoding="utf-8")
+
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
+    responses = [
+        _tool_call_response(
+            "edit_file",
+            {"path": "code.py", "old_string": "return 1", "new_string": "return 2"},
+        ),
+        _stop_response("Edited."),
+    ]
+    with patch(
+        "agent_fleet.openrouter_backend._call_openrouter_raw",
+        side_effect=responses,
+    ):
+        result = session.send("edit code.py", max_tokens=100, timeout_s=30)
+
+    assert result.exit_code == 0
+    assert "edit_file" in result.mcp_tool_calls
+    assert target.read_text(encoding="utf-8") == "def foo():\n    return 2\n"
+
+
+def test_run_sends_edit_file_in_tools_array(tmp_path: Path) -> None:
+    """edit_file must be advertised to the model alongside the other file tools."""
+    payload = {"id": "gen-1", "choices": [{"message": {"content": "ok"}}]}
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    captured: dict[str, Any] = {}
+
+    def _capture(req: urllib.request.Request, timeout: int) -> MagicMock:  # noqa: ARG001
+        data = req.data
+        assert isinstance(data, bytes)
+        captured["body"] = json.loads(data.decode("utf-8"))
+        return _fake_urlopen_response(payload)
+
+    with patch("agent_fleet.openrouter_backend.urllib.request.urlopen", side_effect=_capture):
+        backend.run("do a task", max_tokens=100, timeout_s=30, cwd=tmp_path)
+
+    tools = captured["body"].get("tools")
+    tool_names = {t["function"]["name"] for t in tools}
+    assert "edit_file" in tool_names
+
+
+# --- run_command timeout: configurability + partial output ---------------
+
+
+def test_default_command_timeout_s_default_is_600(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AGENT_FLEET_COMMAND_TIMEOUT_S", raising=False)
+    assert _default_command_timeout_s() == 600
+
+
+def test_default_command_timeout_s_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_FLEET_COMMAND_TIMEOUT_S", "120")
+    assert _default_command_timeout_s() == 120
+
+
+def test_default_command_timeout_s_invalid_value_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENT_FLEET_COMMAND_TIMEOUT_S", "not-a-number")
+    assert _default_command_timeout_s() == 600
+
+
+def test_decode_partial_output_handles_none_bytes_and_str() -> None:
+    assert _decode_partial_output(None) == ""
+    assert _decode_partial_output(b"hello") == "hello"
+    assert _decode_partial_output("hello") == "hello"
+
+
+def test_execute_tool_run_command_timeout_returns_partial_output(tmp_path: Path) -> None:
+    import subprocess
+
+    timeout_exc = subprocess.TimeoutExpired(
+        cmd="npm test",
+        timeout=60,
+        output="test 1 passed\ntest 2 passed\n",
+        stderr="warning: slow test\n",
+    )
+    with patch("agent_fleet.openrouter_backend.subprocess.run", side_effect=timeout_exc):
+        result = _execute_tool(
+            "run_command",
+            {"command": "npm test"},
+            cwd=tmp_path,
+            scope_prefixes=["."],
+        )
+    payload = json.loads(result)
+
+    assert "timed out" in payload["error"].lower()
+    assert payload["stdout"] == "test 1 passed\ntest 2 passed\n"
+    assert payload["stderr"] == "warning: slow test\n"
+
+
+def test_execute_tool_run_command_timeout_none_output_does_not_crash(tmp_path: Path) -> None:
+    import subprocess
+
+    timeout_exc = subprocess.TimeoutExpired(cmd="sleep 999", timeout=60)
+    with patch("agent_fleet.openrouter_backend.subprocess.run", side_effect=timeout_exc):
+        result = _execute_tool(
+            "run_command",
+            {"command": "sleep 999"},
+            cwd=tmp_path,
+            scope_prefixes=["."],
+        )
+    payload = json.loads(result)
+
+    assert "timed out" in payload["error"].lower()
+    assert payload["stdout"] == ""
+    assert payload["stderr"] == ""
+
+
+# --- Per-iteration progress logging & stall/thrash detection -------------
+
+
+def test_session_send_logs_progress_line_per_iteration(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    (tmp_path / "hello.txt").write_text("SECRET-FILE-CONTENTS-1234", encoding="utf-8")
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
+    responses = [
+        _tool_call_response("read_file", {"path": "hello.txt"}),
+        _stop_response("I read the file."),
+    ]
+    with (
+        patch("agent_fleet.openrouter_backend._call_openrouter_raw", side_effect=responses),
+        caplog.at_level("INFO", logger="agent_fleet.openrouter_backend"),
+    ):
+        session.send("read hello.txt", max_tokens=100, timeout_s=30)
+
+    progress_lines = [r.message for r in caplog.records if r.message.startswith("iter ")]
+    assert progress_lines, "expected at least one per-iteration progress line"
+    line = progress_lines[0]
+    assert "iter 1/" in line
+    assert "read_file" in line
+    assert "tokens=" in line
+    assert "elapsed=" in line
+    # Never leak file contents into the progress log.
+    assert "SECRET-FILE-CONTENTS-1234" not in line
+
+
+def test_session_send_progress_line_truncates_long_command(tmp_path: Path) -> None:
+    long_cmd = "echo " + ("x" * 200)
+    responses = [
+        _tool_call_response("run_command", {"command": long_cmd}),
+        _stop_response("Done."),
+    ]
+    from agent_fleet.openrouter_backend import _describe_tool_call
+
+    desc = _describe_tool_call("run_command", {"command": long_cmd})
+    assert len(desc) <= 100
+    assert desc.startswith("run_command(")
+
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
+    with patch("agent_fleet.openrouter_backend._call_openrouter_raw", side_effect=responses):
+        result = session.send("run a long command", max_tokens=100, timeout_s=30)
+    assert result.exit_code == 0
+
+
+def test_session_send_logs_summary_on_normal_exit(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
+    responses = [
+        _tool_call_response("write_file", {"path": "out.txt", "content": "hi"}),
+        _stop_response("Done."),
+    ]
+    with (
+        patch("agent_fleet.openrouter_backend._call_openrouter_raw", side_effect=responses),
+        caplog.at_level("INFO", logger="agent_fleet.openrouter_backend"),
+    ):
+        session.send("write out.txt", max_tokens=100, timeout_s=30)
+
+    summary_lines = [r.message for r in caplog.records if "session summary" in r.message]
+    assert len(summary_lines) == 1
+    assert "exit=success" in summary_lines[0]
+    assert "mutations=1" in summary_lines[0]
+
+
+def test_session_send_logs_summary_on_max_iterations_exit(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
+    endless = _tool_call_response("read_file", {"path": "missing.txt"})
+
+    with (
+        patch("agent_fleet.openrouter_backend._MAX_TOOL_ITERATIONS", 3),
+        patch(
+            "agent_fleet.openrouter_backend._call_openrouter_raw",
+            side_effect=lambda *a, **k: endless,  # noqa: ARG005
+        ),
+        caplog.at_level("INFO", logger="agent_fleet.openrouter_backend"),
+    ):
+        result = session.send("loop forever", max_tokens=100, timeout_s=30)
+
+    assert result.exit_code == 1
+    summary_lines = [r.message for r in caplog.records if "session summary" in r.message]
+    assert len(summary_lines) == 1
+    assert "exit=max_iterations" in summary_lines[0]
+    assert "iterations=3/3" in summary_lines[0]
+
+
+def test_session_send_stall_warning_fires_at_25(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
+    # A read_file call never mutates a file — 30 iterations of it should
+    # cross the 25-iteration thrash-warning threshold without aborting.
+    endless = _tool_call_response("read_file", {"path": "missing.txt"})
+
+    with (
+        patch("agent_fleet.openrouter_backend._MAX_TOOL_ITERATIONS", 30),
+        patch(
+            "agent_fleet.openrouter_backend._call_openrouter_raw",
+            side_effect=lambda *a, **k: endless,  # noqa: ARG005
+        ),
+        caplog.at_level("WARNING", logger="agent_fleet.openrouter_backend"),
+    ):
+        result = session.send("explore forever", max_tokens=100, timeout_s=30)
+
+    assert result.exit_code == 1  # hits the iteration cap, not an abort
+    thrash_warnings = [r.message for r in caplog.records if "thrashing" in r.message]
+    assert any("25" in msg for msg in thrash_warnings)
+
+
+def test_session_send_stall_abort_unset_does_not_abort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Read-only/plan-mode personas must never be aborted by default."""
+    monkeypatch.delenv("AGENT_FLEET_STALL_ABORT", raising=False)
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
+    endless = _tool_call_response("read_file", {"path": "missing.txt"})
+
+    with (
+        patch("agent_fleet.openrouter_backend._MAX_TOOL_ITERATIONS", 60),
+        patch(
+            "agent_fleet.openrouter_backend._call_openrouter_raw",
+            side_effect=lambda *a, **k: endless,  # noqa: ARG005
+        ),
+    ):
+        result = session.send("audit only", max_tokens=100, timeout_s=30)
+
+    # Hits the iteration cap (never an early stall-abort).
+    assert result.exit_code == 1
+    assert "max tool iterations (60)" in result.stderr
+    assert "Aborted" not in result.stderr
+
+
+def test_session_send_stall_abort_triggers_with_env_var(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AGENT_FLEET_STALL_ABORT", "3")
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
+    endless = _tool_call_response("read_file", {"path": "missing.txt"})
+
+    with (
+        patch("agent_fleet.openrouter_backend._MAX_TOOL_ITERATIONS", 50),
+        patch(
+            "agent_fleet.openrouter_backend._call_openrouter_raw",
+            side_effect=lambda *a, **k: endless,  # noqa: ARG005
+        ),
+    ):
+        result = session.send("explore forever", max_tokens=100, timeout_s=30)
+
+    assert result.exit_code == 1
+    assert (
+        "Aborted: 3 consecutive iterations with no file changes (AGENT_FLEET_STALL_ABORT=3)"
+        in result.stderr
+    )
+
+
+def test_session_send_mutation_resets_stall_counter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A mutating iteration resets the consecutive non-mutation counter,
+    so it must not trip an abort threshold crossed only by non-mutating runs
+    before and after the mutation."""
+    monkeypatch.setenv("AGENT_FLEET_STALL_ABORT", "4")
+    backend = OpenRouterBackend(api_key="sk-or-test")
+    session = backend.create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
+
+    read_call = _tool_call_response("read_file", {"path": "missing.txt"})
+    write_call = _tool_call_response("write_file", {"path": "out.txt", "content": "hi"})
+    # 3 non-mutating, 1 mutating (resets), 3 more non-mutating: counter never
+    # reaches 4 consecutive because of the reset in the middle.
+    sequence = [read_call, read_call, read_call, write_call, read_call, read_call, read_call]
+
+    with (
+        patch("agent_fleet.openrouter_backend._MAX_TOOL_ITERATIONS", len(sequence)),
+        patch(
+            "agent_fleet.openrouter_backend._call_openrouter_raw",
+            side_effect=sequence,
+        ),
+    ):
+        result = session.send("mixed activity", max_tokens=100, timeout_s=30)
+
+    assert "Aborted" not in result.stderr

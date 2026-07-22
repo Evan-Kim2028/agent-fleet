@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import importlib.resources
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -20,6 +21,63 @@ from agent_fleet.emit import emit
 from agent_fleet.personas import YamlPersonaResolver
 from agent_fleet.repo import RepoConfig, find_repo_config
 from agent_fleet.runner import run_full_pipeline
+
+
+def _parse_dotenv_line(line: str) -> tuple[str, str] | None:
+    """Parse a single ``KEY=VALUE`` line from a .env file.
+
+    Returns ``None`` for blank lines, comments, or malformed lines rather
+    than raising.
+    """
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        return None
+    if stripped.startswith("export "):
+        stripped = stripped[len("export ") :].lstrip()
+    if "=" not in stripped:
+        return None
+    key, _, value = stripped.partition("=")
+    key = key.strip()
+    if not key or not key.replace("_", "").isalnum() or key[0].isdigit():
+        return None
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        value = value[1:-1]
+    return key, value
+
+
+def _load_dotenv_file(path: Path) -> None:
+    """Load ``KEY=VALUE`` pairs from ``path`` into ``os.environ``.
+
+    Never overrides variables already present in the real environment.
+    Silently no-ops when the file is absent or unreadable. Never logs or
+    raises with any value from the file.
+    """
+    try:
+        if not path.is_file():
+            return
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    for line in text.splitlines():
+        parsed = _parse_dotenv_line(line)
+        if parsed is None:
+            continue
+        key, value = parsed
+        os.environ.setdefault(key, value)
+
+
+def _load_dotenv_files(workspace: str | None) -> None:
+    """Load .env from cwd, and from the resolved workspace root if different."""
+    cwd = Path.cwd()
+    _load_dotenv_file(cwd / ".env")
+    if workspace:
+        try:
+            workspace_path = Path(workspace).expanduser().resolve()
+        except OSError:
+            return
+        if workspace_path != cwd.resolve():
+            _load_dotenv_file(workspace_path / ".env")
 
 
 def cmd_review(args: argparse.Namespace) -> int:
@@ -117,6 +175,13 @@ def _parse_skills_args(args: argparse.Namespace) -> tuple[tuple[str, ...], str]:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
+    from agent_fleet.telemetry import configure_fleet_logging
+
+    # Without this, the backend's per-iteration progress logging (logger.info)
+    # is silently dropped for `fleet run` — only cmd_loop configured logging,
+    # so a 45-minute run produced no output until it finished.
+    configure_fleet_logging()
+
     # Build context with require_env=False so dry_run can early-return first.
     ctx, err = build_fleet_context(
         ContextOptions(
@@ -667,7 +732,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         }
         print(json.dumps(payload, indent=2))
     else:
-        model_s = model or "(backend default)"
+        from agent_fleet.backends import backend_default_model
+
+        model_s = model or backend_default_model(backend) or "(backend default)"
         print(f"backend: {backend}  model: {model_s}")
         print(render_doctor(checks))
     return doctor_exit_code(checks)
@@ -695,6 +762,8 @@ def cmd_config_set_backend(args: argparse.Namespace) -> int:
         data["default_model"] = str(args.model).strip()
     elif backend == "grok" and not data.get("default_model"):
         data["default_model"] = "grok-4.5"
+    elif backend == "qwen" and not data.get("default_model"):
+        data["default_model"] = "qwen3.8-max-preview"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         yaml.safe_dump(data, sort_keys=False, default_flow_style=False), encoding="utf-8"
@@ -850,7 +919,7 @@ def main(argv: list[str] | None = None) -> int:
     run_p.add_argument("--persona", help="Persona id (default: repo or fleet config)")
     run_p.add_argument(
         "--backend",
-        help="Execution backend for this run (cursor|grok|kimi|openrouter). "
+        help="Execution backend for this run (cursor|grok|kimi|openrouter|qwen). "
         "Overrides AGENT_FLEET_BACKEND and fleet.yaml default_backend.",
     )
     run_p.add_argument(
@@ -942,7 +1011,7 @@ def main(argv: list[str] | None = None) -> int:
     doctor_p.add_argument("--workspace", help="Repo path (checks for .agent-fleet.yaml)")
     doctor_p.add_argument(
         "--backend",
-        help="Check auth for this backend (cursor|grok|kimi|openrouter). "
+        help="Check auth for this backend (cursor|grok|kimi|openrouter|qwen). "
         "Overrides AGENT_FLEET_BACKEND and fleet.yaml.",
     )
     doctor_p.add_argument(
@@ -963,11 +1032,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     set_backend_p.add_argument(
         "backend",
-        help="Backend name: cursor | grok | kimi | openrouter",
+        help="Backend name: cursor | grok | kimi | openrouter | qwen",
     )
     set_backend_p.add_argument(
         "--model",
-        help="Also set default_model (grok defaults to grok-4.5 if unset)",
+        help="Also set default_model (grok defaults to grok-4.5, qwen to "
+        "qwen3.8-max-preview, if unset)",
     )
     set_backend_p.set_defaults(func=cmd_config_set_backend)
 
@@ -1192,6 +1262,7 @@ def main(argv: list[str] | None = None) -> int:
     normalized = normalize_argv(raw, set(sub.choices), Path.cwd())
 
     args = parser.parse_args(normalized)
+    _load_dotenv_files(getattr(args, "workspace", None))
     return args.func(args)
 
 

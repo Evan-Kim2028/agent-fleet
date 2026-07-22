@@ -40,7 +40,23 @@ def run_pr_review(
     engine = backend or make_backend(config)
 
     diff, files = get_working_tree_diff(cwd=workspace, base_branch=base_branch)
-    if is_trivial_pr(files, pr_config.trivial_patterns):
+    if not files:
+        # No changed files at all is not "trivial" — it means there is
+        # nothing to review. Surface this distinctly instead of silently
+        # approving via the trivial fast-path.
+        analysis = {
+            "pr_type": "other",
+            "primary_areas": [],
+            "risk_level": "medium",
+            "risk_reasoning": "No files were modified — empty changeset.",
+            "summary": "Skipped deep analysis: no files were modified.",
+            "deep_analysis": "",
+            "recommendations": {},
+            "findings": [],
+            "suggestions": [],
+            "skipped": "empty_changeset",
+        }
+    elif is_trivial_pr(files, pr_config.trivial_patterns):
         analysis = {
             "pr_type": "docs",
             "primary_areas": [],

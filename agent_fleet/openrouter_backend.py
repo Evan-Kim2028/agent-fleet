@@ -14,8 +14,8 @@ passed through to OpenRouter unchanged.
 
 Tool calling: the backend implements ``SessionCapableBackend`` —
 ``create_session()`` returns an ``OpenRouterSession`` that drives a standard
-OpenAI-compatible tool-calling loop (read_file, write_file, run_command,
-list_files). The model calls tools, we execute them locally, feed results
+OpenAI-compatible tool-calling loop (read_file, write_file, edit_file,
+run_command, list_files). The model calls tools, we execute them locally, feed results
 back, and loop until ``finish_reason: "stop"``. This lets the OpenRouter
 backend actually edit files and produce PRs, mirroring what the Cursor SDK
 gives us for free.
@@ -33,6 +33,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.observability.context import get_run_context, get_run_log
@@ -41,7 +42,6 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-    from pathlib import Path
 
     from agent_fleet.config import McpServerSpec
     from agent_fleet.hooks import AgentMode, McpRequirement
@@ -56,16 +56,76 @@ DEFAULT_MODEL = "tencent/hy3:free"
 def _default_max_tool_iterations() -> int:
     raw = os.environ.get("OPENROUTER_MAX_TOOL_ITERATIONS")
     if raw is None:
-        return 80
+        return 200
     try:
         return int(raw)
     except ValueError:
-        return 80
+        return 200
 
 
 _MAX_TOOL_ITERATIONS = _default_max_tool_iterations()
-# Timeout for run_command tool calls.
-_COMMAND_TIMEOUT_S = 60
+
+
+# Timeout for run_command tool calls. Overridable via
+# AGENT_FLEET_COMMAND_TIMEOUT_S (falls back to the default on invalid/missing
+# values) — mirrors _default_max_tool_iterations().
+def _default_command_timeout_s() -> int:
+    raw = os.environ.get("AGENT_FLEET_COMMAND_TIMEOUT_S")
+    if raw is None:
+        return 600
+    try:
+        return int(raw)
+    except ValueError:
+        return 600
+
+
+_COMMAND_TIMEOUT_S = _default_command_timeout_s()
+
+# Tools whose invocation mutates files in the workspace. Used by the
+# thrash/stall detector in OpenRouterSession.send() to track consecutive
+# non-mutating iterations.
+_MUTATING_TOOLS = frozenset({"write_file", "edit_file"})
+
+# Consecutive iterations at which a thrashing warning fires (info-only —
+# read-only/audit personas legitimately make zero file mutations for an
+# entire run, so this never aborts on its own; see _stall_abort_threshold()).
+_STALL_WARNING_THRESHOLDS = (25, 50)
+
+
+def _stall_abort_threshold() -> int:
+    """Consecutive non-mutating iterations after which send() hard-aborts.
+
+    Overridable via AGENT_FLEET_STALL_ABORT (an integer). Defaults to 0
+    (disabled) — unset, non-integer, zero, or negative values all disable
+    the abort so read-only/plan-mode personas that never touch files are
+    never killed by this check.
+    """
+    raw = os.environ.get("AGENT_FLEET_STALL_ABORT")
+    if raw is None:
+        return 0
+    try:
+        value = int(raw)
+    except ValueError:
+        return 0
+    return value if value > 0 else 0
+
+
+def _describe_tool_call(name: str, args: dict[str, Any]) -> str:
+    """One-line, secret-safe description of a tool call for progress logs.
+
+    Never includes file contents, only the target path (for file tools) or a
+    truncated command string (for run_command) — never argument values that
+    could carry secrets/env content.
+    """
+    if name == "run_command":
+        command = str(args.get("command", ""))
+        if len(command) > 80:
+            command = command[:77] + "..."
+        return f"run_command({command!r})"
+    if name in ("read_file", "write_file", "edit_file", "list_files"):
+        path = str(args.get("path", ""))
+        return f"{name}({path})"
+    return f"{name}(...)"
 
 # Retry policy for transport/rate-limit/server errors in _call_openrouter_raw.
 _MAX_RETRIES = 3
@@ -202,6 +262,31 @@ _FILE_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "edit_file",
+            "description": (
+                "Replace one exact occurrence of old_string with new_string in an existing "
+                "file. Prefer this over write_file when modifying an existing file — it "
+                "avoids round-tripping the whole file. old_string must match exactly once in "
+                "the file; include enough surrounding context to make it unique. "
+                "Path is relative to the workspace root."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Relative file path"},
+                    "old_string": {
+                        "type": "string",
+                        "description": "Exact text to replace (must occur exactly once)",
+                    },
+                    "new_string": {"type": "string", "description": "Replacement text"},
+                },
+                "required": ["path", "old_string", "new_string"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "run_command",
             "description": (
                 "Run a shell command in the workspace directory. "
@@ -300,6 +385,21 @@ def _command_violates_scope(command: str, scope_prefixes: list[str]) -> str | No
     return None
 
 
+def _decode_partial_output(output: bytes | str | None) -> str:
+    """Decode the partial stdout/stderr captured on a ``TimeoutExpired``.
+
+    ``subprocess.TimeoutExpired.stdout``/``.stderr`` are ``bytes`` when the
+    call didn't pass ``text=True`` and ``str`` otherwise (our call site does
+    pass ``text=True``, but decode defensively either way); either can be
+    ``None`` if nothing was captured before the timeout.
+    """
+    if output is None:
+        return ""
+    if isinstance(output, bytes):
+        return output.decode("utf-8", errors="replace")
+    return output
+
+
 def _execute_tool(
     name: str,
     args: dict[str, Any],
@@ -358,6 +458,38 @@ def _execute_tool_inner(
         except OSError as exc:
             return json.dumps({"error": str(exc)})
 
+    if name == "edit_file":
+        path = _safe_resolve(str(args.get("path", "")), cwd)
+        if path is None:
+            return json.dumps({"error": f"Path outside workspace: {args.get('path')}"})
+        if not _is_within_scope(path, scope_prefixes, cwd):
+            return json.dumps({"error": f"Path outside scope: {args.get('path')}"})
+        if not path.is_file():
+            return json.dumps({"error": f"File not found: {args.get('path')}"})
+        old_string = str(args.get("old_string", ""))
+        new_string = str(args.get("new_string", ""))
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            return json.dumps({"error": str(exc)})
+        count = content.count(old_string)
+        if count == 0:
+            return json.dumps({"error": "old_string not found in file"})
+        if count > 1:
+            return json.dumps(
+                {
+                    "error": (
+                        f"old_string is not unique: found {count} occurrences. "
+                        "Include more surrounding context to disambiguate."
+                    )
+                }
+            )
+        try:
+            path.write_text(content.replace(old_string, new_string, 1), encoding="utf-8")
+            return json.dumps({"ok": True, "path": str(path.relative_to(cwd.resolve()))})
+        except OSError as exc:
+            return json.dumps({"error": str(exc)})
+
     if name == "run_command":
         command = str(args.get("command", ""))
         if not command:
@@ -387,8 +519,14 @@ def _execute_tool_inner(
                     "stderr": proc.stderr[:10000],
                 }
             )
-        except subprocess.TimeoutExpired:
-            return json.dumps({"error": f"Command timed out after {_COMMAND_TIMEOUT_S}s"})
+        except subprocess.TimeoutExpired as exc:
+            return json.dumps(
+                {
+                    "error": f"Command timed out after {_COMMAND_TIMEOUT_S}s",
+                    "stdout": _decode_partial_output(exc.stdout)[:20000],
+                    "stderr": _decode_partial_output(exc.stderr)[:10000],
+                }
+            )
         except OSError as exc:
             return json.dumps({"error": str(exc)})
 
@@ -699,7 +837,7 @@ _JSON_TOOL_CALL_RE = re.compile(
     re.DOTALL,
 )
 
-_KNOWN_TOOLS = {"read_file", "write_file", "run_command", "list_files"}
+_KNOWN_TOOLS = {"read_file", "write_file", "edit_file", "run_command", "list_files"}
 
 # Some models use Cursor/Claude-Code-style tool names instead of our defined
 # names. Map common aliases to our canonical tool names.
@@ -956,7 +1094,10 @@ class OpenRouterSession:
                 "role": "system",
                 "content": (
                     f"You are a {persona_name} agent working in a git workspace at {cwd}. "
-                    "You have access to tools: read_file, write_file, run_command, list_files. "
+                    "You have access to tools: read_file, write_file, edit_file, run_command, "
+                    "list_files. Prefer edit_file over write_file when modifying an existing "
+                    "file — it replaces one exact snippet instead of resending the whole file. "
+                    "Reserve write_file for creating new files or full rewrites. "
                     "You MUST call tools using the structured tool_calls mechanism — "
                     "do NOT write tool calls as text in your response. "
                     "Always verify your changes by reading the file back after writing. "
@@ -1040,6 +1181,75 @@ class OpenRouterSession:
         tool_calls_made: list[str] = []
         total_usage: dict[str, int] = {}
         corrections = 0
+        file_mutation_count = 0
+        consecutive_no_mutation = 0
+        stall_abort_threshold = _stall_abort_threshold()
+        iteration = -1  # set for the exception handler if we fail before the loop runs
+
+        def _cumulative_tokens() -> int:
+            return total_usage.get("input_tokens", 0) + total_usage.get("output_tokens", 0)
+
+        def _emit_summary(exit_reason: str, iterations_used: int) -> None:
+            logger.info(
+                "OpenRouter session summary: iterations=%d/%d tokens=%d elapsed=%.1fs "
+                "mutations=%d exit=%s",
+                iterations_used,
+                _MAX_TOOL_ITERATIONS,
+                _cumulative_tokens(),
+                time.monotonic() - t0,
+                file_mutation_count,
+                exit_reason,
+            )
+
+        def _after_iteration(
+            iteration: int, iter_descs: list[str], iter_mutated: bool
+        ) -> OpenRouterLLMResult | None:
+            """Log progress for one completed iteration and track stall state.
+
+            Returns an ``OpenRouterLLMResult`` if a configured hard stall
+            abort was crossed (caller should return it immediately), else
+            ``None`` to keep looping.
+            """
+            nonlocal file_mutation_count, consecutive_no_mutation
+            if iter_mutated:
+                file_mutation_count += 1
+                consecutive_no_mutation = 0
+            else:
+                consecutive_no_mutation += 1
+
+            logger.info(
+                "iter %d/%d: %s | tokens=%d elapsed=%.1fs",
+                iteration + 1,
+                _MAX_TOOL_ITERATIONS,
+                "; ".join(iter_descs) if iter_descs else "(no tool calls)",
+                _cumulative_tokens(),
+                time.monotonic() - t0,
+            )
+
+            if not iter_mutated and consecutive_no_mutation in _STALL_WARNING_THRESHOLDS:
+                logger.warning(
+                    "OpenRouter session may be thrashing (exploring without making "
+                    "changes): %d consecutive iterations with no file changes",
+                    consecutive_no_mutation,
+                )
+
+            if stall_abort_threshold and consecutive_no_mutation >= stall_abort_threshold:
+                _emit_summary(
+                    f"stall_abort({consecutive_no_mutation})", iteration + 1
+                )
+                return OpenRouterLLMResult(
+                    stdout="",
+                    stderr=(
+                        f"Aborted: {consecutive_no_mutation} consecutive iterations with "
+                        f"no file changes (AGENT_FLEET_STALL_ABORT={stall_abort_threshold})"
+                    ),
+                    exit_code=1,
+                    duration_s=time.monotonic() - t0,
+                    agent_id=self._agent_id,
+                    usage=total_usage or None,
+                    mcp_tool_calls=tuple(tool_calls_made),
+                )
+            return None
         # A missing/zero max_tokens leaves the request's max_tokens key
         # omitted, which falls back to whatever small default OpenRouter (or
         # the underlying provider) picks — too small for reasoning models.
@@ -1049,7 +1259,7 @@ class OpenRouterSession:
         )
 
         try:
-            for _iteration in range(_MAX_TOOL_ITERATIONS):
+            for iteration in range(_MAX_TOOL_ITERATIONS):
                 self._trim_history()
                 call_base_max_tokens = max(effective_max_tokens, self._reasoning_floor or 0)
                 data, wasted_usage, successful_max_tokens = _call_with_reasoning_escalation(
@@ -1082,6 +1292,7 @@ class OpenRouterSession:
 
                 choices = data.get("choices") or []
                 if not choices:
+                    _emit_summary("no_choices", iteration + 1)
                     return OpenRouterLLMResult(
                         stdout="",
                         stderr="OpenRouter returned no choices",
@@ -1107,6 +1318,8 @@ class OpenRouterSession:
                             "tool_calls": tool_calls,
                         }
                     )
+                    iter_descs: list[str] = []
+                    iter_mutated = False
                     for tc in tool_calls:
                         func = tc.get("function") or {}
                         tool_name = func.get("name", "")
@@ -1115,6 +1328,9 @@ class OpenRouterSession:
                         except json.JSONDecodeError:
                             tool_args = {}
                         tool_calls_made.append(tool_name)
+                        iter_descs.append(_describe_tool_call(tool_name, tool_args))
+                        if tool_name in _MUTATING_TOOLS:
+                            iter_mutated = True
                         result = _execute_tool(
                             tool_name,
                             tool_args,
@@ -1128,6 +1344,10 @@ class OpenRouterSession:
                                 "content": result,
                             }
                         )
+
+                    abort = _after_iteration(iteration, iter_descs, iter_mutated)
+                    if abort is not None:
+                        return abort
                     continue
 
                 # finish_reason == "stop" (or anything else) → we're done.
@@ -1148,6 +1368,7 @@ class OpenRouterSession:
                         duration_s=time.monotonic() - t0,
                         agent_id=self._agent_id,
                     )
+                    _emit_summary("no_content_after_reasoning", iteration + 1)
                     return OpenRouterLLMResult(
                         stdout="",
                         stderr=content,
@@ -1168,8 +1389,13 @@ class OpenRouterSession:
                     # doesn't confuse its own imagined responses with real results.
                     clean_content = _strip_fabricated_responses(content)
                     self._messages.append({"role": "assistant", "content": clean_content})
+                    text_iter_descs: list[str] = []
+                    text_iter_mutated = False
                     for idx, (tool_name, tool_args) in enumerate(text_tool_calls):
                         tool_calls_made.append(tool_name)
+                        text_iter_descs.append(_describe_tool_call(tool_name, tool_args))
+                        if tool_name in _MUTATING_TOOLS:
+                            text_iter_mutated = True
                         result = _execute_tool(
                             tool_name,
                             tool_args,
@@ -1183,6 +1409,9 @@ class OpenRouterSession:
                                 "content": result,
                             }
                         )
+                    abort = _after_iteration(iteration, text_iter_descs, text_iter_mutated)
+                    if abort is not None:
+                        return abort
                     continue
 
                 # Guard: detect repetition loops and hallucinated completions.
@@ -1226,6 +1455,7 @@ class OpenRouterSession:
                     # successful final answer. Fail loudly so callers can
                     # tell the difference between a genuine result and a
                     # session that gave up on guiding the model.
+                    _emit_summary("correction_limit_reached", iteration + 1)
                     return OpenRouterLLMResult(
                         stdout=content,
                         stderr=(
@@ -1239,6 +1469,7 @@ class OpenRouterSession:
                         mcp_tool_calls=tuple(tool_calls_made),
                     )
 
+                _emit_summary("success", iteration + 1)
                 return OpenRouterLLMResult(
                     stdout=content,
                     stderr="",
@@ -1258,6 +1489,7 @@ class OpenRouterSession:
                 duration_s=time.monotonic() - t0,
                 agent_id=self._agent_id,
             )
+            _emit_summary("max_iterations", _MAX_TOOL_ITERATIONS)
             return OpenRouterLLMResult(
                 stdout="",
                 stderr=f"OpenRouter session hit max tool iterations ({_MAX_TOOL_ITERATIONS})",
@@ -1269,6 +1501,7 @@ class OpenRouterSession:
             )
 
         except Exception as exc:
+            _emit_summary(f"exception({type(exc).__name__})", iteration + 1)
             return OpenRouterLLMResult(
                 stdout="",
                 stderr=str(exc),
@@ -1363,7 +1596,7 @@ class OpenRouterBackend:
         model: str | None = None,
         mode: str | None = None,
     ) -> OpenRouterLLMResult:
-        del memory_limit, mode, cwd
+        del memory_limit, mode
 
         if not self.api_key:
             return OpenRouterLLMResult(
@@ -1374,47 +1607,38 @@ class OpenRouterBackend:
             )
 
         selected_model = model or self.model
-        scope_note = ""
-        if allowed_tools:
-            scoped = [
-                tool.removeprefix("path:") for tool in allowed_tools if tool.startswith("path:")
-            ]
-            if scoped:
-                scope_note = (
-                    "\n\nHard scope constraint: only modify files under these prefixes: "
-                    + ", ".join(scoped)
-                )
-        prompt_with_scope = f"{prompt}{scope_note}" if scope_note else prompt
 
         t0 = time.monotonic()
+        # Delegate to the durable session machinery so this call gets the
+        # same tool-execution loop (_FILE_TOOLS: read_file/write_file/
+        # edit_file/run_command/list_files) that OpenRouterSession.send() already
+        # provides. Historically `run()` called the stateless, tool-blind
+        # `call_openrouter()` helper directly, which never advertised any
+        # tools to the model. `OpenRouterSession.send()` already computes
+        # the same "hard scope constraint" note from `allowed_tools` and
+        # appends it to the prompt itself, so we pass the original `prompt`
+        # here rather than duplicating that logic.
+        session = OpenRouterSession(
+            backend=self,
+            cwd=cwd or Path.cwd(),
+            model=selected_model,
+            persona_name="agent",
+        )
         try:
-            content, usage, agent_id = call_openrouter(
-                prompt_with_scope,
-                api_key=self.api_key,
-                model=selected_model,
-                base_url=self.base_url,
-                timeout=timeout_s if timeout_s > 0 else 720,
+            result = session.send(
+                prompt,
                 max_tokens=max_tokens,
+                timeout_s=timeout_s,
+                allowed_tools=allowed_tools,
             )
-            duration_s = time.monotonic() - t0
-            # Wire usage into the fleet's observability system.
-            normalized = _normalize_openrouter_usage(usage)
-            if normalized:
-                ctx = get_run_context()
-                _log_llm_usage(
-                    phase=ctx.phase if ctx is not None else None,
-                    model=selected_model,
-                    usage=normalized,
-                    duration_s=duration_s,
-                    agent_id=agent_id,
-                )
             return OpenRouterLLMResult(
-                stdout=content,
-                stderr="",
-                exit_code=0,
-                duration_s=duration_s,
-                agent_id=agent_id,
-                usage=normalized,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                exit_code=result.exit_code,
+                duration_s=time.monotonic() - t0,
+                agent_id=result.agent_id,
+                usage=result.usage,
+                mcp_tool_calls=result.mcp_tool_calls,
             )
         except Exception as exc:
             return OpenRouterLLMResult(
@@ -1423,3 +1647,5 @@ class OpenRouterBackend:
                 exit_code=1,
                 duration_s=time.monotonic() - t0,
             )
+        finally:
+            session.dispose()

@@ -9,6 +9,7 @@ within a manageable context window.
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.contracts.review import ReviewResult, ReviewVerdict, validate_review
@@ -20,6 +21,68 @@ if TYPE_CHECKING:
 
 # Files-changed threshold above which reviewer shards into multiple LLM calls.
 DEFAULT_FANOUT_THRESHOLD = 20
+
+# Patterns identifying test files, inferred from this repo's own conventions
+# (pytest `test_*.py` / `*_test.py`, `tests/` dirs) plus common JS/TS/other
+# ecosystem conventions (`*.test.ts(x)`, `*.spec.ts`, `__tests__/`).
+_TEST_FILE_PATTERNS: tuple[str, ...] = (
+    r"(^|/)test_[^/]+\.py$",
+    r"_test\.py$",
+    r"\.test\.[cm]?[jt]sx?$",
+    r"\.spec\.[cm]?[jt]sx?$",
+    r"(^|/)tests?/",
+    r"(^|/)__tests__/",
+)
+
+# Reason surfaced when a changeset is entirely test files. Kept as a module
+# constant so callers/tests can assert on the exact wording.
+TESTS_ONLY_REASON = "changeset contains only test files — no implementation change"
+
+
+def is_tests_only_changeset(files: list[str]) -> bool:
+    """True when *files* is non-empty and every path looks like a test file.
+
+    Mirrors ``is_trivial_pr``'s shape (empty is NOT "tests-only" — that's the
+    empty-changeset gate's job) but matches test-file conventions instead of
+    docs/lock/asset conventions.
+    """
+    if not files:
+        return False
+    return all(any(re.search(pattern, f) for pattern in _TEST_FILE_PATTERNS) for f in files)
+
+
+def _flag_tests_only_approvals(
+    results: list[ReviewResult], changed_files: list[str]
+) -> list[ReviewResult]:
+    """Downgrade a bare APPROVE to REQUEST_CHANGES when the diff is tests-only.
+
+    A tests-only changeset is often legitimate (added coverage, a test-only
+    refactor, a regression test for an already-fixed bug), so this does not
+    hard-fail the run — it reuses the existing REQUEST_CHANGES verdict /
+    ``review_changes_requested`` outcome vocabulary so the run still lands in
+    ``ok_outcomes`` and gets a draft/salvage-style path instead of a silent
+    "completed" approval. Non-APPROVE verdicts (already BLOCK or
+    REQUEST_CHANGES) are left untouched.
+    """
+    if not is_tests_only_changeset(changed_files):
+        return results
+    flagged: list[ReviewResult] = []
+    for result in results:
+        if result.verdict != ReviewVerdict.APPROVE:
+            flagged.append(result)
+            continue
+        flag_issue = {"severity": "medium", "file": None, "message": TESTS_ONLY_REASON}
+        issues = [*result.issues, flag_issue]
+        flagged.append(
+            ReviewResult(
+                pr_number=result.pr_number,
+                verdict=ReviewVerdict.REQUEST_CHANGES,
+                summary=f"{TESTS_ONLY_REASON}. {result.summary}".strip(),
+                issues=issues,
+                shard_id=result.shard_id,
+            )
+        )
+    return flagged
 
 
 def _extract_json(text: str) -> dict[str, Any]:
@@ -62,6 +125,20 @@ def _shard_by_directory(files: list[str]) -> dict[str, list[str]]:
     return shards
 
 
+# Max characters kept from a goal/context/summary string embedded in the
+# reviewer prompt. Keeps the prompt compact even if a caller passes a very
+# long task description.
+_PROMPT_FIELD_MAX_CHARS = 2000
+
+
+def _truncate(text: str, limit: int = _PROMPT_FIELD_MAX_CHARS) -> str:
+    """Truncate *text* to *limit* chars, appending a marker if cut."""
+    stripped = text.strip()
+    if len(stripped) <= limit:
+        return stripped
+    return stripped[:limit].rstrip() + " …[truncated]"
+
+
 def _build_prompt(
     pr_number: int,
     shard_files: list[str],
@@ -80,18 +157,34 @@ def _build_prompt(
     )
     files_block = "\n".join(f"  - {f}" for f in shard_files)
     task_block = ""
-    if task_goal.strip():
-        task_block = f"\nOriginal task:\n{task_goal.strip()}\n"
+    goal_stated = bool(task_goal.strip())
+    if goal_stated:
+        task_block = (
+            f"\nOriginal task (what this run was SUPPOSED to accomplish):\n"
+            f"{_truncate(task_goal)}\n"
+        )
     if task_context.strip():
-        task_block += f"\nTask context:\n{task_context.strip()}\n"
+        task_block += f"\nTask context:\n{_truncate(task_context)}\n"
     if implementation_summary.strip():
-        task_block += f"\nImplementer summary:\n{implementation_summary.strip()}\n"
+        task_block += f"\nImplementer summary:\n{_truncate(implementation_summary)}\n"
+
+    goal_check = (
+        "\nBefore verdicting, explicitly check whether the diff actually accomplishes "
+        "the original task above. A diff that is off-task (touches unrelated files, "
+        "implements something other than what was asked) or incomplete (e.g. adds only "
+        "tests/docs without the requested behavior change) must NOT be approved — verdict "
+        "it request_changes (or block for severe cases) and say why in summary/issues, even "
+        "if the changes present are individually clean and low-risk.\n"
+        if goal_stated
+        else ""
+    )
 
     return (
         f"You are a senior code reviewer for change set #{pr_number}.\n"
         f"{shard_note}\n\n"
         f"Files in scope for this review:\n{files_block}\n"
-        f"{task_block}\n"
+        f"{task_block}"
+        f"{goal_check}\n"
         f"Diff:\n{pr_diff or '(no diff captured — review from changed files and summary)'}\n\n"
         "Return ONLY a JSON object with these fields:\n"
         "  pr_number   (integer) — the change set number above\n"
@@ -222,6 +315,7 @@ def review(
     model: str | None = None,
     allowed_tools: list[str] | None = None,
     session: LLMSession | None = None,
+    allow_tests_only_approval: bool = False,
 ) -> list[ReviewResult]:
     """Run the Reviewer phase.
 
@@ -237,11 +331,21 @@ def review(
     (reviewers need global context).  The LLM must return ``ReviewResult``
     JSON.
 
+    A tests-only changeset (every changed path matches a test-file
+    convention) is a common, often-legitimate shape (new coverage, a
+    test-only refactor, a regression test for an already-fixed bug) — but it
+    is also exactly the shape of a run that never actually implemented the
+    requested behavior change. By default, a bare APPROVE on a tests-only
+    changeset is downgraded to REQUEST_CHANGES with a clear reason so it does
+    not silently look identical to a real fix landing. Pass
+    ``allow_tests_only_approval=True`` to opt out for callers/tasks where a
+    tests-only PR is known to be the intended deliverable.
+
     Returns ``list[ReviewResult]`` (always at least one element).
     Raises ``ValueError`` on JSON parse failure or schema validation error.
     """
     if len(changed_files) <= fanout_threshold:
-        return [
+        results = [
             _call_backend(
                 pr_number,
                 changed_files,
@@ -260,9 +364,12 @@ def review(
                 session=session,
             )
         ]
+        if allow_tests_only_approval:
+            return results
+        return _flag_tests_only_approvals(results, changed_files)
 
     shards = _shard_by_directory(changed_files)
-    results: list[ReviewResult] = []
+    results = []
     for shard_id, shard_files in shards.items():
         results.append(
             _call_backend(
@@ -283,4 +390,6 @@ def review(
                 session=session,
             )
         )
-    return results
+    if allow_tests_only_approval:
+        return results
+    return _flag_tests_only_approvals(results, changed_files)

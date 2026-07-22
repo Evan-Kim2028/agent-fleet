@@ -113,8 +113,11 @@ def truncate_diff(diff: str, max_chars: int) -> str:
 
 
 def is_trivial_pr(files: list[str], patterns: tuple[str, ...]) -> bool:
+    # An empty changeset is NOT "trivial" — it means nothing was reviewed at
+    # all, which must not be auto-approved via the trivial fast-path. Only a
+    # non-empty set of exclusively docs/lock/asset files is trivial.
     if not files:
-        return True
+        return False
     return all(any(re.search(pattern, path) for pattern in patterns) for path in files)
 
 

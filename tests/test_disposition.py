@@ -101,6 +101,14 @@ _DEFAULT = DispositionPolicy()
             False,
             id="verify_fatal_no_files_still_abandons",
         ),
+        pytest.param(
+            RunFacts(verify_ok=True, verify_fatal=False, scope_violated=False, changed_files=()),
+            _DEFAULT,
+            DispositionKind.NOOP,
+            "completed_noop",
+            False,
+            id="verify_ok_but_no_changed_files_is_noop_not_completed",
+        ),
     ],
 )
 def test_decide_disposition(

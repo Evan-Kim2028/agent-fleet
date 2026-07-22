@@ -383,6 +383,7 @@ class LocalFleetRunner:
         repo_root: Path,
         base_branch: str,
         title: str,
+        body: str,
         run_log: RunLog,
         phase_graph: PhaseGraph,
         effective_max_retries: int,
@@ -834,6 +835,39 @@ class LocalFleetRunner:
                 )
                 _ok_policy = DispositionPolicy()
                 _ok_disp = decide_disposition(_ok_facts, _ok_policy)
+
+                if _ok_disp.kind == DispositionKind.NOOP:
+                    # verify passed but nothing changed — same treatment as the
+                    # commit_changes NOOP guard above: no PR, no REVIEW/TECH_LEAD,
+                    # a distinct non-"completed" outcome so an empty diff never
+                    # silently reports success.
+                    logger.info(
+                        "[%s] NOOP: verify passed with no changed files; "
+                        "skipping OPEN_PR/REVIEW",
+                        run_id,
+                    )
+                    ctx.phases["NOOP"] = {"reason": _ok_disp.reason}
+                    terminal = FleetRunResult(
+                        run_id=run_id,
+                        task_id=task_id,
+                        persona=persona,
+                        outcome=_ok_disp.outcome,
+                        task_spec=ts.to_dict(),
+                        summary=ctx.brief.summary if ctx.brief else "",
+                        changed_files=ctx.changed_files,
+                        commit_sha=ctx.commit_sha,
+                        branch_name=_branch,
+                        pr_number=None,
+                        phases=ctx.phases,
+                        duration_seconds=round(time.monotonic() - start, 2),
+                    )
+                    run_log.run_end(
+                        outcome=terminal.outcome,
+                        changed_lines=_changed_lines(worktree),
+                        **_run_end_kwargs(terminal, find_repo_config(repo_root)),
+                    )
+                    return PhaseResult(terminal=terminal)
+
                 _ok_pr_body = (
                     pr_body_builder(run_id, ctx.brief.summary if ctx.brief else None)
                     if pr_body_builder
@@ -866,6 +900,9 @@ class LocalFleetRunner:
                         ctx.changed_files,
                         backend=deps.backend,
                         session=ctx.session,
+                        task_goal=title,
+                        task_context=body,
+                        implementation_summary=ctx.brief.summary if ctx.brief else "",
                     )
                 ctx.phases["REVIEW"] = [r.to_dict() for r in review_results]
                 ctx.reviews = review_results
@@ -1180,6 +1217,7 @@ class LocalFleetRunner:
                     repo_root=repo_root,
                     base_branch=base_branch,
                     title=title,
+                    body=body,
                     run_log=run_log,
                     phase_graph=phase_graph,
                     effective_max_retries=effective_max_retries,

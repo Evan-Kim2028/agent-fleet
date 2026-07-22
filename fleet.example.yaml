@@ -3,7 +3,8 @@
 # Copy to ~/.agent-fleet/fleet.yaml (see docs/FLEET-CONFIG.md)
 # See docs/FLEET-CONFIG.md for paths, personas_dir rules, and import-shadow checks.
 
-# Default backend: cursor (Cursor SDK), kimi (Kimi Code CLI), openrouter (OpenRouter HTTP), or grok (Grok Build CLI)
+# Default backend: cursor (Cursor SDK), kimi (Kimi Code CLI), openrouter (OpenRouter HTTP),
+# grok (Grok Build CLI), or qwen (Alibaba Bailian, reuses the OpenRouter HTTP client)
 default_backend: cursor
 # composer-2.5 maps to the slow (non-fast) Cursor tier — agent-fleet
 # explicitly sends {fast=false} so you don't get silently routed to the
@@ -48,6 +49,13 @@ max_redispatches: 1
 # default_backend: grok
 # default_model: grok-4.5
 # grok_bin: ~/.grok/bin/grok
+
+# --- Optional: Qwen execution backend (Alibaba Bailian, Token Plan Team Edition) ---
+# Requires: no binary to install — reuses the OpenRouter OpenAI-compatible HTTP client
+# export QWEN_API_KEY=sk-...   # store in .env
+# default_backend: qwen
+# default_model: qwen3.8-max-preview
+# qwen_base_url: https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1
 
 # personas_dir — bundled personas ship in the installed package (agent_fleet/personas/).
 # Leave UNSET in this global file so fleet uses the package defaults.

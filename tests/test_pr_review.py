@@ -12,6 +12,12 @@ def test_is_trivial_pr_docs_only() -> None:
     assert is_trivial_pr(["README.md", "docs/guide.md"], PrReviewConfig().trivial_patterns)
 
 
+def test_is_trivial_pr_empty_file_list_is_not_trivial() -> None:
+    # An empty changeset must never be vacuously classified as "trivial" —
+    # that would auto-approve a run that changed nothing.
+    assert not is_trivial_pr([], PrReviewConfig().trivial_patterns)
+
+
 def test_is_deletion_only_pr() -> None:
     diff = "--- a/x.py\n+++ b/x.py\n-old\n-old2\n"
     assert is_deletion_only_pr(diff)

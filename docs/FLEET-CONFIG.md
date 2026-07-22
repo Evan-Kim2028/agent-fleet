@@ -57,7 +57,7 @@ fleet run "..." --backend grok
 fleet doctor --backend grok   # prints active backend + model, checks Grok auth
 ```
 
-See also: [GROK.md](GROK.md), [KIMI.md](KIMI.md), [OPENROUTER.md](OPENROUTER.md), [NEW-REPO.md](NEW-REPO.md), [PERSONAS.md](PERSONAS.md), [AGENT-FLEET-DEV.md](AGENT-FLEET-DEV.md).
+See also: [GROK.md](GROK.md), [KIMI.md](KIMI.md), [OPENROUTER.md](OPENROUTER.md), [QWEN.md](QWEN.md), [NEW-REPO.md](NEW-REPO.md), [PERSONAS.md](PERSONAS.md), [AGENT-FLEET-DEV.md](AGENT-FLEET-DEV.md).
 
 ## default_loadout_size
 

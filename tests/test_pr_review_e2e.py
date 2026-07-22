@@ -143,6 +143,49 @@ def test_run_pr_review_mock_backend(
     assert isinstance(result["changed_files"], list)
 
 
+@patch("agent_fleet.pr_review.runner.get_working_tree_diff")
+def test_run_pr_review_empty_changeset_does_not_auto_approve(
+    mock_diff: MagicMock,
+    sample_repo: Path,
+) -> None:
+    # Empty diff / no changed files at all — this must NOT hit the trivial
+    # fast-path and must NOT be auto-approved. No backend calls should be
+    # needed since the empty-changeset branch short-circuits before analysis.
+    mock_diff.return_value = ("", [])
+    backend = _MockBackend(responses=[])
+    result = run_pr_review(
+        workspace=sample_repo,
+        backend=backend,
+        base_branch="main",
+    )
+    assert result["changed_files"] == []
+    assert result["analysis"]["skipped"] != "trivial"
+    assert result["analysis"]["skipped"] == "empty_changeset"
+    assert result["verdict"] != "approve"
+
+
+@patch("agent_fleet.pr_review.runner.get_working_tree_diff")
+def test_run_pr_review_docs_only_nonempty_still_trivial_and_approves(
+    mock_diff: MagicMock,
+    sample_repo: Path,
+) -> None:
+    # Regression guard: a genuinely trivial-but-nonempty changeset (docs
+    # only) must still take the fast-path and auto-approve — proving the
+    # empty-changeset fix didn't break the trivial fast-path itself.
+    mock_diff.return_value = (
+        "diff --git a/README.md b/README.md\n+docs\n",
+        ["README.md"],
+    )
+    backend = _MockBackend(responses=[])
+    result = run_pr_review(
+        workspace=sample_repo,
+        backend=backend,
+        base_branch="main",
+    )
+    assert result["analysis"]["skipped"] == "trivial"
+    assert result["verdict"] == "approve"
+
+
 def test_hermes_pr_review_schema_registered() -> None:
     from typing import Any, cast
 

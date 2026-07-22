@@ -1,0 +1,37 @@
+# Qwen backend fleet config — copy to ~/.agent-fleet/fleet.yaml
+# Requires: QWEN_API_KEY (Alibaba Bailian, Token Plan Team Edition), stored in .env
+# Reuses the shared OpenRouter OpenAI-compatible HTTP client — no binary to install
+
+default_backend: qwen
+default_model: qwen3.8-max-preview
+default_persona: coder
+default_mode: agent
+max_parallel: 3
+timeout_seconds: 900
+default_pipeline: code_review
+
+# Optional — override the default Bailian compatible-mode endpoint:
+# qwen_base_url: https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1
+
+personas:
+  coder:
+    prompt: coder.md
+  reviewer:
+    prompt: reviewer.md
+  explorer:
+    prompt: explorer.md
+    mode: plan
+
+pipelines:
+  simple:
+    - execute
+  code_review:
+    - execute
+    - review
+  full:
+    - plan
+    - research
+    - synthesize
+    - implement
+    - verify
+    - review
