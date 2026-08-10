@@ -368,7 +368,11 @@ def test_run_handles_non_json_response(tmp_path: Path) -> None:
 
 
 def test_live_openrouter_hy3_call(tmp_path: Path) -> None:
-    """Live end-to-end call against tencent/hy3:free. Skipped without a key."""
+    """Live end-to-end call against tencent/hy3:free. Skipped without a key.
+
+    Free tier can 404 when the provider retires the free slug — skip rather
+    than fail CI / fleet verify when only paid hy3 remains.
+    """
     key = os.environ.get("OPENROUTER_API_KEY")
     if not key:
         pytest.skip("OPENROUTER_API_KEY not set — skipping live OpenRouter test")
@@ -380,8 +384,34 @@ def test_live_openrouter_hy3_call(tmp_path: Path) -> None:
         timeout_s=60,
         cwd=tmp_path,
     )
+    if result.exit_code != 0 and (
+        "404" in (result.stderr or "") or "unavailable for free" in (result.stderr or "")
+    ):
+        pytest.skip(f"hy3:free unavailable: {result.stderr[:200]}")
     assert result.exit_code == 0, f"live call failed: {result.stderr}"
     assert result.stdout, "live call returned empty stdout"
+    assert result.duration_s > 0.0
+
+
+def test_live_agnes_flash_call(tmp_path: Path) -> None:
+    """Live end-to-end call against Agnes 2.5 Flash (OpenAI-compatible)."""
+    from agent_fleet.backends import AGNES_BASE_URL, AGNES_DEFAULT_MODEL
+
+    key = os.environ.get("AGNES_API_KEY")
+    if not key:
+        pytest.skip("AGNES_API_KEY not set — skipping live Agnes test")
+
+    backend = OpenRouterBackend(
+        api_key=key, model=AGNES_DEFAULT_MODEL, base_url=AGNES_BASE_URL
+    )
+    result = backend.run(
+        "Reply with exactly the word: pong",
+        max_tokens=500,
+        timeout_s=60,
+        cwd=tmp_path,
+    )
+    assert result.exit_code == 0, f"live Agnes call failed: {result.stderr}"
+    assert result.stdout, "live Agnes call returned empty stdout"
     assert result.duration_s > 0.0
 
 
