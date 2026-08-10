@@ -206,6 +206,28 @@ register(
     sdk_import_check=None,
 )
 
+AGNES_BASE_URL = "https://apihub.agnes-ai.com/v1"
+AGNES_DEFAULT_MODEL = "agnes-2.5-flash"
+
+
+def _make_agnes(config: FleetConfig) -> LLMBackend:
+    from agent_fleet.openrouter_backend import OpenRouterBackend
+
+    return OpenRouterBackend(
+        model=config.default_model or AGNES_DEFAULT_MODEL,
+        api_key=os.environ.get("AGNES_API_KEY", ""),
+        base_url=getattr(config, "agnes_base_url", None) or AGNES_BASE_URL,
+    )
+
+
+register(
+    "agnes",
+    _make_agnes,
+    env_var="AGNES_API_KEY",
+    key_hint="Agnes AI OpenAI-compatible key (apihub.agnes-ai.com)",
+    sdk_import_check=None,
+)
+
 
 def backend_default_model(name: str) -> str | None:
     """The built-in default model id a registered backend falls back to.
@@ -233,6 +255,8 @@ def backend_default_model(name: str) -> str | None:
         return DEFAULT_MODEL
     if lowered == "qwen":
         return QWEN_DEFAULT_MODEL
+    if lowered == "agnes":
+        return AGNES_DEFAULT_MODEL
     return None
 
 

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Agnes backend:** `register("agnes", ...)` with `AGNES_API_KEY`, default model
+  `agnes-2.5-flash`, optional `agnes_base_url` (default
+  `https://apihub.agnes-ai.com/v1`). Thin registration over
+  `openrouter_backend` — same pattern as Qwen. Prefer `max_parallel: 1` on free
+  tier (~20 RPM). See `docs/AGNES.md`, `examples/fleet.agnes.yaml`.
+
 ## 0.14.1 — 2026-07-22
 
 ### Summary

@@ -145,6 +145,45 @@ def test_qwen_respects_custom_base_url_and_model(monkeypatch: pytest.MonkeyPatch
     assert backend.model == "qwen-custom-model"
 
 
+def test_agnes_resolves(monkeypatch: pytest.MonkeyPatch) -> None:
+    """agnes reuses OpenRouterBackend (generic OpenAI-compatible client) as-is."""
+    from agent_fleet.backends import make_backend
+    from agent_fleet.openrouter_backend import OpenRouterBackend
+
+    monkeypatch.setenv("AGNES_API_KEY", "fake-agnes-key")
+    cfg = _config()
+    monkeypatch.setattr(cfg, "default_backend", "agnes", raising=False)
+    backend = make_backend(cfg)
+    assert isinstance(backend, OpenRouterBackend)
+
+
+def test_agnes_uses_default_base_url_and_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent_fleet.backends import AGNES_BASE_URL, AGNES_DEFAULT_MODEL, make_backend
+    from agent_fleet.config import FleetConfig
+
+    monkeypatch.setenv("AGNES_API_KEY", "fake-agnes-key")
+    cfg = FleetConfig(default_backend="agnes", default_model=None)
+    backend = make_backend(cfg)
+    assert backend.base_url == AGNES_BASE_URL
+    assert backend.model == AGNES_DEFAULT_MODEL
+    assert backend.api_key == "fake-agnes-key"
+
+
+def test_agnes_respects_custom_base_url_and_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent_fleet.backends import make_backend
+    from agent_fleet.config import FleetConfig
+
+    monkeypatch.setenv("AGNES_API_KEY", "fake-agnes-key")
+    cfg = FleetConfig(
+        default_backend="agnes",
+        default_model="agnes-custom-model",
+        agnes_base_url="https://example.invalid/v1",
+    )
+    backend = make_backend(cfg)
+    assert backend.base_url == "https://example.invalid/v1"
+    assert backend.model == "agnes-custom-model"
+
+
 def test_registered_backend_resolves(monkeypatch: pytest.MonkeyPatch) -> None:
     from agent_fleet import backends
 
@@ -175,6 +214,7 @@ def test_unknown_backend_raises_helpful_error(monkeypatch: pytest.MonkeyPatch) -
     assert "kimi" in str(exc_info.value)
     assert "grok" in str(exc_info.value)
     assert "qwen" in str(exc_info.value)
+    assert "agnes" in str(exc_info.value)
 
 
 def test_builtin_backend_env_vars() -> None:
@@ -185,6 +225,7 @@ def test_builtin_backend_env_vars() -> None:
     assert backend_env_var("openrouter") == "OPENROUTER_API_KEY"
     assert backend_env_var("grok") is None
     assert backend_env_var("qwen") == "QWEN_API_KEY"
+    assert backend_env_var("agnes") == "AGNES_API_KEY"
     assert backend_env_var("unregistered") is None
 
 
@@ -197,6 +238,7 @@ def test_builtin_backend_sdk_import_checks() -> None:
     assert backend_sdk_import_check("openrouter") is None
     assert backend_sdk_import_check("grok") is None
     assert backend_sdk_import_check("qwen") is None
+    assert backend_sdk_import_check("agnes") is None
     assert backend_sdk_import_check("unregistered") is None
 
 
@@ -209,9 +251,11 @@ def test_builtin_backend_auth_probes() -> None:
     assert backend_auth_probe("kimi") is None
     assert backend_auth_probe("openrouter") is None
     assert backend_auth_probe("qwen") is None
+    assert backend_auth_probe("agnes") is None
     assert backend_auth_probe("unregistered") is None
     assert backend_is_registered("grok") is True
     assert backend_is_registered("qwen") is True
+    assert backend_is_registered("agnes") is True
     assert backend_is_registered("zzz") is False
 
 
@@ -411,6 +455,37 @@ def test_import_isolation_qwen_reuses_openrouter_backend_only(
         from agent_fleet.config import FleetConfig
 
         cfg = FleetConfig(default_backend="qwen", default_model=None)
+        make_backend(cfg)
+
+        assert "agent_fleet.openrouter_backend" in sys.modules
+        assert "agent_fleet.cursor_backend" not in sys.modules
+        assert "agent_fleet.kimi_backend" not in sys.modules
+        assert "agent_fleet.grok_backend" not in sys.modules
+    finally:
+        _restore_backend_modules(saved)
+
+
+def test_import_isolation_agnes_reuses_openrouter_backend_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Selecting agnes imports openrouter_backend (its generic HTTP client) and nothing else.
+
+    agnes intentionally reuses OpenRouterBackend rather than a dedicated module, so
+    unlike the other backends this test asserts openrouter_backend *is* imported.
+    """
+    monkeypatch.setenv("AGNES_API_KEY", "fake-agnes-key")
+    _backend_mods = (
+        "agent_fleet.cursor_backend",
+        "agent_fleet.kimi_backend",
+        "agent_fleet.openrouter_backend",
+        "agent_fleet.grok_backend",
+    )
+    saved = _swap_backend_modules(_backend_mods)
+    try:
+        from agent_fleet.backends import make_backend
+        from agent_fleet.config import FleetConfig
+
+        cfg = FleetConfig(default_backend="agnes", default_model=None)
         make_backend(cfg)
 
         assert "agent_fleet.openrouter_backend" in sys.modules

@@ -328,7 +328,7 @@ Requires `gh` auth + `CURSOR_API_KEY`. Systemd example: [`examples/agent-fleet-p
 
 ---
 
-## Optional: Kimi · OpenRouter · Grok · Qwen · gateway plugin
+## Optional: Kimi · OpenRouter · Grok · Qwen · Agnes · gateway plugin
 
 Cursor-first. Same personas/pipelines if you swap backend or add a Discord gateway plugin:
 
@@ -338,6 +338,7 @@ Cursor-first. Same personas/pipelines if you swap backend or add a Discord gatew
 | [OpenRouter](docs/OPENROUTER.md) | `default_backend: openrouter`, `OPENROUTER_API_KEY` — no binary to install (HTTP via stdlib) |
 | [Grok Build CLI](docs/GROK.md) | `default_backend: grok`, `grok login` (subscription; no `XAI_API_KEY`) |
 | [Qwen](docs/QWEN.md) | `default_backend: qwen`, `QWEN_API_KEY` — reuses the OpenRouter HTTP client (Alibaba Bailian) |
+| [Agnes](docs/AGNES.md) | `default_backend: agnes`, `AGNES_API_KEY` — reuses the OpenRouter HTTP client (`agnes-2.5-flash`; free tier ~20 RPM → `max_parallel: 1`) |
 | [cursor-fleet plugin](integrations/hermes/) | `./scripts/deploy-hermes.sh` — fleet config stays in `~/.agent-fleet/fleet.yaml` |
 
 Not required for CLI, Python, or watcher workflows.

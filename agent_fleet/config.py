@@ -67,6 +67,7 @@ class FleetConfig:
     kimi_bin: str | None = None
     grok_bin: str | None = None
     qwen_base_url: str | None = None
+    agnes_base_url: str | None = None
     default_persona: str = "coder"
     max_parallel: int = 3
     timeout_seconds: int = 900
@@ -222,6 +223,7 @@ def load_fleet_config(
     kimi_bin: str | None = None,
     grok_bin: str | None = None,
     qwen_base_url: str | None = None,
+    agnes_base_url: str | None = None,
     max_parallel: int | None = None,
     timeout_seconds: int | None = None,
     ram_budget_gb: int | None = None,
@@ -287,6 +289,7 @@ def load_fleet_config(
         kimi_bin=kimi_bin or data.get("kimi_bin"),
         grok_bin=grok_bin or data.get("grok_bin"),
         qwen_base_url=qwen_base_url or data.get("qwen_base_url"),
+        agnes_base_url=agnes_base_url or data.get("agnes_base_url"),
         max_parallel=int(max_parallel or data.get("max_parallel") or 3),
         timeout_seconds=int(timeout_seconds or data.get("timeout_seconds") or 900),
         ram_budget_gb=int(ram_budget_gb or data.get("ram_budget_gb") or 24),

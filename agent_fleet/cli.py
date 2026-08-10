@@ -764,6 +764,8 @@ def cmd_config_set_backend(args: argparse.Namespace) -> int:
         data["default_model"] = "grok-4.5"
     elif backend == "qwen" and not data.get("default_model"):
         data["default_model"] = "qwen3.8-max-preview"
+    elif backend == "agnes" and not data.get("default_model"):
+        data["default_model"] = "agnes-2.5-flash"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         yaml.safe_dump(data, sort_keys=False, default_flow_style=False), encoding="utf-8"
@@ -919,7 +921,7 @@ def main(argv: list[str] | None = None) -> int:
     run_p.add_argument("--persona", help="Persona id (default: repo or fleet config)")
     run_p.add_argument(
         "--backend",
-        help="Execution backend for this run (cursor|grok|kimi|openrouter|qwen). "
+        help="Execution backend for this run (cursor|grok|kimi|openrouter|qwen|agnes). "
         "Overrides AGENT_FLEET_BACKEND and fleet.yaml default_backend.",
     )
     run_p.add_argument(
@@ -1011,7 +1013,7 @@ def main(argv: list[str] | None = None) -> int:
     doctor_p.add_argument("--workspace", help="Repo path (checks for .agent-fleet.yaml)")
     doctor_p.add_argument(
         "--backend",
-        help="Check auth for this backend (cursor|grok|kimi|openrouter|qwen). "
+        help="Check auth for this backend (cursor|grok|kimi|openrouter|qwen|agnes). "
         "Overrides AGENT_FLEET_BACKEND and fleet.yaml.",
     )
     doctor_p.add_argument(
@@ -1032,12 +1034,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     set_backend_p.add_argument(
         "backend",
-        help="Backend name: cursor | grok | kimi | openrouter | qwen",
+        help="Backend name: cursor | grok | kimi | openrouter | qwen | agnes",
     )
     set_backend_p.add_argument(
         "--model",
         help="Also set default_model (grok defaults to grok-4.5, qwen to "
-        "qwen3.8-max-preview, if unset)",
+        "qwen3.8-max-preview, agnes to agnes-2.5-flash, if unset)",
     )
     set_backend_p.set_defaults(func=cmd_config_set_backend)
 
