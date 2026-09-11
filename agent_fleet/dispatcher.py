@@ -643,6 +643,25 @@ class FleetDispatcher:
                 goal=task.goal[:120],
                 has_handoff=handoff is not None,
             )
+            # Without this, `fleet run` (this dispatch path) never appears in
+            # `fleet runs`: only runner.py's issue-driven runs called
+            # run_start/run_end, so the index.jsonl row this writes was the
+            # only thing missing — per-run event JSONL files (what `fleet
+            # watch <id>` reads) were already written correctly via
+            # fleet_log.emit() above.
+            fleet_log.run_log.run_start(title=task.goal)
+
+            def _finish(res: FleetTaskResult) -> FleetTaskResult:
+                """Close the index.jsonl row ``run_start`` opened above.
+
+                Every return path below must go through this — an unmatched
+                run_start leaves a run permanently stuck as "running" in
+                `fleet runs`, which is worse than the pre-fix state (no row
+                at all).
+                """
+                fleet_log.run_log.run_end(outcome=res.status)
+                return res
+
             if handoff is not None:
                 fleet_log.emit(
                     "redispatch.handoff",
@@ -660,28 +679,32 @@ class FleetDispatcher:
                 fleet_log.emit(
                     "admission.denied", reason="nesting_depth_exceeds_capacity", depth=depth
                 )
-                return FleetTaskResult(
-                    task_index=task_index,
-                    persona=task.persona,
-                    goal=task.goal,
-                    status="error",
-                    summary=None,
-                    error="Fleet admission denied (max parallel agents reached)",
-                    duration_seconds=round(time.monotonic() - start, 2),
+                return _finish(
+                    FleetTaskResult(
+                        task_index=task_index,
+                        persona=task.persona,
+                        goal=task.goal,
+                        status="error",
+                        summary=None,
+                        error="Fleet admission denied (max parallel agents reached)",
+                        duration_seconds=round(time.monotonic() - start, 2),
+                    )
                 )
 
             try:
                 workspace = self._resolve_workspace(task)
                 run_workspace = workspace
                 if not workspace.exists():
-                    return FleetTaskResult(
-                        task_index=task_index,
-                        persona=task.persona,
-                        goal=task.goal,
-                        status="error",
-                        summary=None,
-                        error=f"Workspace does not exist: {workspace}",
-                        duration_seconds=round(time.monotonic() - start, 2),
+                    return _finish(
+                        FleetTaskResult(
+                            task_index=task_index,
+                            persona=task.persona,
+                            goal=task.goal,
+                            status="error",
+                            summary=None,
+                            error=f"Workspace does not exist: {workspace}",
+                            duration_seconds=round(time.monotonic() - start, 2),
+                        )
                     )
 
                 repo_config = find_repo_config(workspace)
@@ -716,8 +739,15 @@ class FleetDispatcher:
                 phases = self._resolve_pipeline(task)
 
                 if phases == ["full"]:
-                    return self._run_full_pipeline(
-                        task_index, task, workspace, start, handoff=handoff, fleet_log=fleet_log
+                    return _finish(
+                        self._run_full_pipeline(
+                            task_index,
+                            task,
+                            workspace,
+                            start,
+                            handoff=handoff,
+                            fleet_log=fleet_log,
+                        )
                     )
 
                 run_workspace, task_workspace, wt_error = prepare_task_workspace_if_needed(
@@ -732,14 +762,16 @@ class FleetDispatcher:
                     base_branch=base_branch,
                 )
                 if wt_error:
-                    return FleetTaskResult(
-                        task_index=task_index,
-                        persona=task.persona,
-                        goal=task.goal,
-                        status="error",
-                        summary=None,
-                        error=wt_error,
-                        duration_seconds=round(time.monotonic() - start, 2),
+                    return _finish(
+                        FleetTaskResult(
+                            task_index=task_index,
+                            persona=task.persona,
+                            goal=task.goal,
+                            status="error",
+                            summary=None,
+                            error=wt_error,
+                            duration_seconds=round(time.monotonic() - start, 2),
+                        )
                     )
 
                 task_config = merge_repo_into_fleet_config(
@@ -762,7 +794,7 @@ class FleetDispatcher:
                     depth=depth,
                 )
                 if preflight_result is not None:
-                    return preflight_result
+                    return _finish(preflight_result)
 
                 from agent_fleet.orchestration.equip import resolve_dispatch_equip
 
@@ -821,18 +853,22 @@ class FleetDispatcher:
                             },
                         )
                         _first3 = _out_of_scope[:3]
-                        return FleetTaskResult(
-                            task_index=task_index,
-                            persona=task.persona,
-                            goal=task.goal,
-                            status="scope_violation",
-                            summary=None,
-                            error=(f"Agent modified {_n} file(s) outside allowed_paths: {_first3}"),
-                            duration_seconds=round(time.monotonic() - start, 2),
-                            changed_files=list(changed_files or ()),
-                            files_modified=tuple(changed_files or ()),
-                            declared_complexity=task.complexity,
-                            observed_total_tokens=read_observed_total_tokens(task_index),
+                        return _finish(
+                            FleetTaskResult(
+                                task_index=task_index,
+                                persona=task.persona,
+                                goal=task.goal,
+                                status="scope_violation",
+                                summary=None,
+                                error=(
+                                    f"Agent modified {_n} file(s) outside allowed_paths: {_first3}"
+                                ),
+                                duration_seconds=round(time.monotonic() - start, 2),
+                                changed_files=list(changed_files or ()),
+                                files_modified=tuple(changed_files or ()),
+                                declared_complexity=task.complexity,
+                                observed_total_tokens=read_observed_total_tokens(task_index),
+                            )
                         )
 
                 repo_for_metrics = repo_config or git_repo
@@ -903,7 +939,7 @@ class FleetDispatcher:
                         goal=task.goal,
                     )
                     task_workspace.teardown(keep=keep_worktree)
-                return result
+                return _finish(result)
             except Exception as exc:
                 logger.exception("Fleet task %s failed", task_index)
                 if task_workspace is not None:
@@ -920,15 +956,17 @@ class FleetDispatcher:
                     duration_seconds=round(time.monotonic() - start, 2),
                     error=str(exc),
                 )
-                return FleetTaskResult(
-                    task_index=task_index,
-                    persona=task.persona,
-                    goal=task.goal,
-                    status="error",
-                    summary=None,
-                    error=str(exc),
-                    duration_seconds=round(time.monotonic() - start, 2),
-                    stderr=str(exc),
+                return _finish(
+                    FleetTaskResult(
+                        task_index=task_index,
+                        persona=task.persona,
+                        goal=task.goal,
+                        status="error",
+                        summary=None,
+                        error=str(exc),
+                        duration_seconds=round(time.monotonic() - start, 2),
+                        stderr=str(exc),
+                    )
                 )
             finally:
                 if token is not None:

@@ -156,3 +156,24 @@ def test_dry_run_short_circuits_before_backend_env(
     assert payload["dry_run"] is True
     assert payload["goal"] == "ship a thing"
     assert payload["pipeline"] == "simple"
+
+
+def test_dry_run_complexity_med_derives_code_review(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("CURSOR_API_KEY", raising=False)
+    code = main(
+        [
+            "run",
+            "implement the overlay split",
+            "--pipeline",
+            "code_review",
+            "--complexity",
+            "MED",
+            "--dry-run",
+        ]
+    )
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["complexity"] == "MED"
+    assert payload["derived_pipeline"] == "code_review"

@@ -339,6 +339,7 @@ Cursor-first. Same personas/pipelines if you swap backend or add a Discord gatew
 | [Grok Build CLI](docs/GROK.md) | `default_backend: grok`, `grok login` (subscription; no `XAI_API_KEY`) |
 | [Qwen](docs/QWEN.md) | `default_backend: qwen`, `QWEN_API_KEY` — reuses the OpenRouter HTTP client (Alibaba Bailian) |
 | [Agnes](docs/AGNES.md) | `default_backend: agnes`, `AGNES_API_KEY` — reuses the OpenRouter HTTP client (`agnes-2.5-flash`; free tier ~20 RPM → `max_parallel: 1`) |
+| [Devin](docs/DEVIN.md) | `default_backend: devin`, `devin auth login` (subscription; no API key) |
 | [cursor-fleet plugin](integrations/hermes/) | `./scripts/deploy-hermes.sh` — fleet config stays in `~/.agent-fleet/fleet.yaml` |
 
 Not required for CLI, Python, or watcher workflows.

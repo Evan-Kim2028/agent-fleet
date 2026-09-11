@@ -1,4 +1,4 @@
-"""Backend factory — registry-driven; Cursor, Kimi, OpenRouter, and Grok Build CLI.
+"""Backend factory — registry-driven; Cursor, Kimi, OpenRouter, Grok, Command Code CLI, and Devin.
 
 Backends are imported lazily inside their factory functions so that selecting one
 backend (e.g. ``default_backend: openrouter``) does not import the others' modules
@@ -104,6 +104,17 @@ def backend_is_registered(name: str) -> bool:
     return name.lower() in _REGISTRY
 
 
+def registered_backend_names() -> tuple[str, ...]:
+    """All registered backend names, sorted — single source for CLI help/choices.
+
+    Read after all ``register()`` calls in this module have run (i.e. after
+    ``agent_fleet.backends`` has finished importing), so a newly added
+    backend shows up in ``fleet run --help`` / ``fleet doctor --help``
+    without hand-editing a hardcoded list there.
+    """
+    return tuple(sorted(_REGISTRY))
+
+
 def _make_cursor(config: FleetConfig) -> LLMBackend:
     # Lazy import: an openrouter-only or kimi-only install never imports cursor_backend
     # (and therefore never needs cursor_sdk importable at module load).
@@ -153,6 +164,39 @@ def _grok_auth_probe() -> tuple[bool, str, str]:
     return check_grok_auth()
 
 
+def _make_cmd(config: FleetConfig) -> LLMBackend:
+    from agent_fleet.cmd_backend import DEFAULT_MODEL as CMD_DEFAULT_MODEL
+    from agent_fleet.cmd_backend import CmdBackend
+
+    return CmdBackend(
+        model=config.default_model or CMD_DEFAULT_MODEL,
+        cmd_bin=getattr(config, "cmd_bin", None),
+        cmd_taste=getattr(config, "cmd_taste", None),
+    )
+
+
+def _cmd_auth_probe() -> tuple[bool, str, str]:
+    from agent_fleet.cmd_backend import check_cmd_auth
+
+    return check_cmd_auth()
+
+
+def _make_devin(config: FleetConfig) -> LLMBackend:
+    from agent_fleet.devin_backend import DEFAULT_MODEL as DEVIN_DEFAULT_MODEL
+    from agent_fleet.devin_backend import DevinBackend
+
+    return DevinBackend(
+        model=config.default_model or DEVIN_DEFAULT_MODEL,
+        devin_bin=getattr(config, "devin_bin", None),
+    )
+
+
+def _devin_auth_probe() -> tuple[bool, str, str]:
+    from agent_fleet.devin_backend import check_devin_auth
+
+    return check_devin_auth()
+
+
 QWEN_BASE_URL = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
 QWEN_DEFAULT_MODEL = "qwen3.8-max-preview"
 
@@ -199,11 +243,27 @@ register(
     auth_probe=_grok_auth_probe,
 )
 register(
+    "cmd",
+    _make_cmd,
+    env_var=None,
+    key_hint="run `cmd login` (Command Code)",
+    sdk_import_check=None,
+    auth_probe=_cmd_auth_probe,
+)
+register(
     "qwen",
     _make_qwen,
     env_var="QWEN_API_KEY",
     key_hint="Alibaba Bailian Token Plan key (OpenAI-compatible endpoint)",
     sdk_import_check=None,
+)
+register(
+    "devin",
+    _make_devin,
+    env_var=None,
+    key_hint="run `devin auth login`",
+    sdk_import_check=None,
+    auth_probe=_devin_auth_probe,
 )
 
 AGNES_BASE_URL = "https://apihub.agnes-ai.com/v1"
@@ -251,6 +311,14 @@ def backend_default_model(name: str) -> str | None:
         return DEFAULT_MODEL
     if lowered == "grok":
         from agent_fleet.grok_backend import DEFAULT_MODEL
+
+        return DEFAULT_MODEL
+    if lowered == "cmd":
+        from agent_fleet.cmd_backend import DEFAULT_MODEL
+
+        return DEFAULT_MODEL
+    if lowered == "devin":
+        from agent_fleet.devin_backend import DEFAULT_MODEL
 
         return DEFAULT_MODEL
     if lowered == "qwen":

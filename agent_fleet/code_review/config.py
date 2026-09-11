@@ -17,8 +17,8 @@ class CodeReviewConfig:
     auto_push: bool = False
     auto_pr_loop: bool = False
     # Subjective LLM review is advisory by default: its verdict is recorded but
-    # does not block or fire the fix loop. Only objective gates (scope, verify)
-    # block. Set true to let a REQUEST_CHANGES/BLOCK verdict gate the pipeline.
+    # does not red the pipeline. auto_fix still runs on REQUEST_CHANGES/BLOCK.
+    # Set true to let those verdicts also gate the run exit code.
     review_blocking: bool = False
 
 

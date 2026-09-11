@@ -2,8 +2,27 @@
 
 ## Unreleased
 
+### Fixed
+
+- **code_review auto_fix:** REQUEST_CHANGES/BLOCK from an advisory review now
+  enter the fix loop. `review_blocking` still only controls whether the run
+  itself goes red.
+- **PR analyzer in code_review:** forwards the dispatch `fleet_config` so
+  review uses the CLI backend/model (was leaking `~/.agent-fleet/fleet.yaml`).
+- **PR analyzer diff:** includes unstaged and untracked execute output, not
+  only `merge-base..HEAD`.
+
 ### Added
 
+- **`fleet run --complexity {LOW,MED,HIGH}`:** stops auto-classify from
+  discarding `--pipeline`. MED/HIGH derive `code_review` (execute → review,
+  plus repo verify when configured).
+- **Command Code backend:** `register("cmd", ...)` — headless `cmd -p`
+  (default `meituan/longcat-2.0:free`). Auth via `cmd login` /
+  `~/.commandcode/auth.json`. Taste apply-only (`cmd_taste` or the Documents
+  taste file; `--config taste-learning=false`). Session resume via
+  `--resume`. Exit 8 (turn cap) is a partial success. See `docs/CMD.md`,
+  `examples/fleet.cmd.yaml`.
 - **Agnes backend:** `register("agnes", ...)` with `AGNES_API_KEY`, default model
   `agnes-2.5-flash`, optional `agnes_base_url` (default
   `https://apihub.agnes-ai.com/v1`). Thin registration over

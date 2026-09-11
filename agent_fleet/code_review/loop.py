@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.code_review.fix import run_fix_phase
+from agent_fleet.contracts.review import ReviewVerdict
 from agent_fleet.observability.context import bind_phase, get_run_log
 from agent_fleet.observability.efficiency import changed_lines
 from agent_fleet.phases import (
@@ -42,6 +43,7 @@ def _rerun_quality_gates(
     implementation_summary: str,
     reviewer_persona: str = "reviewer",
     review_blocking: bool = False,
+    fleet_config: FleetConfig | None = None,
 ) -> tuple[list[dict[str, Any]], str, int, list[str]]:
     """Re-run scope, verify, and review after a fix attempt."""
     results: list[dict[str, Any]] = []
@@ -94,12 +96,35 @@ def _rerun_quality_gates(
             implementation_summary=summary,
             reviewer_persona=reviewer_persona,
             repo=repo,
+            fleet_config=fleet_config,
         )
     results.append(review_result)
     summary = review_result.get("summary") or review_result.get("stdout") or summary
     # Objective gates passed above. Review is advisory unless blocking.
     exit_code = review_result["exit_code"] if review_blocking else 0
     return results, summary, exit_code, changed_files
+
+
+def _auto_fix_status(
+    phase_results: list[dict[str, Any]],
+    exit_code: int,
+) -> tuple[str, str | None]:
+    """Map pipeline results to a fix-loop status.
+
+    Advisory review (exit 0) still feeds REQUEST_CHANGES/BLOCK into auto_fix.
+    """
+    status, error = resolve_pipeline_outcome(phase_results, exit_code)
+    if status != "completed":
+        return status, error
+    review = next((item for item in reversed(phase_results) if item.get("phase") == "review"), None)
+    if not review:
+        return status, error
+    verdict = str(review.get("verdict") or "")
+    if verdict == ReviewVerdict.REQUEST_CHANGES.value:
+        return "review_changes_requested", review.get("summary") or "Reviewer requested changes"
+    if verdict == ReviewVerdict.BLOCK.value:
+        return "review_blocked", review.get("summary") or "Reviewer blocked merge"
+    return status, error
 
 
 def run_code_review_with_auto_fix(
@@ -153,10 +178,10 @@ def run_code_review_with_auto_fix(
     effective_max_fix = max_retries if max_retries is not None else config.max_fix_attempts
     fix_persona = config.fix_persona or "coder"
     for attempt in range(1, effective_max_fix + 1):
-        status, error = resolve_pipeline_outcome(phase_results, exit_code)
+        status, error = _auto_fix_status(phase_results, exit_code)
         if status == "completed":
             break
-        if status not in {"review_changes_requested", "verify_failed"}:
+        if status not in {"review_changes_requested", "verify_failed", "review_blocked"}:
             break
         if status == "verify_failed" and last_verify_failure_is_bootstrap(phase_results):
             # A broken test harness (import/collection/startup crash) is not
@@ -195,6 +220,7 @@ def run_code_review_with_auto_fix(
             implementation_summary=summary,
             reviewer_persona=reviewer_persona,
             review_blocking=config.review_blocking,
+            fleet_config=fleet_config,
         )
         phase_results.extend(gate_results)
 

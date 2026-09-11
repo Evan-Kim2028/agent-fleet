@@ -1,0 +1,35 @@
+# Command Code CLI fleet config — copy to ~/.agent-fleet/fleet.yaml
+# Requires: cmd on PATH (`npm i -g command-code`), `cmd login`
+
+default_backend: cmd
+default_model: meituan/longcat-2.0:free
+default_persona: coder
+default_mode: agent
+max_parallel: 2
+timeout_seconds: 3600
+default_pipeline: code_review
+
+cmd_taste: /home/evan/Documents/.commandcode/taste/taste.md
+
+personas:
+  coder:
+    prompt: coder.md
+  reviewer:
+    prompt: reviewer.md
+  explorer:
+    prompt: explorer.md
+    mode: plan
+
+pipelines:
+  simple:
+    - execute
+  code_review:
+    - execute
+    - review
+  full:
+    - plan
+    - research
+    - synthesize
+    - implement
+    - verify
+    - review

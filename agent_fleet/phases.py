@@ -20,10 +20,14 @@ from agent_fleet.reviewer import review as structured_review
 from agent_fleet.scope import effective_allowed_paths, files_outside_allowed_paths
 from agent_fleet.skills_lib import base_kit_skill_dirs, resolve_skill_path
 from agent_fleet.verify_core import (
+    clear_pycache,
     get_working_tree_changes,
     get_working_tree_diff,
+    pop_stashed_working_tree,
+    pytest_failed_node_ids,
     revert_paths,
     run_shell_verify,
+    stash_working_tree,
 )
 
 logger = logging.getLogger(__name__)
@@ -442,7 +446,90 @@ def run_scoped_lint_command(
             timeout_s=timeout_s,
             allowed_paths=allowed_paths,
         )
+    elif not outcome["passed"] and "pytest" in command:
+        outcome = _baseline_regate_pytest(
+            workspace=workspace,
+            command=command,
+            timeout_s=timeout_s,
+            outcome=outcome,
+        )
     return outcome
+
+
+def _baseline_regate_pytest(
+    *,
+    workspace: Path,
+    command: str,
+    timeout_s: int,
+    outcome: dict[str, Any],
+) -> dict[str, Any]:
+    """Re-judge a failing pytest verify command against the pre-change baseline.
+
+    Mirrors ``_autofix_and_regate_lint``'s guarantee for ruff — pre-existing
+    debt elsewhere in the tree (a test already broken before this task's
+    diff, e.g. a stale cross-package dependency or an unrelated schema
+    drift) must not fail a scoped task's verify gate; only a failure the
+    task itself introduced should. Stashes the task's uncommitted tracked
+    changes, re-runs the identical command against that clean baseline, and
+    diffs pytest's ``FAILED <node_id>`` short-summary lines. Only passes if
+    every currently-failing node id was already failing on the baseline;
+    any new failure keeps the gate closed (returning the original outcome).
+    Never claims a baseline verdict when the repo can't be safely restored —
+    a failed stash or a failed pop both return the original outcome as-is.
+    """
+    current_failed = pytest_failed_node_ids(
+        (outcome.get("stdout") or "") + (outcome.get("stderr") or "")
+    )
+    if not current_failed:
+        # No per-test FAILED lines to attribute (e.g. a collection error) —
+        # baseline diffing can't help; fail as-is.
+        return outcome
+
+    # See clear_pycache's docstring, failure mode 2: the command we just ran
+    # (above) may have created untracked .pytest_cache/__pycache__ dirs. If
+    # those get swept into the stash below, the baseline run recreates
+    # fresh copies that collide with them on stash pop. Clear them first so
+    # only the task's real changes get stashed.
+    clear_pycache(workspace)
+
+    if not stash_working_tree(workspace, message="agent-fleet-verify-baseline"):
+        return outcome  # no working-tree diff to stash, or the stash itself failed
+
+    # See clear_pycache's docstring, failure mode 1: without this, a fast
+    # stash/pop round trip can make the baseline run silently execute stale
+    # bytecode compiled from the *current* (pre-stash) file content instead
+    # of the baseline content actually on disk.
+    clear_pycache(workspace)
+    baseline_outcome = run_shell_verify(workspace, command, timeout_s=timeout_s)
+
+    popped = pop_stashed_working_tree(workspace)
+    clear_pycache(workspace)  # don't leave the restored tree with baseline-tainted bytecode
+    if not popped:
+        logger.error(
+            "agent-fleet verify baseline: git stash pop failed after re-running %r in "
+            "%s — the task's diff may still be sitting in `git stash list`; recover it "
+            "manually before trusting this workspace again.",
+            command,
+            workspace,
+        )
+        return outcome
+
+    baseline_failed = pytest_failed_node_ids(
+        (baseline_outcome.get("stdout") or "") + (baseline_outcome.get("stderr") or "")
+    )
+    new_failures = sorted(current_failed - baseline_failed)
+    if new_failures:
+        return outcome
+
+    pre_existing = sorted(current_failed)
+    return {
+        **outcome,
+        "passed": True,
+        "detail": (
+            f"verify baseline: {len(pre_existing)} pre-existing failure(s) already "
+            f"broken before this change ({pre_existing}); no new failures introduced"
+        ),
+    }
 
 
 def _autofix_and_regate_lint(
@@ -498,6 +585,7 @@ def run_pr_analyzer_review_phase(
     implementation_summary: str,
     repo: RepoConfig | None,
     reviewer_persona: str = "pr-analyzer",
+    fleet_config: FleetConfig | None = None,
 ) -> dict[str, Any]:
     del resolver, task, timeout_s, changed_files, implementation_summary
     pr_config = repo.pr_review if repo and repo.pr_review else None
@@ -513,6 +601,7 @@ def run_pr_analyzer_review_phase(
     base_branch = repo.default_branch if repo else "main"
     result = run_pr_review(
         workspace=workspace,
+        fleet_config=fleet_config,
         base_branch=base_branch,
         backend=backend,
     )
@@ -541,10 +630,12 @@ def run_analyze_phase(
     workspace: Path,
     repo: RepoConfig | None,
     pr_number: int = 0,
+    fleet_config: FleetConfig | None = None,
 ) -> dict[str, Any]:
     base_branch = repo.default_branch if repo else "main"
     result = run_pr_review(
         workspace=workspace,
+        fleet_config=fleet_config,
         base_branch=base_branch,
         backend=backend,
         pr_number=pr_number,
@@ -577,6 +668,7 @@ def run_structured_review_phase(
     implementation_summary: str,
     reviewer_persona: str = "reviewer",
     repo: RepoConfig | None = None,
+    fleet_config: FleetConfig | None = None,
 ) -> dict[str, Any]:
     pr_config = repo.pr_review if repo and repo.pr_review else None
     if pr_config and pr_config.enabled and pr_config.use_in_code_review:
@@ -590,6 +682,7 @@ def run_structured_review_phase(
             implementation_summary=implementation_summary,
             repo=repo,
             reviewer_persona=pr_config.reviewer_persona,
+            fleet_config=fleet_config,
         )
 
     reviewer = resolver.load(reviewer_persona)
@@ -870,6 +963,7 @@ def run_pipeline(
                     backend=backend,
                     workspace=workspace,
                     repo=repo,
+                    fleet_config=fleet_config,
                 )
             results.append(phase_result)
             summary = phase_result.get("summary") or summary
@@ -913,6 +1007,7 @@ def run_pipeline(
                         implementation_summary=summary,
                         reviewer_persona=reviewer_persona,
                         repo=repo,
+                        fleet_config=fleet_config,
                     )
                 else:
                     phase_result = _legacy_review_phase(

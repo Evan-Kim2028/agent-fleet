@@ -69,19 +69,26 @@ def test_jsonl_sink_rejects_no_extra_keys(tmp_path: Path) -> None:
 
 
 def test_live_main_stream_records_are_string_events() -> None:
-    """Sweep ~/.agent-fleet/fleet/runs/*.jsonl (excluding *.bridge.jsonl).
+    """Sweep ~/.agent-fleet/fleet/runs/*.jsonl (excluding *.bridge.jsonl and index.jsonl).
 
     Skips when no runs dir exists. Caps to the 5 most recent files so a CI
     sandbox with a populated runs dir doesn't turn this into a multi-minute scan.
+
+    ``index.jsonl`` (``append_run_index_row`` / ``run_store.list_run_files``'s
+    own exclusion) is a third, deliberately different row-per-run summary
+    schema — not a FleetEvent stream — so it's excluded the same way
+    ``list_run_files`` excludes it, via ``run_store``'s own file listing
+    rather than a second hand-rolled glob that can drift out of sync with it.
     """
     from agent_fleet.fleet_paths import default_runs_dir
+    from agent_fleet.observability.run_store import list_run_files
 
     runs_dir = default_runs_dir()
     if not runs_dir.is_dir():
         pytest.skip(f"no runs dir at {runs_dir}")
 
     candidates = sorted(
-        (p for p in runs_dir.glob("*.jsonl") if not p.name.endswith(".bridge.jsonl")),
+        (p for p in list_run_files(runs_dir) if not p.name.endswith(".bridge.jsonl")),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )[:5]

@@ -46,7 +46,10 @@ def get_changed_files(base_ref: str, head_ref: str, *, cwd: Path) -> list[str]:
 
 
 def get_working_tree_diff(*, cwd: Path, base_branch: str = "main") -> tuple[str, list[str]]:
-    """Return merge-base diff and changed files for HEAD vs origin/base_branch."""
+    """Return working-tree diff vs merge-base, including unstaged and untracked files.
+
+    Fleet execute leaves changes uncommitted, so ``merge-base..HEAD`` is empty.
+    """
     subprocess.run(
         ["git", "fetch", "origin", base_branch],
         cwd=cwd,
@@ -64,20 +67,21 @@ def get_working_tree_diff(*, cwd: Path, base_branch: str = "main") -> tuple[str,
     )
     diff_target = merge_base_result.stdout.strip() or base
     diff_result = subprocess.run(
-        ["git", "diff", diff_target, head],
+        ["git", "diff", diff_target],
         cwd=cwd,
         capture_output=True,
         text=True,
         check=False,
     )
     files_result = subprocess.run(
-        ["git", "diff", "--name-only", diff_target, head],
+        ["git", "diff", "--name-only", diff_target],
         cwd=cwd,
         capture_output=True,
         text=True,
         check=False,
     )
     files = [line for line in files_result.stdout.strip().split("\n") if line]
+    parts = [diff_result.stdout]
     untracked = subprocess.run(
         ["git", "ls-files", "--others", "--exclude-standard"],
         cwd=cwd,
@@ -86,9 +90,21 @@ def get_working_tree_diff(*, cwd: Path, base_branch: str = "main") -> tuple[str,
         check=False,
     )
     for path in untracked.stdout.strip().split("\n"):
-        if path:
-            files.append(path)
-    return diff_result.stdout, sorted(set(files))
+        if not path:
+            continue
+        files.append(path)
+        if not (cwd / path).is_file():
+            continue
+        udiff = subprocess.run(
+            ["git", "diff", "--no-index", "--", "/dev/null", path],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if udiff.stdout:
+            parts.append(udiff.stdout)
+    return "".join(parts), sorted(set(files))
 
 
 def diff_for_files(full_diff: str, files: list[str]) -> str:

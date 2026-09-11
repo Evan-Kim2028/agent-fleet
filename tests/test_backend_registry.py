@@ -106,6 +106,26 @@ def test_grok_resolves(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(backend, GrokBackend)
 
 
+def test_cmd_resolves(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent_fleet.backends import make_backend
+    from agent_fleet.cmd_backend import CmdBackend
+
+    cfg = _config()
+    monkeypatch.setattr(cfg, "default_backend", "cmd", raising=False)
+    backend = make_backend(cfg)
+    assert isinstance(backend, CmdBackend)
+
+
+def test_devin_resolves(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent_fleet.backends import make_backend
+    from agent_fleet.devin_backend import DevinBackend
+
+    cfg = _config()
+    monkeypatch.setattr(cfg, "default_backend", "devin", raising=False)
+    backend = make_backend(cfg)
+    assert isinstance(backend, DevinBackend)
+
+
 def test_qwen_resolves(monkeypatch: pytest.MonkeyPatch) -> None:
     """qwen reuses OpenRouterBackend (generic OpenAI-compatible client) as-is."""
     from agent_fleet.backends import make_backend
@@ -365,6 +385,7 @@ def test_import_isolation_openrouter_does_not_import_cursor_or_kimi() -> None:
         "agent_fleet.cursor_backend",
         "agent_fleet.kimi_backend",
         "agent_fleet.openrouter_backend",
+        "agent_fleet.cmd_backend",
     )
     # Save original sys.modules state so we don't poison other tests' isinstance checks.
     saved = _swap_backend_modules(_backend_mods)
@@ -384,6 +405,7 @@ def test_import_isolation_openrouter_does_not_import_cursor_or_kimi() -> None:
         assert "agent_fleet.kimi_backend" not in sys.modules, (
             "kimi_backend leaked into an openrouter-only make_backend call"
         )
+        assert "agent_fleet.cmd_backend" not in sys.modules
     finally:
         _restore_backend_modules(saved)
 
@@ -394,6 +416,7 @@ def test_import_isolation_kimi_does_not_import_cursor_or_openrouter() -> None:
         "agent_fleet.cursor_backend",
         "agent_fleet.kimi_backend",
         "agent_fleet.openrouter_backend",
+        "agent_fleet.cmd_backend",
     )
     saved = _swap_backend_modules(_backend_mods)
     try:
@@ -417,6 +440,7 @@ def test_import_isolation_grok_does_not_import_others() -> None:
         "agent_fleet.kimi_backend",
         "agent_fleet.openrouter_backend",
         "agent_fleet.grok_backend",
+        "agent_fleet.cmd_backend",
     )
     saved = _swap_backend_modules(_backend_mods)
     try:
@@ -430,6 +454,63 @@ def test_import_isolation_grok_does_not_import_others() -> None:
         assert "agent_fleet.cursor_backend" not in sys.modules
         assert "agent_fleet.kimi_backend" not in sys.modules
         assert "agent_fleet.openrouter_backend" not in sys.modules
+        assert "agent_fleet.cmd_backend" not in sys.modules
+    finally:
+        _restore_backend_modules(saved)
+
+
+def test_import_isolation_cmd_does_not_import_others() -> None:
+    """Selecting cmd imports only cmd_backend."""
+    _backend_mods = (
+        "agent_fleet.cursor_backend",
+        "agent_fleet.kimi_backend",
+        "agent_fleet.openrouter_backend",
+        "agent_fleet.grok_backend",
+        "agent_fleet.cmd_backend",
+        "agent_fleet.devin_backend",
+    )
+    saved = _swap_backend_modules(_backend_mods)
+    try:
+        from agent_fleet.backends import make_backend
+        from agent_fleet.config import FleetConfig
+
+        cfg = FleetConfig(default_backend="cmd", default_model=None)
+        make_backend(cfg)
+
+        assert "agent_fleet.cmd_backend" in sys.modules
+        assert "agent_fleet.cursor_backend" not in sys.modules
+        assert "agent_fleet.kimi_backend" not in sys.modules
+        assert "agent_fleet.openrouter_backend" not in sys.modules
+        assert "agent_fleet.grok_backend" not in sys.modules
+        assert "agent_fleet.devin_backend" not in sys.modules
+    finally:
+        _restore_backend_modules(saved)
+
+
+def test_import_isolation_devin_does_not_import_others() -> None:
+    """Selecting devin imports only devin_backend."""
+    _backend_mods = (
+        "agent_fleet.cursor_backend",
+        "agent_fleet.kimi_backend",
+        "agent_fleet.openrouter_backend",
+        "agent_fleet.grok_backend",
+        "agent_fleet.cmd_backend",
+        "agent_fleet.devin_backend",
+    )
+    saved = _swap_backend_modules(_backend_mods)
+    try:
+        from agent_fleet.backends import make_backend
+        from agent_fleet.config import FleetConfig
+
+        cfg = FleetConfig(default_backend="devin", default_model=None)
+        make_backend(cfg)
+
+        assert "agent_fleet.devin_backend" in sys.modules
+        assert "agent_fleet.cursor_backend" not in sys.modules
+        assert "agent_fleet.kimi_backend" not in sys.modules
+        assert "agent_fleet.openrouter_backend" not in sys.modules
+        assert "agent_fleet.grok_backend" not in sys.modules
+        assert "agent_fleet.cmd_backend" not in sys.modules
     finally:
         _restore_backend_modules(saved)
 
@@ -448,6 +529,8 @@ def test_import_isolation_qwen_reuses_openrouter_backend_only(
         "agent_fleet.kimi_backend",
         "agent_fleet.openrouter_backend",
         "agent_fleet.grok_backend",
+        "agent_fleet.cmd_backend",
+        "agent_fleet.devin_backend",
     )
     saved = _swap_backend_modules(_backend_mods)
     try:
@@ -461,6 +544,8 @@ def test_import_isolation_qwen_reuses_openrouter_backend_only(
         assert "agent_fleet.cursor_backend" not in sys.modules
         assert "agent_fleet.kimi_backend" not in sys.modules
         assert "agent_fleet.grok_backend" not in sys.modules
+        assert "agent_fleet.cmd_backend" not in sys.modules
+        assert "agent_fleet.devin_backend" not in sys.modules
     finally:
         _restore_backend_modules(saved)
 
@@ -479,6 +564,8 @@ def test_import_isolation_agnes_reuses_openrouter_backend_only(
         "agent_fleet.kimi_backend",
         "agent_fleet.openrouter_backend",
         "agent_fleet.grok_backend",
+        "agent_fleet.cmd_backend",
+        "agent_fleet.devin_backend",
     )
     saved = _swap_backend_modules(_backend_mods)
     try:
@@ -492,5 +579,7 @@ def test_import_isolation_agnes_reuses_openrouter_backend_only(
         assert "agent_fleet.cursor_backend" not in sys.modules
         assert "agent_fleet.kimi_backend" not in sys.modules
         assert "agent_fleet.grok_backend" not in sys.modules
+        assert "agent_fleet.cmd_backend" not in sys.modules
+        assert "agent_fleet.devin_backend" not in sys.modules
     finally:
         _restore_backend_modules(saved)

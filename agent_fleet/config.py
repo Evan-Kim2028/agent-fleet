@@ -66,6 +66,9 @@ class FleetConfig:
     default_backend: str = "cursor"
     kimi_bin: str | None = None
     grok_bin: str | None = None
+    cmd_bin: str | None = None
+    cmd_taste: str | None = None
+    devin_bin: str | None = None
     qwen_base_url: str | None = None
     agnes_base_url: str | None = None
     default_persona: str = "coder"
@@ -222,6 +225,9 @@ def load_fleet_config(
     default_backend: str | None = None,
     kimi_bin: str | None = None,
     grok_bin: str | None = None,
+    cmd_bin: str | None = None,
+    cmd_taste: str | None = None,
+    devin_bin: str | None = None,
     qwen_base_url: str | None = None,
     agnes_base_url: str | None = None,
     max_parallel: int | None = None,
@@ -288,6 +294,9 @@ def load_fleet_config(
         default_backend=str(resolved_backend),
         kimi_bin=kimi_bin or data.get("kimi_bin"),
         grok_bin=grok_bin or data.get("grok_bin"),
+        cmd_bin=cmd_bin or data.get("cmd_bin"),
+        cmd_taste=cmd_taste or data.get("cmd_taste"),
+        devin_bin=devin_bin or data.get("devin_bin"),
         qwen_base_url=qwen_base_url or data.get("qwen_base_url"),
         agnes_base_url=agnes_base_url or data.get("agnes_base_url"),
         max_parallel=int(max_parallel or data.get("max_parallel") or 3),

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import re
+import shutil
 import subprocess
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
@@ -322,6 +323,96 @@ def run_shell_verify(workspace: Path, command: str, *, timeout_s: int = 600) -> 
         "passed": result.returncode == 0,
         "detail": combined[-4000:] if combined else "",
     }
+
+
+_PYTEST_FAILED_RE = re.compile(r"^FAILED (\S+)", re.MULTILINE)
+
+
+def pytest_failed_node_ids(text: str) -> set[str]:
+    """Extract pytest's short-summary ``FAILED <node_id>`` lines from output."""
+    return set(_PYTEST_FAILED_RE.findall(text or ""))
+
+
+def stash_working_tree(workspace: Path, *, message: str) -> bool:
+    """Stash the task's changes (tracked edits and new untracked files) so a
+    verify command can probe the pre-change baseline.
+
+    Uses ``-u`` so a task's brand-new files (not just edits to existing
+    ones) are included in the baseline diff too — otherwise a new file
+    would still be present during the "baseline" run and any test failure
+    coming from it would be misattributed as pre-existing. This is safe
+    against build artifacts (a freshly ``uv sync``'d ``.venv``,
+    ``__pycache__``, etc.): ``-u`` only picks up untracked-but-not-ignored
+    files, never ``.gitignore``d ones (that needs ``-a``, not used here).
+    Returns True only if something was actually stashed — a stash with
+    nothing to save, or a failed stash, both return False so the caller
+    never mistakes "no baseline available" for one.
+    """
+    if not is_git_repo(workspace):
+        return False
+    result = subprocess.run(
+        ["git", "stash", "push", "-u", "-m", message],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    stashed_nothing = "no local changes to save" in (result.stdout or "").lower()
+    return result.returncode == 0 and not stashed_nothing
+
+
+_TEST_CACHE_DIR_NAMES = ("__pycache__", ".pytest_cache")
+
+
+def clear_pycache(workspace: Path) -> None:
+    """Delete every ``__pycache__``/``.pytest_cache`` dir under *workspace*.
+
+    Two failure modes this guards against, both only visible once a verify
+    command has already run at least once before a git stash round trip:
+
+    1. Python's compiled-bytecode cache is keyed on a source file's mtime
+       (and size); a fast stash/pop round trip can restore a file to
+       content Python has already cached bytecode for at a colliding
+       mtime, so a baseline pytest run can silently execute stale bytecode
+       from the *current* tree instead of the file content actually on
+       disk (observed live: an intermittent, non-deterministic false
+       pass/fail on a baseline re-run).
+    2. If a verify command already ran once (creating untracked
+       ``.pytest_cache``/``__pycache__`` dirs) before ``git stash push -u``
+       stashes them alongside the task's real changes, a *second* pytest
+       invocation recreates fresh copies of those same untracked dirs —
+       which then collide with the stashed ones on ``git stash pop``
+       ("untracked working tree files would be overwritten"), aborting the
+       pop and stranding the task's diff in the stash (observed live).
+
+    Called before stashing (so these caches never enter the stash at all),
+    before the baseline run (so it compiles fresh), and after the stash pop
+    (so the restored tree isn't left with baseline-tainted caches for a
+    later real test run). Best-effort: never raises.
+    """
+    for name in _TEST_CACHE_DIR_NAMES:
+        for cache_dir in Path(workspace).rglob(name):
+            shutil.rmtree(cache_dir, ignore_errors=True)
+
+
+def pop_stashed_working_tree(workspace: Path) -> bool:
+    """Restore the most recent stash pushed by ``stash_working_tree``.
+
+    Retries once before giving up. Callers must treat a False return as "the
+    task's diff may still be sitting in the stash" and must not proceed as
+    if the working tree were restored.
+    """
+    for _ in range(2):
+        result = subprocess.run(
+            ["git", "stash", "pop"],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            return True
+    return False
 
 
 def _check_result_to_dict(result: CheckResult) -> dict[str, object]:

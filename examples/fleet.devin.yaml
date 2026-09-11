@@ -1,0 +1,33 @@
+# Devin CLI fleet config — copy to ~/.agent-fleet/fleet.yaml
+# Requires: devin on PATH (or ~/.local/bin/devin), `devin auth login`
+
+default_backend: devin
+default_model: swe-2-high
+default_persona: coder
+default_mode: agent
+max_parallel: 2
+timeout_seconds: 3600
+default_pipeline: code_review
+
+personas:
+  coder:
+    prompt: coder.md
+  reviewer:
+    prompt: reviewer.md
+  explorer:
+    prompt: explorer.md
+    mode: plan
+
+pipelines:
+  simple:
+    - execute
+  code_review:
+    - execute
+    - review
+  full:
+    - plan
+    - research
+    - synthesize
+    - implement
+    - verify
+    - review

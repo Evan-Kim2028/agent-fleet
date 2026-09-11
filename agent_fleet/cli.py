@@ -11,7 +11,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from agent_fleet.backends import make_backend
+from agent_fleet.backends import make_backend, registered_backend_names
 from agent_fleet.cli_core import normalize_argv
 from agent_fleet.cli_env import require_backend_env
 from agent_fleet.config import load_fleet_config
@@ -199,6 +199,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     assert ctx is not None
 
     if getattr(args, "dry_run", False):
+        from agent_fleet.complexity import classify_complexity, derive_runtime
+
+        declared = getattr(args, "complexity", None)
+        complexity = declared or classify_complexity(args.goal)
+        derived_pipeline = derive_runtime(complexity).pipeline
         print(
             json.dumps(
                 {
@@ -208,6 +213,8 @@ def cmd_run(args: argparse.Namespace) -> int:
                     "context": args.context or "",
                     "persona": ctx.persona,
                     "pipeline": args.pipeline,
+                    "complexity": complexity,
+                    "derived_pipeline": derived_pipeline,
                     "workspace": str(ctx.workspace),
                     "backend": ctx.config.default_backend,
                     "repo_config": str(ctx.repo.repo_root) if ctx.repo else None,
@@ -247,9 +254,20 @@ def cmd_run(args: argparse.Namespace) -> int:
     results = dispatcher.dispatch(
         goal=args.goal,
         context=args.context,
-        persona=args.persona,
+        # ctx.persona already applied the arg → repo default_persona → fleet
+        # config default_persona fallback chain (see build_fleet_context).
+        # Passing the raw args.persona here instead silently dropped the repo
+        # default whenever --persona was omitted: dispatch fell through to
+        # dispatcher.dispatch()'s own default (self.config.default_persona,
+        # the *global* fleet.yaml value) instead of the repo's, so --dry-run
+        # (which prints ctx.persona) and the real run disagreed on persona —
+        # and, for lake-of-rage, ran the unscoped top-level verify_commands
+        # instead of the lakestore-scoped ones, failing verify on unrelated
+        # pre-existing repo test failures.
+        persona=args.persona or ctx.persona,
         workspace=str(ctx.workspace),
         pipeline=args.pipeline,
+        complexity=getattr(args, "complexity", None),
         skills=skills,
         skills_mode=skills_mode,
         loadout_size=getattr(args, "loadout", None),
@@ -898,6 +916,8 @@ def cmd_self_update(_args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     from agent_fleet import __version__
 
+    backend_names_help = "|".join(registered_backend_names())
+
     parser = argparse.ArgumentParser(
         prog="agent-fleet",
         description="Agentic coding fleet CLI",
@@ -921,7 +941,7 @@ def main(argv: list[str] | None = None) -> int:
     run_p.add_argument("--persona", help="Persona id (default: repo or fleet config)")
     run_p.add_argument(
         "--backend",
-        help="Execution backend for this run (cursor|grok|kimi|openrouter|qwen|agnes). "
+        help=f"Execution backend for this run ({backend_names_help}). "
         "Overrides AGENT_FLEET_BACKEND and fleet.yaml default_backend.",
     )
     run_p.add_argument(
@@ -933,6 +953,13 @@ def main(argv: list[str] | None = None) -> int:
         "--pipeline",
         default="simple",
         help="simple | code_review | pr_review | full",
+    )
+    run_p.add_argument(
+        "--complexity",
+        choices=("LOW", "MED", "HIGH"),
+        default=None,
+        help="Runtime tier. MED/HIGH derive pipeline=code_review (verify+review). "
+        "Without this, the goal text is auto-classified and --pipeline is ignored.",
     )
     run_p.add_argument(
         "--max-redispatches",
@@ -1013,7 +1040,7 @@ def main(argv: list[str] | None = None) -> int:
     doctor_p.add_argument("--workspace", help="Repo path (checks for .agent-fleet.yaml)")
     doctor_p.add_argument(
         "--backend",
-        help="Check auth for this backend (cursor|grok|kimi|openrouter|qwen|agnes). "
+        help=f"Check auth for this backend ({backend_names_help}). "
         "Overrides AGENT_FLEET_BACKEND and fleet.yaml.",
     )
     doctor_p.add_argument(
@@ -1034,7 +1061,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     set_backend_p.add_argument(
         "backend",
-        help="Backend name: cursor | grok | kimi | openrouter | qwen | agnes",
+        help="Backend name: " + " | ".join(registered_backend_names()),
     )
     set_backend_p.add_argument(
         "--model",

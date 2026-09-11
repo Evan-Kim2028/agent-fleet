@@ -145,6 +145,7 @@ def run_log_total_tokens(rows: Iterable[Mapping[str, object]]) -> int:
     """
     headline = 0
     agent_sum = 0
+    live = 0
     for row in rows:
         event = str(row.get("event", ""))
         data = _as_dict(row.get("data"))
@@ -155,7 +156,12 @@ def run_log_total_tokens(rows: Iterable[Mapping[str, object]]) -> int:
             headline = _coerce_int(totals.get("total_tokens")) or headline
         elif event == "program.agent.done":
             agent_sum += _coerce_int(data.get("tokens")) or 0
-    return headline or agent_sum
+        elif event == "usage.progress":
+            # Live per-phase usage from a backend still mid-call (e.g. devin
+            # polling its export/sessions.db) — only a fallback so `fleet
+            # watch` shows moving tokens before any rollup/headline exists.
+            live = max(live, _coerce_int(data.get("total_tokens")) or 0)
+    return headline or agent_sum or live
 
 
 def _map_event(seq: int, row: Mapping[str, object]) -> RunEvent | None:

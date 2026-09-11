@@ -169,6 +169,47 @@ def test_real_test_failure_still_triggers_fix() -> None:
     fix_mock.assert_called_once()
 
 
+def test_advisory_block_review_still_triggers_fix() -> None:
+    """auto_fix runs on BLOCK even when review_blocking is off (pipeline stays green)."""
+    from agent_fleet.code_review.loop import run_code_review_with_auto_fix
+    from agent_fleet.contracts.review import ReviewVerdict
+
+    phase_results = [
+        {"phase": "execute", "exit_code": 0, "stdout": "done", "stderr": ""},
+        {"phase": "scope", "passed": True, "exit_code": 0},
+        {
+            "phase": "review",
+            "verdict": ReviewVerdict.BLOCK.value,
+            "passed": False,
+            "exit_code": 1,
+            "summary": "raw regexp never interpolates",
+        },
+    ]
+    config = CodeReviewConfig(
+        auto_fix=True, max_fix_attempts=2, fix_persona="coder", review_blocking=False
+    )
+    fix_mock = MagicMock(return_value={"phase": "fix", "exit_code": 1, "stdout": "", "stderr": ""})
+    _loop = "agent_fleet.code_review.loop"
+    with (
+        patch(
+            f"{_loop}.run_pipeline",
+            return_value=(list(phase_results), "summary", 0, ["overlay.dart"]),
+        ),
+        patch(f"{_loop}.run_fix_phase", fix_mock),
+    ):
+        run_code_review_with_auto_fix(
+            backend=MagicMock(),
+            resolver=MagicMock(),
+            task=MagicMock(),
+            workspace=MagicMock(),
+            timeout_s=60,
+            phases=["execute", "review"],
+            repo=None,
+            config=config,
+        )
+    fix_mock.assert_called_once()
+
+
 def test_command_not_found_is_bootstrap() -> None:
     """Missing worktree tooling (e.g. react-router without node_modules) is bootstrap."""
     detail = "bash: react-router: command not found"
