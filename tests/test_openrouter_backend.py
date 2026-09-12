@@ -394,7 +394,12 @@ def test_live_openrouter_hy3_call(tmp_path: Path) -> None:
 
 
 def test_live_agnes_flash_call(tmp_path: Path) -> None:
-    """Live end-to-end call against Agnes 2.5 Flash (OpenAI-compatible)."""
+    """Live end-to-end call against Agnes 2.5 Flash (OpenAI-compatible).
+
+    Transient transport failures (read timeout, connection error) skip rather
+    than fail CI / fleet verify — the endpoint being slow or unreachable is
+    not a code defect.
+    """
     from agent_fleet.backends import AGNES_BASE_URL, AGNES_DEFAULT_MODEL
 
     key = os.environ.get("AGNES_API_KEY")
@@ -408,6 +413,9 @@ def test_live_agnes_flash_call(tmp_path: Path) -> None:
         timeout_s=60,
         cwd=tmp_path,
     )
+    stderr = (result.stderr or "").lower()
+    if result.exit_code != 0 and ("timed out" in stderr or "connection error" in stderr):
+        pytest.skip(f"Agnes endpoint unreachable: {result.stderr[:200]}")
     assert result.exit_code == 0, f"live Agnes call failed: {result.stderr}"
     assert result.stdout, "live Agnes call returned empty stdout"
     assert result.duration_s > 0.0
