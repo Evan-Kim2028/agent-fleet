@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+## 0.15.2 — 2026-09-12
+
+### Fixed
+
+- **`changed_lines` / `collect_changed_files`:** measured working-tree delta
+  vs `HEAD` first, so one stray dirty file (e.g. 2-line `uv.lock` churn)
+  made a 300-line committed change report as 2 lines and the `code_review`
+  gate silently skipped review. Diff is now counted against a resolved
+  base (`origin/<default>` merge-base, else local `main`/`master`, else
+  `HEAD^`) plus uncommitted and untracked lines. Fixes #90.
+- **Hung verify commands:** `CommandVerifier` had no timeout, so one hung
+  pytest could hold an admission slot forever. `verify_timeout_s`
+  (default 600s) now bounds bootstrap (FATAL) and verify (RETRY). Fixes #89.
+- **OpenRouter live Agnes test:** skip on transport timeout / connection
+  error so a third-party blip does not fail CI or fleet verify.
+
+### Changed
+
+- **Grok default model:** `grok-4.6` (matches the grok CLI). Explicit
+  `--model grok-4.5` is still honored.
+
 ## 0.15.1 — 2026-09-11
 
 ### Fixed
