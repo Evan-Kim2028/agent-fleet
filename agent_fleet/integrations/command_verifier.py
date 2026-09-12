@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
+import signal
 import subprocess
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from agent_fleet.contracts.verify_result import VerifyResult, VerifySeverity
@@ -18,11 +21,92 @@ if TYPE_CHECKING:
     from agent_fleet.repo import RepoConfig
 
 
-def _format_failure(headline: str, proc: subprocess.CompletedProcess[str]) -> str:
+@dataclass
+class _ProcResult:
+    returncode: int
+    stdout: str
+    stderr: str
+    timed_out: bool = False
+
+
+def _as_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def _format_failure(headline: str, proc: _ProcResult) -> str:
     detail = (proc.stderr or proc.stdout or "")[-2000:].rstrip()
+    if proc.timed_out:
+        if not detail:
+            return headline
+        return f"{headline}\n{detail}"
     if not detail:
         return f"{headline}\nexit={proc.returncode}"
     return f"{headline}\nexit={proc.returncode}\n{detail}"
+
+
+def _kill_process_group(proc: subprocess.Popen[str]) -> None:
+    if proc.pid is None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        with contextlib.suppress(OSError):
+            proc.kill()
+
+
+def _run_shell(
+    cmd: str,
+    *,
+    cwd: str,
+    env: dict[str, str],
+    timeout_s: int,
+) -> _ProcResult:
+    """Run *cmd* in a new session; kill the whole process group on timeout.
+
+    ``subprocess.run(timeout=...)`` only signals the shell. ``shell=True``
+    verify commands (pytest, uv, xdist) spawn grandchildren that would
+    otherwise survive as orphans. ``start_new_session=True`` makes the
+    shell the process-group leader so ``killpg`` reaps the tree.
+    """
+    proc = subprocess.Popen(
+        cmd,
+        shell=True,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_s)
+    except subprocess.TimeoutExpired as exc:
+        _kill_process_group(proc)
+        try:
+            stdout, stderr = proc.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            stdout, stderr = proc.communicate()
+        # TimeoutExpired.stdout/stderr may be bytes or None even under text=True.
+        stdout_s = _as_text(stdout) or _as_text(exc.stdout)
+        stderr_s = _as_text(stderr) or _as_text(exc.stderr)
+        return _ProcResult(-1, stdout_s, stderr_s, timed_out=True)
+    code = proc.returncode if proc.returncode is not None else -1
+    return _ProcResult(code, stdout or "", stderr or "")
+
+
+def _check_record(name: str, proc: _ProcResult) -> dict[str, object]:
+    return {
+        "name": name,
+        "passed": (not proc.timed_out) and proc.returncode == 0,
+        "stdout_tail": proc.stdout[-2000:],
+        "stderr_tail": proc.stderr[-2000:],
+        "exit_code": proc.returncode,
+    }
 
 
 _INFRASTRUCTURE_EXIT_CODES = frozenset({126, 127})
@@ -66,36 +150,22 @@ class CommandVerifier:
         changed_result = get_changed_files_result(worktree)
         rel_changed = changed_result.files
         checks: list[dict] = []
-        verify_env = {
+        timeout_s = self.repo.verify_timeout_s
+        verify_env: dict[str, str] = {
             **os.environ,
             "ISSUE_NUMBER": str(task_id),
             "FLEET_PERSONA": persona,
         }
+        worktree_s = str(worktree)
         bootstrap_commands = list(self.repo.worktree_bootstrap_commands)
         bootstrap_t0 = time.monotonic()
         bootstrap_exit_code = 0
-        bootstrap_fatal_proc: subprocess.CompletedProcess[str] | None = None
+        bootstrap_fatal_proc: _ProcResult | None = None
         bootstrap_fatal_cmd: str | None = None
         for cmd in bootstrap_commands:
-            proc = subprocess.run(
-                cmd,
-                shell=True,
-                cwd=str(worktree),
-                capture_output=True,
-                text=True,
-                check=False,
-                env=verify_env,
-            )
-            checks.append(
-                {
-                    "name": f"bootstrap: {cmd}",
-                    "passed": proc.returncode == 0,
-                    "stdout_tail": proc.stdout[-2000:],
-                    "stderr_tail": proc.stderr[-2000:],
-                    "exit_code": proc.returncode,
-                }
-            )
-            if proc.returncode != 0:
+            proc = _run_shell(cmd, cwd=worktree_s, env=verify_env, timeout_s=timeout_s)
+            checks.append(_check_record(f"bootstrap: {cmd}", proc))
+            if proc.timed_out or proc.returncode != 0:
                 bootstrap_exit_code = proc.returncode
                 bootstrap_fatal_proc = proc
                 bootstrap_fatal_cmd = cmd
@@ -110,41 +180,42 @@ class CommandVerifier:
         if bootstrap_fatal_proc is not None and bootstrap_fatal_cmd is not None:
             # Bootstrap prepares the worktree. It is deterministic on
             # rerun and not fixable by editing the code under task
-            # (lockfile drift, missing tools, network). Classify FATAL
-            # so the runner bails immediately instead of burning fix
-            # iterations on an environmental problem.
+            # (lockfile drift, missing tools, network). A hang here is
+            # the same class of environmental failure as a missing
+            # toolchain — FATAL so the runner bails instead of burning
+            # fix iterations. A *verify* timeout is different: the
+            # agent may have just written an infinite loop.
+            headline = (
+                f"Worktree bootstrap timed out after {timeout_s}s: {bootstrap_fatal_cmd}"
+                if bootstrap_fatal_proc.timed_out
+                else f"Worktree bootstrap failed: {bootstrap_fatal_cmd}"
+            )
             return VerifyResult(
                 severity=VerifySeverity.FATAL,
                 checks=checks,
                 violating_paths=[],
                 files_changed=rel_changed,
-                message=_format_failure(
-                    f"Worktree bootstrap failed: {bootstrap_fatal_cmd}",
-                    bootstrap_fatal_proc,
-                ),
+                message=_format_failure(headline, bootstrap_fatal_proc),
             )
 
         commands = self.repo.verify_commands_for(persona)
         verify_commands_ran = bool(commands)
         for cmd in commands:
-            proc = subprocess.run(
-                cmd,
-                shell=True,
-                cwd=str(worktree),
-                capture_output=True,
-                text=True,
-                check=False,
-                env=verify_env,
-            )
-            checks.append(
-                {
-                    "name": cmd,
-                    "passed": proc.returncode == 0,
-                    "stdout_tail": proc.stdout[-2000:],
-                    "stderr_tail": proc.stderr[-2000:],
-                    "exit_code": proc.returncode,
-                }
-            )
+            proc = _run_shell(cmd, cwd=worktree_s, env=verify_env, timeout_s=timeout_s)
+            checks.append(_check_record(cmd, proc))
+            if proc.timed_out:
+                # Hung verify is plausibly an infinite loop in code the
+                # agent just wrote. RETRY feeds the fix loop.
+                return VerifyResult(
+                    severity=VerifySeverity.RETRY,
+                    checks=checks,
+                    violating_paths=[],
+                    files_changed=rel_changed,
+                    message=_format_failure(
+                        f"Verification timed out after {timeout_s}s: {cmd}",
+                        proc,
+                    ),
+                )
             if proc.returncode != 0:
                 if proc.returncode in _INFRASTRUCTURE_EXIT_CODES:
                     return VerifyResult(
@@ -163,30 +234,16 @@ class CommandVerifier:
                 # Scope is intentionally narrow — only `ruff check` triggers it.
                 if "ruff check" in cmd and "--fix" not in cmd:
                     fix_cmd = cmd + " --fix"
-                    subprocess.run(
-                        fix_cmd,
-                        shell=True,
-                        cwd=str(worktree),
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                        env=verify_env,
-                    )
-                    rerun_proc = subprocess.run(
-                        cmd,
-                        shell=True,
-                        cwd=str(worktree),
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                        env=verify_env,
+                    _run_shell(fix_cmd, cwd=worktree_s, env=verify_env, timeout_s=timeout_s)
+                    rerun_proc = _run_shell(
+                        cmd, cwd=worktree_s, env=verify_env, timeout_s=timeout_s
                     )
                     # Count files changed by ruff --fix via git diff --name-only
                     _files_changed_count = 0
                     try:
                         _diff = subprocess.run(
                             ["git", "diff", "--name-only"],
-                            cwd=str(worktree),
+                            cwd=worktree_s,
                             capture_output=True,
                             text=True,
                             check=False,
@@ -205,18 +262,26 @@ class CommandVerifier:
                             "files_changed_count": _files_changed_count,
                         },
                     )
-                    checks[-1] = {
-                        "name": cmd,
-                        "passed": rerun_proc.returncode == 0,
-                        "stdout_tail": rerun_proc.stdout[-2000:],
-                        "stderr_tail": rerun_proc.stderr[-2000:],
-                        "exit_code": rerun_proc.returncode,
-                        "autofix_applied": True,
-                    }
+                    record = _check_record(cmd, rerun_proc)
+                    record["autofix_applied"] = True
+                    checks[-1] = record
+                    if rerun_proc.timed_out:
+                        return VerifyResult(
+                            severity=VerifySeverity.RETRY,
+                            checks=checks,
+                            violating_paths=[],
+                            files_changed=rel_changed,
+                            message=_format_failure(
+                                f"Verification timed out after {timeout_s}s: {cmd}",
+                                rerun_proc,
+                            ),
+                        )
                     if rerun_proc.returncode == 0:
                         continue
                     proc = rerun_proc
-                preexisting, new_ids = self._preexisting_only(worktree, cmd, verify_env, proc)
+                preexisting, new_ids = self._preexisting_only(
+                    worktree, cmd, verify_env, proc, timeout_s=timeout_s
+                )
                 if preexisting:
                     checks[-1]["passed"] = True
                     checks[-1]["attributed_preexisting"] = True
@@ -285,7 +350,9 @@ class CommandVerifier:
         worktree: Path,
         cmd: str,
         env: dict[str, str],
-        head_proc: subprocess.CompletedProcess[str],
+        head_proc: _ProcResult,
+        *,
+        timeout_s: int,
     ) -> tuple[bool, frozenset[str]]:
         """Re-run a failed command against the base tree to attribute failures.
 
@@ -315,15 +382,7 @@ class CommandVerifier:
             if stash.returncode != 0:
                 return False, frozenset()
             try:
-                base_proc = subprocess.run(
-                    cmd,
-                    shell=True,
-                    cwd=str(worktree),
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    env=env,
-                )
+                base_proc = _run_shell(cmd, cwd=str(worktree), env=env, timeout_s=timeout_s)
             finally:
                 subprocess.run(
                     ["git", "stash", "pop", "--quiet"],
@@ -333,6 +392,8 @@ class CommandVerifier:
                     check=False,
                 )
         except Exception:
+            return False, frozenset()
+        if base_proc.timed_out:
             return False, frozenset()
 
         head_ids = _parse_failed_ids(head_proc.stdout, head_proc.stderr, head_proc.returncode)

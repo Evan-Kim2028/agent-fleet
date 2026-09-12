@@ -51,6 +51,7 @@ class RepoConfig:
     persona_verify_commands: dict[str, tuple[str, ...]] = field(default_factory=dict)
     worktree_bootstrap_commands: list[str] = field(default_factory=list)
     commit_preflight_commands: list[str] = field(default_factory=list)
+    verify_timeout_s: int = 600
     test_command: str | None = None
     lint_command: str | None = None
     typecheck_command: str | None = None
@@ -140,6 +141,12 @@ def load_repo_config(
     }
     worktree_bootstrap_commands = list(raw.get("worktree_bootstrap_commands") or [])
     commit_preflight_commands = list(raw.get("commit_preflight_commands") or [])
+    try:
+        verify_timeout_s = int(raw.get("verify_timeout_s") or 600)
+    except TypeError, ValueError:
+        verify_timeout_s = 600
+    if verify_timeout_s < 1:
+        verify_timeout_s = 600
     test_command = raw.get("test_command")
     lint_command = raw.get("lint_command")
     typecheck_command = raw.get("typecheck_command")
@@ -209,6 +216,7 @@ def load_repo_config(
         persona_verify_commands=persona_verify_commands,
         worktree_bootstrap_commands=worktree_bootstrap_commands,
         commit_preflight_commands=commit_preflight_commands,
+        verify_timeout_s=verify_timeout_s,
         test_command=test_command,
         lint_command=lint_command,
         typecheck_command=typecheck_command,

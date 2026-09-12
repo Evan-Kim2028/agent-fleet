@@ -20,6 +20,11 @@ lint_command: ruff check .
 #   - npm test
 #   - npm run lint
 
+# Kill hung bootstrap/verify commands, including process-group grandchildren.
+# Default 600s (same as verify_core.run_shell_verify). Bootstrap timeout is
+# FATAL; verify timeout is a fixable RETRY (the agent may have written a loop).
+# verify_timeout_s: 600
+
 # Persona scope restrictions (path prefixes)
 persona_scope_allowlist:
   backend:

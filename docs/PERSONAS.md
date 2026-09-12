@@ -191,6 +191,7 @@ Used by the **full** pipeline (`--pipeline full`):
 
 - `test_command`, `lint_command`, `typecheck_command` → run after IMPLEMENT
 - Or explicit `verify_commands: [...]` list
+- `verify_timeout_s` (default 600) bounds each bootstrap and verify command. The process group is killed on expiry so `shell=True` grandchildren (pytest, uv, xdist) do not survive. A **bootstrap** timeout is `FATAL` (environmental). A **verify** timeout is `RETRY` so the fix loop can run — the agent may have just written an infinite loop.
 
 ## Pipelines
 
