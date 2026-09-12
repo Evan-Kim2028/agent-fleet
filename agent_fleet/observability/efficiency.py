@@ -51,15 +51,81 @@ def _untracked_lines(cwd: str, ws: Path) -> int:
     return total
 
 
+def _git_sha(cwd: str, ref: str) -> str | None:
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", ref],
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+        timeout=5,
+    )
+    sha = result.stdout.strip()
+    return sha if result.returncode == 0 and sha else None
+
+
+def _merge_base(cwd: str, ref: str) -> str | None:
+    result = subprocess.run(
+        ["git", "merge-base", ref, "HEAD"],
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+        timeout=5,
+    )
+    sha = result.stdout.strip()
+    return sha if result.returncode == 0 and sha else None
+
+
+def _diff_base(cwd: str) -> str | None:
+    """Best-effort base for the task's diff, resolved from local refs only.
+
+    Prefer merge-base against a base branch (origin/<default> if the ref already
+    exists locally, else local main/master that isn't the current branch); fall
+    back to HEAD's parent. Unlike verify_core._resolve_diff_base this never
+    fetches: changed_lines runs in the run_end hot path and an untimeouted
+    network op could stall the runner. None when nothing resolves (e.g. a repo
+    whose only commit is the root commit).
+    """
+    current = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+        timeout=5,
+    ).stdout.strip()
+    origin_head_result = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"],
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+        timeout=5,
+    )
+    # A missing origin/HEAD still echoes "origin/HEAD" on stdout (rc 128), so
+    # the returncode -- not the text -- tells us whether the ref exists.
+    origin_head = origin_head_result.stdout.strip() if origin_head_result.returncode == 0 else ""
+    default = origin_head.split("/")[-1] if origin_head else "main"
+    candidates: list[str] = []
+    if origin_head:
+        candidates.append(origin_head)
+    for name in (default, "main", "master"):
+        if name != current and name not in candidates:
+            candidates.append(name)
+    for ref in candidates:
+        if _git_sha(cwd, ref) is None:
+            continue
+        base = _merge_base(cwd, ref)
+        if base is not None:
+            return base
+    return _git_sha(cwd, "HEAD^")
+
+
 def changed_lines(workspace: Path | str | None) -> int:
     """Total changed lines (additions + deletions) for the task's work in *workspace*.
 
-    The work may be uncommitted (dispatcher path, and the runner's pre-commit
-    early exits) or already committed (the runner success path commits before
-    run_end). Measure the working-tree delta vs HEAD plus untracked-file lines
-    first; when the tree is clean the work is committed, so fall back to the last
-    commit (HEAD~1..HEAD). Returns 0 on any error (not a git repo, no commits,
-    only one commit so HEAD~1 doesn't exist, OSError, timeout).
+    The task's contribution is measured as one diff of the working tree against
+    the resolved base (see _diff_base): committed work on the branch plus
+    uncommitted tracked edits, plus untracked-file lines counted separately.
+    A stray dirty file can no longer mask committed work. Returns 0 on any
+    error (not a git repo, no commits, OSError, timeout).
     """
     if workspace is None:
         return 0
@@ -68,9 +134,7 @@ def changed_lines(workspace: Path | str | None) -> int:
         return 0
     cwd = str(ws)
     try:
-        working = _numstat_total(["HEAD"], cwd) + _untracked_lines(cwd, ws)
-        if working > 0:
-            return working
-        return _numstat_total(["HEAD~1..HEAD"], cwd)
+        base = _diff_base(cwd) or "HEAD"
+        return _numstat_total([base], cwd) + _untracked_lines(cwd, ws)
     except OSError, subprocess.TimeoutExpired, subprocess.CalledProcessError:
         return 0
