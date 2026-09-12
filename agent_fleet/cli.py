@@ -779,7 +779,7 @@ def cmd_config_set_backend(args: argparse.Namespace) -> int:
     if getattr(args, "model", None):
         data["default_model"] = str(args.model).strip()
     elif backend == "grok" and not data.get("default_model"):
-        data["default_model"] = "grok-4.5"
+        data["default_model"] = "grok-4.6"
     elif backend == "qwen" and not data.get("default_model"):
         data["default_model"] = "qwen3.8-max-preview"
     elif backend == "agnes" and not data.get("default_model"):
@@ -1065,7 +1065,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     set_backend_p.add_argument(
         "--model",
-        help="Also set default_model (grok defaults to grok-4.5, qwen to "
+        help="Also set default_model (grok defaults to grok-4.6, qwen to "
         "qwen3.8-max-preview, agnes to agnes-2.5-flash, if unset)",
     )
     set_backend_p.set_defaults(func=cmd_config_set_backend)

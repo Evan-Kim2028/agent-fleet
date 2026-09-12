@@ -28,7 +28,7 @@ from agent_fleet.grok_backend import (
 
 
 def test_default_model_is_grok_build() -> None:
-    assert DEFAULT_MODEL == "grok-4.5"
+    assert DEFAULT_MODEL == "grok-4.6"
 
 
 def test_grok_resolves_from_registry() -> None:
@@ -61,7 +61,7 @@ def test_grok_factory_inherits_default_when_config_model_none() -> None:
     cfg = FleetConfig(default_backend="grok", default_model=None)
     backend = make_backend(cfg)
     assert isinstance(backend, GrokBackend)
-    assert backend.model == "grok-4.5"
+    assert backend.model == "grok-4.6"
 
 
 def test_grok_factory_respects_explicit_model_and_bin() -> None:

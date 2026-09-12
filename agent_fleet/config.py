@@ -58,7 +58,7 @@ class PersonaSpec:
 class FleetConfig:
     # default_model is None so each backend can supply its own DEFAULT_MODEL
     # (cursor → composer-2.5, kimi → kimi-for-coding, openrouter → tencent/hy3:free,
-    #  grok → grok-4.5)
+    #  grok → grok-4.6)
     # without a Cursor slug leaking into the shared config default. The factory
     # resolves `config.default_model or <BACKEND>.DEFAULT_MODEL`.
     default_model: str | None = None

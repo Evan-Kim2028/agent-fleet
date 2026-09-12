@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "grok-4.5"
+DEFAULT_MODEL = "grok-4.6"
 AUTH_JSON = Path("~/.grok/auth.json").expanduser()
 LOCAL_BIN = Path("~/.grok/bin/grok").expanduser()
 
