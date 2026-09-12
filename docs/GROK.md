@@ -11,7 +11,7 @@ Use this backend when your fleet should run via the official Grok Build CLI with
 | `default_backend` | `grok` |
 | Auth | `grok login` → `~/.grok/auth.json` (OIDC / SuperGrok) |
 | API key | **Not required** — do not set `XAI_API_KEY` for fleet runs |
-| Default model | `grok-4.5` (Grok Build coding model; see `grok models`) |
+| Default model | `grok-4.6` (Grok Build coding model; see `grok models`) |
 | Runtime | `grok` binary (`which grok` or `~/.grok/bin/grok`) |
 | Session support | Yes — `GrokSession` uses `-s` UUID on first send, `-r` on subsequent |
 
@@ -63,7 +63,7 @@ Edit `~/.agent-fleet/fleet.yaml` — set the Grok backend:
 
 ```yaml
 default_backend: grok
-default_model: grok-4.5
+default_model: grok-4.6
 default_persona: coder
 default_pipeline: code_review
 timeout_seconds: 900
@@ -102,7 +102,7 @@ fleet config set-backend grok
 
 # Or session-wide (CLI + pr-analyzer + issue dispatch + pr_loop)
 export AGENT_FLEET_BACKEND=grok
-export AGENT_FLEET_MODEL=grok-4.5
+export AGENT_FLEET_MODEL=grok-4.6
 
 # Or a single run / doctor check
 fleet run "..." --backend grok --pipeline code_review
@@ -175,16 +175,16 @@ Optional — override the global Grok model for one persona:
 
 ```yaml
 default_backend: grok
-default_model: grok-4.5
+default_model: grok-4.6
 
 personas:
   coder:
     prompt: coder.md
-    model: grok-4.5
+    model: grok-4.6
   explorer:
     prompt: explorer.md
     mode: plan
-    model: grok-4.5
+    model: grok-4.6
 ```
 
 Persona `model` is passed through to the backend when supported. Plan mode maps to `grok --permission-mode plan`.
@@ -203,7 +203,7 @@ Persona `model` is passed through to the backend when supported. Plan mode maps 
 ## How it works (implementation)
 
 - `default_backend: grok` → `GrokBackend` (`agent_fleet/grok_backend.py`)
-- Spawns `grok` headless with `--prompt-file`, `--output-format plain`, `-m grok-4.5`
+- Spawns `grok` headless with `--prompt-file`, `--output-format plain`, `-m grok-4.6`
 - Agent mode uses `--yolo`; plan mode uses `--permission-mode plan`
 - Sessions: first send `-s <uuid>`, subsequent sends `-r <uuid>`
 - Auth probe: binary present + non-empty valid JSON dict at `~/.grok/auth.json`

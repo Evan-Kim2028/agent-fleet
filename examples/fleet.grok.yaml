@@ -3,7 +3,7 @@
 # No XAI_API_KEY required — subscription auth via ~/.grok/auth.json
 
 default_backend: grok
-default_model: grok-4.5
+default_model: grok-4.6
 default_persona: coder
 default_mode: agent
 max_parallel: 3

@@ -118,10 +118,10 @@ Copy `examples/github/pr-analyzer.yml` → `.github/workflows/pr-analyzer.yml`.
   with:
     python-version: "3.14"
 - name: Install agent-fleet
-  run: uv pip install "git+https://github.com/Evan-Kim2028/agent-fleet.git@v0.6.0"
+  run: uv pip install "git+https://github.com/Evan-Kim2028/agent-fleet.git@v0.15.2"
 ```
 
-Replace `@v0.6.0` with the version you tested, or `@<40-char-commit-sha>`.
+Replace `@v0.15.2` with the version you tested, or `@<40-char-commit-sha>`. Current tag: [v0.15.2](https://github.com/Evan-Kim2028/agent-fleet/releases/tag/v0.15.2).
 
 ### 3. Backend and secrets
 
@@ -141,6 +141,12 @@ In repo **Settings → Secrets → Actions**, add keys for backends you may use:
 
 For **Grok** (`default_backend: grok`): no API-key secret — the runner must have
 `grok login` completed (`~/.grok/auth.json`). See [GROK.md](GROK.md).
+
+For **Devin** (`default_backend: devin`): no API-key secret — `devin auth login`
+(`~/.local/share/devin/credentials.toml`). See [DEVIN.md](DEVIN.md).
+
+For **Command Code** (`default_backend: cmd`): no API-key secret — `cmd login`
+(`~/.commandcode/auth.json`). See [CMD.md](CMD.md).
 
 Comment titles follow the backend (Composer / Grok / Kimi / OpenRouter PR Analysis)
 unless you set a custom `pr_review.comment_title` in `.agent-fleet.yaml`.

@@ -120,7 +120,13 @@ Or dispatch with pipeline `pr_review`:
 | `default_backend` | Key required | Model default |
 |-------------------|--------------|---------------|
 | `cursor` (default) | `CURSOR_API_KEY` | `composer-2.5` |
-| `kimi` (optional) | `KIMI_API_KEY` | `kimi-for-coding` |
+| `kimi` | `KIMI_API_KEY` | `kimi-for-coding` |
+| `grok` | `grok login` (no API key) | `grok-4.6` |
+| `openrouter` | `OPENROUTER_API_KEY` | backend default |
+| `qwen` | `QWEN_API_KEY` | `qwen3.8-max-preview` |
+| `agnes` | `AGNES_API_KEY` | `agnes-2.5-flash` |
+| `cmd` | `cmd login` (no API key) | `meituan/longcat-2.0:free` |
+| `devin` | `devin auth login` (no API key) | `swe-2-high` |
 
 ## Pipelines
 

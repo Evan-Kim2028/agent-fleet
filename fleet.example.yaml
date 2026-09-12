@@ -47,7 +47,7 @@ max_redispatches: 1
 # Requires: grok binary (https://x.ai/cli); run `grok login` (SuperGrok / X Premium+)
 # No XAI_API_KEY required — uses ~/.grok/auth.json
 # default_backend: grok
-# default_model: grok-4.5
+# default_model: grok-4.6
 # grok_bin: ~/.grok/bin/grok
 
 # --- Optional: Qwen execution backend (Alibaba Bailian, Token Plan Team Edition) ---

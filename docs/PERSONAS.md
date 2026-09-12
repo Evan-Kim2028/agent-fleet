@@ -73,7 +73,7 @@ default_model: composer-2.5
 
 # Optional — Grok Build CLI, SuperGrok / X Premium+ via `grok login`
 # default_backend: grok
-# default_model: grok-4.5
+# default_model: grok-4.6
 # grok_bin: ~/.grok/bin/grok
 
 # Optional — Qwen (Alibaba Bailian), reuses the OpenRouter HTTP client, QWEN_API_KEY
@@ -85,10 +85,10 @@ default_model: composer-2.5
 |---------|----------------------|---------------|----------------|------|
 | `default_backend` | `cursor` | `kimi` | `grok` | `qwen` |
 | Auth | `CURSOR_API_KEY` | `KIMI_API_KEY` | `grok login` → `~/.grok/auth.json` | `QWEN_API_KEY` |
-| Default model | `composer-2.5` | `kimi-for-coding` | `grok-4.5` | `qwen3.8-max-preview` |
+| Default model | `composer-2.5` | `kimi-for-coding` | `grok-4.6` | `qwen3.8-max-preview` |
 | Runtime | `cursor-sdk` (pip) | `kimi-cli` binary | `grok` binary | HTTP (OpenRouter client) |
 
-Personas, pipelines, and repo scope are **backend-agnostic**. Kimi setup: **[KIMI.md](KIMI.md)**. Grok setup: **[GROK.md](GROK.md)**. Qwen setup: **[QWEN.md](QWEN.md)**.
+Personas, pipelines, and repo scope are **backend-agnostic**. Kimi: **[KIMI.md](KIMI.md)**. Grok: **[GROK.md](GROK.md)**. Qwen: **[QWEN.md](QWEN.md)**. Also [CMD.md](CMD.md), [DEVIN.md](DEVIN.md), [AGNES.md](AGNES.md).
 
 ## Global fleet (`fleet.yaml`)
 

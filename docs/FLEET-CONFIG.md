@@ -36,8 +36,8 @@ Repo-level settings (verify commands, scope, PR loop) always come from `.agent-f
 
 Resolution order for backend and model (first non-empty wins):
 
-1. CLI flags: `fleet run --backend grok --model grok-4.5`
-2. Env: `export AGENT_FLEET_BACKEND=grok` / `export AGENT_FLEET_MODEL=grok-4.5`
+1. CLI flags: `fleet run --backend grok --model grok-4.6`
+2. Env: `export AGENT_FLEET_BACKEND=grok` / `export AGENT_FLEET_MODEL=grok-4.6`
 3. Global config: `default_backend` / `default_model` in `~/.agent-fleet/fleet.yaml`
 4. Built-in default: `cursor` (model left unset so each backend supplies its default)
 
@@ -46,11 +46,11 @@ One-line switches:
 ```bash
 # Permanent (writes ~/.agent-fleet/fleet.yaml)
 fleet config set-backend grok
-# or: fleet config set-backend grok --model grok-4.5
+# or: fleet config set-backend grok --model grok-4.6
 
 # Session / CI (all entry points)
 export AGENT_FLEET_BACKEND=grok
-export AGENT_FLEET_MODEL=grok-4.5
+export AGENT_FLEET_MODEL=grok-4.6
 
 # Single command
 fleet run "..." --backend grok
