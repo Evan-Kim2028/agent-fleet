@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.15.1 — 2026-09-11
+
+### Fixed
+
+- **`tests/test_cli_persona_resolution.py`:** the test dispatched with
+  `--backend devin`, so `require_backend_env()` short-circuited `cmd_run`
+  before dispatch on any machine without real Devin credentials. It passed
+  locally (credentials present) and failed in CI. The auth probe is now
+  stubbed — the test is about persona resolution, not auth. Reproduce the
+  old failure with `HOME=$(mktemp -d) uv run pytest
+  tests/test_cli_persona_resolution.py`.
+
 ## 0.15.0 — 2026-09-11
 
 ### Summary

@@ -25,7 +25,14 @@ def test_cmd_run_dispatch_uses_repo_default_persona_not_global(
     default_persona instead of the repo's, running the wrong (unscoped)
     verify_commands for that persona.
     """
-    from agent_fleet import cli
+    from agent_fleet import cli, devin_backend
+
+    # This test is about persona resolution, not auth. Without this stub it
+    # passes only on a machine that happens to have real Devin credentials
+    # and fails in CI, where ~/.local/share/devin/credentials.toml is absent
+    # and require_backend_env() short-circuits cmd_run before it ever
+    # dispatches.
+    monkeypatch.setattr(devin_backend, "check_devin_auth", lambda: (True, "stubbed", ""))
 
     workspace = tmp_path / "repo"
     workspace.mkdir()
