@@ -11,6 +11,7 @@ from agent_fleet.observability.efficiency import changed_lines
 from agent_fleet.observability.events import FleetEvent, RunContext
 from agent_fleet.observability.log import RunLog
 from agent_fleet.observability.sinks import JsonlFileSink, MemoryRingSink
+from agent_fleet.phases import collect_changed_files
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -418,3 +419,67 @@ def test_changed_lines_single_commit_returns_zero(tmp_path: Path) -> None:
     )
     # HEAD~1 doesn't exist → git diff exits non-zero → returns 0.
     assert changed_lines(tmp_path) == 0
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=str(repo), check=True, capture_output=True)
+
+
+def _init_repo(repo: Path, *init_args: str) -> None:
+    _git(repo, "init", *init_args)
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test")
+
+
+def test_changed_lines_committed_work_plus_stray_dirty_file(tmp_path: Path) -> None:
+    """Issue #90: one stray dirty file must not mask a large committed change.
+
+    The old implementation measured the working tree vs HEAD first and
+    returned the stray file's 2 lines, silently disabling the review gate.
+    """
+    _init_repo(tmp_path)
+    (tmp_path / "base.txt").write_text("a\nb\nc\n")
+    _git(tmp_path, "add", "base.txt")
+    _git(tmp_path, "commit", "-m", "base")
+    (tmp_path / "work.txt").write_text("".join(f"line{i}\n" for i in range(60)))
+    _git(tmp_path, "add", "work.txt")
+    _git(tmp_path, "commit", "-m", "task work")
+    # Stray uncommitted edit: 2 appended lines to base.txt.
+    with (tmp_path / "base.txt").open("a") as fh:
+        fh.write("d\ne\n")
+    assert changed_lines(tmp_path) == 62
+
+
+def test_changed_lines_task_branch_merge_base(tmp_path: Path) -> None:
+    """Fleet worktree shape: task commits on a branch off main are measured
+    against merge-base(main, HEAD), so committed work plus dirty-tracked and
+    untracked files all count."""
+    _init_repo(tmp_path, "-b", "main")
+    (tmp_path / "base.txt").write_text("a\nb\nc\n")
+    _git(tmp_path, "add", "base.txt")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "checkout", "-b", "fleet/task")
+    (tmp_path / "work.txt").write_text("".join(f"line{i}\n" for i in range(60)))
+    _git(tmp_path, "add", "work.txt")
+    _git(tmp_path, "commit", "-m", "task work")
+    with (tmp_path / "base.txt").open("a") as fh:
+        fh.write("d\ne\n")
+    (tmp_path / "scratch.txt").write_text("x\ny\n")
+    assert changed_lines(tmp_path) == 64
+
+
+def test_collect_changed_files_reports_committed_files(tmp_path: Path) -> None:
+    """Issue #90 sibling: collect_changed_files used porcelain only, so files
+    the run committed were invisible."""
+    _init_repo(tmp_path)
+    (tmp_path / "base.txt").write_text("a\nb\nc\n")
+    _git(tmp_path, "add", "base.txt")
+    _git(tmp_path, "commit", "-m", "base")
+    (tmp_path / "work.txt").write_text("".join(f"line{i}\n" for i in range(60)))
+    _git(tmp_path, "add", "work.txt")
+    _git(tmp_path, "commit", "-m", "task work")
+    with (tmp_path / "base.txt").open("a") as fh:
+        fh.write("d\ne\n")
+    files = collect_changed_files(tmp_path)
+    assert "work.txt" in files
+    assert "base.txt" in files

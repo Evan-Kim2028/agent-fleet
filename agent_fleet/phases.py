@@ -21,6 +21,7 @@ from agent_fleet.scope import effective_allowed_paths, files_outside_allowed_pat
 from agent_fleet.skills_lib import base_kit_skill_dirs, resolve_skill_path
 from agent_fleet.verify_core import (
     clear_pycache,
+    get_changed_files,
     get_working_tree_changes,
     get_working_tree_diff,
     pop_stashed_working_tree,
@@ -788,7 +789,7 @@ def resolve_pipeline_outcome(
 
 
 def collect_changed_files(workspace: Path) -> list[str]:
-    return get_working_tree_changes(workspace)
+    return get_changed_files(workspace)
 
 
 REVIEW_SKIP_LINES_THRESHOLD: int = 50
