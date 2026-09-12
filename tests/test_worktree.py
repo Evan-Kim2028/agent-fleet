@@ -389,6 +389,59 @@ def test_prepare_task_workspace_resume_ignores_clean_branch(tmp_path: Path) -> N
     second.teardown(keep=False)
 
 
+def test_prepare_task_workspace_does_not_steal_live_foreign_worktree(
+    tmp_path: Path,
+) -> None:
+    """Concurrent ``fleet run`` processes all dispatch task_index=0.
+
+    Resume used to attach to any dirty ``fleet/task-0-*`` branch, including
+    one another live dispatcher still owned. Devin sessions are cwd-keyed, so
+    the second run joined the first worktree and overwrote its session.
+    A sidecar lock held by a different live PID must force a fresh worktree.
+    Same-PID dirty resume is still covered by
+    test_prepare_task_workspace_resumes_dirty_branch_for_same_task_index.
+    """
+    from agent_fleet.pr_loop.worktree import claim_worktree_lock
+
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+    repo = RepoConfig(
+        repo_root=repo_path,
+        use_worktree=True,
+        worktree_base=tmp_path / "worktrees",
+    )
+
+    first = prepare_task_workspace(repo, task_index=0, force_isolation=True)
+    (first.path / "in_progress.txt").write_text("partial work\n", encoding="utf-8")
+
+    holder = subprocess.Popen(["sleep", "60"])
+    second = None
+    try:
+        claim_worktree_lock(first.path, pid=holder.pid)
+        second = prepare_task_workspace(repo, task_index=0, force_isolation=True)
+        assert second.path != first.path
+        assert second.branch_name != first.branch_name
+        assert not (second.path / "in_progress.txt").exists()
+    finally:
+        holder.kill()
+        holder.wait(timeout=5)
+        if second is not None:
+            second.teardown(keep=False)
+        first.teardown(keep=False)
+
+
+def test_worktree_locked_by_other_process_false_for_self(tmp_path: Path) -> None:
+    from agent_fleet.integrations.local_git import LocalGitOps
+    from agent_fleet.pr_loop.worktree import worktree_locked_by_other_process
+
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+    git_ops = LocalGitOps(repo_path, use_worktree=True, worktree_base=tmp_path / "worktrees")
+    wt = git_ops.setup_workspace(repo_path, "self-lock", "main", branch_name="fleet/self")
+    assert worktree_locked_by_other_process(wt) is False
+    git_ops.teardown_workspace(wt)
+
+
 def test_sweep_removes_worktree_with_stale_pid_lock(tmp_path: Path) -> None:
     """A lock whose PID is dead (or recycled with different starttime) is stale."""
     from agent_fleet.integrations.local_git import LocalGitOps

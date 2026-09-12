@@ -205,6 +205,22 @@ def release_worktree_lock(worktree_path: Path) -> None:
         _worktree_lock_path(worktree_path).unlink()
 
 
+def _lock_owner(worktree_path: Path) -> tuple[int, int] | None:
+    """Return ``(pid, recorded_starttime)`` from the sidecar lock, or None."""
+    lock = _worktree_lock_path(worktree_path)
+    try:
+        text = lock.read_text().strip()
+    except OSError, ValueError:
+        return None
+    parts = text.split()
+    if len(parts) < 2:
+        return None
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+
+
 def _worktree_locked(worktree_path: Path) -> bool:
     """True if a live process declared ownership of *worktree_path* via lock file.
 
@@ -212,18 +228,28 @@ def _worktree_locked(worktree_path: Path) -> bool:
     is treated as stale, so the sweeper can reclaim worktrees abandoned by
     crashed dispatchers without waiting for a watcher restart.
     """
-    lock = _worktree_lock_path(worktree_path)
-    try:
-        text = lock.read_text().strip()
-    except OSError, ValueError:
+    owner = _lock_owner(worktree_path)
+    if owner is None:
         return False
-    parts = text.split()
-    if len(parts) < 2:
+    pid, recorded_start = owner
+    actual_start = _proc_start_time(pid)
+    return actual_start is not None and actual_start == recorded_start
+
+
+def worktree_locked_by_other_process(worktree_path: Path) -> bool:
+    """True when a *different* live process owns the sidecar lock.
+
+    Same-PID locks (in-process redispatch after a failed phase) are not
+    "other". Stale locks (dead PID / starttime mismatch) are not live.
+    Concurrent ``fleet run`` processes all use ``task_index=0``; resume
+    must not attach to a worktree another dispatcher still owns — Devin
+    sessions are cwd-keyed and would clobber each other.
+    """
+    owner = _lock_owner(worktree_path)
+    if owner is None:
         return False
-    try:
-        pid = int(parts[0])
-        recorded_start = int(parts[1])
-    except ValueError:
+    pid, recorded_start = owner
+    if pid == os.getpid():
         return False
     actual_start = _proc_start_time(pid)
     return actual_start is not None and actual_start == recorded_start

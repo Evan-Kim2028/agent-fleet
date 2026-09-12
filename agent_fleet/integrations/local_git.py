@@ -117,10 +117,20 @@ class LocalGitOps:
             for line in result.stdout.splitlines()
             if line.strip() and line.strip().lstrip("*+ ").startswith(prefix)
         ]
+        from agent_fleet.pr_loop.worktree import (
+            claim_worktree_lock,
+            worktree_locked_by_other_process,
+        )
+
         for branch_name in reversed(candidates):
             run_id = branch_name.rsplit("-", 1)[-1]
             worktree = self.attach_worktree(branch_name, run_id, create=False)
-            if worktree is not None and self.has_workspace_changes(worktree):
+            if worktree is None:
+                continue
+            if worktree_locked_by_other_process(worktree):
+                continue
+            if self.has_workspace_changes(worktree):
+                claim_worktree_lock(worktree)
                 return branch_name, run_id
         return None
 

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Fixed
+
+- **Devin / concurrent `fleet run` worktree steal:** every single-task
+  `fleet run` uses `task_index=0`, so resume attached to any dirty
+  `fleet/task-0-*` branch — including one a live Devin dispatcher still
+  owned. Devin sessions are cwd-keyed; the second run joined the first
+  worktree and overwrote its session. Resume now skips worktrees whose
+  sidecar lock is held by a different live PID (same-PID redispatch and
+  stale locks after SIGTERM still resume).
+
 ## 0.15.2 — 2026-09-12
 
 ### Fixed
