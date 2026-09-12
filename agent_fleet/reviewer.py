@@ -160,8 +160,7 @@ def _build_prompt(
     goal_stated = bool(task_goal.strip())
     if goal_stated:
         task_block = (
-            f"\nOriginal task (what this run was SUPPOSED to accomplish):\n"
-            f"{_truncate(task_goal)}\n"
+            f"\nOriginal task (what this run was SUPPOSED to accomplish):\n{_truncate(task_goal)}\n"
         )
     if task_context.strip():
         task_block += f"\nTask context:\n{_truncate(task_context)}\n"

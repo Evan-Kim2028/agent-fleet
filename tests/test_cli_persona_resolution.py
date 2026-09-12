@@ -9,6 +9,8 @@ if TYPE_CHECKING:
 
     import pytest
 
+    from agent_fleet.config import FleetConfig
+
 
 def test_cmd_run_dispatch_uses_repo_default_persona_not_global(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -39,8 +41,8 @@ def test_cmd_run_dispatch_uses_repo_default_persona_not_global(
     captured: dict[str, object] = {}
 
     class _FakeDispatcher:
-        def __init__(self, *, config: object) -> None:
-            captured["config_default_persona"] = config.default_persona  # type: ignore[attr-defined]
+        def __init__(self, *, config: FleetConfig) -> None:
+            captured["config_default_persona"] = config.default_persona
 
         def dispatch(self, **kwargs: object) -> list[object]:
             captured.update(kwargs)

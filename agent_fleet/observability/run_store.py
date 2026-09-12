@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -57,6 +58,39 @@ def append_run_index_row(row: Mapping[str, object], *, runs_dir: Path | None = N
             fh.write("\n")
 
 
+def _pid_alive(pid: object) -> bool:
+    """True if *pid* names a live process. Missing/malformed pid -> assume alive
+    (no reclassification) rather than risk mislabeling a run in progress."""
+    if not isinstance(pid, (int, float, str)):
+        return True
+    try:
+        pid_int = int(pid)
+    except ValueError:
+        return True
+    if pid_int <= 0:
+        return True
+    try:
+        os.kill(pid_int, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        # e.g. EPERM — the pid exists but we can't signal it; assume alive.
+        return True
+    return True
+
+
+def _reclassify_stale_running(row: dict[str, object]) -> dict[str, object]:
+    """A row still ``status: "running"`` whose recorded pid is dead means the
+    fleet run process was hard-killed (e.g. SIGTERM — no ``finally`` blocks run,
+    so run_end/its terminal index row never gets written) rather than genuinely
+    still in progress. Reported read-time only; the stored row is untouched."""
+    if row.get("status") != "running" or "pid" not in row:
+        return row
+    if _pid_alive(row.get("pid")):
+        return row
+    return {**row, "status": "interrupted"}
+
+
 def read_run_index(*, runs_dir: Path | None = None) -> list[dict[str, object]]:
     """Merge the index by run_id (last-writer-wins per field), newest started first."""
     path = run_index_path(runs_dir)
@@ -82,7 +116,7 @@ def read_run_index(*, runs_dir: Path | None = None) -> list[dict[str, object]]:
                 merged[rid] = {}
                 order.append(rid)
             merged[rid].update(row)
-    rows = [merged[rid] for rid in order]
+    rows = [_reclassify_stale_running(merged[rid]) for rid in order]
     rows.sort(key=lambda r: _coerce_float(r.get("started_at")) or 0.0, reverse=True)
     return rows
 

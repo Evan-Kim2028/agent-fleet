@@ -139,6 +139,7 @@ class SessionCapableBackend(LLMBackend, Protocol):
         mcp_servers: Mapping[str, McpServerSpec] | None = None,
         model: str | None = None,
         mode: AgentMode | str | None = None,
+        session_id: str | None = None,
     ) -> LLMSession: ...
 
 

@@ -720,6 +720,7 @@ class CursorBackend:
         mcp_servers: Mapping[str, McpServerSpec] | None = None,
         model: str | None = None,
         mode: AgentMode | None = None,
+        session_id: str | None = None,  # noqa: ARG002 (cursor-sdk has no session-id resume path)
     ) -> CursorSession | _ErrorSession:
         if not self.api_key:
             return _ErrorSession("CURSOR_API_KEY is not set")

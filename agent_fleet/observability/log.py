@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import time
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
@@ -165,6 +166,11 @@ class RunLog:
                 "started_at": time.time(),
                 "persona": self.context.persona if self.context else None,
                 "issue_number": self.context.issue_number if self.context else None,
+                # Lets `fleet runs` tell a genuinely in-progress run apart from
+                # one whose process was hard-killed (e.g. SIGTERM) before it
+                # could write a terminal run.end/index row — see
+                # observability/run_store.py's dead-pid reclassification.
+                "pid": os.getpid(),
             },
             runs_dir=self._index_runs_dir(),
         )

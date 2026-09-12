@@ -274,3 +274,72 @@ def test_run_index_path_uses_runs_dir(tmp_path: Path) -> None:
     p = run_index_path(runs_dir=tmp_path)
     assert p.parent == tmp_path
     assert p.name == "index.jsonl"
+
+
+# ---------------------------------------------------------------------------
+# (h) dead-pid reclassification: a hard-killed (SIGTERM) run process never
+# writes run_end, so its index row is stuck at status="running" forever
+# unless read_run_index notices the recorded pid is no longer alive.
+# ---------------------------------------------------------------------------
+
+
+def test_running_row_with_dead_pid_reclassified_as_interrupted(tmp_path: Path) -> None:
+    import subprocess
+    import sys
+
+    # A pid guaranteed to be dead: spawn a process and wait for it to exit.
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead_pid = proc.pid
+    proc.wait()
+
+    append_run_index_row(
+        {"run_id": "killed", "status": "running", "started_at": 1.0, "pid": dead_pid},
+        runs_dir=tmp_path,
+    )
+    rows = read_run_index(runs_dir=tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["status"] == "interrupted"
+
+
+def test_running_row_with_live_pid_stays_running(tmp_path: Path) -> None:
+    import os
+
+    append_run_index_row(
+        {"run_id": "alive", "status": "running", "started_at": 1.0, "pid": os.getpid()},
+        runs_dir=tmp_path,
+    )
+    rows = read_run_index(runs_dir=tmp_path)
+    assert rows[0]["status"] == "running"
+
+
+def test_running_row_without_pid_field_stays_running(tmp_path: Path) -> None:
+    """Rows written before the pid field existed must not be misclassified."""
+    append_run_index_row(
+        {"run_id": "legacy", "status": "running", "started_at": 1.0},
+        runs_dir=tmp_path,
+    )
+    rows = read_run_index(runs_dir=tmp_path)
+    assert rows[0]["status"] == "running"
+
+
+def test_completed_row_with_dead_pid_is_untouched(tmp_path: Path) -> None:
+    """Reclassification only applies to status == 'running'."""
+    append_run_index_row(
+        {"run_id": "done", "status": "completed", "started_at": 1.0, "pid": 999999},
+        runs_dir=tmp_path,
+    )
+    rows = read_run_index(runs_dir=tmp_path)
+    assert rows[0]["status"] == "completed"
+
+
+def test_run_start_records_pid(tmp_path: Path) -> None:
+    import os
+
+    from agent_fleet.observability.log import RunLog
+
+    run_log = RunLog.create(
+        run_id="r-pid", task_id=1, persona="coder", runs_dir=tmp_path, include_memory_ring=False
+    )
+    run_log.run_start(title="t")
+    rows = read_run_index(runs_dir=tmp_path)
+    assert rows[0]["pid"] == os.getpid()

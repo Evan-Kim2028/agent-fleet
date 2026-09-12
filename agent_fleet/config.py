@@ -284,9 +284,7 @@ def load_fleet_config(
     explicit_model = default_model or _env_model_override()
     yaml_backend = str(data.get("default_backend") or "cursor").strip().lower()
     backend_matches_yaml = str(resolved_backend).strip().lower() == yaml_backend
-    resolved_model = explicit_model or (
-        data.get("default_model") if backend_matches_yaml else None
-    )
+    resolved_model = explicit_model or (data.get("default_model") if backend_matches_yaml else None)
 
     return FleetConfig(
         default_model=resolved_model,

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.15.0 — 2026-09-11
+
+### Summary
+
+Four execution backends land in one release: **qwen**, **agnes**, **cmd**
+(Command Code), and **devin** (Devin CLI). `0.14.1` was version-bumped but
+never tagged; its qwen work ships here.
+
 ### Fixed
 
 - **code_review auto_fix:** REQUEST_CHANGES/BLOCK from an advisory review now
@@ -14,6 +22,17 @@
 
 ### Added
 
+- **Devin CLI backend:** `register("devin", ...)` — headless `devin -p` on a
+  Devin Pro/Team subscription (`devin auth login`; no API key). Default model
+  `swe-2-high`, binary resolved from `PATH` or `~/.local/bin/devin` (override
+  with `devin_bin`). Session id captured from `--export <tmp>.json` and reused
+  via `-r` on the next send; retries on rate_limit/quota/transient/timeout
+  resume the captured session rather than restarting. A rate-limit cooldown is
+  now shared process-wide, so concurrent dispatcher sessions back off together
+  instead of hammering the same quota. Session ids persist mid-flight, so a
+  SIGTERM'd fleet still leaves a resumable session behind. `mode: plan` leaves
+  `DEVIN_PERMISSION_MODE` unset (read-only). See `docs/DEVIN.md`,
+  `examples/fleet.devin.yaml`.
 - **`fleet run --complexity {LOW,MED,HIGH}`:** stops auto-classify from
   discarding `--pipeline`. MED/HIGH derive `code_review` (execute → review,
   plus repo verify when configured).

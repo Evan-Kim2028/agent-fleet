@@ -83,8 +83,24 @@ def prepare_task_workspace(
     task_index: int,
     force_isolation: bool = False,
     base_branch: str | None = None,
+    resume: bool = True,
 ) -> TaskWorkspace:
-    """Create an isolated worktree for a fleet task, or return the repo root."""
+    """Create an isolated worktree for a fleet task, or return the repo root.
+
+    When ``resume`` (default True, matching ``FleetRunConfig.resume``'s
+    default), first looks for an existing ``fleet/task-{task_index}-*``
+    branch with local changes — e.g. left behind by a fleet run process that
+    was hard-killed (SIGTERM) mid-task — and reuses that worktree/branch
+    instead of creating a fresh one. Without this, every dispatch of "the
+    same" task_index (a DAG task redispatched after an interruption) got a
+    brand-new worktree, branch, and (for session-capable backends like Devin)
+    a brand-new agent session with no memory of the killed attempt's
+    progress — the dispatcher path had no connection at all to the
+    ResumableGitOps resume mechanism LocalFleetRunner uses for its "full"
+    pipeline. A backend session id captured against the resumed worktree path
+    is picked up automatically by session_store.load_session_id — see
+    dispatcher_task.run_configured_pipeline.
+    """
     repo_root = repo.repo_root.resolve()
     if not force_isolation and not repo.use_worktree:
         return TaskWorkspace(
@@ -99,13 +115,29 @@ def prepare_task_workspace(
             "Initialize git or disable parallel dispatch for this path."
         )
 
-    run_id = f"task-{task_index}-{uuid.uuid4().hex[:8]}"
-    branch_name = f"fleet/task-{task_index}-{run_id.split('-')[-1]}"
     git_ops = LocalGitOps(
         repo_root,
         use_worktree=True,
         worktree_base=repo.worktree_base,
     )
+
+    if resume:
+        resumed = git_ops.find_resume_branch_by_prefix(f"fleet/task-{task_index}-")
+        if resumed is not None:
+            branch_name, run_id = resumed
+            worktree = git_ops.attach_worktree(branch_name, run_id, create=False)
+            if worktree is not None:
+                return TaskWorkspace(
+                    path=worktree,
+                    repo_root=repo_root,
+                    isolated=True,
+                    branch_name=branch_name,
+                    run_id=run_id,
+                    git_ops=git_ops,
+                )
+
+    run_id = f"task-{task_index}-{uuid.uuid4().hex[:8]}"
+    branch_name = f"fleet/task-{task_index}-{run_id.split('-')[-1]}"
     worktree = git_ops.setup_workspace(
         repo_root,
         run_id,

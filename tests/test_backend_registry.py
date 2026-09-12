@@ -141,10 +141,12 @@ def test_qwen_resolves(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_qwen_uses_default_base_url_and_model(monkeypatch: pytest.MonkeyPatch) -> None:
     from agent_fleet.backends import QWEN_BASE_URL, QWEN_DEFAULT_MODEL, make_backend
     from agent_fleet.config import FleetConfig
+    from agent_fleet.openrouter_backend import OpenRouterBackend
 
     monkeypatch.setenv("QWEN_API_KEY", "fake-qwen-key")
     cfg = FleetConfig(default_backend="qwen", default_model=None)
     backend = make_backend(cfg)
+    assert isinstance(backend, OpenRouterBackend)
     assert backend.base_url == QWEN_BASE_URL
     assert backend.model == QWEN_DEFAULT_MODEL
     assert backend.api_key == "fake-qwen-key"
@@ -153,6 +155,7 @@ def test_qwen_uses_default_base_url_and_model(monkeypatch: pytest.MonkeyPatch) -
 def test_qwen_respects_custom_base_url_and_model(monkeypatch: pytest.MonkeyPatch) -> None:
     from agent_fleet.backends import make_backend
     from agent_fleet.config import FleetConfig
+    from agent_fleet.openrouter_backend import OpenRouterBackend
 
     monkeypatch.setenv("QWEN_API_KEY", "fake-qwen-key")
     cfg = FleetConfig(
@@ -161,6 +164,7 @@ def test_qwen_respects_custom_base_url_and_model(monkeypatch: pytest.MonkeyPatch
         qwen_base_url="https://example.invalid/v1",
     )
     backend = make_backend(cfg)
+    assert isinstance(backend, OpenRouterBackend)
     assert backend.base_url == "https://example.invalid/v1"
     assert backend.model == "qwen-custom-model"
 
@@ -180,10 +184,12 @@ def test_agnes_resolves(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_agnes_uses_default_base_url_and_model(monkeypatch: pytest.MonkeyPatch) -> None:
     from agent_fleet.backends import AGNES_BASE_URL, AGNES_DEFAULT_MODEL, make_backend
     from agent_fleet.config import FleetConfig
+    from agent_fleet.openrouter_backend import OpenRouterBackend
 
     monkeypatch.setenv("AGNES_API_KEY", "fake-agnes-key")
     cfg = FleetConfig(default_backend="agnes", default_model=None)
     backend = make_backend(cfg)
+    assert isinstance(backend, OpenRouterBackend)
     assert backend.base_url == AGNES_BASE_URL
     assert backend.model == AGNES_DEFAULT_MODEL
     assert backend.api_key == "fake-agnes-key"
@@ -192,6 +198,7 @@ def test_agnes_uses_default_base_url_and_model(monkeypatch: pytest.MonkeyPatch) 
 def test_agnes_respects_custom_base_url_and_model(monkeypatch: pytest.MonkeyPatch) -> None:
     from agent_fleet.backends import make_backend
     from agent_fleet.config import FleetConfig
+    from agent_fleet.openrouter_backend import OpenRouterBackend
 
     monkeypatch.setenv("AGNES_API_KEY", "fake-agnes-key")
     cfg = FleetConfig(
@@ -200,6 +207,7 @@ def test_agnes_respects_custom_base_url_and_model(monkeypatch: pytest.MonkeyPatc
         agnes_base_url="https://example.invalid/v1",
     )
     backend = make_backend(cfg)
+    assert isinstance(backend, OpenRouterBackend)
     assert backend.base_url == "https://example.invalid/v1"
     assert backend.model == "agnes-custom-model"
 

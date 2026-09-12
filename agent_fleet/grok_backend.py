@@ -532,6 +532,7 @@ class GrokBackend:
         mcp_servers: Mapping[str, McpServerSpec] | None = None,  # noqa: ARG002
         model: str | None = None,
         mode: AgentMode | str | None = None,
+        session_id: str | None = None,  # noqa: ARG002 (grok mints its own UUID via -s)
     ) -> GrokSession | _GrokErrorSession:
         """Create a durable headless Grok session (UUID via ``-s``, resume via ``-r``)."""
         ok, detail, fix = check_grok_auth()

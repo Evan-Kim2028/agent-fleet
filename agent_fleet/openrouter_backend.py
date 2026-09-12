@@ -127,6 +127,7 @@ def _describe_tool_call(name: str, args: dict[str, Any]) -> str:
         return f"{name}({path})"
     return f"{name}(...)"
 
+
 # Retry policy for transport/rate-limit/server errors in _call_openrouter_raw.
 _MAX_RETRIES = 3
 _RETRY_BASE_DELAY_S = 1.0
@@ -1234,9 +1235,7 @@ class OpenRouterSession:
                 )
 
             if stall_abort_threshold and consecutive_no_mutation >= stall_abort_threshold:
-                _emit_summary(
-                    f"stall_abort({consecutive_no_mutation})", iteration + 1
-                )
+                _emit_summary(f"stall_abort({consecutive_no_mutation})", iteration + 1)
                 return OpenRouterLLMResult(
                     stdout="",
                     stderr=(
@@ -1250,6 +1249,7 @@ class OpenRouterSession:
                     mcp_tool_calls=tuple(tool_calls_made),
                 )
             return None
+
         # A missing/zero max_tokens leaves the request's max_tokens key
         # omitted, which falls back to whatever small default OpenRouter (or
         # the underlying provider) picks — too small for reasoning models.
@@ -1568,6 +1568,7 @@ class OpenRouterBackend:
         mcp_servers: Mapping[str, McpServerSpec] | None = None,  # noqa: ARG002
         model: str | None = None,
         mode: AgentMode | str | None = None,  # noqa: ARG002
+        session_id: str | None = None,  # noqa: ARG002 (no resume path for this backend)
     ) -> OpenRouterSession | _OpenRouterErrorSession:
         """Create a durable tool-calling session.
 

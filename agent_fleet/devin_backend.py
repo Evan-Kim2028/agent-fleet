@@ -59,6 +59,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from agent_fleet.observability.context import get_run_context, get_run_log
+from agent_fleet.session_store import persist_session_id
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -91,6 +92,52 @@ _BACKOFF_JITTER = 0.3
 _RATE_LIMIT_COOLDOWN_S = 60.0
 
 _RETRYABLE_CLASSIFICATIONS = frozenset({"rate_limit", "quota", "transient", "timeout"})
+
+# Process-wide (module-level) rate-limit cooldown, shared across every
+# concurrent devin session in this process (dispatcher runs tasks on a
+# ThreadPoolExecutor in one process — see agent_fleet/dispatcher.py). Without
+# this, each session's retry/backoff is independent: if one session gets
+# rate-limited, the others keep hammering the same account/quota instead of
+# backing off too. Guarded by _rate_limit_lock; monotonic clock so it is
+# immune to wall-clock adjustments.
+_rate_limit_lock = threading.Lock()
+_rate_limit_until_monotonic: float = 0.0
+
+
+def _await_shared_rate_limit(
+    sleep: Callable[[float], None], *, already_satisfied_until: float = 0.0
+) -> None:
+    """Block until any cooldown set by another concurrent session has elapsed.
+
+    ``already_satisfied_until`` lets a call skip waiting on a deadline *it*
+    already extended (and already backed off for via its own retry sleep) —
+    without it, a single session's own rate-limit backoff would double-sleep
+    on its very next attempt, since checking the still-current shared deadline
+    again would look unsatisfied.
+    """
+    with _rate_limit_lock:
+        until = _rate_limit_until_monotonic
+    if until <= already_satisfied_until:
+        return
+    remaining = until - time.monotonic()
+    if remaining > 0:
+        sleep(remaining)
+
+
+def _extend_shared_rate_limit(cooldown_s: float) -> float:
+    """Record that *this* session was rate-limited so siblings also back off.
+
+    Returns the resulting deadline (monotonic time) so the caller can pass it
+    back as ``already_satisfied_until`` and avoid double-waiting on its own
+    contribution.
+    """
+    global _rate_limit_until_monotonic
+    with _rate_limit_lock:
+        _rate_limit_until_monotonic = max(
+            _rate_limit_until_monotonic, time.monotonic() + cooldown_s
+        )
+        return _rate_limit_until_monotonic
+
 
 # How often the background progress thread polls for live usage while a devin
 # subprocess is running. Overridable via DEVIN_PROGRESS_POLL_S for tests.
@@ -219,7 +266,7 @@ def _read_export_session_id(export_path: str) -> str | None:
         if not path.is_file():
             return None
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    except OSError, UnicodeDecodeError, json.JSONDecodeError:
         return None
     if isinstance(data, dict):
         session_id = data.get("session_id")
@@ -229,9 +276,11 @@ def _read_export_session_id(export_path: str) -> str | None:
 
 
 def _coerce_int(value: object) -> int:
+    if not isinstance(value, (int, float, str)):
+        return 0
     try:
-        return int(value) if value is not None else 0
-    except (TypeError, ValueError):
+        return int(value)
+    except ValueError:
         return 0
 
 
@@ -252,7 +301,7 @@ def _read_export_usage(export_path: str) -> dict[str, int] | None:
         if not path.is_file():
             return None
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    except OSError, UnicodeDecodeError, json.JSONDecodeError:
         return None
     if not isinstance(data, dict):
         return None
@@ -332,7 +381,7 @@ def _read_sessions_db_usage(session_id: str) -> dict[str, int] | None:
         for (raw,) in cur.fetchall():
             try:
                 msg = json.loads(raw)
-            except (TypeError, json.JSONDecodeError):
+            except TypeError, json.JSONDecodeError:
                 continue
             if not isinstance(msg, dict):
                 continue
@@ -516,6 +565,11 @@ def call_devin(
     should_resume = resume
     last_classification: str | None = None
     last_err_text = ""
+    # Tracks the shared rate-limit deadline *this* call has already extended
+    # (and already backed off for via its own retry sleep below), so its own
+    # next attempt doesn't wait a second time on a deadline it caused itself —
+    # only a deadline pushed further out by another concurrent session.
+    own_rate_limit_deadline = 0.0
 
     try:
         for attempt in range(max_retries + 1):
@@ -523,6 +577,17 @@ def call_devin(
             if remaining <= 0:
                 last_classification = last_classification or "timeout"
                 last_err_text = last_err_text or "devin call exceeded the timeout budget"
+                break
+
+            # Honor a cooldown set by another concurrent session in this
+            # process before spending an attempt (see _extend_shared_rate_limit).
+            _await_shared_rate_limit(sleep, already_satisfied_until=own_rate_limit_deadline)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                last_classification = last_classification or "rate_limit"
+                last_err_text = last_err_text or (
+                    "devin call exceeded the timeout budget waiting on a shared rate-limit cooldown"
+                )
                 break
 
             cmd = [bin_path]
@@ -613,6 +678,9 @@ def call_devin(
             last_classification = classification
             last_err_text = text_out.strip()
 
+            if classification in ("rate_limit", "quota"):
+                own_rate_limit_deadline = _extend_shared_rate_limit(cooldown)
+
             if classification in _RETRYABLE_CLASSIFICATIONS and attempt < max_retries:
                 should_resume = bool(current_session_id)
                 min_wait = cooldown if classification in ("rate_limit", "quota") else None
@@ -643,9 +711,7 @@ def _scope_note(allowed_tools: list[str] | None) -> str:
     scoped = [tool.removeprefix("path:") for tool in allowed_tools if tool.startswith("path:")]
     if not scoped:
         return ""
-    return "\n\nHard scope constraint: only modify files under these prefixes: " + ", ".join(
-        scoped
-    )
+    return "\n\nHard scope constraint: only modify files under these prefixes: " + ", ".join(scoped)
 
 
 class DevinSession:
@@ -688,11 +754,18 @@ class DevinSession:
         run_log = get_run_log()
 
         def _on_progress(session_id: str | None, usage: dict[str, int]) -> None:
-            total = sum(usage.values())
-            run_log.emit(  # type: ignore[union-attr]
-                "usage.progress",
-                data={"total_tokens": total, **usage, "agent_id": session_id or self.agent_id},
-            )
+            # Persist as soon as a session id is resolvable — even mid-flight,
+            # before this call returns — so a hard-killed fleet process (e.g.
+            # SIGTERM) still leaves a resumable session id behind for the next
+            # dispatch of this task (see agent_fleet/session_store.py).
+            if session_id:
+                persist_session_id(str(self._cwd), session_id)
+            if run_log is not None:
+                total = sum(usage.values())
+                run_log.emit(
+                    "usage.progress",
+                    data={"total_tokens": total, **usage, "agent_id": session_id or self.agent_id},
+                )
 
         try:
             stdout, session_id, cumulative, code = call_devin(
@@ -704,12 +777,13 @@ class DevinSession:
                 mode=self._mode,
                 session_id=self._session_id,
                 resume=self._started,
-                on_progress=_on_progress if run_log is not None else None,
+                on_progress=_on_progress,
             )
             self._started = True
             if session_id:
                 self._session_id = session_id
                 self.agent_id = session_id
+                persist_session_id(str(self._cwd), session_id)
             duration_s = time.monotonic() - t0
             ctx = get_run_context()
             usage = _harvest_devin_usage(
@@ -785,7 +859,12 @@ class DevinBackend:
         mcp_servers: Mapping[str, McpServerSpec] | None = None,  # noqa: ARG002
         model: str | None = None,
         mode: AgentMode | str | None = None,
+        session_id: str | None = None,
     ) -> DevinSession | _DevinErrorSession:
+        """Create a devin session. Pass ``session_id`` to resume a previously
+        captured session (e.g. carried across a redispatch of an interrupted
+        run — see ``agent_fleet/session_store.py``) instead of starting fresh.
+        """
         ok, detail, fix = check_devin_auth()
         if not ok:
             msg = detail if not fix else f"{detail}; {fix}"
@@ -794,6 +873,7 @@ class DevinBackend:
             devin_bin=self.devin_bin,
             model=model or self.model,
             cwd=cwd,
+            session_id=session_id,
             mode=mode or self.default_mode,
         )
 
@@ -823,8 +903,10 @@ class DevinBackend:
         run_log = get_run_log()
 
         def _on_progress(session_id: str | None, usage: dict[str, int]) -> None:
+            if run_log is None:
+                return
             total = sum(usage.values())
-            run_log.emit(  # type: ignore[union-attr]
+            run_log.emit(
                 "usage.progress",
                 data={"total_tokens": total, **usage, "agent_id": session_id},
             )

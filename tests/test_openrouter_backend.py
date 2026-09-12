@@ -401,9 +401,7 @@ def test_live_agnes_flash_call(tmp_path: Path) -> None:
     if not key:
         pytest.skip("AGNES_API_KEY not set — skipping live Agnes test")
 
-    backend = OpenRouterBackend(
-        api_key=key, model=AGNES_DEFAULT_MODEL, base_url=AGNES_BASE_URL
-    )
+    backend = OpenRouterBackend(api_key=key, model=AGNES_DEFAULT_MODEL, base_url=AGNES_BASE_URL)
     result = backend.run(
         "Reply with exactly the word: pong",
         max_tokens=500,

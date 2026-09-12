@@ -43,6 +43,65 @@ def test_should_keep_task_worktree() -> None:
     assert should_keep_task_worktree("error", has_changes=True) is False
 
 
+def test_find_resume_branch_matches_branch_checked_out_in_another_worktree(
+    tmp_path: Path,
+) -> None:
+    """Regression: git marks a branch checked out in a *different* worktree
+    with "+ " in `branch --list` output, not "* " (that's reserved for the
+    branch checked out in the cwd `git branch --list` itself runs from). Only
+    stripping "* " silently filtered out every real resume candidate, since a
+    branch is only ever resumable *because* it's checked out in a worktree —
+    find_resume_branch could never actually find anything.
+    """
+    from agent_fleet.integrations.local_git import LocalGitOps
+
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+    base = tmp_path / "worktrees"
+    git_ops = LocalGitOps(repo_path, use_worktree=True, worktree_base=base)
+
+    worktree = git_ops.setup_workspace(
+        repo_path, "run-abc123", "main", branch_name="fleet/coder/42-abc123"
+    )
+    (worktree / "wip.txt").write_text("wip\n", encoding="utf-8")
+
+    # From repo_path (not the worktree), git branch --list marks this "+ ".
+    listing = subprocess.run(
+        ["git", "branch", "--list", "fleet/coder/42-*"],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert listing.strip().startswith("+"), f"test assumption broken, got: {listing!r}"
+
+    found = git_ops.find_resume_branch(42, "coder", "fleet")
+    assert found == ("fleet/coder/42-abc123", "abc123")
+
+    git_ops.teardown_workspace(worktree)
+
+
+def test_has_workspace_changes_false_for_clean_worktree_without_remote(tmp_path: Path) -> None:
+    """Regression: `--not --remotes` excludes nothing when no remote is
+    configured, so every commit reachable from HEAD (including the repo's
+    very first commit) counted as "ahead" and every worktree looked dirty
+    forever — defeating resume's "don't reuse an already-clean branch" gate
+    in exactly the repos most test setups (and some real ones) use: no
+    `git remote add` ever run.
+    """
+    from agent_fleet.integrations.local_git import LocalGitOps
+
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)  # no remote configured
+    base = tmp_path / "worktrees"
+    git_ops = LocalGitOps(repo_path, use_worktree=True, worktree_base=base)
+
+    worktree = git_ops.setup_workspace(repo_path, "run-clean", "main", branch_name="fleet/clean")
+    assert git_ops.has_workspace_changes(worktree) is False
+
+    git_ops.teardown_workspace(worktree)
+
+
 def test_prepare_task_workspace_uses_base_branch(tmp_path: Path) -> None:
     repo_path = tmp_path / "repo"
     _init_git_repo(repo_path)
@@ -247,6 +306,87 @@ def test_sweep_skips_worktree_locked_by_live_owner(tmp_path: Path) -> None:
 
     assert removed == 0
     assert live_wt.exists(), "live-locked worktree must survive the sweep"
+
+
+def test_prepare_task_workspace_resumes_dirty_branch_for_same_task_index(tmp_path: Path) -> None:
+    """Regression: prepare_task_workspace previously had no connection at all to
+    the ResumableGitOps resume mechanism (find_resume_branch/attach_worktree) —
+    every dispatch of "the same" task_index (e.g. a DAG task redispatched after
+    its fleet process was SIGTERM'd mid-run) got a brand-new worktree, branch,
+    and (for a session-capable backend) a brand-new agent session with no
+    memory of the killed attempt. resume=True (the default) must instead reuse
+    an existing fleet/task-{task_index}-* branch that still has local changes.
+    """
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+    repo = RepoConfig(
+        repo_root=repo_path,
+        use_worktree=True,
+        worktree_base=tmp_path / "worktrees",
+    )
+
+    first = prepare_task_workspace(repo, task_index=7, force_isolation=True)
+    (first.path / "in_progress.txt").write_text("partial work\n", encoding="utf-8")
+    # No teardown: simulates the fleet process being hard-killed (SIGTERM) —
+    # worktree and uncommitted changes survive on disk exactly as they were.
+
+    second = prepare_task_workspace(repo, task_index=7, force_isolation=True)
+
+    assert second.path == first.path
+    assert second.branch_name == first.branch_name
+    # find_resume_branch's run_id is only the branch name's trailing hex
+    # fragment (see LocalGitOps.find_resume_branch_by_prefix), not the full
+    # "task-{index}-{hex}" run_id prepare_task_workspace originally minted —
+    # attach_worktree resolves the real path via `git worktree list` (ground
+    # truth) regardless, so this is expected, not a bug.
+    assert first.branch_name is not None
+    assert second.run_id == first.branch_name.rsplit("-", 1)[-1]
+    assert (second.path / "in_progress.txt").read_text() == "partial work\n"
+
+    second.teardown(keep=False)
+
+
+def test_prepare_task_workspace_resume_false_always_creates_fresh(tmp_path: Path) -> None:
+    """Control: resume=False must never reuse a dirty branch (legacy behavior)."""
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+    repo = RepoConfig(
+        repo_root=repo_path,
+        use_worktree=True,
+        worktree_base=tmp_path / "worktrees",
+    )
+
+    first = prepare_task_workspace(repo, task_index=3, force_isolation=True, resume=False)
+    (first.path / "in_progress.txt").write_text("partial work\n", encoding="utf-8")
+
+    second = prepare_task_workspace(repo, task_index=3, force_isolation=True, resume=False)
+
+    assert second.path != first.path
+    assert second.branch_name != first.branch_name
+
+    first.teardown(keep=False)
+    second.teardown(keep=False)
+
+
+def test_prepare_task_workspace_resume_ignores_clean_branch(tmp_path: Path) -> None:
+    """A previous, already-clean (e.g. successfully completed+committed) branch
+    for the same task_index must not be resumed — has_workspace_changes gates
+    reuse to genuinely-interrupted attempts, matching find_resume_branch."""
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+    repo = RepoConfig(
+        repo_root=repo_path,
+        use_worktree=True,
+        worktree_base=tmp_path / "worktrees",
+    )
+
+    first = prepare_task_workspace(repo, task_index=5, force_isolation=True)
+    first.teardown(keep=True)  # worktree stays, but has no uncommitted changes
+
+    second = prepare_task_workspace(repo, task_index=5, force_isolation=True)
+    assert second.path != first.path
+
+    second.teardown(keep=False)
 
 
 def test_sweep_removes_worktree_with_stale_pid_lock(tmp_path: Path) -> None:

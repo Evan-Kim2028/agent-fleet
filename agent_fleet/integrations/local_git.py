@@ -92,12 +92,30 @@ class LocalGitOps:
         branch_prefix: str,
     ) -> tuple[str, str] | None:
         """Return (branch_name, run_id) for an in-progress fleet branch with local changes."""
-        prefix = f"{branch_prefix}/{persona}/{task_id}-"
+        return self.find_resume_branch_by_prefix(f"{branch_prefix}/{persona}/{task_id}-")
+
+    def find_resume_branch_by_prefix(self, prefix: str) -> tuple[str, str] | None:
+        """Same lookup as ``find_resume_branch``, given the full branch prefix directly.
+
+        Lets callers whose branch-naming convention doesn't carry
+        ``(branch_prefix, persona, task_id)`` as separate components — e.g.
+        ``agent_fleet.worktree.prepare_task_workspace``'s
+        ``fleet/task-{task_index}-{run_id}`` scheme, used by the dispatcher's
+        parallel/code_review path — still reuse this resume lookup instead of
+        reimplementing it.
+        """
         result = self._run(["branch", "--list", f"{prefix}*"], cwd=self.repo_root)
+        # ``git branch --list`` prefixes the current branch of *this* cwd with
+        # "* " but a branch checked out in a *different* worktree — which is
+        # exactly the resume case, since the whole point is that a fleet
+        # worktree has it checked out — with "+ " instead. Only stripping
+        # "* " (as this used to) silently dropped every real candidate: the
+        # "+ branch-name" line never matched startswith(prefix), so resume
+        # could never find a branch that was actually resumable.
         candidates = [
-            line.strip().lstrip("* ")
+            line.strip().lstrip("*+ ")
             for line in result.stdout.splitlines()
-            if line.strip() and line.strip().lstrip("* ").startswith(prefix)
+            if line.strip() and line.strip().lstrip("*+ ").startswith(prefix)
         ]
         for branch_name in reversed(candidates):
             run_id = branch_name.rsplit("-", 1)[-1]
@@ -141,6 +159,17 @@ class LocalGitOps:
         status = self._run(["status", "--porcelain"], cwd=worktree)
         if status.stdout.strip():
             return True
+        # "ahead of any remote" only means something if a remote is actually
+        # configured. Without this guard, a repo with no remote (a fresh
+        # local-only repo, or simply one that hasn't run `git remote add`
+        # yet) makes `--not --remotes` exclude nothing, so EVERY commit
+        # reachable from HEAD — including the repo's very first commit —
+        # counts as "ahead", and every worktree looks dirty forever. That
+        # silently defeated find_resume_branch's whole point: a genuinely
+        # clean (already-completed) branch would look resumable forever.
+        remotes = self._run(["remote"], cwd=worktree)
+        if not remotes.stdout.strip():
+            return False
         ahead = self._run(["rev-list", "--count", "HEAD", "--not", "--remotes"], cwd=worktree)
         try:
             return int(ahead.stdout.strip() or "0") > 0
@@ -191,7 +220,13 @@ class LocalGitOps:
             "".join(traceback.format_stack(limit=8)),
         )
         from agent_fleet.pr_loop.worktree import release_worktree_lock
+        from agent_fleet.session_store import clear_session_id
 
+        # This path is gone for good (non-forensic teardown), so any durable
+        # session id persisted against it (see session_store.py) can never be
+        # resumed again — drop it so a future, unrelated run that happens to
+        # land on the same worktree path never inherits a stale session id.
+        clear_session_id(str(worktree))
         release_worktree_lock(worktree)
         self._run(["worktree", "remove", "--force", str(worktree)], cwd=self.repo_root)
         if worktree.exists():

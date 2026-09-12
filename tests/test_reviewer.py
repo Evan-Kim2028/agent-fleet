@@ -184,6 +184,7 @@ class _PromptCapturingBackend:
         mode: AgentMode | None = None,
     ) -> _FakeResult:
         del max_tokens, timeout_s, memory_limit, allowed_tools, cwd, model, mode
+        assert self.prompts is not None
         self.prompts.append(prompt)
         payload = {
             "pr_number": 1,

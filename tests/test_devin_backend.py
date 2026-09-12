@@ -8,10 +8,11 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
+import agent_fleet.devin_backend as devin_backend_module
 from agent_fleet.devin_backend import (
     DEFAULT_MODEL,
     DevinBackend,
@@ -25,6 +26,20 @@ from agent_fleet.devin_backend import (
     check_devin_auth,
     classify_devin_error,
 )
+
+if TYPE_CHECKING:
+    from agent_fleet.observability.log import RunLog
+
+
+@pytest.fixture(autouse=True)
+def _reset_shared_rate_limit_state() -> None:
+    """The process-wide rate-limit cooldown (see _await_shared_rate_limit /
+    _extend_shared_rate_limit) is module-level global state so concurrent devin
+    sessions in one fleet process can share it. Reset it before every test so a
+    rate_limit test can't leak a cooldown into an unrelated test run later in
+    the same pytest session."""
+    devin_backend_module._rate_limit_until_monotonic = 0.0
+
 
 # --- Constants / registry --------------------------------------------------
 
@@ -70,6 +85,7 @@ def test_devin_factory_respects_explicit_model_and_bin() -> None:
         default_backend="devin", default_model="claude-sonnet-5", devin_bin="/bin/devin"
     )
     backend = make_backend(cfg)
+    assert isinstance(backend, DevinBackend)
     assert backend.model == "claude-sonnet-5"
     assert backend.devin_bin == "/bin/devin"
 
@@ -309,6 +325,101 @@ def test_call_devin_quota_exhaustion_retries_then_fails_cleanly(tmp_path: Path) 
     assert all(s >= 60.0 for s in sleeps)
 
 
+def test_shared_rate_limit_extend_then_await_blocks() -> None:
+    """A rate_limit classification must extend a process-wide cooldown that a
+    *different* (unrelated) caller — i.e. another concurrent devin session in
+    the same fleet process — will also wait on. See test below for the full
+    two-thread integration version."""
+    from agent_fleet.devin_backend import _await_shared_rate_limit, _extend_shared_rate_limit
+
+    deadline = _extend_shared_rate_limit(30.0)
+    assert deadline > time.monotonic()
+
+    sleeps: list[float] = []
+    _await_shared_rate_limit(sleeps.append)
+    assert len(sleeps) == 1
+    assert sleeps[0] > 0
+
+
+def test_shared_rate_limit_does_not_double_wait_on_own_extension() -> None:
+    """A session that itself set the deadline (and is about to sleep for it via
+    its own backoff) must not also be told to wait for it again here — that
+    would double the sleep for a single session's own retry (see
+    test_call_devin_rate_limit_then_success_retries_with_cooldown, which
+    asserts exactly one sleep call for a single session's own rate limit)."""
+    from agent_fleet.devin_backend import _await_shared_rate_limit, _extend_shared_rate_limit
+
+    deadline = _extend_shared_rate_limit(30.0)
+    sleeps: list[float] = []
+    _await_shared_rate_limit(sleeps.append, already_satisfied_until=deadline)
+    assert sleeps == []
+
+
+def test_concurrent_sessions_share_rate_limit_cooldown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two concurrent call_devin invocations (simulating two dispatcher
+    ThreadPoolExecutor tasks — see agent_fleet/dispatcher.py) in one process:
+    session A gets rate-limited; session B — which never itself sees an
+    error — must still back off on the shared cooldown A set, instead of
+    hammering ahead independently ("smart rate limiting")."""
+    monkeypatch.setenv("DEVIN_RATE_LIMIT_COOLDOWN_S", "0.4")
+    monkeypatch.setenv("DEVIN_MAX_RETRIES", "2")
+
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    a_calls: list[float] = []
+    b_calls: list[float] = []
+    start = time.monotonic()
+
+    def _run_a(cmd: list[str], **_kwargs: Any) -> Any:  # noqa: ANN401
+        a_calls.append(time.monotonic() - start)
+        _write_export(cmd, "session-a")
+        if len(a_calls) == 1:
+            return _fake_completed(stdout="", stderr="Rate limited: back off", returncode=1)
+        return _fake_completed(stdout="a done", returncode=0)
+
+    def _run_b(cmd: list[str], **_kwargs: Any) -> Any:  # noqa: ANN401
+        b_calls.append(time.monotonic() - start)
+        _write_export(cmd, "session-b")
+        return _fake_completed(stdout="b done", returncode=0)
+
+    results: dict[str, Any] = {}
+
+    def _call_a() -> None:
+        # Fake sleep: session A's *own* backoff isn't what we're timing here.
+        results["a"] = call_devin(
+            "do a",
+            work_dir=str(tmp_path / "a"),
+            devin_bin="/bin/devin",
+            runner=_run_a,
+            sleep=lambda _s: None,
+        )
+
+    def _call_b() -> None:
+        time.sleep(0.05)  # let A classify + extend the shared cooldown first
+        # Real sleep (call_devin's default): this is the wait we assert on.
+        results["b"] = call_devin(
+            "do b", work_dir=str(tmp_path / "b"), devin_bin="/bin/devin", runner=_run_b
+        )
+
+    t_a = threading.Thread(target=_call_a)
+    t_b = threading.Thread(target=_call_b)
+    t_a.start()
+    t_b.start()
+    t_a.join(timeout=5)
+    t_b.join(timeout=5)
+
+    assert not t_a.is_alive()
+    assert not t_b.is_alive()
+    assert results["a"][1] == "session-a"
+    assert results["b"][1] == "session-b"
+    # B made exactly one attempt, and it only happened after waiting out A's
+    # shared cooldown (started ~0.05s in, cooldown extends ~0.4s from ~0s).
+    assert len(b_calls) == 1
+    assert b_calls[0] >= 0.35
+
+
 def test_call_devin_env_override_max_retries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -383,9 +494,7 @@ def _write_sqlite_message(
             "CREATE TABLE IF NOT EXISTS message_nodes ("
             "row_id INTEGER PRIMARY KEY, session_id TEXT, node_id INTEGER, chat_message TEXT)"
         )
-        chat_message = json.dumps(
-            {"role": "assistant", "metadata": {"metrics": metrics}}
-        )
+        chat_message = json.dumps({"role": "assistant", "metadata": {"metrics": metrics}})
         conn.execute(
             "INSERT INTO message_nodes (session_id, node_id, chat_message) VALUES (?, ?, ?)",
             (session_id, node_id, chat_message),
@@ -429,9 +538,7 @@ def test_read_export_usage_missing_file_returns_none(tmp_path: Path) -> None:
     assert _read_export_usage(str(tmp_path / "does-not-exist.json")) is None
 
 
-def test_read_sessions_db_usage_fallback(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_read_sessions_db_usage_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     db_path = tmp_path / "sessions.db"
     _write_sqlite_message(
         db_path,
@@ -678,9 +785,7 @@ def test_harvest_devin_usage_computes_delta_across_resumed_turns() -> None:
 
 def test_harvest_devin_usage_none_cumulative_returns_none() -> None:
     assert (
-        _harvest_devin_usage(
-            cumulative=None, session_id="x", phase=None, model="m", duration_s=0.0
-        )
+        _harvest_devin_usage(cumulative=None, session_id="x", phase=None, model="m", duration_s=0.0)
         is None
     )
 
@@ -817,6 +922,39 @@ def test_create_session_ok(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
     assert isinstance(session, DevinSession)
 
 
+def test_create_session_with_session_id_resumes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """DevinBackend.create_session(session_id=...) must carry the id through to
+    DevinSession so the very first send() resumes it with -r, instead of
+    starting a brand-new session. This is the seam runner.py uses to carry a
+    Devin session across a killed-and-redispatched fleet run (see
+    agent_fleet/session_store.py)."""
+    monkeypatch.setattr(
+        "agent_fleet.devin_backend.check_devin_auth", lambda: (True, "authenticated", "")
+    )
+    backend = DevinBackend(devin_bin="/bin/devin", model="swe-2-high")
+    session = backend.create_session(
+        persona_name="coder", cwd=tmp_path, session_id="carried-over-session"
+    )
+    assert isinstance(session, DevinSession)
+    assert session.agent_id == "carried-over-session"
+
+    calls: list[list[str]] = []
+
+    def _run(cmd: list[str], **_kwargs: Any) -> Any:  # noqa: ANN401
+        calls.append(list(cmd))
+        _write_export(cmd, "carried-over-session")
+        return _fake_completed("resumed")
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(devin_backend_module.subprocess, "run", _run)
+        session.send("continue where you left off", max_tokens=0, timeout_s=60)
+
+    assert "-r" in calls[0]
+    assert calls[0][calls[0].index("-r") + 1] == "carried-over-session"
+
+
 def test_run_returns_error_when_auth_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         "agent_fleet.devin_backend.check_devin_auth",
@@ -859,9 +997,7 @@ def test_run_success_and_scope_note(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     assert "only modify files under these prefixes: src/" in captured["prompt"]
 
 
-def test_run_populates_usage_from_export(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_run_populates_usage_from_export(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         "agent_fleet.devin_backend.check_devin_auth", lambda: (True, "authenticated", "")
     )
@@ -925,7 +1061,8 @@ def test_backend_run_progress_event_includes_resolved_session_id(
             emitted.append((event, data or {}))
 
     def _fake_call_devin(
-        _prompt: str, **kwargs: Any  # noqa: ANN401
+        _prompt: str,
+        **kwargs: Any,  # noqa: ANN401
     ) -> tuple[str, str | None, dict[str, int] | None, int]:
         on_progress = kwargs.get("on_progress")
         if on_progress is not None:
@@ -943,7 +1080,7 @@ def test_backend_run_progress_event_includes_resolved_session_id(
     monkeypatch.setattr("agent_fleet.devin_backend.call_devin", _fake_call_devin)
 
     backend = DevinBackend(devin_bin="/bin/devin")
-    with bind_run(_FakeRunLog(), RunContext(run_id="test-run")):
+    with bind_run(cast("RunLog", _FakeRunLog()), RunContext(run_id="test-run")):
         backend.run("do it", max_tokens=0, timeout_s=60, cwd=tmp_path)
 
     progress_events = [data for event, data in emitted if event == "usage.progress"]
@@ -968,7 +1105,8 @@ def test_session_send_progress_event_includes_resolved_session_id(
             emitted.append((event, data or {}))
 
     def _fake_call_devin(
-        _prompt: str, **kwargs: Any  # noqa: ANN401
+        _prompt: str,
+        **kwargs: Any,  # noqa: ANN401
     ) -> tuple[str, str | None, dict[str, int] | None, int]:
         on_progress = kwargs.get("on_progress")
         if on_progress is not None:
@@ -986,7 +1124,7 @@ def test_session_send_progress_event_includes_resolved_session_id(
     monkeypatch.setattr("agent_fleet.devin_backend.call_devin", _fake_call_devin)
 
     session = DevinSession(devin_bin="/bin/devin", model="swe-2-high", cwd=tmp_path)
-    with bind_run(_FakeRunLog(), RunContext(run_id="test-run")):
+    with bind_run(cast("RunLog", _FakeRunLog()), RunContext(run_id="test-run")):
         # self.agent_id is still None here (fresh session, first send) —
         # the emitted event must use the on_progress-supplied id instead.
         assert session.agent_id is None
@@ -995,6 +1133,79 @@ def test_session_send_progress_event_includes_resolved_session_id(
     progress_events = [data for event, data in emitted if event == "usage.progress"]
     assert progress_events, "usage.progress should have been emitted"
     assert progress_events[0]["agent_id"] == "live-session"
+
+
+# --- session id persistence (resume across a killed-and-redispatched run) ----
+
+
+def test_session_send_persists_session_id_mid_flight_via_progress(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A resumed fleet run needs the durable session id even if the fleet
+    process is hard-killed (SIGTERM — see test plan) *while* devin is still
+    mid-turn, before call_devin returns. The on_progress callback must
+    persist as soon as a session id is resolvable, not only after send()
+    completes. No run_log is bound here, proving persistence doesn't depend
+    on observability being active."""
+    import agent_fleet.session_store as session_store_module
+    from agent_fleet.session_store import load_session_id
+
+    monkeypatch.setattr(session_store_module, "_STORE_DIR", tmp_path / "session_store")
+
+    persisted_mid_flight: dict[str, str | None] = {}
+
+    def _fake_call_devin(
+        _prompt: str,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> tuple[str, str | None, dict[str, int] | None, int]:
+        on_progress = kwargs.get("on_progress")
+        assert on_progress is not None
+        on_progress(
+            "mid-flight-session",
+            {
+                "input_tokens": 1,
+                "output_tokens": 0,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+            },
+        )
+        # Read back *before* call_devin returns, simulating a check made while
+        # the subprocess is still running.
+        persisted_mid_flight["session_id"] = load_session_id(str(tmp_path))
+        return "done", "mid-flight-session", None, 0
+
+    monkeypatch.setattr("agent_fleet.devin_backend.call_devin", _fake_call_devin)
+
+    session = DevinSession(devin_bin="/bin/devin", model="swe-2-high", cwd=tmp_path)
+    session.send("go", max_tokens=0, timeout_s=60)
+
+    assert persisted_mid_flight["session_id"] == "mid-flight-session"
+    # And still resolvable after send() returns.
+    assert load_session_id(str(tmp_path)) == "mid-flight-session"
+
+
+def test_session_send_persists_session_id_after_completion(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Even with no progress callback firing mid-flight (e.g. a very fast
+    single-turn call), the session id must be persisted once send() returns."""
+    import agent_fleet.session_store as session_store_module
+    from agent_fleet.session_store import load_session_id
+
+    monkeypatch.setattr(session_store_module, "_STORE_DIR", tmp_path / "session_store")
+
+    def _fake_call_devin(
+        _prompt: str,
+        **_kwargs: Any,  # noqa: ANN401
+    ) -> tuple[str, str | None, dict[str, int] | None, int]:
+        return "done", "fast-session", None, 0
+
+    monkeypatch.setattr("agent_fleet.devin_backend.call_devin", _fake_call_devin)
+
+    session = DevinSession(devin_bin="/bin/devin", model="swe-2-high", cwd=tmp_path)
+    session.send("go", max_tokens=0, timeout_s=60)
+
+    assert load_session_id(str(tmp_path)) == "fast-session"
 
 
 # --- import isolation ---------------------------------------------------------

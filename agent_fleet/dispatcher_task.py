@@ -12,6 +12,7 @@ from agent_fleet.handoff_context import apply_handoff_to_task
 from agent_fleet.observability.context import get_run_log
 from agent_fleet.observability.run_metrics import build_run_metrics
 from agent_fleet.phases import resolve_pipeline_outcome, run_pipeline
+from agent_fleet.session_store import load_session_id
 from agent_fleet.worktree import TaskWorkspace, prepare_task_workspace, should_isolate_worktree
 
 if TYPE_CHECKING:
@@ -188,6 +189,13 @@ def run_configured_pipeline(
             persona_resolver=resolver,
             persona=effective_task.persona,
             cwd=run_workspace,
+            # A resumed task_workspace (see worktree.prepare_task_workspace's
+            # resume=True path) reuses the *same* run_workspace path a killed
+            # attempt used, so any durable session id a session-capable
+            # backend (e.g. Devin) persisted against that path (see
+            # agent_fleet/session_store.py) is picked up here automatically.
+            # A no-op (returns None) for a fresh, never-before-seen path.
+            session_id=load_session_id(str(run_workspace)),
         )
     )
     try:

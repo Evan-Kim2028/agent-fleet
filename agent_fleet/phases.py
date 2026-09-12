@@ -456,6 +456,16 @@ def run_scoped_lint_command(
     return outcome
 
 
+def _verify_streams(outcome: dict[str, object]) -> str:
+    """Concatenated stdout+stderr of a verify outcome, tolerant of missing/non-str values."""
+    parts = []
+    for key in ("stdout", "stderr"):
+        value = outcome.get(key)
+        if isinstance(value, str):
+            parts.append(value)
+    return "".join(parts)
+
+
 def _baseline_regate_pytest(
     *,
     workspace: Path,
@@ -477,9 +487,7 @@ def _baseline_regate_pytest(
     Never claims a baseline verdict when the repo can't be safely restored —
     a failed stash or a failed pop both return the original outcome as-is.
     """
-    current_failed = pytest_failed_node_ids(
-        (outcome.get("stdout") or "") + (outcome.get("stderr") or "")
-    )
+    current_failed = pytest_failed_node_ids(_verify_streams(outcome))
     if not current_failed:
         # No per-test FAILED lines to attribute (e.g. a collection error) —
         # baseline diffing can't help; fail as-is.
@@ -514,9 +522,7 @@ def _baseline_regate_pytest(
         )
         return outcome
 
-    baseline_failed = pytest_failed_node_ids(
-        (baseline_outcome.get("stdout") or "") + (baseline_outcome.get("stderr") or "")
-    )
+    baseline_failed = pytest_failed_node_ids(_verify_streams(baseline_outcome))
     new_failures = sorted(current_failed - baseline_failed)
     if new_failures:
         return outcome

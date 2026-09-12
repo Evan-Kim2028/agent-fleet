@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
@@ -11,6 +10,7 @@ from agent_fleet.pr_review.analyzer import merge_analyses, passes_for_files
 from agent_fleet.pr_review.config import PrReviewConfig
 from agent_fleet.pr_review.git import get_working_tree_diff, is_deletion_only_pr, is_trivial_pr
 from agent_fleet.pr_review.verdict import analysis_to_review_result, risk_to_verdict
+from agent_fleet.repo import RepoConfig
 
 if TYPE_CHECKING:
     import pytest
@@ -112,7 +112,8 @@ def test_pr_analyzer_review_forwards_fleet_config(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr("agent_fleet.phases.run_pr_review", fake_run_pr_review)
     fleet_config = MagicMock()
-    repo = SimpleNamespace(
+    repo = RepoConfig(
+        repo_root=Path("/tmp"),
         pr_review=PrReviewConfig(enabled=True, use_in_code_review=True),
         default_branch="main",
     )

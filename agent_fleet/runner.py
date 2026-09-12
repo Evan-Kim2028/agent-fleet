@@ -65,6 +65,7 @@ from agent_fleet.run_controller import (
     _build_run_metrics,
 )
 from agent_fleet.scope_paths import path_under_allowlist
+from agent_fleet.session_store import load_session_id
 from agent_fleet.spine_config import SpineConfig
 from agent_fleet.synthesizer import synthesize
 from agent_fleet.tech_lead import tech_lead_review
@@ -428,8 +429,11 @@ class LocalFleetRunner:
 
         class SynthesizeHandler(PhaseHandler):
             def run(self, ctx: PhaseRunContext, deps: PhaseDeps) -> PhaseResult:
-                if resume_mode:
-                    return PhaseResult()
+                # Unlike RESEARCH, this must still run on resume: IMPLEMENT
+                # requires ctx.brief, and nothing else produces one. (A session
+                # backend that resumed its own durable session — e.g. Devin's
+                # -r — already has full prior context regardless of what this
+                # fresh brief says, so re-synthesizing here is cheap and safe.)
                 ts = ctx.task_spec
                 assert ts is not None
                 with run_log.phase("SYNTHESIZE"):
@@ -446,16 +450,25 @@ class LocalFleetRunner:
                 _branch = ctx.branch_name
                 with run_log.phase("IMPLEMENT"):
                     logger.info("[%s] IMPLEMENT", run_id)
-                    ctx.worktree = deps.git_ops.setup_workspace(
-                        repo_root,
-                        run_id,
-                        base_branch,
-                        branch_name=_branch if deps.run_config.create_branch else None,
-                    )
-                    if deps.run_config.create_branch and not getattr(
-                        deps.git_ops, "use_worktree", False
-                    ):
-                        deps.git_ops.create_branch(ctx.worktree, _branch)
+                    if resume_mode and ctx.worktree is not None:
+                        # Reuse the worktree ResumableGitOps.attach_worktree already
+                        # checked out for this branch. Calling setup_workspace here
+                        # would resolve to the *same* path (worktree_base/run_id) and
+                        # either destroy the resumed working tree (rmtree-then-recreate)
+                        # or fail outright on `git worktree add -b <branch>` because the
+                        # branch already exists.
+                        logger.info("[%s] RESUME: reusing worktree %s", run_id, ctx.worktree)
+                    else:
+                        ctx.worktree = deps.git_ops.setup_workspace(
+                            repo_root,
+                            run_id,
+                            base_branch,
+                            branch_name=_branch if deps.run_config.create_branch else None,
+                        )
+                        if deps.run_config.create_branch and not getattr(
+                            deps.git_ops, "use_worktree", False
+                        ):
+                            deps.git_ops.create_branch(ctx.worktree, _branch)
 
                     implement(
                         ctx.brief,
@@ -842,8 +855,7 @@ class LocalFleetRunner:
                     # a distinct non-"completed" outcome so an empty diff never
                     # silently reports success.
                     logger.info(
-                        "[%s] NOOP: verify passed with no changed files; "
-                        "skipping OPEN_PR/REVIEW",
+                        "[%s] NOOP: verify passed with no changed files; skipping OPEN_PR/REVIEW",
                         run_id,
                     )
                     ctx.phases["NOOP"] = {"reason": _ok_disp.reason}
@@ -1037,12 +1049,37 @@ class LocalFleetRunner:
                 run_log.emit("mcp.required", data={"servers": ["playwright"]})
 
             try:
+                if self._config.resume and isinstance(self._git_ops, ResumableGitOps):
+                    resumed = self._git_ops.find_resume_branch(
+                        task_id,
+                        persona,
+                        self._spine.branch_prefix,
+                    )
+                    if resumed is not None:
+                        branch_name, run_id = resumed
+                        worktree = self._git_ops.attach_worktree(branch_name, run_id)
+                        resume_mode = True
+                        logger.info("[%s] RESUME on %s", run_id, branch_name)
+                        phases["RESUME"] = {"branch": branch_name, "worktree": str(worktree)}
+                        run_log.emit("run.resume", data=phases["RESUME"])
+
+                # A resumed run must open its session against the resumed
+                # worktree (not repo_root — devin/cursor/etc run their agent
+                # in this cwd) and, when the backend supports it, resume the
+                # same durable session id captured before the interruption
+                # (see agent_fleet/session_store.py) instead of starting a
+                # brand-new one with no memory of prior progress.
+                session_cwd = worktree if (resume_mode and worktree is not None) else repo_root
+                resume_session_id = (
+                    load_session_id(str(worktree)) if resume_mode and worktree is not None else None
+                )
                 session = create_fleet_session(
                     self._backend,
                     fleet_config=self._fleet_config,
                     persona_resolver=self._persona_resolver,
                     persona=persona,
-                    cwd=repo_root,
+                    cwd=session_cwd,
+                    session_id=resume_session_id,
                 )
                 if session is not None and self._fleet_config:
                     persona_spec = self._persona_resolver.load(persona)
@@ -1063,22 +1100,8 @@ class LocalFleetRunner:
                                     fleet_config=self._fleet_config,
                                     persona_resolver=self._persona_resolver,
                                     persona=persona,
-                                    cwd=repo_root,
+                                    cwd=session_cwd,
                                 )
-
-                if self._config.resume and isinstance(self._git_ops, ResumableGitOps):
-                    resumed = self._git_ops.find_resume_branch(
-                        task_id,
-                        persona,
-                        self._spine.branch_prefix,
-                    )
-                    if resumed is not None:
-                        branch_name, run_id = resumed
-                        worktree = self._git_ops.attach_worktree(branch_name, run_id)
-                        resume_mode = True
-                        logger.info("[%s] RESUME on %s", run_id, branch_name)
-                        phases["RESUME"] = {"branch": branch_name, "worktree": str(worktree)}
-                        run_log.emit("run.resume", data=phases["RESUME"])
 
                 with run_log.phase("PLAN"):
                     logger.info("[%s] PLAN", run_id)
@@ -1195,6 +1218,7 @@ class LocalFleetRunner:
                     phases=phases,
                     branch_name=branch_name,
                     session=session,
+                    worktree=worktree,
                 )
                 phase_deps = PhaseDeps(
                     backend=self._backend,
