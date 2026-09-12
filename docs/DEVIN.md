@@ -79,7 +79,7 @@ uv run agent-fleet doctor --backend devin
 - Non-interactive mode can't show approval prompts, so agent-mode runs set `DEVIN_PERMISSION_MODE=bypass` per call; plan mode leaves it unset (default `auto` — read-only tools only, workspace edits are rejected).
 - `--respect-workspace-trust false` is always passed (fleet worktrees are not pre-trusted).
 - Prompts are written to a temp file and passed via `--prompt-file` to avoid argv length limits.
-- Exhausted retries fail the phase with exit code 1; stderr names the failure classification (`rate_limit` / `quota` / `transient` / `timeout` / `error`).
+- Exhausted retries fail the phase with exit code 1; stderr names the failure classification (`rate_limit` / `quota` / `transient` / `timeout` / `error`). Cognition's `Reached overall message rate limit` and `"cognition.ai/errorKind": "unavailable"` are retryable (not a hard `error`).
 - Devin sessions are keyed by cwd. Concurrent `fleet run` processes all use `task_index=0`; resume of `fleet/task-0-*` skips a worktree locked by another live PID so two Devin sessions cannot share a directory. SIGTERM'd runs (stale lock) still resume.
 
 ## See also

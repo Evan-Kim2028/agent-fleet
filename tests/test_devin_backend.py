@@ -159,6 +159,12 @@ def test_check_devin_auth_passes_with_valid_credentials(
     ("text", "expected"),
     [
         ("Rate limited: try again later", "rate_limit"),
+        (
+            "Error: Agent error: Reached overall message rate limit. "
+            "Please try again later. Your limit will reset in 3 minutes.",
+            "rate_limit",
+        ),
+        ('{"cognition.ai/errorKind": "unavailable", "cognition.ai/retryable": true}', "transient"),
         ("Quota exhausted: upgrade your plan", "quota"),
         ("Usage limit reached for this month", "quota"),
         ("Usage paused, contact support", "quota"),

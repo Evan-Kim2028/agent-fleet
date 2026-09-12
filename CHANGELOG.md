@@ -11,6 +11,11 @@
   worktree and overwrote its session. Resume now skips worktrees whose
   sidecar lock is held by a different live PID (same-PID redispatch and
   stale locks after SIGTERM still resume).
+- **Devin rate-limit classifier:** Cognition's live error is
+  `Reached overall message rate limit` (plus
+  `"cognition.ai/errorKind": "unavailable"`), not `Rate limited:`. Those
+  used to classify as a hard `error` and skip retries. They now retry as
+  `rate_limit` / `transient`.
 
 ## 0.15.2 — 2026-09-12
 

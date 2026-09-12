@@ -157,9 +157,12 @@ _last_session_usage: dict[str, dict[str, int]] = {}
 # stdout+stderr. See module docstring for where these prefixes come from.
 _ERROR_CLASSIFIERS: tuple[tuple[str, str], ...] = (
     ("rate limited:", "rate_limit"),
+    ("reached overall message rate limit", "rate_limit"),
+    ("message rate limit", "rate_limit"),
     ("quota exhausted:", "quota"),
     ("usage limit reached", "quota"),
     ("usage paused", "quota"),
+    ('"cognition.ai/errorkind": "unavailable"', "transient"),
     ("server error:", "transient"),
     ("connection failed (attempt", "transient"),
     ("request timed out:", "timeout"),
