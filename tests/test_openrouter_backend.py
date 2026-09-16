@@ -30,6 +30,7 @@ from agent_fleet.openrouter_backend import (
     _MAX_TOKENS_CEILING,
     DEFAULT_MODEL,
     OPENROUTER_BASE_URL,
+    CompletionContract,
     OpenRouterBackend,
     OpenRouterLLMResult,
     OpenRouterSession,
@@ -1202,6 +1203,7 @@ def test_session_logs_usage_on_max_iterations_exit(tmp_path: Path) -> None:
     mock_log = MagicMock()
 
     with (
+        patch("agent_fleet.openrouter_backend._MAX_TOOL_ITERATIONS", 3),
         patch(
             "agent_fleet.openrouter_backend._call_openrouter_raw",
             side_effect=lambda *a, **k: endless,  # noqa: ARG005
@@ -1855,16 +1857,13 @@ def test_session_send_stall_warning_fires_at_25(
     backend = OpenRouterBackend(api_key="sk-or-test")
     session = backend.create_session(persona_name="coder", cwd=tmp_path)
     assert isinstance(session, OpenRouterSession)
-    # A read_file call never mutates a file — 30 iterations of it should
-    # cross the 25-iteration thrash-warning threshold without aborting.
-    endless = _tool_call_response("read_file", {"path": "missing.txt"})
+    # Distinct reads still cross the legacy warning threshold without
+    # triggering the identical-call stall detector.
+    responses = [_tool_call_response("read_file", {"path": f"missing-{i}"}) for i in range(30)]
 
     with (
         patch("agent_fleet.openrouter_backend._MAX_TOOL_ITERATIONS", 30),
-        patch(
-            "agent_fleet.openrouter_backend._call_openrouter_raw",
-            side_effect=lambda *a, **k: endless,  # noqa: ARG005
-        ),
+        patch("agent_fleet.openrouter_backend._call_openrouter_raw", side_effect=responses),
         caplog.at_level("WARNING", logger="agent_fleet.openrouter_backend"),
     ):
         result = session.send("explore forever", max_tokens=100, timeout_s=30)
@@ -1877,19 +1876,16 @@ def test_session_send_stall_warning_fires_at_25(
 def test_session_send_stall_abort_unset_does_not_abort(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Read-only/plan-mode personas must never be aborted by default."""
+    """Distinct read-only exploration is not an inactivity stall."""
     monkeypatch.delenv("AGENT_FLEET_STALL_ABORT", raising=False)
     backend = OpenRouterBackend(api_key="sk-or-test")
     session = backend.create_session(persona_name="coder", cwd=tmp_path)
     assert isinstance(session, OpenRouterSession)
-    endless = _tool_call_response("read_file", {"path": "missing.txt"})
+    responses = [_tool_call_response("read_file", {"path": f"missing-{i}"}) for i in range(60)]
 
     with (
         patch("agent_fleet.openrouter_backend._MAX_TOOL_ITERATIONS", 60),
-        patch(
-            "agent_fleet.openrouter_backend._call_openrouter_raw",
-            side_effect=lambda *a, **k: endless,  # noqa: ARG005
-        ),
+        patch("agent_fleet.openrouter_backend._call_openrouter_raw", side_effect=responses),
     ):
         result = session.send("audit only", max_tokens=100, timeout_s=30)
 
@@ -1951,3 +1947,228 @@ def test_session_send_mutation_resets_stall_counter(
         result = session.send("mixed activity", max_tokens=100, timeout_s=30)
 
     assert "Aborted" not in result.stderr
+
+
+@pytest.fixture
+def guarded_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> OpenRouterSession:
+    monkeypatch.setattr("agent_fleet.openrouter_backend._sleep", lambda _: None)
+    monkeypatch.delenv("AGENT_FLEET_STALL_ABORT", raising=False)
+    session = OpenRouterBackend(api_key="test").create_session(persona_name="coder", cwd=tmp_path)
+    assert isinstance(session, OpenRouterSession)
+    return session
+
+
+_PR_CONTRACT = CompletionContract(
+    required_patterns=(r"https://github\.com/[^/]+/[^/]+/pull/\d+",),
+    or_blocker_pattern=r"(?i)blocked: .+",
+)
+_PR_TEXT = "https://github.com/example/repo/pull/12"
+
+
+@pytest.mark.parametrize("text", [_PR_TEXT, "Blocked: GitHub credentials unavailable"])
+def test_completion_contract_first_reply(guarded_session: OpenRouterSession, text: str) -> None:
+    with patch("agent_fleet.openrouter_backend._call_openrouter_raw",
+               return_value=_stop_response(text)) as call:
+        result = guarded_session.send("finish", max_tokens=100, timeout_s=30,
+                                      completion_contract=_PR_CONTRACT)
+    assert result.exit_code == 0
+    assert result.stdout == text
+    call.assert_called_once()
+
+
+@pytest.mark.parametrize("contract", [None, _PR_CONTRACT])
+def test_empty_reply_nudged_then_satisfied(
+    guarded_session: OpenRouterSession, contract: CompletionContract | None,
+) -> None:
+    with patch("agent_fleet.openrouter_backend._call_openrouter_raw",
+               side_effect=[_stop_response(" \n"), _stop_response(_PR_TEXT)]) as call:
+        result = guarded_session.send("finish", max_tokens=100, timeout_s=30,
+                                      completion_contract=contract)
+    assert result.exit_code == 0
+    assert call.call_count == 2
+    assert "a non-empty final message" in guarded_session._messages[-2]["content"]
+    assert guarded_session._messages[-2]["role"] == "user"
+
+
+@pytest.mark.parametrize("contract,text,reason", [
+    (_PR_CONTRACT, "Still working", "contract_unmet"),
+    (None, "", "empty_reply"),
+])
+def test_completion_nudges_exhausted(
+    guarded_session: OpenRouterSession, caplog: pytest.LogCaptureFixture,
+    contract: CompletionContract | None, text: str, reason: str,
+) -> None:
+    with (
+        patch("agent_fleet.openrouter_backend._call_openrouter_raw",
+              return_value=_stop_response(text)) as call,
+        caplog.at_level("INFO"),
+    ):
+        result = guarded_session.send("finish", max_tokens=100, timeout_s=30,
+                                      completion_contract=contract)
+    assert result.exit_code == 2
+    assert result.stdout == text
+    assert result.stderr == ("completion contract unmet" if contract else "empty reply")
+    assert call.call_count == 3
+    assert f"exit={reason}" in caplog.text
+
+
+def test_completion_contract_all_patterns_and_zero_nudges(
+    guarded_session: OpenRouterSession,
+) -> None:
+    contract = CompletionContract((r"PR", r"tests passed"), max_nudges=0)
+    with patch("agent_fleet.openrouter_backend._call_openrouter_raw",
+               return_value=_stop_response("PR")) as call:
+        result = guarded_session.send("finish", max_tokens=100, timeout_s=30,
+                                      completion_contract=contract)
+    assert result.exit_code == 2
+    call.assert_called_once()
+
+
+@pytest.mark.parametrize("text_mode", [False, True])
+def test_stall_repeated_calls(
+    guarded_session: OpenRouterSession, caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch, text_mode: bool,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_STALL_WINDOW", "3")
+    response = (
+        _stop_response('<tool_call>read_file\nparameter: path: missing\n</tool_call>')
+        if text_mode else _tool_call_response("read_file", {"path": "missing"})
+    )
+    with (
+        patch("agent_fleet.openrouter_backend._call_openrouter_raw", return_value=response) as call,
+        caplog.at_level("INFO"),
+    ):
+        result = guarded_session.send("explore", max_tokens=100, timeout_s=30)
+    assert result.exit_code == 3
+    assert call.call_count == 6
+    assert "exit=stalled" in caplog.text
+    nudges = [m for m in guarded_session._messages if "You appear to be looping" in
+              (m.get("content") or "")]
+    assert len(nudges) == 1
+
+
+def test_stall_can_recover(
+    guarded_session: OpenRouterSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENROUTER_STALL_WINDOW", "2")
+    response = _tool_call_response("read_file", {"path": "missing"})
+    with patch("agent_fleet.openrouter_backend._call_openrouter_raw",
+               side_effect=[response, response, _stop_response("Blocked: missing brief")]):
+        result = guarded_session.send("explore", max_tokens=100, timeout_s=30,
+                                      completion_contract=_PR_CONTRACT)
+    assert result.exit_code == 0
+
+
+@pytest.mark.parametrize("progress_tool", ["write_file", "run_command"])
+def test_stall_inactivity_resets_on_progress(
+    guarded_session: OpenRouterSession, monkeypatch: pytest.MonkeyPatch, progress_tool: str,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_STALL_MAX_ITERS", "3")
+    read_calls = [_tool_call_response("read_file", {"path": f"missing-{i}"}) for i in range(8)]
+    def progress(i: int) -> dict[str, Any]:
+        args = ({"path": "out", "content": str(i)} if progress_tool == "write_file"
+                else {"command": f"echo {i}"})
+        return _tool_call_response(progress_tool, args)
+    responses = [progress(0), *read_calls[:2], progress(1), *read_calls[2:]]
+    with (
+        patch("agent_fleet.openrouter_backend._call_openrouter_raw", side_effect=responses) as call
+    ):
+        result = guarded_session.send("work", max_tokens=100, timeout_s=30)
+    assert result.exit_code == 3
+    assert call.call_count == len(responses)
+    if progress_tool == "write_file":
+        assert (guarded_session._cwd / "out").read_text() == "1"
+
+
+def _seed_context(session: OpenRouterSession) -> None:
+    session._messages.append({"role": "user", "content": "original brief"})
+    for i in range(12):
+        session._messages.extend([
+            {"role": "assistant", "content": None, "tool_calls": [{"id": f"c{i}"}]},
+            {"role": "tool", "tool_call_id": f"c{i}", "content": "x" * 100},
+        ])
+
+
+def test_context_compaction_preserves_anchors_tail_and_usage(
+    guarded_session: OpenRouterSession, monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_CONTEXT_BUDGET_TOKENS", "1000")
+    _seed_context(guarded_session)
+    anchors = guarded_session._messages[:2]
+    response = _tool_call_response("read_file", {"path": "missing"})
+    response["usage"]["prompt_tokens"] = 800
+    captured: list[list[dict[str, Any]]] = []
+    responses = iter([response, _stop_response("Decisions and remaining steps."), _stop_response()])
+    def raw(messages: list[dict[str, Any]], **kwargs: object) -> dict[str, Any]:
+        captured.append(json.loads(json.dumps(messages)))
+        if len(captured) == 2:
+            assert not kwargs.get("tools")
+            assert "<=400 words" in messages[-1]["content"]
+        return next(responses)
+    with (
+        patch("agent_fleet.openrouter_backend._call_openrouter_raw", side_effect=raw),
+        caplog.at_level("INFO"),
+    ):
+        result = guarded_session.send("continue", max_tokens=100, timeout_s=30)
+    assert result.exit_code == 0
+    assert len(captured) == 3
+    compacted = captured[2]
+    assert compacted[:2] == anchors
+    assert compacted[2] == {"role": "assistant", "content":
+                            "Progress summary:\nDecisions and remaining steps."}
+    # The last four messages begin in a tool group, so its request also survives.
+    assert compacted[3:] == captured[1][-6:-1]
+    assert "context compacted" in caplog.text
+    assert "input_tokens=800" in caplog.text
+    assert result.usage is not None and result.usage["input_tokens"] == 820
+    tools = [m for m in captured[1] if m["role"] == "tool"]
+    assert all(m["content"] == "[tool result elided to save context]" for m in tools[:-8])
+    assert all(m["content"] != "[tool result elided to save context]" for m in tools[-8:])
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("summary unavailable"), _stop_response("")])
+def test_context_compaction_failure_nonfatal(
+    guarded_session: OpenRouterSession, monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture, failure: RuntimeError | dict[str, Any],
+) -> None:
+    monkeypatch.setenv("OPENROUTER_CONTEXT_BUDGET_TOKENS", "1000")
+    _seed_context(guarded_session)
+    response = _tool_call_response("read_file", {"path": "missing"})
+    response["usage"]["prompt_tokens"] = 800
+    with patch("agent_fleet.openrouter_backend._call_openrouter_raw",
+               side_effect=[response, failure, _stop_response()]) as call:
+        result = guarded_session.send("continue", max_tokens=100, timeout_s=30)
+    assert result.exit_code == 0
+    assert call.call_count == 3
+    assert len(guarded_session._messages) == 30
+    assert guarded_session._messages[1]["content"] == "original brief"
+    assert "context compaction skipped" in caplog.text
+
+
+def test_context_elision_avoids_side_call(
+    guarded_session: OpenRouterSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_CONTEXT_BUDGET_TOKENS", "1000")
+    _seed_context(guarded_session)
+    guarded_session._messages[3]["content"] = "x" * 100_000
+    guarded_session._last_input_tokens = 800
+    guarded_session._last_prompt_chars = guarded_session._history_chars()
+    with patch("agent_fleet.openrouter_backend._call_openrouter_raw") as call:
+        guarded_session._budget_history(timeout_s=30, max_tokens=100)
+    call.assert_not_called()
+    assert guarded_session._messages[3]["content"] == "[tool result elided to save context]"
+
+
+def test_context_below_threshold_no_compaction(
+    guarded_session: OpenRouterSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_CONTEXT_BUDGET_TOKENS", "1000")
+    _seed_context(guarded_session)
+    guarded_session._last_input_tokens = 700
+    guarded_session._last_prompt_chars = guarded_session._history_chars()
+    before = json.loads(json.dumps(guarded_session._messages))
+    with patch("agent_fleet.openrouter_backend._call_openrouter_raw") as call:
+        guarded_session._budget_history(timeout_s=30, max_tokens=100)
+    call.assert_not_called()
+    assert guarded_session._messages == before
