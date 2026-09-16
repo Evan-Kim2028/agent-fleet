@@ -32,6 +32,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -807,6 +808,34 @@ def call_openrouter(
 # ---------------------------------------------------------------------------
 
 
+def _positive_env_int(name: str, default: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+@dataclass(frozen=True)
+class CompletionContract:
+    """All required regexes must match, unless the blocker regex matches."""
+
+    required_patterns: tuple[str, ...] = ()
+    or_blocker_pattern: str = ""
+    max_nudges: int = 2
+
+    def __post_init__(self) -> None:
+        if self.max_nudges < 0:
+            raise ValueError("max_nudges must be non-negative")
+        for pattern in (*self.required_patterns, self.or_blocker_pattern):
+            re.compile(pattern)
+
+    def missing(self, text: str) -> list[str]:
+        if self.or_blocker_pattern and re.search(self.or_blocker_pattern, text):
+            return []
+        return [pattern for pattern in self.required_patterns if not re.search(pattern, text)]
+
+
 @dataclass(frozen=True)
 class OpenRouterLLMResult:
     stdout: str
@@ -1117,6 +1146,91 @@ class OpenRouterSession:
         # each time — avoids repeating the same doomed low-budget attempt
         # every iteration for models that consistently need more headroom.
         self._reasoning_floor: int | None = None
+        self._last_input_tokens = 0
+        self._last_prompt_chars = 0
+
+    def _history_chars(self) -> int:
+        return sum(len(json.dumps(m, default=str)) for m in self._messages)
+
+    def _budget_history(self, *, timeout_s: int, max_tokens: int) -> dict[str, int]:
+        """Use the last measured token/character ratio to budget the next call.
+
+        Keep tool-call/result pairs intact at the tail boundary. A failed side
+        call leaves the (possibly elided) history usable and never ends send().
+        Returned usage includes the side call and any reasoning retries.
+        """
+        usage: dict[str, int] = {}
+        if not self._last_input_tokens or not self._last_prompt_chars:
+            return usage
+        ratio = self._last_input_tokens / self._last_prompt_chars
+        threshold = 0.7 * _positive_env_int("OPENROUTER_CONTEXT_BUDGET_TOKENS", 180_000)
+        if self._history_chars() * ratio <= threshold:
+            return usage
+        tool_results = [m for m in self._messages if m.get("role") == "tool"]
+        elided = 0
+        for message in tool_results[:-8]:
+            body = message.get("content") or ""
+            if len(body) > len(_HISTORY_ELIDED_STUB):
+                message["content"] = _HISTORY_ELIDED_STUB
+                elided += 1
+        if elided:
+            logger.info("OpenRouter context budgeting: elided %d old tool results", elided)
+        if self._history_chars() * ratio <= threshold:
+            return usage
+
+        first_user = next(
+            (i for i, m in enumerate(self._messages) if m.get("role") == "user"), None
+        )
+        if first_user is None:
+            return usage
+        tail_start = max(first_user + 1, len(self._messages) - 4)
+        # A tail starting with a result must retain its assistant tool request.
+        while tail_start > first_user + 1 and self._messages[tail_start].get("role") == "tool":
+            tail_start -= 1
+        if tail_start <= first_user + 1:
+            return usage  # nothing can be compacted without losing protected turns
+        instruction = {
+            "role": "user",
+            "content": (
+                "Write a progress summary in <=400 words: decisions, files changed, "
+                "tests run (with actual results), and remaining steps, including blockers "
+                "and completion requirements. Summarize only; do not call tools."
+            ),
+        }
+        try:
+            data, wasted, _ = _call_with_reasoning_escalation(
+                [*self._messages, instruction],
+                api_key=self._backend.api_key,
+                model=self._model,
+                base_url=self._backend.base_url,
+                timeout=timeout_s if timeout_s > 0 else 720,
+                max_tokens=max_tokens,
+            )
+            usage.update(wasted)
+            for key, value in (_normalize_openrouter_usage(data.get("usage")) or {}).items():
+                usage[key] = usage.get(key, 0) + value
+            choices = data.get("choices") or []
+            message = choices[0].get("message", {}) if choices else {}
+            summary = str(message.get("content") or "").strip()
+            if not summary or message.get("tool_calls"):
+                raise ValueError("summary side call returned no usable text")
+            summary = " ".join(summary.split()[:400])
+        except Exception as exc:
+            logger.warning("OpenRouter context compaction skipped: %s", exc)
+            return usage
+
+        before = len(self._messages)
+        self._messages = [
+            *(m for m in self._messages[:first_user] if m.get("role") == "system"),
+            self._messages[first_user],
+            {"role": "assistant", "content": "Progress summary:\n" + summary},
+            *self._messages[tail_start:],
+        ]
+        logger.info(
+            "OpenRouter context compacted: %d -> %d messages, estimated input_tokens=%d",
+            before, len(self._messages), int(self._history_chars() * ratio),
+        )
+        return usage
 
     @property
     def agent_id(self) -> str | None:
@@ -1169,6 +1283,7 @@ class OpenRouterSession:
         allowed_tools: list[str] | None = None,
         expect_mcp_tools: bool = False,  # noqa: ARG002
         mcp_requirement: McpRequirement | None = None,
+        completion_contract: CompletionContract | None = None,
     ) -> OpenRouterLLMResult:
         del mcp_requirement
         scope_prefixes = [
@@ -1186,6 +1301,17 @@ class OpenRouterSession:
         tool_calls_made: list[str] = []
         total_usage: dict[str, int] = {}
         corrections = 0
+        completion_nudges = 0
+        contract = completion_contract or CompletionContract()
+        stall_window = _positive_env_int("OPENROUTER_STALL_WINDOW", 6)
+        stall_max_iters = _positive_env_int("OPENROUTER_STALL_MAX_ITERS", 40)
+        recent_calls: deque[tuple[str, str]] = deque(maxlen=stall_window)
+        seen_commands: set[str] = set()
+        mutation_phase = False
+        no_progress_iters = 0
+        new_command = False
+        repeated_calls = False
+        stall_nudged = False
         file_mutation_count = 0
         consecutive_no_mutation = 0
         stall_abort_threshold = _stall_abort_threshold()
@@ -1206,8 +1332,43 @@ class OpenRouterSession:
                 exit_reason,
             )
 
+        def _track_tool(name: str, args: dict[str, Any], result: str) -> bool:
+            nonlocal mutation_phase, new_command, repeated_calls
+            signature = (name, json.dumps(args, sort_keys=True))
+            recent_calls.append(signature)
+            if len(recent_calls) == stall_window and len(set(recent_calls)) == 1:
+                repeated_calls = True
+            # Begin inactivity tracking at the first write/edit/command attempt,
+            # not during an initial read-only exploration phase.
+            if name in _MUTATING_TOOLS or name == "run_command":
+                mutation_phase = True
+            if name == "run_command" and signature[1] not in seen_commands:
+                seen_commands.add(signature[1])
+                new_command = True
+            try:
+                outcome = json.loads(result)
+            except (ValueError, TypeError):
+                return False
+            return name in _MUTATING_TOOLS and outcome.get("ok") is True
+
+        def _guard_failure(reason: str, code: int, text: str, stderr: str) -> OpenRouterLLMResult:
+            ctx = get_run_context()
+            _log_llm_usage(
+                phase=ctx.phase if ctx is not None else None,
+                model=self._model,
+                usage=total_usage or None,
+                duration_s=time.monotonic() - t0,
+                agent_id=self._agent_id,
+            )
+            _emit_summary(reason, iteration + 1)
+            return OpenRouterLLMResult(
+                stdout=text, stderr=stderr, exit_code=code,
+                duration_s=time.monotonic() - t0, agent_id=self._agent_id,
+                usage=total_usage or None, mcp_tool_calls=tuple(tool_calls_made),
+            )
+
         def _after_iteration(
-            iteration: int, iter_descs: list[str], iter_mutated: bool
+            iteration: int, iter_descs: list[str], iter_mutated: bool, *, final: bool = False
         ) -> OpenRouterLLMResult | None:
             """Log progress for one completed iteration and track stall state.
 
@@ -1216,6 +1377,7 @@ class OpenRouterSession:
             ``None`` to keep looping.
             """
             nonlocal file_mutation_count, consecutive_no_mutation
+            nonlocal no_progress_iters, new_command, repeated_calls, stall_nudged
             if iter_mutated:
                 file_mutation_count += 1
                 consecutive_no_mutation = 0
@@ -1223,13 +1385,35 @@ class OpenRouterSession:
                 consecutive_no_mutation += 1
 
             logger.info(
-                "iter %d/%d: %s | tokens=%d elapsed=%.1fs",
+                "iter %d/%d: %s | tokens=%d input_tokens=%d elapsed=%.1fs",
                 iteration + 1,
                 _MAX_TOOL_ITERATIONS,
                 "; ".join(iter_descs) if iter_descs else "(no tool calls)",
                 _cumulative_tokens(),
+                self._last_input_tokens,
                 time.monotonic() - t0,
             )
+
+            if final:
+                return None
+            if iter_mutated or new_command:
+                no_progress_iters = 0
+            elif mutation_phase:
+                no_progress_iters += 1
+            new_command = False
+            if repeated_calls or no_progress_iters >= stall_max_iters:
+                if stall_nudged:
+                    return _guard_failure("stalled", 3, "", "session stalled")
+                stall_nudged = True
+                recent_calls.clear()
+                repeated_calls = False
+                no_progress_iters = 0
+                self._messages.append({
+                    "role": "user",
+                    "content": "You appear to be looping/reading without progress; "
+                    "commit to a change or state the blocker",
+                })
+                logger.warning("OpenRouter stall detected; nudging once before abort")
 
             if not iter_mutated and consecutive_no_mutation in _STALL_WARNING_THRESHOLDS:
                 logger.warning(
@@ -1264,8 +1448,13 @@ class OpenRouterSession:
 
         try:
             for iteration in range(_MAX_TOOL_ITERATIONS):
-                self._trim_history()
                 call_base_max_tokens = max(effective_max_tokens, self._reasoning_floor or 0)
+                for key, value in self._budget_history(
+                    timeout_s=timeout_s, max_tokens=call_base_max_tokens,
+                ).items():
+                    total_usage[key] = total_usage.get(key, 0) + value
+                self._trim_history()
+                self._last_prompt_chars = self._history_chars()
                 # Some providers (stealth/free tiers) answer HTTP 200 with an
                 # empty ``choices`` list and an ``error`` object when they shed
                 # load. Retry those in place rather than aborting the session.
@@ -1285,7 +1474,10 @@ class OpenRouterSession:
                     _ec_delay = min(20.0 * (2 ** _ec_attempt), 180.0)
                     logger.warning(
                         "OpenRouter returned no choices (error=%s), retry %d/%d in %.0fs",
-                        json.dumps(data.get("error"))[:300], _ec_attempt + 1, _empty_choice_retries, _ec_delay,
+                        json.dumps(data.get("error"))[:300],
+                        _ec_attempt + 1,
+                        _empty_choice_retries,
+                        _ec_delay,
                     )
                     time.sleep(_ec_delay)
                 if (
@@ -1303,6 +1495,7 @@ class OpenRouterSession:
 
                 # Accumulate usage across all turns in this send()
                 turn_usage = _normalize_openrouter_usage(data.get("usage"))
+                self._last_input_tokens = (turn_usage or {}).get("input_tokens", 0)
                 if turn_usage:
                     for k, v in turn_usage.items():
                         total_usage[k] = total_usage.get(k, 0) + v
@@ -1326,7 +1519,7 @@ class OpenRouterSession:
 
                 # If the model produced tool_calls, execute them and continue.
                 tool_calls = message.get("tool_calls")
-                if tool_calls and finish_reason == "tool_calls":
+                if tool_calls:
                     # Append the assistant message (with tool_calls) to history.
                     self._messages.append(
                         {
@@ -1346,14 +1539,13 @@ class OpenRouterSession:
                             tool_args = {}
                         tool_calls_made.append(tool_name)
                         iter_descs.append(_describe_tool_call(tool_name, tool_args))
-                        if tool_name in _MUTATING_TOOLS:
-                            iter_mutated = True
                         result = _execute_tool(
                             tool_name,
                             tool_args,
                             cwd=self._cwd,
                             scope_prefixes=scope_prefixes,
                         )
+                        iter_mutated = _track_tool(tool_name, tool_args, result) or iter_mutated
                         self._messages.append(
                             {
                                 "role": "tool",
@@ -1411,13 +1603,14 @@ class OpenRouterSession:
                     for idx, (tool_name, tool_args) in enumerate(text_tool_calls):
                         tool_calls_made.append(tool_name)
                         text_iter_descs.append(_describe_tool_call(tool_name, tool_args))
-                        if tool_name in _MUTATING_TOOLS:
-                            text_iter_mutated = True
                         result = _execute_tool(
                             tool_name,
                             tool_args,
                             cwd=self._cwd,
                             scope_prefixes=scope_prefixes,
+                        )
+                        text_iter_mutated = (
+                            _track_tool(tool_name, tool_args, result) or text_iter_mutated
                         )
                         self._messages.append(
                             {
@@ -1430,6 +1623,37 @@ class OpenRouterSession:
                     if abort is not None:
                         return abort
                     continue
+
+                missing = contract.missing(content)
+                if not content.strip() or missing:
+                    self._messages.append({"role": "assistant", "content": content})
+                    abort = _after_iteration(iteration, [], False)
+                    if abort is not None:
+                        return abort
+                    if completion_nudges >= contract.max_nudges:
+                        return _guard_failure(
+                            "contract_unmet" if completion_contract else "empty_reply",
+                            2, content,
+                            "completion contract unmet" if completion_contract else "empty reply",
+                        )
+                    completion_nudges += 1
+                    required = ", ".join(contract.required_patterns) or "a non-empty final message"
+                    what_missing = (
+                        ", ".join(missing) if content.strip() else "a non-empty final message"
+                    )
+                    self._messages.append({
+                        "role": "user",
+                        "content": (
+                            "Your final message did not satisfy the completion contract: "
+                            f"{what_missing}. Continue the task; finish with {required}. "
+                            "If it is impossible, state the blocker explicitly."
+                            + (f" Blocker format: {contract.or_blocker_pattern}"
+                               if contract.or_blocker_pattern else "")
+                        ),
+                    })
+                    continue
+
+                _after_iteration(iteration, [], False, final=True)
 
                 # Guard: detect repetition loops and hallucinated completions.
                 # If the model hasn't called any tools yet but claims completion,
@@ -1555,8 +1779,10 @@ class _OpenRouterErrorSession:
         allowed_tools: list[str] | None = None,
         expect_mcp_tools: bool = False,
         mcp_requirement: McpRequirement | None = None,
+        completion_contract: CompletionContract | None = None,
     ) -> OpenRouterLLMResult:
         del prompt, max_tokens, timeout_s, allowed_tools, expect_mcp_tools, mcp_requirement
+        del completion_contract
         return OpenRouterLLMResult(stdout="", stderr=self._message, exit_code=1, duration_s=0.0)
 
     def dispose(self) -> None:
