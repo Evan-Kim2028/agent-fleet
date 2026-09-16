@@ -333,7 +333,7 @@ def test_run_handles_http_error(tmp_path: Path) -> None:
     )
     with (
         patch("agent_fleet.openrouter_backend.urllib.request.urlopen", side_effect=err),
-        patch("agent_fleet.openrouter_backend.time.sleep"),
+        patch("agent_fleet.openrouter_backend._sleep"),
     ):
         result = backend.run("prompt", max_tokens=10, timeout_s=30, cwd=tmp_path)
 
@@ -346,7 +346,10 @@ def test_run_handles_url_error(tmp_path: Path) -> None:
 
     backend = OpenRouterBackend(api_key="sk-or-test")
     err = urllib.error.URLError("connection refused")
-    with patch("agent_fleet.openrouter_backend.urllib.request.urlopen", side_effect=err):
+    with (
+        patch("agent_fleet.openrouter_backend.urllib.request.urlopen", side_effect=err),
+        patch("agent_fleet.openrouter_backend._sleep"),
+    ):
         result = backend.run("prompt", max_tokens=10, timeout_s=30, cwd=tmp_path)
 
     assert result.exit_code == 1
