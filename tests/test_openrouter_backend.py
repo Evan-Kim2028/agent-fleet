@@ -331,7 +331,10 @@ def test_run_handles_http_error(tmp_path: Path) -> None:
         hdrs=email.message.Message(),
         fp=None,
     )
-    with patch("agent_fleet.openrouter_backend.urllib.request.urlopen", side_effect=err):
+    with (
+        patch("agent_fleet.openrouter_backend.urllib.request.urlopen", side_effect=err),
+        patch("agent_fleet.openrouter_backend.time.sleep"),
+    ):
         result = backend.run("prompt", max_tokens=10, timeout_s=30, cwd=tmp_path)
 
     assert result.exit_code == 1
