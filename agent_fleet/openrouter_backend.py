@@ -1262,15 +1262,28 @@ class OpenRouterSession:
             for iteration in range(_MAX_TOOL_ITERATIONS):
                 self._trim_history()
                 call_base_max_tokens = max(effective_max_tokens, self._reasoning_floor or 0)
-                data, wasted_usage, successful_max_tokens = _call_with_reasoning_escalation(
-                    self._messages,
-                    api_key=self._backend.api_key,
-                    model=self._model,
-                    base_url=self._backend.base_url,
-                    timeout=timeout_s if timeout_s > 0 else 720,
-                    max_tokens=call_base_max_tokens,
-                    tools=_FILE_TOOLS,
-                )
+                # Some providers (stealth/free tiers) answer HTTP 200 with an
+                # empty ``choices`` list and an ``error`` object when they shed
+                # load. Retry those in place rather than aborting the session.
+                _empty_choice_retries = int(os.environ.get("OPENROUTER_EMPTY_CHOICES_RETRIES", "6"))
+                for _ec_attempt in range(_empty_choice_retries + 1):
+                    data, wasted_usage, successful_max_tokens = _call_with_reasoning_escalation(
+                        self._messages,
+                        api_key=self._backend.api_key,
+                        model=self._model,
+                        base_url=self._backend.base_url,
+                        timeout=timeout_s if timeout_s > 0 else 720,
+                        max_tokens=call_base_max_tokens,
+                        tools=_FILE_TOOLS,
+                    )
+                    if data.get("choices") or _ec_attempt >= _empty_choice_retries:
+                        break
+                    _ec_delay = min(20.0 * (2 ** _ec_attempt), 180.0)
+                    logger.warning(
+                        "OpenRouter returned no choices (error=%s), retry %d/%d in %.0fs",
+                        json.dumps(data.get("error"))[:300], _ec_attempt + 1, _empty_choice_retries, _ec_delay,
+                    )
+                    time.sleep(_ec_delay)
                 if (
                     successful_max_tokens is not None
                     and successful_max_tokens > call_base_max_tokens
