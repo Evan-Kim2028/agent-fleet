@@ -129,9 +129,13 @@ def _describe_tool_call(name: str, args: dict[str, Any]) -> str:
 
 
 # Retry policy for transport/rate-limit/server errors in _call_openrouter_raw.
-_MAX_RETRIES = 3
-_RETRY_BASE_DELAY_S = 1.0
-_RETRY_MAX_DELAY_S = 30.0
+# Transport/rate-limit retry policy. Free/stealth tiers rate-limit large
+# tool-bearing requests (observed: bursts of HTTP 429 with two concurrent
+# ~50k-token sessions on stealth/union-alpha, 2026-09-16); 3 tries at 1-4s
+# never cleared the window. Patient by default, env-overridable.
+_MAX_RETRIES = int(os.environ.get("OPENROUTER_MAX_RETRIES", "8"))
+_RETRY_BASE_DELAY_S = float(os.environ.get("OPENROUTER_RETRY_BASE_DELAY_S", "5.0"))
+_RETRY_MAX_DELAY_S = float(os.environ.get("OPENROUTER_RETRY_MAX_DELAY_S", "180.0"))
 
 # Reasoning-model output-exhaustion handling: when a response comes back with
 # reasoning content but no message content and finish_reason == "length", the
