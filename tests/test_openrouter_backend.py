@@ -1965,15 +1965,61 @@ _PR_CONTRACT = CompletionContract(
 _PR_TEXT = "https://github.com/example/repo/pull/12"
 
 
-@pytest.mark.parametrize("text", [_PR_TEXT, "Blocked: GitHub credentials unavailable"])
-def test_completion_contract_first_reply(guarded_session: OpenRouterSession, text: str) -> None:
-    with patch("agent_fleet.openrouter_backend._call_openrouter_raw",
-               return_value=_stop_response(text)) as call:
+@pytest.mark.parametrize("text,satisfied_by", [
+    (_PR_TEXT, _PR_CONTRACT.required_patterns[0]),
+    ("Blocked: cannot proceed", "blocker"),
+])
+@pytest.mark.parametrize("prefix", ["", "<think>Private reasoning\nnot for stdout</think>\n"])
+def test_completion_contract_first_reply(
+    guarded_session: OpenRouterSession, caplog: pytest.LogCaptureFixture,
+    text: str, satisfied_by: str, prefix: str,
+) -> None:
+    with (
+        patch("agent_fleet.openrouter_backend._call_openrouter_raw",
+              return_value=_stop_response(prefix + text)) as call,
+        caplog.at_level("INFO", logger="agent_fleet.openrouter_backend"),
+    ):
         result = guarded_session.send("finish", max_tokens=100, timeout_s=30,
                                       completion_contract=_PR_CONTRACT)
     assert result.exit_code == 0
     assert result.stdout == text
     call.assert_called_once()
+    assert f"completion contract: satisfied by {satisfied_by}" in caplog.messages
+    assert "completion contract: nudge" not in caplog.text
+
+
+@pytest.mark.parametrize("hidden", ["We may be blocked", _PR_TEXT])
+@pytest.mark.parametrize("tag", ["think", "thinking", "think:private"])
+@pytest.mark.parametrize("visible", ["", "Still working"])
+def test_completion_contract_ignores_hidden_matches(
+    guarded_session: OpenRouterSession, caplog: pytest.LogCaptureFixture,
+    hidden: str, tag: str, visible: str,
+) -> None:
+    contract = CompletionContract(
+        required_patterns=_PR_CONTRACT.required_patterns,
+        or_blocker_pattern=r"(?i)\bblock(ed|er)\b",
+    )
+    raw = f"<{tag}>Considering next steps\n{hidden}</{tag}>\n{visible}"
+    with (
+        patch("agent_fleet.openrouter_backend._call_openrouter_raw",
+              side_effect=[_stop_response(raw), _stop_response(_PR_TEXT)]) as call,
+        caplog.at_level("INFO", logger="agent_fleet.openrouter_backend"),
+    ):
+        result = guarded_session.send("finish", max_tokens=100, timeout_s=30,
+                                      completion_contract=contract)
+    assert result.exit_code == 0
+    assert result.stdout == _PR_TEXT
+    assert call.call_count == 2
+    assert guarded_session._messages[-2]["role"] == "user"
+    assert "did not satisfy the completion contract" in guarded_session._messages[-2]["content"]
+    missing = contract.required_patterns[0]
+    if not visible:
+        missing += ", a non-empty final message"
+    assert (
+        f"completion contract: nudge 1/2 — missing: {missing} "
+        f"(cleaned text length {len(visible)})"
+    ) in caplog.messages
+    assert f"completion contract: satisfied by {contract.required_patterns[0]}" in caplog.messages
 
 
 @pytest.mark.parametrize("contract", [None, _PR_CONTRACT])
@@ -2010,6 +2056,26 @@ def test_completion_nudges_exhausted(
     assert result.stderr == ("completion contract unmet" if contract else "empty reply")
     assert call.call_count == 3
     assert f"exit={reason}" in caplog.text
+    missing = contract.required_patterns[0] if contract else "a non-empty final message"
+    assert [m for m in caplog.messages if m.startswith("completion contract: nudge")] == [
+        f"completion contract: nudge {n}/2 — missing: {missing} (cleaned text length {len(text)})"
+        for n in (1, 2)
+    ]
+    assert "completion contract: satisfied" not in caplog.text
+
+
+@pytest.mark.parametrize("contract", [None, _PR_CONTRACT, CompletionContract((r".*",))])
+@pytest.mark.parametrize("closing", ["</think>", ""])
+def test_completion_contract_hidden_only_exhausts_nudges(
+    guarded_session: OpenRouterSession, contract: CompletionContract | None, closing: str,
+) -> None:
+    with patch("agent_fleet.openrouter_backend._call_openrouter_raw",
+               return_value=_stop_response(f"<think>{_PR_TEXT}{closing}")) as call:
+        result = guarded_session.send("finish", max_tokens=100, timeout_s=30,
+                                      completion_contract=contract)
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert call.call_count == 3
 
 
 def test_completion_contract_all_patterns_and_zero_nudges(
