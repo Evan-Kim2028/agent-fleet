@@ -1011,6 +1011,14 @@ def _strip_fabricated_responses(content: str) -> str:
     return _FABRICATED_BLOCK_RE.sub("", content)
 
 
+# Final answers must not expose reasoning or satisfy contracts with hidden text.
+_FINAL_REASONING_RE = re.compile(
+    r"<(?:think|thinking)(?::[a-zA-Z0-9_-]+)?>.*?"
+    r"(?:</(?:think|thinking)(?::[a-zA-Z0-9_-]+)?>|$)",
+    re.DOTALL,
+)
+
+
 # ---------------------------------------------------------------------------
 # Repetition + hallucination guards
 # ---------------------------------------------------------------------------
@@ -1624,8 +1632,11 @@ class OpenRouterSession:
                         return abort
                     continue
 
+                # Compute the visible final text once for both the contract and
+                # stdout. Hidden reasoning must never satisfy a requirement.
+                content = _FINAL_REASONING_RE.sub("", content).strip()
                 missing = contract.missing(content)
-                if not content.strip() or missing:
+                if not content or missing:
                     self._messages.append({"role": "assistant", "content": content})
                     abort = _after_iteration(iteration, [], False)
                     if abort is not None:
@@ -1638,8 +1649,14 @@ class OpenRouterSession:
                         )
                     completion_nudges += 1
                     required = ", ".join(contract.required_patterns) or "a non-empty final message"
-                    what_missing = (
-                        ", ".join(missing) if content.strip() else "a non-empty final message"
+                    what_missing = ", ".join(missing)
+                    if not content:
+                        what_missing = ", ".join(filter(None, (
+                            what_missing, "a non-empty final message",
+                        )))
+                    logger.info(
+                        "completion contract: nudge %d/%d — missing: %s (cleaned text length %d)",
+                        completion_nudges, contract.max_nudges, what_missing, len(content),
                     )
                     self._messages.append({
                         "role": "user",
@@ -1710,6 +1727,14 @@ class OpenRouterSession:
                         mcp_tool_calls=tuple(tool_calls_made),
                     )
 
+                if completion_contract is not None:
+                    satisfied_by = (
+                        "blocker"
+                        if contract.or_blocker_pattern
+                        and re.search(contract.or_blocker_pattern, content)
+                        else ", ".join(contract.required_patterns) or "a non-empty final message"
+                    )
+                    logger.info("completion contract: satisfied by %s", satisfied_by)
                 _emit_summary("success", iteration + 1)
                 return OpenRouterLLMResult(
                     stdout=content,
