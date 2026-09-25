@@ -76,10 +76,12 @@ the API ships as an API batch. The tables are overridable per repo in
 **dbt models** — `transform/models/**/*.{sql,py,yml}` parses to model names
 (`transform/models/gold/sales.sql` → `gold.sales`). When
 `transform/target/manifest.json` is present, the set is expanded to the full
-downstream closure by walking the manifest's `parent_map`, so the rebuild
-covers everything the change can invalidate. Without a manifest only the
-directly edited models are selected, and the plan records
-`dbt_select_source: direct` so the operator knows the difference.
+downstream closure so the rebuild covers everything the change can invalidate.
+dbt's `parent_map` points *upstream* (each node lists what it reads), so the
+dependents are its inverse — the same relation the manifest calls `child_map` —
+and that is what gets walked. Without a manifest only the directly edited
+models are selected, and the plan records `dbt_select_source: direct` so the
+operator knows the difference.
 
 **Risk flags** — `migration` (sql, `gold_catalog.json`, `packages/lakestore`,
 alembic), `deploy` (workflow files, `infra/vps`, deploy scripts, Dockerfiles),
@@ -127,11 +129,21 @@ knows the rebuild will run more than once:
 
 A batch also has to be *landable*. `merge-plan` verifies that with
 `git merge-tree --write-tree` on git >= 2.38, folding each merge onto the
-previous result. On older git (this box runs 2.34) it falls back to a scratch
-worktree under a temp directory, replaying the merges with
-`git merge --no-commit`. The worktree is created and removed by the check
-itself; your repo is never mutated. If a batch still cannot merge cleanly, it
-is peeled back to single-PR batches rather than shipping an unlandable merge.
+previous result — the tree it writes is committed back into a commit first,
+because git >= 2.38 rejects a bare tree as the next merge base. On older git
+(this box runs 2.34) it falls back to a scratch worktree under a temp
+directory, replaying the merges with `git merge --no-commit` and committing
+each result, since git refuses a second merge while `MERGE_HEAD` is still
+outstanding. The worktree is created and removed by the check itself; your
+repo is never mutated. If a batch still cannot merge cleanly, it is peeled
+back to single-PR batches rather than shipping an unlandable merge.
+
+The head commits come from the GitHub API, so a checkout that has not fetched
+since a PR opened does not have them. They are fetched (`refs/pull/<n>/head`,
+falling back to the raw SHA) before the check runs — otherwise every missing
+object would read as a conflict and silently collapse the plan back to one
+deploy per PR. A commit that cannot be fetched at all is still treated as
+unmergeable, so a batch is never reported as verified without being checked.
 
 File-overlap analysis already proves most batches disjoint, and
 `--no-merge-check` skips the git work entirely when that is enough.

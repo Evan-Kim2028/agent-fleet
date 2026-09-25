@@ -124,6 +124,73 @@ def _git_version(repo_path: Path) -> tuple[int, ...]:
     return ()
 
 
+def _commit_exists(repo_path: Path, sha: str) -> bool:
+    """Whether *sha* is a commit the local object store already has."""
+    try:
+        result = subprocess.run(
+            ["git", "cat-file", "-e", f"{sha}^{{commit}}"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+            cwd=str(repo_path),
+        )
+    except OSError, subprocess.SubprocessError:
+        return False
+    return result.returncode == 0
+
+
+def ensure_commits_local(
+    repo_path: Path,
+    shas: Sequence[str],
+    prs: Sequence[ApprovedPR] = (),
+) -> None:
+    """Fetch any of *shas* the checkout does not already have.
+
+    ``gh pr view`` reports head commits that live on the remote; a working copy
+    that has not fetched since the PR opened does not have those objects.
+    Handing a missing object to the merge check makes it answer "incompatible",
+    which demotes every batch to single PRs and silently defeats batching.
+
+    Each missing commit is fetched twice over: by SHA, for a remote that
+    advertises ``uploadpack.allowReachableSHA1InWant``, and as
+    ``refs/pull/<n>/head``, which GitHub always serves.  A commit that cannot
+    be materialised at all is left to the merge check, which then reports the
+    batch as unmergeable rather than pretending it verified.
+    """
+    missing = [sha for sha in shas if sha and not _commit_exists(repo_path, sha)]
+    if not missing:
+        return
+    prs_by_sha = {(p.head_sha or p.approved_sha): p for p in prs}
+    for sha in missing:
+        pr = prs_by_sha.get(sha)
+        refspecs = [sha]
+        if pr is not None and pr.pr_number:
+            refspecs.insert(0, f"+refs/pull/{pr.pr_number}/head")
+        if _fetch(repo_path, *refspecs):
+            continue
+        if refspecs and refspecs[0] != sha:
+            _fetch(repo_path, sha)
+
+
+def _fetch(repo_path: Path, *refspecs: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["git", "fetch", "--quiet", "origin", *refspecs],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=600,
+            cwd=str(repo_path),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.debug("mergecheck fetch %s failed: %s", refspecs, exc)
+        return False
+    if result.returncode != 0:
+        logger.debug("mergecheck fetch %s failed: %s", refspecs, result.stderr.strip())
+    return result.returncode == 0
+
+
 def _merge_tree_compatible(
     repo_path: Path,
     shas: Sequence[str],
@@ -131,9 +198,13 @@ def _merge_tree_compatible(
     """Try ``git merge-tree --write-tree`` (git >= 2.38).
 
     Returns True/False on a verdict, or None when this git is too old for the
-    command, so the caller falls back to a scratch worktree.  Each merge is
-    folded onto the previous result, so the check matches the real sequence:
-    ``merge-tree`` writes a tree oid that the next merge takes as its base.
+    command, so the caller falls back to a scratch worktree.
+
+    Each PR is folded onto the base branch in turn and the resulting tree is
+    turned back into a commit, so the next ``merge-tree`` gets a *commit* as
+    its base.  ``--write-tree`` prints a tree oid, and feeding that back as
+    the next base makes git >= 2.38 reject it ("expected commit type"), so a
+    correct 3+ PR fold needs the ``commit-tree`` round trip.
     """
     if _git_version(repo_path) < (2, 38):
         return None
@@ -152,8 +223,29 @@ def _merge_tree_compatible(
         parts = result.stdout.split()
         if not parts:
             return False
-        base = parts[0]
+        # A clean merge prints just the tree oid; a conflicted one exits nonzero
+        # above, so whatever reaches here is a tree that must be committed back
+        # into a commit before the next fold.
+        committed = _commit_tree(repo_path, parts[0], base, sha)
+        if committed is None:
+            return False
+        base = committed
     return True
+
+
+def _commit_tree(repo_path: Path, tree: str, base: str, other: str) -> str | None:
+    """Record *tree* as a commit so it can be used as the next merge base."""
+    result = subprocess.run(
+        ["git", "commit-tree", tree, "-p", base, "-p", other, "-m", "merge-plan fold"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+        cwd=str(repo_path),
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
 
 
 def _scratch_merge_compatible(
@@ -162,9 +254,15 @@ def _scratch_merge_compatible(
 ) -> bool:
     """Fallback: replay the merges in a throwaway worktree.
 
-    Each SHA is merged with ``--no-commit`` on top of the previous result, so
-    conflicts surface exactly as they would in the real batch sequence.  The
-    worktree is removed in a ``finally`` — it is created by this function, so
+    Each SHA is merged with ``--no-commit`` and the result committed as a
+    throwaway merge commit, because ``git merge`` refuses to start a second
+    merge while MERGE_HEAD from the first is still outstanding — without the
+    commit, the third and later PR of a batch cannot merge at all and the whole
+    batch is falsely reported as incompatible.  A refused merge (nonzero exit)
+    is a real conflict and returns False; the exit status is read from the
+    process itself because git reports "Automatic merge went well" on stdout
+    while still exiting 1.
+    The worktree is removed in a ``finally`` — it is created by this function, so
     removing it is safe, but the repo itself is never mutated.
     """
     if not shas:
@@ -194,6 +292,17 @@ def _scratch_merge_compatible(
             )
             if merge.returncode != 0:
                 return False
+            commit = subprocess.run(
+                ["git", "commit", "--no-gpg-sign", "-q", "-m", "merge-plan check"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=300,
+                cwd=str(worktree),
+            )
+            if commit.returncode != 0:
+                logger.debug("mergecheck commit failed: %s", commit.stderr.strip())
+                return False
         return True
     finally:
         # Detach and remove only the worktree this call created.
@@ -213,6 +322,7 @@ def merge_compatible(
     repo_path: Path | None,
     shas: Sequence[str],
     check: bool = True,
+    prs: Sequence[ApprovedPR] = (),
 ) -> bool:
     """Whether *shas* merge cleanly together, in the order given.
 
@@ -224,6 +334,12 @@ def merge_compatible(
         return True
     if not repo_path.is_dir():
         return True
+    # The head SHAs come from the GitHub API, not from this checkout, so they
+    # are fetched before the check rather than being reported as unmergeable.
+    ensure_commits_local(repo_path, shas, prs)
+    if not all(_commit_exists(repo_path, sha) for sha in shas if sha):
+        logger.debug("mergecheck: PR head commits unavailable in %s", repo_path)
+        return False
     verdict = _merge_tree_compatible(repo_path, shas)
     if verdict is not None:
         return verdict
@@ -511,7 +627,7 @@ def _enforce_merge_compatibility(
             (out_risky if members[0].is_risky else out_safe).append((members, split))
             continue
         shas = [sha_by_pr[m.pr_number] for m in members]
-        if merge_compatible(repo_path=repo_path, shas=shas, check=True):
+        if merge_compatible(repo_path=repo_path, shas=shas, check=True, prs=repo_prs):
             (out_risky if any(m.is_risky for m in members) else out_safe).append((members, split))
         else:
             for member in members:

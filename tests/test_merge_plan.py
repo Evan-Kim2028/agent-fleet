@@ -228,12 +228,16 @@ def test_dbt_models_parsed_from_paths() -> None:
 
 
 def test_expand_downstream_transitively() -> None:
+    # c <- b <- a: b reads c, a reads b. parent_map is upstream-only, so it
+    # expands to a leaf; the dependents are the inverse relation.
     parent_map = {
         "model.transform.a": ["model.transform.b"],
         "model.transform.b": ["model.transform.c"],
         "model.transform.c": [],
     }
-    assert expand_downstream(["a"], parent_map) == ("a", "b", "c")
+    assert expand_downstream(["a"], parent_map) == ("a",)
+    # Editing c invalidates everything that reads it, transitively.
+    assert expand_downstream(["c"], parent_map) == ("c", "b", "a")
     assert expand_downstream(["a"], {}) == ("a",)
 
 

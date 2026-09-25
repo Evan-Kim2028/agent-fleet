@@ -92,6 +92,42 @@
 
 ### Fixed
 
+- **`merge-plan` read every repo's PRs from the first repo's checkout.** A single
+  `gh` client was pinned to the alphabetically-first `--repo-path` and reused for
+  every approval, but `gh pr view <n>` resolves the number against the origin
+  remote of the checkout it runs in. With more than one repo selected, every repo
+  after the first had its head SHA *and* its changed-file list read from the
+  wrong repository: an approved, non-stale PR was reported as a false "stale
+  approval" and dropped from the plan, or, when the other repo happened to have
+  the same PR number, it was profiled with another repo's files — so a
+  production migration in the second repo no longer raised its risk flag and
+  lost the isolation that keeps it out of a shared deploy. Each PR is now read
+  through a client scoped to its own repo's checkout.
+- **`merge-plan`'s dbt `--select` set never covered the models a change actually
+  invalidates.** Expansion walked the manifest's `parent_map` as though each
+  entry listed a node's dependents, but dbt's `parent_map` points the other way
+  (each node lists what it *reads*; the dependents are `child_map`). The result
+  collapsed to the directly edited models, so the rebuild the operator ran left
+  every downstream model serving stale derived data. The dependents relation is
+  now what gets walked.
+- **`merge-plan` collapsed every multi-PR batch into single-PR batches.** The
+  merge-compatibility check was handed PR head SHAs from the GitHub API that a
+  not-recently-fetched checkout does not have, and no fetch was ever issued, so
+  the check could only answer "incompatible" — 4 disjoint approved PRs planned
+  as 4 batches and 4 deploys, with nothing in the output to show the check had
+  misfired. Heads are now materialised (`refs/pull/<n>/head`, falling back to
+  the raw SHA) before the check. Two further fold bugs had the same effect: the
+  `merge-tree --write-tree` path fed its tree oid back as the next merge base,
+  which git >= 2.38 rejects, and the scratch-worktree path left `MERGE_HEAD`
+  outstanding so the third and later PR of a batch could never merge. Conflicts
+  are still rejected, so the check is no weaker — it is finally able to say yes.
+- **One approved PR could be planned and merged twice.** Approvals were
+  de-duplicated on the raw repo string, before the `owner/name` -> `name`
+  reconciliation, so the same PR recorded both ways survived as two entries and
+  was emitted twice into one batch — the operator's merge script was handed the
+  same PR twice in a single batch (double-merge, double-deploy) and the batch
+  size counted it twice.
+
 - **The package was unimportable on `main`.** The tree had carried a Python-2-only
   `except A, B:` spelling since 2026-05-26 (commit `3e8b195`), which is a hard
   SyntaxError under Python 3, not a style nit. Because `agent_fleet/__init__.py`

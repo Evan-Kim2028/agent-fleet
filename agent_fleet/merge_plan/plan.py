@@ -8,7 +8,6 @@ import logging
 import shutil
 import subprocess
 from dataclasses import replace
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from agent_fleet.merge_plan.batching import plan_batches
@@ -23,6 +22,7 @@ from agent_fleet.merge_plan.types import DEFAULT_MAX_BATCH_SIZE, MergePlan
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
     from agent_fleet.merge_plan.types import ApprovedPR, ChangeProfile, RepoSpec
 
@@ -47,14 +47,20 @@ def build_plan(
     approvals: list[ApprovedPR] = list(collect_from_lanes(operator=operator, lanes_root=lanes_root))
     if status_dir is not None:
         approvals.extend(collect_from_status_dir(status_dir))
-    approvals = [_normalize_repo(pr, repo_specs) for pr in dedupe_approvals(approvals)]
+    # Normalise the repo spelling *before* de-duplicating: the same PR is
+    # recorded as ``owner/name#N`` by one source and as ``name`` by another, and
+    # de-duping on the raw strings would keep both, planning one PR twice and
+    # handing the operator's merge script the same PR twice in one batch.
+    approvals = dedupe_approvals([_normalize_repo(pr, repo_specs) for pr in approvals])
     approvals = [p for p in approvals if p.repo in repo_specs]
 
     notes: list[str] = []
     if not approvals:
         notes.append("no PREMERGE-APPROVED status lines found for the selected repos/operators")
 
-    client = client or GitHubClient(cwd=_first_repo_path(repo_specs))
+    # One client, re-scoped per repo inside profile_approvals: gh resolves a
+    # bare PR number against the checkout it runs in.
+    client = client or GitHubClient()
     batchable, profiles, stale, unprofilable = profile_approvals(
         approvals, client=client, repo_specs=repo_specs
     )
@@ -100,14 +106,6 @@ def _normalize_repo(pr: ApprovedPR, repo_specs: dict[str, RepoSpec]) -> Approved
                 return pr
             return replace(pr, repo=name)
     return pr
-
-
-def _first_repo_path(repo_specs: dict[str, RepoSpec]) -> Path | None:
-    for name in sorted(repo_specs):
-        spec = repo_specs[name]
-        if spec.path:
-            return Path(spec.path).expanduser()
-    return None
 
 
 # ---------------------------------------------------------------------------

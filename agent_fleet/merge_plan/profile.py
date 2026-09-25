@@ -168,6 +168,9 @@ def load_manifest_parent_map(manifest_path: Path) -> dict[str, list[str]]:
 
     A missing or unreadable manifest is not an error: the caller falls back to
     direct models only.
+
+    The value is the manifest's own ``parent_map``, which maps each node to
+    its **upstream parents** — see ``expand_downstream``.
     """
     try:
         data = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -189,25 +192,37 @@ def expand_downstream(
 ) -> tuple[str, ...]:
     """Expand *models* to every model downstream of them.
 
-    Walks the manifest's ``parent_map`` transitively, keeping only model
-    nodes.  A model that nothing depends on maps to itself, so the result is
-    always a superset of the input.
+    dbt's ``parent_map`` maps each node to the nodes it **reads from**, so it
+    holds the upstream direction.  The dependents are the inverse relation
+    (``child_map`` in the same manifest), which is built here by inverting
+    every entry, so the walk follows "readers of" rather than "reads".
+
+    Only model nodes are kept, so a model that also feeds a test or a source
+    does not drag non-model nodes into the ``--select`` set.  A model nothing
+    depends on maps to itself, so the result is always a superset of the input.
+    The result is in breadth-first discovery order (the edited models, then
+    their dependents), so it reads like the order the rebuild propagates.
     """
     seeds = {f"model.{package}.{m}" for m in models}
     if not seeds or not parent_map:
         return tuple(sorted(models))
-    seen: set[str] = set(seeds)
-    queue = list(seeds)
-    while queue:
-        node = queue.pop()
-        for child in parent_map.get(node, ()):
+    children: dict[str, list[str]] = {}
+    for node, parents in parent_map.items():
+        for parent in parents:
+            children.setdefault(parent, []).append(node)
+    order: list[str] = sorted(seeds)
+    seen: set[str] = set(order)
+    head = 0
+    while head < len(order):
+        for child in children.get(order[head], ()):
             if child in seen or not child.startswith("model."):
                 continue
             seen.add(child)
-            queue.append(child)
+            order.append(child)
+        head += 1
     suffix = f".{package}."
-    expanded = {n.split(suffix, 1)[1] for n in seen if suffix in n}
-    return tuple(sorted(expanded or models))
+    expanded = tuple(n.split(suffix, 1)[1] for n in order if suffix in n)
+    return expanded or tuple(sorted(models))
 
 
 def build_profile(

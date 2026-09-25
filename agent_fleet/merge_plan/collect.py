@@ -164,6 +164,18 @@ class GitHubClient:
         self.cwd = cwd
         self.binary = binary
 
+    def for_repo(self, repo_path: Path | None) -> GitHubClient:
+        """A client scoped to *repo_path*, which is how ``gh`` finds a repo.
+
+        ``gh pr view <n>`` resolves the PR number against the origin remote of
+        the checkout it runs in, so a client bound to one checkout must not be
+        reused for another repository.  Returns ``self`` when *repo_path* is
+        empty, keeping the caller's cwd.
+        """
+        if repo_path is None:
+            return self
+        return GitHubClient(cwd=repo_path, binary=self.binary)
+
     def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [self.binary, *args],
@@ -217,6 +229,22 @@ class GitHubClient:
         return [d for d in data if isinstance(d, dict)] if isinstance(data, list) else []
 
 
+def _scoped_client(client: GitHubClient, repo_path: Path | None) -> GitHubClient:
+    """*client* bound to *repo_path*, so gh resolves the PR in that repository.
+
+    A client that cannot re-scope itself (an injected test double) is used as
+    given, which keeps the collector usable without a per-repo checkout.
+    """
+    if repo_path is None:
+        return client
+    for_repo: object = getattr(client, "for_repo", None)
+    if callable(for_repo):
+        scoped = for_repo(repo_path)
+        if isinstance(scoped, GitHubClient):
+            return scoped
+    return client
+
+
 def _files_from_detail(detail: Mapping[str, Any]) -> tuple[str, ...]:
     files = detail.get("files")
     if not isinstance(files, list):
@@ -267,7 +295,11 @@ def profile_approvals(
 
     for pr in approvals:
         spec = repo_specs.get(pr.repo)
-        detail = client.pr_detail(pr.pr_number)
+        repo_path = Path(spec.path).expanduser() if spec and spec.path else None
+        # gh resolves the PR number against the checkout it runs in, so each
+        # repo must be read through its own client.  One client pinned to the
+        # first repo silently profiles every other repo's PRs against it.
+        detail = _scoped_client(client, repo_path).pr_detail(pr.pr_number)
         head_sha = str(detail.get("headRefOid") or "")
         if not head_sha:
             unprofilable.append(
@@ -298,7 +330,6 @@ def profile_approvals(
             )
             continue
 
-        repo_path = Path(spec.path).expanduser() if spec and spec.path else None
         parent_map = _parent_map_for(repo_path, spec, parent_maps)
         batchable.append(current)
         profiles[(pr.repo, pr.pr_number)] = build_profile(
