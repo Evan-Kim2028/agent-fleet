@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Added
+
+- **`agent-fleet merge-plan`:** the command center now decides which gate-approved
+  PRs ship *together*. Merging and deploying is the slowest serialized step in
+  the loop (~15-20 min per lake-of-rage deploy, ~9 min per silphcoanalytics), so
+  approved PRs are grouped so one deploy plus one verify covers as many of them
+  as is safe. Collects `PREMERGE-APPROVED <sha>` status lines from the lane
+  registry and `--status-dir`, profiles each PR (deploy unit, dbt models, risk
+  flags, size), and batches them under five documented rules: one deploy unit
+  per batch, no file overlap, dbt models rebuilt once, risky PRs isolated and
+  ordered last, and a size cap. Reports a **stale approval** and excludes the PR
+  when the head has moved past the SHA the gate approved. Batching is
+  deterministic — identical input yields byte-identical plan JSON. `--emit`
+  publishes the plan as a `merge.plan` event, feature-detecting the `fb/fleetobs`
+  `emit` command and falling back to the runs-dir JSONL. See `docs/MERGE-PLAN.md`.
+  Executor command templates are config-driven with no built-in defaults: the
+  per-repo merge scripts differ in argument shape, and the planner will not print
+  a command that does not exist on the box.
+
 ## 0.16.1
 
 ## 0.16.0
@@ -71,6 +90,49 @@
 
 ### Fixed
 
+- **`merge-plan` read every repo's PRs from the first repo's checkout.** A single
+  `gh` client was pinned to the alphabetically-first `--repo-path` and reused for
+  every approval, but `gh pr view <n>` resolves the number against the origin
+  remote of the checkout it runs in. With more than one repo selected, every repo
+  after the first had its head SHA *and* its changed-file list read from the
+  wrong repository: an approved, non-stale PR was reported as a false "stale
+  approval" and dropped from the plan, or, when the other repo happened to have
+  the same PR number, it was profiled with another repo's files — so a
+  production migration in the second repo no longer raised its risk flag and
+  lost the isolation that keeps it out of a shared deploy. Each PR is now read
+  through a client scoped to its own repo's checkout.
+- **`merge-plan`'s dbt `--select` set never covered the models a change actually
+  invalidates.** Expansion walked the manifest's `parent_map` as though each
+  entry listed a node's dependents, but dbt's `parent_map` points the other way
+  (each node lists what it *reads*; the dependents are `child_map`). The result
+  collapsed to the directly edited models, so the rebuild the operator ran left
+  every downstream model serving stale derived data. The dependents relation is
+  now what gets walked.
+- **`merge-plan` collapsed every multi-PR batch into single-PR batches.** The
+  merge-compatibility check was handed PR head SHAs from the GitHub API that a
+  not-recently-fetched checkout does not have, and no fetch was ever issued, so
+  the check could only answer "incompatible" — 4 disjoint approved PRs planned
+  as 4 batches and 4 deploys, with nothing in the output to show the check had
+  misfired. Heads are now materialised (`refs/pull/<n>/head`, falling back to
+  the raw SHA) before the check. Two further fold bugs had the same effect: the
+  `merge-tree --write-tree` path fed its tree oid back as the next merge base,
+  which git >= 2.38 rejects, and the scratch-worktree path left `MERGE_HEAD`
+  outstanding so the third and later PR of a batch could never merge. Conflicts
+  are still rejected, so the check is no weaker — it is finally able to say yes.
+- **One approved PR could be planned and merged twice.** Approvals were
+  de-duplicated on the raw repo string, before the `owner/name` -> `name`
+  reconciliation, so the same PR recorded both ways survived as two entries and
+  was emitted twice into one batch — the operator's merge script was handed the
+  same PR twice in a single batch (double-merge, double-deploy) and the batch
+  size counted it twice.
+
+- **The package was unimportable on `main`.** The tree had carried a Python-2-only
+  `except A, B:` spelling since 2026-05-26 (commit `3e8b195`), which is a hard
+  SyntaxError under Python 3, not a style nit. Because `agent_fleet/__init__.py`
+  imports `agent_fleet.repo`, the single bad clause in `repo.py` made
+  `import agent_fleet`, every `agent-fleet` subcommand, and the test suite all
+  dead. Restored `except (A, B):` at 41 sites across 24 files; purely mechanical,
+  no behavior change.
 - **Devin / concurrent `fleet run` worktree steal:** every single-task
   `fleet run` uses `task_index=0`, so resume attached to any dirty
   `fleet/task-0-*` branch — including one a live Devin dispatcher still

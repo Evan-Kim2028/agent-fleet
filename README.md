@@ -11,6 +11,7 @@ Built on **[Cursor SDK](https://github.com/cursor/cursor-sdk)** (`cursor-sdk`). 
 | [New repo setup](docs/NEW-REPO.md) | `.agent-fleet.yaml`, GHA, PR loop |
 | [Personas](docs/PERSONAS.md) | Fleet cookbook |
 | [Schedules](docs/SCHEDULES.md) | Cron-based daily/weekly fleet jobs |
+| [Merge plan](docs/MERGE-PLAN.md) | Batch approved PRs into one deploy |
 
 **Requires:** Python 3.14 · [Cursor API key](https://cursor.com/dashboard/integrations) · git workspace  
 **Default model:** `composer-2.5` (slow / non-fast tier — agent-fleet pins `fast=false` explicitly so you aren't silently routed to the fast variant that Cursor returns as its default for the bare model id).
@@ -181,6 +182,24 @@ fleet watch <run-id>   # full id or a unique prefix
 
 - `--once` prints one snapshot and exits (no live loop).
 - `--json` emits the complete folded run state as JSON and exits.
+
+---
+
+## Planning merges
+
+`merge-plan` batches gate-approved PRs so that one deploy covers as many of
+them as it safely can — the deploy is the slow step, not the merge:
+
+```bash
+fleet merge-plan --repo-path ~/Documents/lake-of-rage
+```
+
+Groups PRs by deploy unit, never batches two PRs that touch the same file,
+keeps PRs sharing a dbt model together so the rebuild runs once, isolates
+risky PRs (migrations, deploy scripts, prod-write tools) into their own batch
+ordered last, and caps batch size. PRs whose head moved past the SHA the gate
+approved are reported as stale and excluded. See
+[docs/MERGE-PLAN.md](docs/MERGE-PLAN.md).
 
 ---
 
