@@ -37,6 +37,7 @@ OUTCOME_STALLED = "stalled"
 OUTCOME_NO_PUSH = "no-push"
 OUTCOME_TESTS_BROKEN = "tests-broken"
 OUTCOME_UNTESTABLE_UNRESOLVED = "untestable-unresolved"
+OUTCOME_UNTESTABLE_NEEDS_REVIEW = "untestable-needs-review"
 OUTCOME_CAP = "cap"
 
 
@@ -86,6 +87,8 @@ class GateMetrics:
     head_sha: str = ""
     reasons: list[str] = field(default_factory=list)
     at: str = ""
+    #: Per-agent-call parse state (lens/verify/judge). See GateCallRecord.
+    calls: list[dict[str, object]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.at:
@@ -116,6 +119,7 @@ class GateMetrics:
             "rounds": [r.to_dict() for r in self.rounds],
             "failing_by_round": self.failing_by_round,
             "reasons": list(self.reasons),
+            "calls": list(self.calls),
         }
 
     def append_metrics(self, path: Path | None = None) -> Path:

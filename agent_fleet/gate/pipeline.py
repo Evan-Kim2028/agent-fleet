@@ -138,13 +138,19 @@ class GateResult:
     rejected: list[dict[str, Any]] = field(default_factory=list)
     status_line: str = ""
     run_id: str = ""
+    calls: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def approved(self) -> bool:
         return self.outcome is GateOutcome.APPROVED
 
     def funnel(self) -> dict[str, Any]:
-        """Where claims went: candidates per lens -> confirmed / untestable / rejected."""
+        """Where claims went: candidates per lens -> confirmed / untestable / rejected.
+
+        ``lens_calls`` is the parse state of every reviewer call, so a run that
+        reported zero candidates is distinguishable from a run whose reviewers
+        returned zero candidates.
+        """
         by_lens: dict[str, int] = {}
         for c in self.candidates:
             lens = str(c.get("lens") or "?")
@@ -155,6 +161,7 @@ class GateResult:
             "confirmed": len(self.confirmed),
             "untestable": len(self.untestable),
             "rejected": len(self.rejected),
+            "lens_calls": list(self.calls),
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -171,6 +178,85 @@ class GateResult:
             "metrics": self.metrics.to_dict() if self.metrics else {},
             "status_line": self.status_line,
         }
+
+
+class GateCallRecorder:
+    """Persists every agent call the gate makes, and summarises its parse state.
+
+    A gate run that reports ``candidates=0`` is ambiguous: either the reviewers
+    found nothing, or the findings were lost between the agent and the counter.
+    This recorder makes that distinction checkable after the fact by writing one
+    JSON file per call under ``<gate_dir>/calls/`` — the raw final text, the
+    parsed object, the parse error, the exit code and the duration — and by
+    keeping the per-call summary that ends up in :class:`GateResult` and
+    :class:`~agent_fleet.gate.metrics.GateMetrics`.
+
+    Records are appended for failures too: a dead or unparseable lens is exactly
+    the case where the raw text is the only evidence of what happened.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.dir = root / "calls"
+        self.records: list[dict[str, Any]] = []
+        self._n = 0
+
+    def _next_name(self, stage: str) -> str:
+        self._n += 1
+        safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in stage)
+        return f"{safe}-{self._n}.json"
+
+    def record(
+        self,
+        *,
+        stage: str,
+        model: str,
+        raw: str,
+        parsed: dict[str, Any] | None,
+        parse_error: str,
+        exit_code: int,
+        duration_s: float,
+        lens: str = "",
+        n_items: int = 0,
+        err: str = "",
+    ) -> dict[str, Any]:
+        """Write one call record and return its summary row."""
+        entry: dict[str, Any] = {
+            "stage": stage,
+            "lens": lens,
+            "model": model,
+            "raw_len": len(raw or ""),
+            "parsed_ok": parsed is not None,
+            "n_items": n_items,
+            "parse_error": (parse_error or err)[:400],
+            "exit_code": int(exit_code),
+            "duration_s": round(float(duration_s), 3),
+        }
+        self.records.append(entry)
+        payload = {
+            "stage": stage,
+            "lens": lens,
+            "model": model,
+            "exit_code": entry["exit_code"],
+            "duration_s": entry["duration_s"],
+            "raw_len": entry["raw_len"],
+            "parsed_ok": entry["parsed_ok"],
+            "parse_error": entry["parse_error"],
+            "n_items": n_items,
+            "raw": raw or "",
+            "parsed": parsed,
+        }
+        try:
+            self.dir.mkdir(parents=True, exist_ok=True)
+            (self.dir / self._next_name(stage)).write_text(
+                json.dumps(payload, indent=2, default=str), encoding="utf-8"
+            )
+        except (OSError, TypeError) as exc:
+            # Persisting the trace must never change the verdict.
+            logger.warning("gate could not persist %s call record: %s", stage, exc)
+        return entry
+
+    def rows(self) -> list[dict[str, Any]]:
+        return [dict(r) for r in self.records]
 
 
 def status_line_for(outcome: GateOutcome, sha: str, reasons: list[str]) -> str:
@@ -409,6 +495,7 @@ class GatePipeline:
         self.use_systemd = systemd_run_available() if use_systemd is None else use_systemd
         self.evidence = _Evidence()
         self.archive = GateTestArchive(gate_dir)
+        self.recorder = GateCallRecorder(gate_dir)
         self._candidates: list[dict[str, Any]] = []
         self._runner: GateTestRunner | None = None
 
@@ -453,6 +540,8 @@ class GatePipeline:
         timeout_s: int,
         validate: Any,  # noqa: ANN401
         mode: AgentMode = "agent",
+        list_key: str | None = None,
+        **_: Any,  # noqa: ANN401 - `lens` is only used by _call_required's recorder
     ) -> Any:  # noqa: ANN401 - StructuredAnswer
         """One structured agent call. Defaults to AGENT mode (tools on).
 
@@ -471,6 +560,7 @@ class GatePipeline:
             validate=validate,
             mode=mode,
             slot=self.agent_pool,
+            list_key=list_key,
         )
 
     def _call_required(
@@ -489,10 +579,24 @@ class GatePipeline:
         "no findings". An *invalid* answer raises too unless ``invalid_ok``
         (a verifier that answered without proof leaves the claim unproven, so
         rejecting it is correct); the caller then gets ``None``.
+
+        Both outcomes are persisted to ``<gate_dir>/calls/`` before returning or
+        raising, so a lost finding can always be traced to the answer that
+        carried it.
         """
         try:
-            return self._call(**kwargs)
+            answer = self._call(**kwargs)
         except StructuredCallError as exc:
+            self.recorder.record(
+                stage=role,
+                model=str(kwargs.get("model", "")),
+                raw=getattr(exc, "raw", ""),
+                parsed=None,
+                parse_error=str(exc),
+                exit_code=1,
+                duration_s=getattr(exc, "duration_s", 0.0),
+                lens=str(kwargs.get("lens", "")),
+            )
             self._log(f"gate.{role}.failed", subject=subject, kind=exc.kind, error=str(exc)[:200])
             if exc.kind == "invalid" and invalid_ok:
                 return None
@@ -500,6 +604,18 @@ class GatePipeline:
                 f"fail-closed: {role} agent for {subject} gave no usable result "
                 f"({exc.kind}): {str(exc)[:160]}"
             ) from exc
+        self.recorder.record(
+            stage=role,
+            model=str(kwargs.get("model", "")),
+            raw=answer.raw,
+            parsed=answer.data,
+            parse_error="",
+            exit_code=0,
+            duration_s=getattr(answer, "duration_s", 0.0),
+            lens=str(kwargs.get("lens", "")),
+            n_items=_n_items(answer.data),
+        )
+        return answer
 
     # -- step 0 ----------------------------------------------------------
 
@@ -559,12 +675,14 @@ class GatePipeline:
             answer = self._call_required(
                 role="lens",
                 subject=lens,
+                lens=lens,
                 backend=self.backend,
                 prompt=prompt,
                 model=model,
                 cwd=worktree,
                 timeout_s=self.config.agent_timeout_s,
                 validate=validate_findings,
+                list_key="findings",
             )
             return _tag_lens(FindingsReport.from_dict(answer.data).findings, lens)
 
@@ -621,6 +739,7 @@ class GatePipeline:
             role="verify",
             subject=finding.id,
             invalid_ok=True,
+            lens=finding.lens,
             backend=self.backend,
             prompt=prompt,
             model=model,
@@ -751,7 +870,26 @@ class GatePipeline:
         except StructuredCallError as exc:
             # A failed recheck is not a pass: we could not confirm resolution.
             self._log("gate.recheck.failed", error=str(exc)[:200])
+            self.recorder.record(
+                stage="recheck",
+                model=model,
+                raw=getattr(exc, "raw", ""),
+                parsed=None,
+                parse_error=str(exc),
+                exit_code=1,
+                duration_s=getattr(exc, "duration_s", 0.0),
+            )
             return False
+        self.recorder.record(
+            stage="recheck",
+            model=model,
+            raw=answer.raw,
+            parsed=answer.data,
+            parse_error="",
+            exit_code=0,
+            duration_s=getattr(answer, "duration_s", 0.0),
+            n_items=_n_items(answer.data),
+        )
         report = RecheckReport.from_dict(answer.data)
         self._log("gate.recheck", unresolved=len(report.unresolved))
         return not report.unresolved
@@ -792,6 +930,18 @@ class GatePipeline:
         ]
         if run.count == 0 and not untestable_open:
             return current, self._metrics(metric, ref, outcome=gate_metrics.OUTCOME_CONVERGED)
+        if run.count == 0 and untestable_open:
+            # Nothing fails and the only blockers are untestable ones no local
+            # test can demonstrate. A fixer cannot make progress on a green
+            # test set, so spending a round here just produced the misleading
+            # "cap after 1 round(s)" verdict: escalate and name what a human
+            # has to look at.
+            return current, self._metrics(
+                metric,
+                ref,
+                outcome=gate_metrics.OUTCOME_UNTESTABLE_NEEDS_REVIEW,
+                rounds=rounds,
+            )
 
         push_branch = self.config.push_branch or ref.head_ref
         model = self._model_for(
@@ -923,6 +1073,15 @@ class GatePipeline:
                 model=model,
                 mode="agent",
             )
+        self.recorder.record(
+            stage="fix",
+            model=model,
+            raw=result.stdout or "",
+            parsed=None,
+            parse_error="" if result.exit_code == 0 else (result.stderr or "")[:400],
+            exit_code=result.exit_code,
+            duration_s=getattr(result, "duration_s", 0.0),
+        )
         if result.exit_code != 0:
             self._log("gate.fix.failed", error=(result.stderr or "")[:200])
 
@@ -954,6 +1113,7 @@ class GatePipeline:
             untestable=len(self.evidence.untestable),
             untestable_real=untestable_real,
             rounds=all_rounds,
+            calls=self.recorder.rows(),
         )
 
     # -- entry point -----------------------------------------------------
@@ -991,6 +1151,13 @@ class GatePipeline:
                 converged_metric = metric
                 if metric.outcome == gate_metrics.OUTCOME_CONVERGED:
                     outcome = GateOutcome.APPROVED
+                elif metric.outcome == gate_metrics.OUTCOME_UNTESTABLE_NEEDS_REVIEW:
+                    # No test can demonstrate these, and a fixer cannot make
+                    # progress on a green suite, so say who has to look.
+                    reasons.append(
+                        untestable_review_reason(self.evidence.confirmed)
+                        or "untestable blocker(s) need human review"
+                    )
                 else:
                     failing = ",".join(str(f) for f in metric.failing_by_round)
                     reasons.append(
@@ -1064,12 +1231,69 @@ class GatePipeline:
             rejected=list(self.evidence.rejected_items),
             status_line=line,
             run_id=self.run_id,
+            calls=self.recorder.rows(),
+        )
+
+    def _result_for(
+        self,
+        outcome: GateOutcome,
+        sha: str,
+        reasons: list[str],
+        ref: PullRequestRef | None,
+    ) -> GateResult:
+        """A GateResult carrying the current evidence, without recording metrics.
+
+        The funnel view of a run's evidence, for callers that want the result
+        shape mid-run (a lens stage inspected in isolation, a dry run).
+        """
+        return GateResult(
+            outcome=outcome,
+            sha=sha,
+            reasons=list(reasons),
+            metrics=self._metrics(
+                gate_metrics.RoundMetric(round=0, head=(sha or "")[:9], failing=0),
+                ref or PullRequestRef(number=self.pr_number, head_ref="", head_sha=sha, state=""),
+                outcome=(
+                    gate_metrics.OUTCOME_CONVERGED
+                    if outcome is GateOutcome.APPROVED
+                    else gate_metrics.OUTCOME_STALLED
+                ),
+                head=sha,
+            ),
+            confirmed=list(self.evidence.confirmed),
+            untestable=list(self.evidence.untestable),
+            candidates=list(self._candidates),
+            rejected=list(self.evidence.rejected_items),
+            run_id=self.run_id,
+            calls=self.recorder.rows(),
         )
 
 
 # ---------------------------------------------------------------------------
 # Small pure helpers
 # ---------------------------------------------------------------------------
+
+
+def _n_items(data: dict[str, Any]) -> int:
+    """How many claims a structured answer carried (0 for scalar-shaped answers)."""
+    for key in ("findings", "new_blockers", "untestable_rulings", "unresolved"):
+        value = data.get(key)
+        if isinstance(value, list):
+            return len(value)
+    return 0
+
+
+def untestable_review_reason(confirmed: list[dict[str, Any]]) -> str | None:
+    """The escalation reason for a PR whose only blockers need a human.
+
+    Returns ``None`` when there is no judge-confirmed untestable blocker, so a
+    green PR still converges instead of escalating.
+    """
+    open_blockers = [c for c in confirmed if c.get("source") == "judge-untestable"]
+    if not open_blockers:
+        return None
+    named = "; ".join(str(c.get("claim") or c.get("id") or "?")[:120] for c in open_blockers[:3])
+    return f"untestable blocker(s) need human review: {named}"
 
 
 def _file_of_node_id(node_id: str, candidates: list[str]) -> str | None:

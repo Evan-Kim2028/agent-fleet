@@ -94,12 +94,21 @@ def apply_cmd_taste(work_dir: str, taste_src: str | Path | None) -> Path | None:
 
 
 def _parse_cmd_stream(stdout: str, stderr: str) -> tuple[str, str | None, dict[str, int] | None]:
-    """Return (final_text, session_id, usage) from cmd JSON NDJSON + verbose stderr."""
+    """Return (final_text, session_id, usage) from cmd JSON NDJSON + verbose stderr.
+
+    ``final_text`` is the ``result`` event's ``finalText`` when the run produced
+    one, else the assistant text accumulated from the stream. A turn-capped run
+    (exit 8) ends in a ``result`` event with an **empty** ``finalText``; treating
+    that as the answer erased the assistant text the agent had already written,
+    so a review that did find blockers reported nothing at all.
+    """
     session_id: str | None = None
     m = _SESSION_RE.search(stderr or "")
     if m:
         session_id = m.group(1)
-    final = (stdout or "").strip()
+    final = ""
+    reported = ""
+    assistant_text: list[str] = []
     usage: dict[str, int] | None = None
     for line in (stdout or "").splitlines():
         line = line.strip()
@@ -117,7 +126,7 @@ def _parse_cmd_stream(stdout: str, stderr: str) -> tuple[str, str | None, dict[s
             continue
         if obj.get("type") == "result":
             session_id = obj.get("sessionId") or session_id
-            final = str(obj.get("finalText") or "")
+            reported = str(obj.get("finalText") or "")
             raw_usage = obj.get("usage")
             if isinstance(raw_usage, dict):
                 usage = {}
@@ -141,8 +150,15 @@ def _parse_cmd_stream(stdout: str, stderr: str) -> tuple[str, str | None, dict[s
             if isinstance(ev, dict) and ev.get("sessionId"):
                 session_id = ev["sessionId"]
         ev = obj.get("event") if obj.get("type") == "event" else None
-        if isinstance(ev, dict) and ev.get("type") == "run_start" and ev.get("sessionId"):
+        if not isinstance(ev, dict):
+            continue
+        if ev.get("type") == "run_start" and ev.get("sessionId"):
             session_id = ev["sessionId"]
+        if ev.get("type") == "assistant":
+            text = ev.get("text")
+            if isinstance(text, str) and text.strip():
+                assistant_text.append(text)
+    final = reported.strip() or "\n".join(assistant_text).strip() or (stdout or "").strip()
     return final, session_id, usage
 
 
