@@ -135,12 +135,27 @@ class GateResult:
     confirmed: list[dict[str, Any]] = field(default_factory=list)
     untestable: list[dict[str, Any]] = field(default_factory=list)
     candidates: list[dict[str, Any]] = field(default_factory=list)
+    rejected: list[dict[str, Any]] = field(default_factory=list)
     status_line: str = ""
     run_id: str = ""
 
     @property
     def approved(self) -> bool:
         return self.outcome is GateOutcome.APPROVED
+
+    def funnel(self) -> dict[str, Any]:
+        """Where claims went: candidates per lens -> confirmed / untestable / rejected."""
+        by_lens: dict[str, int] = {}
+        for c in self.candidates:
+            lens = str(c.get("lens") or "?")
+            by_lens[lens] = by_lens.get(lens, 0) + 1
+        return {
+            "candidates_by_lens": by_lens,
+            "candidates": len(self.candidates),
+            "confirmed": len(self.confirmed),
+            "untestable": len(self.untestable),
+            "rejected": len(self.rejected),
+        }
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -151,6 +166,8 @@ class GateResult:
             "candidates": list(self.candidates),
             "confirmed": list(self.confirmed),
             "untestable": list(self.untestable),
+            "rejected": list(self.rejected),
+            "funnel": self.funnel(),
             "metrics": self.metrics.to_dict() if self.metrics else {},
             "status_line": self.status_line,
         }
@@ -338,7 +355,20 @@ class _Evidence:
     confirmed: list[dict[str, Any]] = field(default_factory=list)
     untestable: list[dict[str, Any]] = field(default_factory=list)
     rejected: int = 0
+    rejected_items: list[dict[str, Any]] = field(default_factory=list)
     gate_tests: list[str] = field(default_factory=list)
+
+    def reject(self, finding: Any, reason: str) -> None:  # noqa: ANN401 - Finding
+        """Count AND record a rejected claim, so a false negative can be traced."""
+        self.rejected += 1
+        self.rejected_items.append(
+            {
+                "id": getattr(finding, "id", ""),
+                "lens": getattr(finding, "lens", "") or "",
+                "claim": (getattr(finding, "claim", "") or "")[:300],
+                "reason": reason[:300],
+            }
+        )
 
     def confirmed_test_files(self) -> list[str]:
         return sorted({str(c["test_file"]) for c in self.confirmed if c.get("test_file")})
@@ -599,7 +629,7 @@ class GatePipeline:
             validate=validate_verify,
         )
         if answer is None:
-            self.evidence.rejected += 1
+            self.evidence.reject(finding, "verifier answer invalid (no proof)")
             return
         report = VerifyReport.from_dict(answer.data)
         if report.verdict is VerifyVerdict.UNTESTABLE:
@@ -607,25 +637,25 @@ class GatePipeline:
             self._log("gate.verify.untestable", finding=finding.id)
             return
         if report.verdict is not VerifyVerdict.CONFIRMED or not report.test_file:
-            self.evidence.rejected += 1
+            self.evidence.reject(finding, f"verifier: {report.verdict.value}: {report.reason}")
             self._log("gate.verify.rejected", finding=finding.id, reason=report.reason[:160])
             return
         rel = _normalise_repo_path(report.test_file)
         test_path = worktree / rel
         if not test_path.is_file():
-            self.evidence.rejected += 1
+            self.evidence.reject(finding, "verifier named a test file that does not exist")
             self._log("gate.verify.discarded", finding=finding.id, reason="no test file")
             return
         run = runner.run([rel])
         if run.infra_error:
-            self.evidence.rejected += 1
+            self.evidence.reject(finding, f"verifier test could not run: {run.infra_error}")
             self._log("gate.verify.discarded", finding=finding.id, reason=run.infra_error[:160])
             _unlink(test_path)
             return
         if not run.tests_failed:
             # The verifier claimed CONFIRMED but its test does not fail on a test
             # assertion. The pipeline believes the test, not the verdict.
-            self.evidence.rejected += 1
+            self.evidence.reject(finding, f"verifier test did not fail (failing={run.count})")
             self._log(
                 "gate.verify.discarded",
                 finding=finding.id,
@@ -1031,6 +1061,7 @@ class GatePipeline:
             confirmed=list(self.evidence.confirmed),
             untestable=list(self.evidence.untestable),
             candidates=list(self._candidates),
+            rejected=list(self.evidence.rejected_items),
             status_line=line,
             run_id=self.run_id,
         )

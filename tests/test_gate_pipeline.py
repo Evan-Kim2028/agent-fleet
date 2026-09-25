@@ -847,3 +847,21 @@ def test_every_gate_role_runs_with_tools(tmp_path: Path, monkeypatch: pytest.Mon
     pipe = _pipeline(tmp_path, backend)
     pipe.find(tmp_path / "wt", _ref())
     assert modes and all(m == "agent" for m in modes), modes
+
+
+def test_rejected_claims_are_recorded_with_reasons(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A false negative must be traceable: every rejection keeps its lens, claim and reason."""
+    pipe, wt = _verify(
+        tmp_path,
+        monkeypatch,
+        verdict_payload="I could not determine that.",
+        written_test=None,
+        test_result=TestRun(ran=0),
+    )
+    pipe.verify(wt, [_finding("r-1")], source="lens")
+    assert pipe.evidence.rejected == 1
+    item = pipe.evidence.rejected_items[0]
+    assert item["id"] == "r-1"
+    assert item["reason"]
