@@ -422,8 +422,16 @@ class GatePipeline:
         cwd: Path,
         timeout_s: int,
         validate: Any,  # noqa: ANN401
-        mode: AgentMode = "plan",
+        mode: AgentMode = "agent",
     ) -> Any:  # noqa: ANN401 - StructuredAnswer
+        """One structured agent call. Defaults to AGENT mode (tools on).
+
+        Lenses must run ``git diff`` / grep the repo / run tests, and verifiers must
+        WRITE and run a failing test; in plan mode they can do neither, so lenses
+        review shallowly and every claim is "rejected" — a false-negative gate
+        (A/B on lake #3541: plan-mode fleet gate approved a PR the tool-enabled
+        bash gate proved had 3 real blockers). Prompts keep them read-only and
+        forbid pattern kills; gate worktrees are disposable."""
         return call_structured(
             backend,
             prompt,

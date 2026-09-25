@@ -828,3 +828,22 @@ def test_verify_schema_accepts_a_null_test_file() -> None:
     from agent_fleet.gate.pipeline import validate_verify
 
     validate_verify(_json.loads('{"verdict": "UNTESTABLE", "test_file": null, "reason": "r"}'))
+
+
+def test_every_gate_role_runs_with_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression (false-negative gate): lens/verify/judge ran in plan mode — no git
+    diff, no grep, no test writing — so real blockers were never found or proven."""
+    from agent_fleet.gate import pipeline as pl
+
+    modes: list[str | None] = []
+    real = pl.call_structured
+
+    def spy(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        modes.append(kwargs.get("mode"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(pl, "call_structured", spy)
+    backend = _FakeBackend(default=_findings_json())
+    pipe = _pipeline(tmp_path, backend)
+    pipe.find(tmp_path / "wt", _ref())
+    assert modes and all(m == "agent" for m in modes), modes
