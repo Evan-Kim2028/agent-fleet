@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 from collections.abc import Callable, Sequence
@@ -164,7 +165,9 @@ def commit_worktree(
     the detail is surfaced to the caller so the lane can escalate with it.
     """
     skip_env = {"SKIP": ",".join(h for h in skip_hooks if h)} if any(skip_hooks) else {}
-    env = {**dict(skip_env)} if skip_env else None
+    # Overlay SKIP on the real environment: a bare {"SKIP": ...} env strips PATH/HOME and
+    # breaks the very hooks the manager promises to keep live.
+    env = {**os.environ, **skip_env} if skip_env else None
 
     add = _git(["git", "add", "-A"], cwd=worktree, runner=runner, env=env, timeout=300)
     if add.returncode != 0:

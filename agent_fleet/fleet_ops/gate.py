@@ -22,6 +22,7 @@ stray ``REVIEW_REPO`` from sending four review lenses at another team's PR.
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -39,9 +40,9 @@ logger = logging.getLogger(__name__)
 #: The gate's own approval marker, matching the status-line contract the bash
 #: automerge already consumed.
 APPROVAL_MARKER = "PREMERGE-APPROVED"
+_APPROVAL_LINE_RE = re.compile(r"^(?:\d{2}:\d{2}:\d{2}\s+)?PREMERGE-APPROVED\s+[0-9a-f]{7,40}\s*$")
 
 #: Markers that also mean "approved", weaker than the exact token above.
-APPROVAL_FALLBACK_MARKERS = ("APPROVE",)
 
 #: The escalation line the gate emits when it could not clear the PR.
 ESCALATION_MARKER = "NEEDS-ESCALATION"
@@ -139,10 +140,10 @@ def _classify(output: str) -> tuple[bool, str, str]:
     if ESCALATION_MARKER in last or any(m in last for m in REJECTION_MARKERS):
         return False, last or "gate did not approve", ""
 
-    approval_line = next((line for line in reversed(lines) if APPROVAL_MARKER in line), "")
-    if approval_line:
-        return True, "gate approved", approval_line
-    if any(marker in last for marker in APPROVAL_FALLBACK_MARKERS):
+    # Only the gate's exact status contract counts, and only as the LAST line:
+    # "[HH:MM:SS ]PREMERGE-APPROVED <sha>". No substring/earlier-line fallbacks — a
+    # partial run that printed an approval before failing must not be approved.
+    if _APPROVAL_LINE_RE.match(last):
         return True, "gate approved", last
     return False, last or "gate produced no approval line", ""
 
@@ -231,8 +232,13 @@ def run_gate(
     except (FileNotFoundError, OSError, subprocess.SubprocessError) as exc:
         return GateOutcome(available=True, ran=True, reason=f"gate invocation failed: {exc}")
 
+    # The status contract is on stdout; stderr carries logs whose trailing lines must
+    # not decide the verdict. An approval also requires a clean exit.
     output = f"{result.stdout or ''}\n{result.stderr or ''}"
-    approved, reason, approval_line = _classify(output)
+    approved, reason, approval_line = _classify(result.stdout or "")
+    if approved and result.returncode not in (0, None):
+        approved, approval_line = False, ""
+        reason = f"gate printed an approval but exited {result.returncode}"
     if not approved and result.returncode not in (0, None) and not reason:
         reason = f"gate exited {result.returncode}"
 

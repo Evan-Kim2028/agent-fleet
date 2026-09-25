@@ -100,7 +100,8 @@ def cmd_lanes_stop(args: argparse.Namespace) -> int:
 
 def register_lane_commands(sub: argparse._SubParsersAction) -> None:
     """Register ``lane`` and ``lanes`` on the top-level parser."""
-    gate_known = set(sub.choices)
+    # Live mapping, not a snapshot: the gate subcommand is registered later in main().
+    gate_known = sub.choices
 
     lane_p = sub.add_parser(
         "lane",

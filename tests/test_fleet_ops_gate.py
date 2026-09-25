@@ -85,9 +85,34 @@ def test_gate_approval_is_read_from_the_status_line() -> None:
     assert out.sha9 == "abc123def"
 
 
-def test_approval_falls_back_to_the_bindings_head_sha() -> None:
+def test_a_bare_approve_word_is_not_an_approval() -> None:
+    """Only the exact status contract approves; a stray "APPROVE" never reaches the merge path."""
+
     def runner(_args, **_kwargs: object):  # noqa: ANN001, ANN202
         return subprocess.CompletedProcess([], 0, "APPROVE\n", "")
+
+    out = g.run_gate(
+        lane="x", binding=_binding(), cwd=Path("/tmp"), known_subcommands={"gate"}, runner=runner
+    )
+    assert not out.approved
+    assert out.sha9 is None
+
+
+def test_an_approval_line_with_a_failing_exit_is_rejected() -> None:
+    def runner(_args, **_kwargs: object):  # noqa: ANN001, ANN202
+        return subprocess.CompletedProcess([], 5, "12:00:00 PREMERGE-APPROVED abcdef123\n", "")
+
+    out = g.run_gate(
+        lane="x", binding=_binding(), cwd=Path("/tmp"), known_subcommands={"gate"}, runner=runner
+    )
+    assert not out.approved
+
+
+def test_stderr_logs_do_not_hide_the_stdout_status_line() -> None:
+    def runner(_args, **_kwargs: object):  # noqa: ANN001, ANN202
+        return subprocess.CompletedProcess(
+            [], 0, "12:00:00 PREMERGE-APPROVED abcdef123\n", "INFO trailing log line\n"
+        )
 
     out = g.run_gate(
         lane="x", binding=_binding(), cwd=Path("/tmp"), known_subcommands={"gate"}, runner=runner
@@ -123,8 +148,8 @@ def test_nonzero_exit_without_approval_is_a_rejection() -> None:
     assert not out.approved
 
 
-def test_gate_prose_tail_is_not_mistaken_for_a_sha() -> None:
-    """`automerge.sh` took the last field; prose must not become a sha9."""
+def test_gate_prose_tail_is_not_an_approval() -> None:
+    """`PREMERGE-APPROVED <prose>` is not the status contract: no approval, no sha9."""
 
     def runner(_args, **_kwargs: object):  # noqa: ANN001, ANN202
         return subprocess.CompletedProcess([], 0, "12:00:00 PREMERGE-APPROVED everything\n", "")
@@ -136,5 +161,25 @@ def test_gate_prose_tail_is_not_mistaken_for_a_sha() -> None:
         known_subcommands={"gate"},
         runner=runner,
     )
-    assert out.approved
+    assert not out.approved
     assert out.sha9 is None
+
+
+def test_commit_env_overlays_skip_on_the_real_environment(monkeypatch, tmp_path) -> None:  # noqa: ANN001
+    """A bare {"SKIP": ...} env stripped PATH/HOME and broke the hooks it meant to keep."""
+    from agent_fleet.fleet_ops import guarantee
+
+    seen: dict[str, object] = {}
+
+    def runner(args, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        seen.setdefault("env", kwargs.get("env"))
+        return subprocess.CompletedProcess(args, 1, "", "stop here")
+
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    guarantee.commit_worktree(
+        tmp_path, engine="cmd", skip_hooks=("ruff-format",), runner=runner, lane="x"
+    )
+    env = seen["env"]
+    assert isinstance(env, dict)
+    assert env["SKIP"] == "ruff-format"
+    assert env["PATH"] == "/usr/bin:/bin"
