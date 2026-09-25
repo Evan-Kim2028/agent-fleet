@@ -70,6 +70,27 @@ def test_worktree_is_created_from_base(repo: Path, tmp_path: Path) -> None:
     assert _git(result.path, "rev-parse", "--abbrev-ref", "HEAD") == "fb/movers"
 
 
+def test_a_new_lane_starts_from_origin_not_a_stale_local_main(repo: Path, tmp_path: Path) -> None:
+    origin = tmp_path / "origin.git"
+    _git(tmp_path, "clone", "-q", "--bare", str(repo), str(origin))
+    upstream = tmp_path / "upstream"
+    _git(tmp_path, "clone", "-q", str(origin), str(upstream))
+    _git(upstream, "config", "user.email", "u@example.com")
+    _git(upstream, "config", "user.name", "U")
+    _git(upstream, "config", "commit.gpgsign", "false")
+    (upstream / "new.txt").write_text("merged since\n", encoding="utf-8")
+    _git(upstream, "add", "-A")
+    _git(upstream, "commit", "-q", "-m", "merged on main")
+    _git(upstream, "push", "-q", "origin", "main")
+    _git(repo, "remote", "add", "origin", str(origin))
+
+    result = ensure_lane_worktree(repo, lane="movers", parent=tmp_path / "wt")
+
+    assert _git(result.path, "rev-parse", "HEAD") == _git(upstream, "rev-parse", "HEAD")
+    assert _git(repo, "rev-parse", "main") != _git(upstream, "rev-parse", "HEAD")
+    assert result.reason == "created from origin/main"
+
+
 def test_an_existing_worktree_is_reused_not_recreated(repo: Path, tmp_path: Path) -> None:
     """A lane that was interrupted usually has real work; it must be adopted."""
     first = ensure_lane_worktree(repo, lane="movers", parent=tmp_path / "wt")
