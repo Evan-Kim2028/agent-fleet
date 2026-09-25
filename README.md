@@ -12,6 +12,8 @@ Built on **[Cursor SDK](https://github.com/cursor/cursor-sdk)** (`cursor-sdk`). 
 | [Personas](docs/PERSONAS.md) | Fleet cookbook |
 | [Schedules](docs/SCHEDULES.md) | Cron-based daily/weekly fleet jobs |
 | [Merge plan](docs/MERGE-PLAN.md) | Batch approved PRs into one deploy |
+| [Merge gate](docs/GATE.md) | Evidence-based `gate` pipeline before a PR merges |
+| [Fleet ops](docs/FLEET-OPS.md) | Multi-operator lane manager for the `cmd` swarm |
 
 **Requires:** Python 3.14 · [Cursor API key](https://cursor.com/dashboard/integrations) · git workspace  
 **Default model:** `composer-2.5` (slow / non-fast tier — agent-fleet pins `fast=false` explicitly so you aren't silently routed to the fast variant that Cursor returns as its default for the bare model id).
@@ -225,6 +227,8 @@ timeout_seconds: 900
 
 MCP + persistent sessions: [docs/SESSIONS.md](docs/SESSIONS.md) · [docs/MCP.md](docs/MCP.md).
 
+**Operator docs:** [docs/DISPATCH-COOKBOOK.md](docs/DISPATCH-COOKBOOK.md) (task shapes + recipes) · [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) (logs, metrics, `fleet doctor`) · [docs/REDISPATCH.md](docs/REDISPATCH.md) (retry and resume semantics) · [docs/WORKSTREAMS.md](docs/WORKSTREAMS.md) · [docs/SCOUTS.md](docs/SCOUTS.md) · [docs/PERSONA-EVOLUTION.md](docs/PERSONA-EVOLUTION.md) · [docs/AGENT-FLEET-DEV.md](docs/AGENT-FLEET-DEV.md) (contributor guide) · [docs/RELEASE.md](docs/RELEASE.md) (how we cut a release)
+
 ---
 
 ## Pipelines
@@ -235,6 +239,11 @@ MCP + persistent sessions: [docs/SESSIONS.md](docs/SESSIONS.md) · [docs/MCP.md]
 | `code_review` | execute → scope → verify → review | Default for merge-bound work |
 | `pr_review` | analyze | PR diff only (no implement) |
 | `full` | PLAN → … → REVIEW → TECH_LEAD? | Large features, branch + PR |
+
+`gate` is **not** a `--pipeline` value — it runs as its own command, `agent-fleet
+gate --repo-path <path> --pr <n>`, against an existing PR head. Phases:
+step0 → find → verify → judge (at most one call, plus one recheck), with a
+convergence-driven fix loop. [docs/GATE.md](docs/GATE.md).
 
 Outcomes: `completed`, `scope_violation`, `token_ceiling_exceeded`, `verify_failed`, `review_changes_requested`, `review_blocked`, `error`, `decompose_partial`, `decompose_failed`, `dag_partial`, `dag_failed`.
 

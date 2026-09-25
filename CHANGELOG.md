@@ -20,8 +20,64 @@
   Executor command templates are config-driven with no built-in defaults: the
   per-repo merge scripts differ in argument shape, and the planner will not print
   a command that does not exist on the box.
+- **`fleet lane run --no-gate`** (#102) for lanes that are gated outside the
+  manager — a CI job or a human reviewing the PR head — so the lane does not
+  run a second gate over work that is already gated. Without the flag the gate
+  runs as before.
 
 ## 0.16.1
+
+### Added
+
+- **`fleet_ops` — multi-operator lane manager:** `agent-fleet lane run` drives
+  one coding lane end to end for two concurrent operator sessions on the same
+  repos, replacing the bash drivers (`xlane`, `fbrun`, `devin_finish.sh`,
+  `fbstatus`, `automerge.sh`). **A PR always exists when the lane finishes:**
+  the guarantee step commits leftover work, pushes and opens a PR *even when
+  the engine failed*, which was the recurring failure the bash drivers left for
+  a human. A lane reuses an interrupted worktree rather than abandoning the
+  commits in it, and registers its `(pid, pgid, starttime)` before spawning so a
+  concurrent `lanes stop` always has a valid target.
+- **Binding — a lane cannot review the wrong PR.** The repo is derived from the
+  lane's own worktree `origin` remote (not from an inherited `REVIEW_REPO`, a
+  lane name, or the main working tree), and the PR's `headRefName` must be the
+  lane's branch. A mismatch is a hard refusal rather than a self-correction;
+  `--expected-repo OWNER/REPO` adds an operator-side assertion.
+- **CLI surface:** `agent-fleet lane run --operator <op> --lane <name>
+  --repo-path <path> --task-file f [--status-file f] [--expected-repo
+  OWNER/REPO]`, plus `agent-fleet lanes status [--all]` and
+  `agent-fleet lanes stop <lane> --operator <op>`. Emits the same
+  `HH:MM:SS PREMERGE-APPROVED <sha9>` / `HH:MM:SS NEEDS-ESCALATION <reason>`
+  status line the gate writes.
+- **Config:** an additive `fleet_ops:` block in the repo's `.agent-fleet.yaml`
+  — a repo without it is unaffected. Top level: `base_branch`, `stall_minutes`,
+  `baseline_skip_hooks` (hook ids the auto-commit may pass via `SKIP=`; every
+  other hook runs and `--no-verify` is never used), and `fences` (appended to
+  the house fences, can add rules but never shorten them). Per operator:
+  `engine`, `push_branch`, `task_file`, `judge_engine`, `on_approved`,
+  `on_escalated`. `{lane}` and `{operator}` expand in template values.
+- **Model policy enforced in code,** not left to operator discipline: `cmd` is
+  pinned to `stealth/space-bunny-alpha` (implement), `devin` walks
+  `swe-2-high` → `swe-2-medium` down on a capacity error, and `grok`
+  (`step-5-preview`) is **judge only** — it is rejected outright for
+  `role="implement"`. An out-of-policy model raises before any subprocess is
+  spawned, so a stray `AGENT_FLEET_MODEL` in the environment cannot redirect a
+  lane. Operators wanting cmd for the judge too set `judge_engine: cmd`.
+- **Engine and failure handling:** both engines launch memory-capped
+  (`systemd-run --user --scope`, falling back to `ulimit -v`) with
+  `MemorySwapMax=0`, detached via `start_new_session=True`. `cmd` exit 8 means
+  the turn cap stopped the run rather than the work, so the manager resumes it
+  once; a **lazy exit** (zero exit with no tool calls, or few tool calls plus a
+  refusal — both of which read as success to a naive caller) is re-judged from
+  the JSONL stream and marked as failure. A `devin` run truncated by the output
+  token ceiling with no PR yet gets *one* continue, where the bash driver looped
+  up to ten times.
+- **Hook environment:** `on_approved` / `on_escalated` run through a shell with
+  a small explicit environment (`LANE`, `OPERATOR`, `REPO`, `PR`, `SHA9`,
+  `STATUS`, `VERDICT`, `exit`, `RC`) rather than the manager's, so a hook
+  cannot inherit internal paths and credentials. A failing hook is reported,
+  never fatal — the verdict is already recorded.
+- **Docs:** [docs/FLEET-OPS.md](docs/FLEET-OPS.md).
 
 ## 0.16.0
 
