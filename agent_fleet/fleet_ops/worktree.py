@@ -143,6 +143,27 @@ def branch_exists(root: Path, branch: str, *, runner: Runner | None = None) -> b
     return result.returncode == 0
 
 
+def _fresh_base(root: Path, base: str, *, runner: Runner | None = None) -> str:
+    """The start point for a new lane branch: ``origin/<base>`` after a fetch, when it exists.
+
+    A local ``main`` in a long-lived clone is routinely hundreds of commits behind
+    (nobody pulls it; the main checkout may even hold it). Branching from it gives
+    the implementer a stale tree and the PR a conflict-prone base. A fetch failure
+    or a repo without that remote branch falls back to *base* as given.
+    """
+    if "/" in base:
+        return base
+    _git(["git", "fetch", "-q", "origin", base], cwd=root, runner=runner, timeout=300)
+    remote = f"origin/{base}"
+    probe = _git(
+        ["git", "rev-parse", "--verify", "-q", f"refs/remotes/{remote}"],
+        cwd=root,
+        runner=runner,
+        timeout=60,
+    )
+    return remote if probe.returncode == 0 else base
+
+
 def ensure_lane_worktree(
     repo_path: Path,
     *,
@@ -195,8 +216,9 @@ def ensure_lane_worktree(
         args = ["git", "worktree", "add", str(path), branch]
         reason = "attached to existing branch"
     else:
-        args = ["git", "worktree", "add", "-b", branch, str(path), base]
-        reason = f"created from {base}"
+        start = _fresh_base(root, base, runner=runner)
+        args = ["git", "worktree", "add", "-b", branch, str(path), start]
+        reason = f"created from {start}"
 
     result = _git(args, cwd=root, runner=runner, timeout=600)
     if result.returncode != 0:
