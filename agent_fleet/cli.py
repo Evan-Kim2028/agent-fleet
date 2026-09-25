@@ -808,6 +808,55 @@ def cmd_runs(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_merge_plan(args: argparse.Namespace) -> int:
+    """Batch gate-approved PRs into groups that share one deploy + verify."""
+    import time
+    from pathlib import Path as _Path
+
+    from agent_fleet.merge_plan import (
+        build_plan,
+        emit_plan_event,
+        render_plan_text,
+        resolve_repo_specs,
+    )
+
+    repo_specs = resolve_repo_specs(list(args.repo_path or []))
+    if not repo_specs:
+        print(
+            "error: no repos selected. Pass --repo-path PATH (repeatable) or "
+            "add merge_plan.repos[] to fleet.yaml.",
+            file=sys.stderr,
+        )
+        return 1
+
+    operator = None if args.operator in (None, "all") else args.operator
+    plan = build_plan(
+        repo_specs=repo_specs,
+        operator=operator,
+        status_dir=_Path(args.status_dir).expanduser() if args.status_dir else None,
+        max_batch_size=args.max_batch_size,
+        check_merges=not args.no_merge_check,
+    )
+
+    if args.emit:
+        run_id = f"merge-plan-{int(time.time())}"
+        sink = emit_plan_event(plan, run_id=run_id)
+        if args.json:
+            payload = plan.to_dict()
+            payload["emitted_to"] = sink
+            print(json.dumps(payload, indent=2, default=str))
+        else:
+            print(render_plan_text(plan))
+            print(f"emitted merge.plan -> {sink}")
+        return 0
+
+    if args.json:
+        print(json.dumps(plan.to_dict(), indent=2, default=str))
+    else:
+        print(render_plan_text(plan))
+    return 0
+
+
 def cmd_watch(args: argparse.Namespace) -> int:
     import time
     from dataclasses import asdict
@@ -1362,6 +1411,43 @@ def main(argv: list[str] | None = None) -> int:
         help="Upgrade agent-fleet to the latest published version via uv",
     )
     self_update_p.set_defaults(func=cmd_self_update)
+
+    merge_plan_p = sub.add_parser(
+        "merge-plan",
+        help="Batch gate-approved PRs into groups that share one deploy + verify",
+    )
+    merge_plan_p.add_argument(
+        "--repo-path",
+        action="append",
+        help="Checkout to plan for (repeatable). Overrides fleet.yaml merge_plan.repos[]",
+    )
+    merge_plan_p.add_argument(
+        "--operator",
+        default=None,
+        help="Only read lanes for this operator (default: all operators)",
+    )
+    merge_plan_p.add_argument(
+        "--status-dir",
+        help="Directory of gate status files containing PREMERGE-APPROVED <sha> lines",
+    )
+    merge_plan_p.add_argument(
+        "--max-batch-size",
+        type=int,
+        default=5,
+        help="Cap on PRs per batch (default 5)",
+    )
+    merge_plan_p.add_argument(
+        "--no-merge-check",
+        action="store_true",
+        help="Skip the git merge-compatibility check (file-overlap analysis still applies)",
+    )
+    merge_plan_p.add_argument(
+        "--emit",
+        action="store_true",
+        help="Emit the plan as a merge.plan event for the dashboard",
+    )
+    merge_plan_p.add_argument("--json", action="store_true", help="Emit the plan as JSON")
+    merge_plan_p.set_defaults(func=cmd_merge_plan)
 
     # Normalize argv before parsing so bare invocation and plain-goal shortcuts work.
     # known_subcommands is derived from sub.choices at this point (all subparsers registered).

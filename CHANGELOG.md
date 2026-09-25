@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+## Unreleased
+
+### Added
+
+- **`agent-fleet merge-plan`:** the command center now decides which gate-approved
+  PRs ship *together*. Merging and deploying is the slowest serialized step in
+  the loop (~15-20 min per lake-of-rage deploy, ~9 min per silphcoanalytics), so
+  approved PRs are grouped so one deploy plus one verify covers as many of them
+  as is safe. Collects `PREMERGE-APPROVED <sha>` status lines from the lane
+  registry and `--status-dir`, profiles each PR (deploy unit, dbt models, risk
+  flags, size), and batches them under five documented rules: one deploy unit
+  per batch, no file overlap, dbt models rebuilt once, risky PRs isolated and
+  ordered last, and a size cap. Reports a **stale approval** and excludes the PR
+  when the head has moved past the SHA the gate approved. Batching is
+  deterministic — identical input yields byte-identical plan JSON. `--emit`
+  publishes the plan as a `merge.plan` event, feature-detecting the `fb/fleetobs`
+  `emit` command and falling back to the runs-dir JSONL. See `docs/MERGE-PLAN.md`.
+  Executor command templates are config-driven with no built-in defaults: the
+  per-repo merge scripts differ in argument shape, and the planner will not print
+  a command that does not exist on the box.
+
 ## 0.16.1
 
 ## 0.16.0
@@ -71,6 +92,13 @@
 
 ### Fixed
 
+- **The package was unimportable on `main`.** The tree had carried a Python-2-only
+  `except A, B:` spelling since 2026-05-26 (commit `3e8b195`), which is a hard
+  SyntaxError under Python 3, not a style nit. Because `agent_fleet/__init__.py`
+  imports `agent_fleet.repo`, the single bad clause in `repo.py` made
+  `import agent_fleet`, every `agent-fleet` subcommand, and the test suite all
+  dead. Restored `except (A, B):` at 41 sites across 24 files; purely mechanical,
+  no behavior change.
 - **Devin / concurrent `fleet run` worktree steal:** every single-task
   `fleet run` uses `task_index=0`, so resume attached to any dirty
   `fleet/task-0-*` branch — including one a live Devin dispatcher still
