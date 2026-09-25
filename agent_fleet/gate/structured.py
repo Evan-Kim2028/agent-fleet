@@ -26,6 +26,27 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _FENCED_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+_FINAL_FORMAT_NOTE = (
+    "FINAL ANSWER FORMAT (repeated on purpose): your final message must be exactly "
+    "one ```json fenced block matching the schema/example given above. No prose "
+    "after it."
+)
+
+
+def _repair_prompt(original: str, raw: str, error: str) -> str:
+    return (
+        "Your previous answer below contains the right analysis but not in the "
+        "required format. Rewrite it as exactly one ```json fenced block that "
+        "conforms to the required schema. Keep every finding/verdict you made; add "
+        "nothing new; no prose outside the block. Do not run any tools.\n\n"
+        f"Validation error: {error[:300]}\n\n"
+        "===== REQUIRED FORMAT (from the original instructions) =====\n"
+        f"{original[-4000:]}\n\n"
+        "===== YOUR PREVIOUS ANSWER =====\n"
+        f"{raw[-12000:]}"
+    )
+
+
 _RETRY_NOTE = (
     "Your previous response could not be parsed or failed schema validation. "
     "Respond again with ONLY the JSON object — no prose, no markdown fences "
@@ -48,46 +69,79 @@ class StructuredCallError(RuntimeError):
         self.kind = kind
 
 
-def extract_json_object(text: str) -> dict[str, Any]:
-    """Extract the first balanced JSON object from *text*.
+def json_candidates(text: str) -> list[dict[str, Any]]:
+    """Every JSON object in *text*, most-likely-final first.
 
-    Walks brace depth with string/escape awareness so a ``}`` inside a string
-    does not end the object early; falls back to the last fenced ```json block
-    (the reference gate read answers in reverse order, since the final block is
-    the model corrected itself).
+    Order: fenced ```json blocks from last to first (a model that corrected
+    itself puts the final answer last), then every balanced top-level ``{...}``
+    from last to first. Prose containing braces (code snippets, dict literals)
+    no longer blocks extraction: unparseable candidates are skipped.
     """
-    start = text.find("{")
-    if start != -1:
-        depth = 0
-        in_string = False
-        escape = False
-        for i, ch in enumerate(text[start:], start=start):
-            if escape:
-                escape = False
-                continue
-            if ch == "\\" and in_string:
-                escape = True
-                continue
-            if ch == '"':
-                in_string = not in_string
-                continue
-            if in_string:
-                continue
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    return json.loads(text[start : i + 1])
-    blocks = _FENCED_RE.findall(text)
-    for block in reversed(blocks):
+    out: list[dict[str, Any]] = []
+    for block in reversed(_FENCED_RE.findall(text)):
         try:
             parsed = json.loads(block)
         except json.JSONDecodeError:
             continue
         if isinstance(parsed, dict):
-            return parsed
-    raise ValueError("no balanced JSON object found in model output")
+            out.append(parsed)
+    spans: list[tuple[int, int]] = []
+    depth = 0
+    start = -1
+    in_string = False
+    escape = False
+    for i, ch in enumerate(text):
+        if escape:
+            escape = False
+            continue
+        if ch == "\\" and in_string:
+            escape = True
+            continue
+        if ch == '"' and depth > 0:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}" and depth > 0:
+            depth -= 1
+            if depth == 0:
+                spans.append((start, i + 1))
+    for lo, hi in reversed(spans):
+        try:
+            parsed = json.loads(text[lo:hi])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict) and parsed not in out:
+            out.append(parsed)
+    return out
+
+
+def extract_json_object(text: str) -> dict[str, Any]:
+    """The most-likely-final JSON object in *text* (see :func:`json_candidates`)."""
+    found = json_candidates(text)
+    if not found:
+        raise ValueError("no balanced JSON object found in model output")
+    return found[0]
+
+
+def _first_valid(text: str, validate: Any) -> tuple[dict[str, Any] | None, str]:  # noqa: ANN401
+    """First candidate that passes *validate*, or ``(None, last_error)``."""
+    cands = json_candidates(text)
+    if not cands:
+        return None, "no balanced JSON object found in model output"
+    last = ""
+    for cand in cands:
+        try:
+            validate(cand)
+        except Exception as exc:
+            last = str(exc)[:400]
+            continue
+        return cand, ""
+    return None, last
 
 
 @dataclass(frozen=True)
@@ -119,13 +173,17 @@ def call_structured(
     """
     from contextlib import nullcontext
 
+    prompt = f"{prompt}\n\n{_FINAL_FORMAT_NOTE}"
     attempt_prompt = prompt
     last_error = ""
     last_kind = "invalid"
     raw = ""
+
+    def guard_factory() -> Any:  # noqa: ANN401
+        return slot.slot(timeout_s=slot_timeout_s) if slot is not None else nullcontext()
+
     for attempt in range(max_attempts):
-        guard = slot.slot(timeout_s=slot_timeout_s) if slot is not None else nullcontext()
-        with guard:
+        with guard_factory():
             result = backend.run(
                 attempt_prompt,
                 max_tokens=0,
@@ -139,15 +197,30 @@ def call_structured(
             last_kind = "dead"
         else:
             raw = result.stdout
-            try:
-                data = extract_json_object(raw)
-                validate(data)
-            except Exception as exc:
-                last_error = str(exc)[:400]
-                last_kind = "invalid"
-                logger.debug("gate structured call %d invalid: %s", attempt, last_error)
-            else:
+            data, last_error = _first_valid(raw, validate)
+            if data is not None:
                 return StructuredAnswer(data=data, raw=raw)
+            last_kind = "invalid"
+            logger.debug("gate structured call %d invalid: %s", attempt, last_error)
+            # REPAIR turn: the agent did the work but answered in the wrong shape.
+            # Hand it its own answer and ask only for the reformat — cheap, and it
+            # keeps the analysis instead of redoing it from scratch.
+            repair = _repair_prompt(prompt, raw, last_error)
+            with guard_factory():
+                fixed = backend.run(
+                    repair,
+                    max_tokens=0,
+                    timeout_s=min(timeout_s, 600),
+                    cwd=cwd,
+                    model=model,
+                    mode="plan",
+                )
+            if fixed.exit_code == 0 and (fixed.stdout or "").strip():
+                data, repair_error = _first_valid(fixed.stdout, validate)
+                if data is not None:
+                    logger.debug("gate structured call %d repaired", attempt)
+                    return StructuredAnswer(data=data, raw=fixed.stdout)
+                last_error = f"{last_error}; repair: {repair_error}"
         # Feed the failure back so the retry corrects rather than repeats.
         attempt_prompt = f"{prompt}\n\n{_RETRY_NOTE}\n\nPrevious failure: {last_error}"
     raise StructuredCallError(

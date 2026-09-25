@@ -12,6 +12,7 @@ from agent_fleet.gate.structured import (
     StructuredCallError,
     call_structured,
     extract_json_object,
+    json_candidates,
 )
 
 # ---------------------------------------------------------------------------
@@ -122,8 +123,8 @@ def test_call_structured_returns_the_parsed_object(tmp_path: Path) -> None:
     assert backend.calls == 1
 
 
-def test_call_structured_retries_once_with_the_error_fed_back(tmp_path: Path) -> None:
-    """A malformed answer gets one corrective retry before the role is lost."""
+def test_call_structured_repairs_a_prose_answer_before_retrying(tmp_path: Path) -> None:
+    """A right-but-misformatted answer is REPAIRED (its analysis kept), not redone."""
     backend = _ScriptedBackend(["no json here", '{"verdict": "REJECTED"}'])
     answer = call_structured(
         backend,  # type: ignore[arg-type]
@@ -135,8 +136,49 @@ def test_call_structured_retries_once_with_the_error_fed_back(tmp_path: Path) ->
     )
     assert answer.data == {"verdict": "REJECTED"}
     assert backend.calls == 2
-    # The retry prompt carries the first failure so the model can correct itself.
-    assert "could not be parsed" in backend.prompts[1]
+    assert "not in the required format" in backend.prompts[1]
+    assert "no json here" in backend.prompts[1]  # its own answer is handed back
+
+
+def test_call_structured_retries_with_the_error_fed_back_when_repair_fails(
+    tmp_path: Path,
+) -> None:
+    backend = _ScriptedBackend(["no json here", "still prose", '{"verdict": "REJECTED"}'])
+    answer = call_structured(
+        backend,  # type: ignore[arg-type]
+        "prompt",
+        model="m",
+        cwd=tmp_path,
+        timeout_s=10,
+        validate=_requires_key,
+    )
+    assert answer.data == {"verdict": "REJECTED"}
+    assert backend.calls == 3
+    assert "could not be parsed" in backend.prompts[2]
+
+
+def test_call_structured_repeats_the_format_at_the_end_of_the_prompt(tmp_path: Path) -> None:
+    backend = _ScriptedBackend(['{"verdict": "REJECTED"}'])
+    call_structured(
+        backend,  # type: ignore[arg-type]
+        "prompt",
+        model="m",
+        cwd=tmp_path,
+        timeout_s=10,
+        validate=_requires_key,
+    )
+    assert backend.prompts[0].rstrip().endswith("No prose after it.")
+
+
+def test_json_candidates_skip_prose_braces_and_prefer_the_last_fenced_block() -> None:
+    text = (
+        "`table.scan(row_filter=None)` uses {row_filter} and a dict {'a': 1}.\n"
+        '```json\n{"verdict": "OLD"}\n```\nthen corrected:\n'
+        '```json\n{"verdict": "CONFIRMED", "test_file": "t.py"}\n```'
+    )
+    cands = json_candidates(text)
+    assert cands[0] == {"verdict": "CONFIRMED", "test_file": "t.py"}
+    assert {"verdict": "OLD"} in cands
 
 
 def test_call_structured_raises_after_the_retry_budget(tmp_path: Path) -> None:
@@ -151,7 +193,7 @@ def test_call_structured_raises_after_the_retry_budget(tmp_path: Path) -> None:
             validate=_requires_key,
         )
     assert "2 attempts" in str(exc.value)
-    assert backend.calls == 2
+    assert backend.calls == 4  # 2 attempts x (call + repair)
 
 
 def test_call_structured_rejects_a_schema_violation(tmp_path: Path) -> None:
@@ -223,4 +265,4 @@ def test_call_structured_respects_max_attempts(tmp_path: Path) -> None:
             validate=_requires_key,
             max_attempts=3,
         )
-    assert backend.calls == 3
+    assert backend.calls == 6  # 3 attempts x (call + repair)
