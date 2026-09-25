@@ -1,0 +1,107 @@
+# Fleet config for the evidence-based pre-merge gate (`agent-fleet gate`).
+#
+# Copy to ~/.agent-fleet/fleet.yaml (or point AGENT_FLEET_CONFIG at it) to run
+# the gate from this machine. See docs/GATE.md for the design and the outputs.
+#
+# Two sections matter here:
+#
+#   model_policy  — machine-wide. Pins the ONLY models each backend may spend,
+#                   and which pipeline roles a backend may serve. The gate
+#                   checks this BEFORE dispatching any agent, so a config drift
+#                   fails in a second instead of after a fan-out.
+#   gate          — per-run knobs: which lenses review, which backends serve the
+#                   find/verify/fix roles, the judge backend, and the
+#                   convergence safety net.
+
+# ---------------------------------------------------------------------------
+# Model policy — fail fast on anything not approved here.
+# ---------------------------------------------------------------------------
+model_policy:
+  backends:
+    # The review/verify/fix work runs on the Command Code CLI, one model only.
+    cmd:
+      allowed_models:
+        - stealth/space-bunny-alpha
+
+    # The judge runs on a separately configured backend/model and is used for
+    # exactly one job: ruling on claims no local test could demonstrate, plus
+    # one blocker pass of its own. Restricting it to the judge role is what
+    # keeps that expensive call from leaking into the cheap parallel fan-out.
+    grok:
+      allowed_models:
+        - step-5-preview
+      roles:
+        - judge
+
+# ---------------------------------------------------------------------------
+# Gate pipeline
+# ---------------------------------------------------------------------------
+gate:
+  # Backend + model for the find / verify / fix roles (must satisfy model_policy).
+  backend: cmd
+  model: stealth/space-bunny-alpha
+
+  # The judge runs on its own backend/model. The gate spends at most one judge
+  # call for the main ruling and at most one recheck call, and only for
+  # untestable claims.
+  judge_backend: grok
+  judge_model: step-5-preview
+
+  # Parallel lens reviewers, each with ONE focus. Report blockers only; an
+  # empty findings list is a normal, good outcome. Replace the mapping to
+  # change the lens set, or use a list to keep the default focus text:
+  #   lenses: [correctness, contract, prodsafety, spec]
+  lenses:
+    correctness: >-
+      Logic errors, wrong results, broken edge cases, error handling,
+      concurrency/race bugs, regressions of existing behaviour.
+    contract: >-
+      Public API/MCP/schema contract breaks, response shape, params,
+      docs/OpenAPI drift vs behaviour, backwards compatibility, missing
+      tests for promised behaviour.
+    prodsafety: >-
+      Production data safety and ops: data loss, destructive writes,
+      unbounded memory/CPU on the VPS, missing locks/atomicity, unsafe
+      migrations, performance regressions on hot paths, secrets exposure.
+    spec: >-
+      Conformance to the task specification supplied with --task-file:
+      required items missing or implemented differently from what was asked.
+
+  # Cap on candidate claims carried into verify, and on parallel reviewers.
+  max_candidates: 12
+  max_parallel_lenses: 8
+  max_parallel_verifiers: 6
+
+  # Fix rounds continue while the failing set strictly shrinks and no new
+  # failures appear. max_fix_rounds is only a safety net against a run that
+  # keeps making one-test-at-a-time progress — the stopping rule is
+  # convergence, not the round count.
+  max_fix_rounds: 4
+  enable_fix: true
+  enable_judge: true
+
+  # Base branch for the diff the reviewers read; push_branch defaults to the
+  # PR's own head branch.
+  base_branch: main
+
+  # Timeouts (seconds) and the deterministic test budget.
+  agent_timeout_s: 1800
+  judge_timeout_s: 7200
+  test_timeout_s: 900
+
+  # Every pytest the gate launches is memory-capped: a runaway suite once
+  # consumed 36GB. The cap is used as given; the gate never raises it.
+  test_memory: 6G
+
+  # Machine-wide admission: these size the shared cross-process slot pools
+  # under ~/.agent-fleet/slots, so several independent fleet processes on this
+  # box share one budget instead of each getting its own. The test pool is
+  # deliberately much smaller than the agent pool — pytest, not the agent, is
+  # what exhausts memory.
+  agent_slots: 24
+  test_slots: 4
+
+  # Force every test into one package directory when the repo's root
+  # pyproject.toml is not the one that owns the tests. Leave unset for the
+  # normal case, where the gate resolves each test's owning package.
+  # package_dir: api
