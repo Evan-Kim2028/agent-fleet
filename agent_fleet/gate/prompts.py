@@ -26,6 +26,17 @@ if TYPE_CHECKING:
     from agent_fleet.contracts.gate import Finding
 
 
+PROCESS_SAFETY = (
+    "PROCESS SAFETY (hard rule, overrides everything else): this machine runs many "
+    "other agents and services. NEVER kill processes by name or pattern — no pkill, "
+    "killall, `pgrep ... | kill`, `ps | grep | xargs kill`, and no kill of a process "
+    "group you did not create. Agent wrappers can carry prompt text in their command "
+    "line, so a pattern like `pkill -f pytest` kills other agents. To stop something "
+    "you started, record its PID when you start it and kill only that PID; otherwise "
+    "leave it running.\n\n"
+)
+
+
 def _example_block(spec: dict[str, object]) -> str:
     """Fence the *spec* as a literal ```json block the model must copy the shape of."""
     return f"```json\n{json.dumps(spec, indent=2)}\n```"
@@ -62,7 +73,7 @@ def find_prompt(
             f"the current code):\n----- PRIOR CLAIMS -----\n{prior_claims}\n"
             "----- END PRIOR -----\n"
         )
-    return (
+    return PROCESS_SAFETY + (
         f"You are a pre-merge reviewer with ONE focus: **{lens}** — {focus}\n"
         f"Repository worktree (read-only for you; do NOT edit, commit or push): "
         f"{worktree}, detached at PR #{pr_number} head {head_sha}. Review ONLY the "
@@ -141,7 +152,7 @@ def verify_prompt(
     """Prompt for one verifier: write exactly one failing test, or refute the claim."""
     tag = finding.id or "claim"
     claim_json = json.dumps(finding.to_dict(), indent=2)
-    return (
+    return PROCESS_SAFETY + (
         f"You verify ONE claimed defect in worktree {worktree} (detached at PR "
         f"#{pr_number} head {head_sha}; the change is `git diff "
         f"{base_branch}...HEAD`).\n"
@@ -173,7 +184,7 @@ def judge_prompt(
     task_text: str,
 ) -> str:
     """Prompt for the single judge call: rule on untestable claims + own blocker pass."""
-    return (
+    return PROCESS_SAFETY + (
         f"You are the final pre-merge judge for PR #{pr_number} in worktree "
         f"{worktree} (detached at {head_sha}). Read-only: do not edit, commit or "
         f"push. The change is `git diff {base_branch}...HEAD`.\n"
@@ -198,7 +209,7 @@ def recheck_prompt(
     untestable: str,
 ) -> str:
     """Prompt for the single judge recheck: which untestable blockers remain."""
-    return (
+    return PROCESS_SAFETY + (
         f"Recheck for PR #{pr_number} in worktree {worktree} at {head_sha} "
         f"(read-only; use a fresh `git fetch` and inspect `git diff {start_sha} "
         f"{head_sha}`). These blockers were ruled real earlier and had no test:\n"
@@ -229,7 +240,7 @@ def fix_prompt(
         if untestable.strip()
         else ""
     )
-    return (
+    return PROCESS_SAFETY + (
         f"Fix PR #{pr_number} in worktree {worktree} (detached at {head_sha}; push "
         f"with `git push origin HEAD:{push_branch}`). Fix round {round_number}.\n"
         "These tests FAIL right now and must pass (each proves a confirmed defect; "

@@ -202,3 +202,12 @@ def test_record_size_is_safe_across_processes(tmp_path: Path) -> None:
     assert [p.exitcode for p in procs] == [0, 0, 0, 0]
     assert declared_size(tmp_path, "agent") in (8, 9, 10)
     assert not list(tmp_path.rglob("pool.*.tmp"))
+
+
+def test_every_gate_prompt_forbids_pattern_kills() -> None:
+    """Regression: a lens ran `pkill -9 -f pytest`, killing every agent whose argv held a prompt."""
+    from agent_fleet.gate import prompts
+
+    assert "NEVER kill processes by name or pattern" in prompts.PROCESS_SAFETY
+    src = Path(prompts.__file__).read_text(encoding="utf-8")
+    assert src.count("return PROCESS_SAFETY + (") == 5
