@@ -17,11 +17,14 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from agent_fleet.merge_plan import build_plan, resolve_repo_specs
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 #: Distinct real-looking SHAs so the two repositories' PR #101 differ only by
 #: which repository it is looked up in.
@@ -115,7 +118,7 @@ def per_repo_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_each_repo_is_profiled_in_its_own_checkout(
     two_repos: dict[str, Path],
-    per_repo_gh: None,
+    per_repo_gh: None,  # noqa: ARG001 - fixture used for its side effect
     tmp_path: Path,
 ) -> None:
     """Two selected repos, one approved PR each: both must reach the plan.
@@ -158,8 +161,6 @@ def test_each_repo_is_profiled_in_its_own_checkout(
         f"excluded={[(e.repo, e.pr_number, e.reason) for e in plan.excluded]}"
     )
 
-    assert not [
-        e
-        for e in plan.excluded
-        if e.repo == "silphcoanalytics" and e.pr_number == 101
-    ], "silphcoanalytics#101 was excluded despite its approval matching its own head"
+    assert not [e for e in plan.excluded if e.repo == "silphcoanalytics" and e.pr_number == 101], (
+        "silphcoanalytics#101 was excluded despite its approval matching its own head"
+    )

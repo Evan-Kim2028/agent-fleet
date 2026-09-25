@@ -30,7 +30,7 @@ def _load_rule_touch(directory: Path) -> dict[str, str]:
         return {}
     try:
         raw = json.loads(meta_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except OSError, json.JSONDecodeError:
         return {}
     touches = raw.get("rule_touch") or {}
     if not isinstance(touches, dict):
@@ -48,7 +48,7 @@ def touch_overlay_rules(repo_key: str, persona: str, rule_ids: list[str]) -> Non
             loaded = json.loads(meta_path.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
                 meta = loaded
-        except (OSError, json.JSONDecodeError):
+        except OSError, json.JSONDecodeError:
             meta = {}
     touches = dict(meta.get("rule_touch") or {})
     now = datetime.now(tz=UTC).isoformat()

@@ -10,8 +10,9 @@ models that read it.
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from typing import TYPE_CHECKING
 
+from agent_fleet.merge_plan.batching import plan_batches
 from agent_fleet.merge_plan.config import builtin_spec
 from agent_fleet.merge_plan.plan import render_plan_text
 from agent_fleet.merge_plan.profile import (
@@ -20,7 +21,9 @@ from agent_fleet.merge_plan.profile import (
     load_manifest_parent_map,
 )
 from agent_fleet.merge_plan.types import ApprovedPR, MergePlan
-from agent_fleet.merge_plan.batching import plan_batches
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 #: A real dbt manifest fragment.  cardindex is the source; sales and report read
 #: it, so editing cardindex invalidates both, transitively.
@@ -62,7 +65,9 @@ def test_expand_downstream_uses_real_manifest_parent_map(tmp_path: Path) -> None
 def test_profile_dbt_select_covers_downstream_of_edited_model(tmp_path: Path) -> None:
     """A PR editing only cardindex must still select sales and report."""
     parent_map = load_manifest_parent_map(_write_manifest(tmp_path))
-    pr = ApprovedPR(repo="lake-of-rage", pr_number=12, approved_sha="abc000012", head_sha="abc000012")
+    pr = ApprovedPR(
+        repo="lake-of-rage", pr_number=12, approved_sha="abc000012", head_sha="abc000012"
+    )
 
     profile = build_profile(
         pr,
@@ -79,7 +84,9 @@ def test_profile_dbt_select_covers_downstream_of_edited_model(tmp_path: Path) ->
 def test_plan_renders_select_covering_downstream_dependents(tmp_path: Path) -> None:
     """The operator-facing plan text must rebuild the real dependents."""
     parent_map = load_manifest_parent_map(_write_manifest(tmp_path))
-    pr = ApprovedPR(repo="lake-of-rage", pr_number=12, approved_sha="abc000012", head_sha="abc000012")
+    pr = ApprovedPR(
+        repo="lake-of-rage", pr_number=12, approved_sha="abc000012", head_sha="abc000012"
+    )
 
     profile = build_profile(
         pr,

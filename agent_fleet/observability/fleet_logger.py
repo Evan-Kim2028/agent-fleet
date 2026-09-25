@@ -111,7 +111,7 @@ def emit_fleet_event(
             import logfire
 
             getattr(logfire, level)(event, **payload)
-        except (ImportError, AttributeError):
+        except ImportError, AttributeError:
             logger.log(
                 logging.getLevelName(level.upper()),
                 "%s %s",

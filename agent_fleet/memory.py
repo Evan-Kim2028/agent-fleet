@@ -21,7 +21,7 @@ def _read_meminfo_kb(key: str) -> int | None:
         for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
             if line.startswith(f"{key}:"):
                 return int(line.split()[1])
-    except (FileNotFoundError, OSError, ValueError):
+    except FileNotFoundError, OSError, ValueError:
         return None
     return None
 
@@ -38,7 +38,7 @@ def process_rss_mb(pid: int) -> float | None:
     """Return resident set size for *pid* in MiB."""
     try:
         status = Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
-    except (FileNotFoundError, OSError):
+    except FileNotFoundError, OSError:
         return None
     for line in status.splitlines():
         if line.startswith("VmRSS:"):

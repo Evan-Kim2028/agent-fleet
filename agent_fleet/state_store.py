@@ -22,7 +22,7 @@ class JsonStateStore:
             return base
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+        except json.JSONDecodeError, OSError:
             return base
         if not isinstance(data, dict):
             return base

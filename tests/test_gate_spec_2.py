@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -24,6 +24,9 @@ from agent_fleet.merge_plan.batching import plan_batches
 from agent_fleet.merge_plan.config import builtin_spec
 from agent_fleet.merge_plan.profile import build_profile
 from agent_fleet.merge_plan.types import ApprovedPR, RepoSpec
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 PR_NUMBERS = (1, 2)
 

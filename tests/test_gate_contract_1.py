@@ -125,13 +125,15 @@ def cwd_aware_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
 
 
-def test_each_pr_is_read_from_its_own_repository(tmp_path: Path, cwd_aware_gh: None) -> None:
+def test_each_pr_is_read_from_its_own_repository(tmp_path: Path, cwd_aware_gh: None) -> None:  # noqa: ARG001 - fixture used for its side effect
     """Two checkouts, both with an approved PR #12 — both must survive planning.
 
     Both repos deliberately use the *same* PR number and different head SHAs,
     which is exactly the case a shared, first-repo-pinned client gets wrong.
     """
-    lor = _make_checkout(tmp_path / "checkouts", "lake-of-rage", "git@github.com:acme/lake-of-rage.git")
+    lor = _make_checkout(
+        tmp_path / "checkouts", "lake-of-rage", "git@github.com:acme/lake-of-rage.git"
+    )
     silph = _make_checkout(
         tmp_path / "checkouts", "silphcoanalytics", "git@github.com:acme/silphcoanalytics.git"
     )

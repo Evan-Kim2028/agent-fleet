@@ -132,7 +132,7 @@ def _normalize_grok_usage(raw: Mapping[str, Any] | None) -> dict[str, int] | Non
             continue
         try:
             out[dst] = int(val)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             continue
     return out or None
 
@@ -209,7 +209,7 @@ def _find_session_id_by_cwd(work_dir: str, *, since_ts: float) -> str | None:
                 continue
             try:
                 summary = json.loads(summary_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            except OSError, json.JSONDecodeError, UnicodeDecodeError:
                 continue
             if not isinstance(summary, dict):
                 continue

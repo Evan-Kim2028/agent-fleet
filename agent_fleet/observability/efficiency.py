@@ -136,5 +136,5 @@ def changed_lines(workspace: Path | str | None) -> int:
     try:
         base = _diff_base(cwd) or "HEAD"
         return _numstat_total([base], cwd) + _untracked_lines(cwd, ws)
-    except (OSError, subprocess.TimeoutExpired, subprocess.CalledProcessError):
+    except OSError, subprocess.TimeoutExpired, subprocess.CalledProcessError:
         return 0

@@ -121,7 +121,7 @@ def _worktree_in_use(worktree_path: Path) -> bool:
             continue
         try:
             cwd = (entry / "cwd").resolve()
-        except (OSError, PermissionError):
+        except OSError, PermissionError:
             continue
         try:
             cwd.relative_to(target)
@@ -148,7 +148,7 @@ def _alive_dispatch_issue_numbers() -> set[int]:
             continue
         try:
             data = (entry / "environ").read_bytes()
-        except (OSError, PermissionError):
+        except OSError, PermissionError:
             continue
         for chunk in data.split(b"\x00"):
             if chunk.startswith(b"ISSUE_NUMBER="):
@@ -167,7 +167,7 @@ def _proc_start_time(pid: int) -> int | None:
     """Read field 22 (starttime, clock ticks since boot) from /proc/<pid>/stat."""
     try:
         stat = Path(f"/proc/{pid}/stat").read_text()
-    except (OSError, PermissionError):
+    except OSError, PermissionError:
         return None
     # Field 2 is comm in parens, which may contain spaces. Split after the
     # closing paren so subsequent fields are positional.
@@ -178,7 +178,7 @@ def _proc_start_time(pid: int) -> int | None:
     # rest[0] is field 3 (state); starttime is field 22, so index 19 here.
     try:
         return int(rest[19])
-    except (IndexError, ValueError):
+    except IndexError, ValueError:
         return None
 
 
@@ -210,7 +210,7 @@ def _lock_owner(worktree_path: Path) -> tuple[int, int] | None:
     lock = _worktree_lock_path(worktree_path)
     try:
         text = lock.read_text().strip()
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return None
     parts = text.split()
     if len(parts) < 2:

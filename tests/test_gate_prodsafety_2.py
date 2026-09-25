@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 from typing import TYPE_CHECKING
 
 import pytest
@@ -69,9 +68,7 @@ def fake_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
 
 
-def test_same_pr_under_two_repo_spellings_is_planned_once(
-    tmp_path: Path, fake_gh: None
-) -> None:
+def test_same_pr_under_two_repo_spellings_is_planned_once(tmp_path: Path, fake_gh: None) -> None:  # noqa: ARG001 - fixture used for its side effect
     lanes = tmp_path / "lanes"
     (lanes / "op").mkdir(parents=True)
     # The lane registry recorded the repo bare...
@@ -116,7 +113,7 @@ def test_same_pr_under_two_repo_spellings_is_planned_once(
     )
 
 
-def test_build_plan_does_not_double_count_size(tmp_path: Path, fake_gh: None) -> None:
+def test_build_plan_does_not_double_count_size(tmp_path: Path, fake_gh: None) -> None:  # noqa: ARG001 - fixture used for its side effect
     """The batch size / cap accounting must see the PR once too."""
     lanes = tmp_path / "lanes"
     (lanes / "op").mkdir(parents=True)

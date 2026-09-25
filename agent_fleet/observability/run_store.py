@@ -105,7 +105,7 @@ def read_run_index(*, runs_dir: Path | None = None) -> list[dict[str, object]]:
                 continue
             try:
                 row = json.loads(stripped)
-            except (json.JSONDecodeError, ValueError):
+            except json.JSONDecodeError, ValueError:
                 continue
             if not isinstance(row, dict):
                 continue
@@ -139,7 +139,7 @@ def load_fleet_events(path: str | Path) -> list[dict[str, object]]:
                 continue
             try:
                 obj = json.loads(stripped)
-            except (json.JSONDecodeError, ValueError):
+            except json.JSONDecodeError, ValueError:
                 continue
             if isinstance(obj, dict):
                 rows.append(obj)

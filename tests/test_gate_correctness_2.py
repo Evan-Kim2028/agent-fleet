@@ -114,9 +114,7 @@ def _write_status(status_dir: Path, repo: str, pr: int, approved_sha: str) -> No
 # ---------------------------------------------------------------------------
 
 
-def test_pr_resolved_against_its_own_repo_not_the_first_one(
-    tmp_path: Path, fake_gh: Path
-) -> None:
+def test_pr_resolved_against_its_own_repo_not_the_first_one(tmp_path: Path, fake_gh: Path) -> None:
     """A PR number that only exists in the *second* repo must still batch.
 
     lake-of-rage sorts first, so it is what `_first_repo_path` returns and
@@ -175,9 +173,7 @@ def test_pr_resolved_against_its_own_repo_not_the_first_one(
     assert batch.deploy_unit == "frontend"
 
 
-def test_colliding_pr_number_profiles_own_repo_files(
-    tmp_path: Path, fake_gh: Path
-) -> None:
+def test_colliding_pr_number_profiles_own_repo_files(tmp_path: Path, fake_gh: Path) -> None:
     """When both repos have a #7, each must profile its *own* changed files.
 
     Both heads share the approved prefix so neither is stale; the only way

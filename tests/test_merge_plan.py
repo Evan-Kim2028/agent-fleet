@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
@@ -134,7 +134,7 @@ def profile_for(pr: ApprovedPR, files: list[str], spec: RepoSpec | None = None) 
 
 
 def spec_for(repo: str = "lake-of-rage", **kw: object) -> RepoSpec:
-    spec = builtin_spec(repo, path=kw.pop("path", ""))
+    spec = builtin_spec(repo, path=str(kw.pop("path", "")))
     for key, value in kw.items():
         setattr(spec, key, value)
     return spec
@@ -326,7 +326,7 @@ def test_stale_approval_detected_and_excluded() -> None:
     )
     batchable, profiles, stale, unprofilable = profile_approvals(
         [stale_pr],
-        client=_StubClient({1: {"headRefOid": "bbbb222222"}}),
+        client=_stub({1: {"headRefOid": "bbbb222222"}}),
         repo_specs={"lake-of-rage": spec},
     )
     assert batchable == []
@@ -343,9 +343,7 @@ def test_current_approval_is_batchable() -> None:
     )
     batchable, profiles, stale, _ = profile_approvals(
         [pr],
-        client=_StubClient(
-            {7: {"headRefOid": "aaaa1111ffff", "files": [{"path": "api/src/a.py"}]}}
-        ),
+        client=_stub({7: {"headRefOid": "aaaa1111ffff", "files": [{"path": "api/src/a.py"}]}}),
         repo_specs={"lake-of-rage": spec},
     )
     assert [p.pr_number for p in batchable] == [7]
@@ -357,7 +355,7 @@ def test_unreadable_head_is_reported_not_assumed() -> None:
     spec = spec_for()
     pr = ApprovedPR(repo="lake-of-rage", pr_number=1, approved_sha="aaaa111", head_sha="")
     batchable, _, stale, unprofilable = profile_approvals(
-        [pr], client=_StubClient({}), repo_specs={"lake-of-rage": spec}
+        [pr], client=_stub({}), repo_specs={"lake-of-rage": spec}
     )
     assert batchable == []
     assert stale == []
@@ -372,6 +370,11 @@ class _StubClient:
 
     def pr_detail(self, pr_number: int) -> dict:
         return self._details.get(pr_number, {})
+
+
+def _stub(details: dict[int, dict]) -> GitHubClient:
+    """The stub, typed as the client it stands in for (it has no ``for_repo``)."""
+    return cast("GitHubClient", _StubClient(details))
 
 
 # ---------------------------------------------------------------------------
@@ -436,7 +439,7 @@ def test_plan_is_deterministic() -> None:
     spec = spec_for()
     prs = [make_pr(i) for i in (5, 1, 3, 2, 4)]
     profiles = {p.pr_number: profile_for(p, [f"api/src/f{p.pr_number}.py"], spec) for p in prs}
-    kwargs = {"repo_specs": {"lake-of-rage": spec}, "check_merges": False}
+    kwargs: dict[str, Any] = {"repo_specs": {"lake-of-rage": spec}, "check_merges": False}
     keyed_profiles = keyed(profiles)
     first = plan_batches(prs, keyed_profiles, **kwargs)
     second = plan_batches(list(reversed(prs)), keyed_profiles, **kwargs)

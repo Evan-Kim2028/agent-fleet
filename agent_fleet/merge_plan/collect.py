@@ -237,7 +237,7 @@ def _scoped_client(client: GitHubClient, repo_path: Path | None) -> GitHubClient
     """
     if repo_path is None:
         return client
-    for_repo: object = getattr(client, "for_repo", None)
+    for_repo = getattr(client, "for_repo", None)
     if callable(for_repo):
         scoped = for_repo(repo_path)
         if isinstance(scoped, GitHubClient):

@@ -2,8 +2,6 @@
 
 ## Unreleased
 
-## Unreleased
-
 ### Added
 
 - **`agent-fleet merge-plan`:** the command center now decides which gate-approved

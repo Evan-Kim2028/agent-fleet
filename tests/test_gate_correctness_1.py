@@ -27,7 +27,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -36,9 +36,12 @@ from agent_fleet.merge_plan.config import builtin_spec
 from agent_fleet.merge_plan.profile import build_profile
 from agent_fleet.merge_plan.types import ApprovedPR
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
 #: A `git` wrapper that advertises >= 2.38 and emulates `merge-tree --write-tree`
 #: on top of the real binary, so the tested code path is the one the claim is about.
-GIT_SHIM = '''#!/usr/bin/env python3
+GIT_SHIM = """#!/usr/bin/env python3
 import os
 import shutil
 import subprocess
@@ -89,7 +92,7 @@ if ARGS[:2] == ["merge-tree", "--write-tree"]:
         shutil.rmtree(tmp, ignore_errors=True)
 
 sys.exit(subprocess.run([REAL, *ARGS], cwd=REPO).returncode)
-'''
+"""
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -159,7 +162,8 @@ def _make_prs(
 
 
 def test_three_disjoint_prs_stay_in_one_batch(
-    modern_git: Path, three_disjoint_prs: tuple[Path, list[ApprovedPR]]
+    modern_git: Path,  # noqa: ARG001 - fixture used for its side effect
+    three_disjoint_prs: tuple[Path, list[ApprovedPR]],
 ) -> None:
     """Three cleanly-merging PRs of one deploy unit must plan as one batch.
 
@@ -178,9 +182,7 @@ def test_three_disjoint_prs_stay_in_one_batch(
 
     # The shim reports 2.54, so the merge-tree path (not the fallback) is used.
     assert shutil.which("git")
-    batches = plan_batches(
-        prs, profiles, repo_specs={"lake-of-rage": spec}, check_merges=True
-    )
+    batches = plan_batches(prs, profiles, repo_specs={"lake-of-rage": spec}, check_merges=True)
 
     planned = [[p.pr_number for p in batch.prs] for batch in batches]
     assert planned == [[1, 2, 3]], (
@@ -190,7 +192,8 @@ def test_three_disjoint_prs_stay_in_one_batch(
 
 
 def test_merge_compatible_true_for_three_disjoint_shas(
-    modern_git: Path, three_disjoint_prs: tuple[Path, list[ApprovedPR]]
+    modern_git: Path,  # noqa: ARG001 - fixture used for its side effect
+    three_disjoint_prs: tuple[Path, list[ApprovedPR]],
 ) -> None:
     """The same fold, called directly: three disjoint commits merge cleanly."""
     repo, prs = three_disjoint_prs
@@ -199,7 +202,8 @@ def test_merge_compatible_true_for_three_disjoint_shas(
 
 
 def test_conflicting_prs_are_still_demoted(
-    modern_git: Path, conflicting_prs: tuple[Path, list[ApprovedPR]]
+    modern_git: Path,  # noqa: ARG001 - fixture used for its side effect
+    conflicting_prs: tuple[Path, list[ApprovedPR]],
 ) -> None:
     """Control: the merge check must still reject PRs that truly conflict.
 
@@ -214,10 +218,11 @@ def test_conflicting_prs_are_still_demoted(
         )
         for pr in prs
     }
-    assert merge_compatible(repo_path=repo, shas=[prs[0].head_sha, prs[1].head_sha], check=True) is False
-
-    batches = plan_batches(
-        prs, profiles, repo_specs={"lake-of-rage": spec}, check_merges=True
+    assert (
+        merge_compatible(repo_path=repo, shas=[prs[0].head_sha, prs[1].head_sha], check=True)
+        is False
     )
+
+    batches = plan_batches(prs, profiles, repo_specs={"lake-of-rage": spec}, check_merges=True)
     planned = [[p.pr_number for p in batch.prs] for batch in batches]
     assert planned == [[1], [2], [3]]

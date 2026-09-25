@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -27,6 +27,9 @@ from agent_fleet.merge_plan.collect import GitHubClient, profile_approvals
 from agent_fleet.merge_plan.config import builtin_spec
 from agent_fleet.merge_plan.plan import build_plan
 from agent_fleet.merge_plan.types import ApprovedPR, RepoSpec
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # Hex-only, as the ``PREMERGE-APPROVED <sha>`` marker requires.
 LOR_SHA = "a" * 40
@@ -179,7 +182,7 @@ def two_repos_shared_head(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> di
     )
 
 
-def _profile(two_repos: dict, approvals: list[ApprovedPR]):
+def _profile(two_repos: dict, approvals: list[ApprovedPR]) -> tuple:
     return profile_approvals(
         approvals,
         client=GitHubClient(cwd=two_repos["lor"]),
