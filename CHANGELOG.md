@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Fixed
+
+- **Gate fails CLOSED on dead agents:** a killed, crashed or empty lens,
+  verifier or judge raises `GateInfraError` (NEEDS_ESCALATION) instead of
+  reading as "0 findings". A verifier that answers without proof still
+  rejects the claim. Regression from a live incident where a mass SIGKILL
+  of agent wrappers produced an approval on "0 candidates".
+- **Gate test plumbing on multi-package repos:** tests run with paths
+  relative to their owning package (cwd = package dir) and failing node ids
+  map back to repo-relative; uv workspace roots run `uv run --all-packages`
+  so tests importing workspace members work in a fresh gate worktree.
+- **Gate diffs against `origin/<base>`** (fallback: local base when no
+  remote), in step0 and every lens/verify/judge prompt — a stale local base
+  branch no longer inflates "the PR's changed tests".
+- **Slot pool bookkeeping race:** `pool.json` writes use a unique temp file
+  per writer under an flock and retry transient IO errors.
+
 ### Added
 
 - **`gate` pipeline — evidence-based PR merge gate:** `agent-fleet gate

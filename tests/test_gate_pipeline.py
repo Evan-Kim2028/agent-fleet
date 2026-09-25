@@ -526,6 +526,7 @@ def test_verify_skips_untestable_claims_without_calling_a_verifier(
 def test_verify_counts_an_unparseable_answer_as_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """An answer without proof leaves the claim unproven: rejected, not escalated."""
     pipe, wt = _verify(
         tmp_path,
         monkeypatch,
@@ -535,6 +536,21 @@ def test_verify_counts_an_unparseable_answer_as_rejected(
     )
     pipe.verify(wt, [_finding()], source="lens")
     assert pipe.evidence.rejected == 1
+
+
+def test_verify_fails_closed_when_the_verifier_dies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dead verifier (empty output) must not silently drop a possible blocker."""
+    pipe, wt = _verify(
+        tmp_path,
+        monkeypatch,
+        verdict_payload="",
+        written_test=None,
+        test_result=TestRun(ran=0),
+    )
+    with pytest.raises(GateInfraError, match="fail-closed: verify"):
+        pipe.verify(wt, [_finding()], source="lens")
 
 
 # ---------------------------------------------------------------------------
@@ -614,13 +630,14 @@ def test_judge_is_skipped_when_disabled(tmp_path: Path) -> None:
     assert backend.prompts == []
 
 
-def test_judge_failure_is_not_a_pass(tmp_path: Path) -> None:
-    """A judge we could not reach leaves untestable claims unresolved, not cleared."""
+def test_judge_failure_fails_closed(tmp_path: Path) -> None:
+    """A judge we could not reach is not a ruling: escalate, never approve."""
     backend = _FakeBackend(answers={"final pre-merge judge": "no idea"})
     pipe = _pipeline(tmp_path, backend, config=_config(enable_judge=True), judge_backend=backend)
     pipe.evidence.untestable.append(_finding("c-1").to_dict())
-    pipe.judge(tmp_path / "wt", _ref())
-    assert pipe.evidence.confirmed == []  # nothing was ruled real
+    with pytest.raises(GateInfraError, match="fail-closed: judge"):
+        pipe.judge(tmp_path / "wt", _ref())
+    assert pipe.evidence.confirmed == []
 
 
 # ---------------------------------------------------------------------------
@@ -703,16 +720,27 @@ def test_find_dedupes_the_same_claim_from_two_lenses(tmp_path: Path) -> None:
     assert len(backend.prompts) == len(pipe.config.lenses)
 
 
-def test_find_survives_a_lens_that_answers_nothing(
-    tmp_path: Path,
-) -> None:
-    """One dead reviewer must not lose the other lenses' findings."""
+def test_find_fails_closed_when_a_lens_dies(tmp_path: Path) -> None:
+    """A killed reviewer is not a clean review: 0 findings from a dead lens must escalate.
+
+    Regression: on 2026-09-25 a mass SIGKILL of agent wrappers left every lens
+    empty and the gate approved a PR on "0 candidates".
+    """
+    backend = _FakeBackend(answers={"**correctness**": _findings_json("c-1")}, default="")
+    pipe = _pipeline(tmp_path, backend)
+    with pytest.raises(GateInfraError, match="fail-closed: lens"):
+        pipe.find(tmp_path / "wt", _ref())
+
+
+def test_find_fails_closed_when_a_lens_answers_garbage(tmp_path: Path) -> None:
+    """A lens whose answer never validates leaves its findings unknown: escalate."""
     backend = _FakeBackend(
-        answers={"**correctness**": _findings_json("c-1"), "**contract**": "no idea"}
+        answers={"**correctness**": _findings_json("c-1"), "**contract**": "no idea"},
+        default=_findings_json(),
     )
     pipe = _pipeline(tmp_path, backend)
-    found = pipe.find(tmp_path / "wt", _ref())
-    assert [f.id for f in found] == ["c-1"]
+    with pytest.raises(GateInfraError, match="invalid"):
+        pipe.find(tmp_path / "wt", _ref())
 
 
 def test_find_caps_at_max_candidates(tmp_path: Path) -> None:

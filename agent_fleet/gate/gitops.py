@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -144,6 +145,23 @@ def worktree_head_sha(worktree: Path) -> str:
     return _run_git(worktree, "rev-parse", "HEAD", check=False).strip()
 
 
+def resolve_diff_base(worktree: Path, base_branch: str) -> str:
+    """The ref a PR diff is taken against: ``origin/<base>`` when it exists.
+
+    The local ``<base>`` branch of the main checkout can be far behind the
+    forge (seen: lake-of-rage local main hundreds of commits behind), and
+    diffing against it pulls unrelated upstream files into "the PR's changes".
+    :func:`fetch_base` refreshes ``origin/<base>`` first. Explicit remote refs
+    and SHAs pass through; a repo with no ``origin`` falls back to the local branch.
+    """
+    explicit = base_branch.startswith(("origin/", "refs/"))
+    if explicit or re.fullmatch(r"[0-9a-f]{7,40}", base_branch):
+        return base_branch
+    remote = f"origin/{base_branch}"
+    probe = _run_git(worktree, "rev-parse", "--verify", "--quiet", remote, check=False).strip()
+    return remote if probe else base_branch
+
+
 def changed_test_files(worktree: Path, base_branch: str) -> list[str]:
     """Repo-relative ``test_*.py`` paths the PR changed and that still exist.
 
@@ -151,7 +169,13 @@ def changed_test_files(worktree: Path, base_branch: str) -> list[str]:
     widening that to the whole suite would turn one slow package into a gate
     timeout for reasons unrelated to the change.
     """
-    diff = _run_git(worktree, "diff", "--name-only", f"{base_branch}...HEAD", check=False)
+    diff = _run_git(
+        worktree,
+        "diff",
+        "--name-only",
+        f"{resolve_diff_base(worktree, base_branch)}...HEAD",
+        check=False,
+    )
     out: list[str] = []
     for line in diff.splitlines():
         rel = line.strip()

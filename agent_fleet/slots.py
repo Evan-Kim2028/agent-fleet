@@ -30,6 +30,7 @@ import fcntl
 import json
 import logging
 import os
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -95,9 +96,28 @@ def record_size(root: Path | str, name: str, size: int) -> None:
         raise ValueError(f"pool size must be positive, got {size}")
     path = _record_path(root, name)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps({"size": int(size), "updated_at": time.time()}), encoding="utf-8")
-    tmp.replace(path)
+    payload = json.dumps({"size": int(size), "updated_at": time.time()})
+    last: OSError | None = None
+    for attempt in range(3):
+        try:
+            # One tmp file PER WRITER (a shared tmp name let one process's
+            # os.replace move the file out from under another) and an flock so
+            # concurrent read-modify-write cycles serialize.
+            with (path.parent / "pool.lock").open("a+") as lock:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                fd, tmp = tempfile.mkstemp(dir=path.parent, prefix="pool.", suffix=".tmp")
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                        fh.write(payload)
+                    Path(tmp).replace(path)
+                finally:
+                    with contextlib.suppress(FileNotFoundError):
+                        Path(tmp).unlink()
+            return
+        except OSError as exc:  # bookkeeping IO must not fail a whole gate
+            last = exc
+            time.sleep(0.05 * (attempt + 1))
+    raise last if last else OSError("record_size failed")
 
 
 class _Slot:

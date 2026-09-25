@@ -35,7 +35,17 @@ _RETRY_NOTE = (
 
 
 class StructuredCallError(RuntimeError):
-    """Raised when a model answer cannot be parsed or validated after retries."""
+    """Raised when a model answer cannot be parsed or validated after retries.
+
+    ``kind`` tells the gate what the failure means for the verdict:
+    ``"dead"`` — the agent exited non-zero or produced no output (killed,
+    crashed, timed out): there is NO evidence either way; ``"invalid"`` — the
+    agent answered, but not in the required shape.
+    """
+
+    def __init__(self, message: str, *, kind: str = "invalid") -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 def extract_json_object(text: str) -> dict[str, Any]:
@@ -111,6 +121,7 @@ def call_structured(
 
     attempt_prompt = prompt
     last_error = ""
+    last_kind = "invalid"
     raw = ""
     for attempt in range(max_attempts):
         guard = slot.slot(timeout_s=slot_timeout_s) if slot is not None else nullcontext()
@@ -125,6 +136,7 @@ def call_structured(
             )
         if result.exit_code != 0 or not (result.stdout or "").strip():
             last_error = f"backend call failed (exit {result.exit_code}): {result.stderr[:300]}"
+            last_kind = "dead"
         else:
             raw = result.stdout
             try:
@@ -132,6 +144,7 @@ def call_structured(
                 validate(data)
             except Exception as exc:
                 last_error = str(exc)[:400]
+                last_kind = "invalid"
                 logger.debug("gate structured call %d invalid: %s", attempt, last_error)
             else:
                 return StructuredAnswer(data=data, raw=raw)
@@ -139,5 +152,6 @@ def call_structured(
         attempt_prompt = f"{prompt}\n\n{_RETRY_NOTE}\n\nPrevious failure: {last_error}"
     raise StructuredCallError(
         f"structured call failed after {max_attempts} attempts: {last_error}; "
-        f"raw output: {raw[:300]}"
+        f"raw output: {raw[:300]}",
+        kind=last_kind,
     )

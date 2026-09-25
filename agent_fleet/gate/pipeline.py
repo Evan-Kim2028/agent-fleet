@@ -70,6 +70,7 @@ from agent_fleet.gate.gitops import (
     fetch_base,
     prepare_worktree,
     remove_worktree,
+    resolve_diff_base,
     resolve_pull_request,
     worktree_head_sha,
 )
@@ -87,6 +88,8 @@ from agent_fleet.gate.pytest_runner import (
     find_test_packages,
     run_pytest,
     systemd_run_available,
+    to_package_path,
+    to_repo_node_id,
 )
 from agent_fleet.gate.structured import StructuredCallError, call_structured
 from agent_fleet.model_policy import ModelPolicy, ModelPolicyError, parse_model_policy
@@ -240,7 +243,12 @@ class GateTestRunner:
         """The exact memory-capped command the agents are told to run."""
         package = self.packages_for([test_file])
         rel_dir = package[0].rel_dir if package else "."
-        cmd = build_pytest_command([test_file], memory=self.memory, use_systemd=self.use_systemd)
+        cmd = build_pytest_command(
+            [to_package_path(rel_dir, test_file)],
+            memory=self.memory,
+            use_systemd=self.use_systemd,
+            package_dir=self.root / rel_dir,
+        )
         return f"(cd {self.root / rel_dir} && {' '.join(cmd)})"
 
     def test_dir_hint(self, test_file: str) -> str:
@@ -264,7 +272,7 @@ class GateTestRunner:
                 return result
             if outcome.tests_failed:
                 result.tests_failed = True
-            result.failing.extend(outcome.failed_ids)
+            result.failing.extend(to_repo_node_id(package.rel_dir, i) for i in outcome.failed_ids)
         result.failing = sorted(set(result.failing))
         return result
 
@@ -275,7 +283,7 @@ class GateTestRunner:
         with guard:
             return run_pytest(
                 package.dir,
-                package.tests,
+                package.local_tests,
                 memory=self.memory,
                 timeout_s=self.timeout_s,
                 use_systemd=self.use_systemd,
@@ -427,6 +435,34 @@ class GatePipeline:
             slot=self.agent_pool,
         )
 
+    def _call_required(
+        self,
+        *,
+        role: str,
+        subject: str,
+        invalid_ok: bool = False,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> Any:  # noqa: ANN401
+        """Call an agent whose answer the verdict depends on; fail CLOSED.
+
+        ``call_structured`` already retries once. A *dead* agent (killed,
+        crashed, empty output) is never evidence of a clean PR, so it raises
+        :class:`GateInfraError` and the gate escalates instead of approving on
+        "no findings". An *invalid* answer raises too unless ``invalid_ok``
+        (a verifier that answered without proof leaves the claim unproven, so
+        rejecting it is correct); the caller then gets ``None``.
+        """
+        try:
+            return self._call(**kwargs)
+        except StructuredCallError as exc:
+            self._log(f"gate.{role}.failed", subject=subject, kind=exc.kind, error=str(exc)[:200])
+            if exc.kind == "invalid" and invalid_ok:
+                return None
+            raise GateInfraError(
+                f"fail-closed: {role} agent for {subject} gave no usable result "
+                f"({exc.kind}): {str(exc)[:160]}"
+            ) from exc
+
     # -- step 0 ----------------------------------------------------------
 
     def run_pr_tests(self, worktree: Path) -> list[str]:
@@ -477,23 +513,21 @@ class GatePipeline:
                 lens=lens,
                 focus=self.config.focus_for(lens),
                 worktree=str(worktree),
-                base_branch=self.config.base_branch,
+                base_branch=resolve_diff_base(worktree, self.config.base_branch),
                 head_sha=ref.short_sha,
                 pr_number=self.pr_number,
                 task_text=task_text,
             )
-            try:
-                answer = self._call(
-                    backend=self.backend,
-                    prompt=prompt,
-                    model=model,
-                    cwd=worktree,
-                    timeout_s=self.config.agent_timeout_s,
-                    validate=validate_findings,
-                )
-            except StructuredCallError as exc:
-                self._log("gate.lens.failed", lens=lens, error=str(exc)[:200])
-                return []
+            answer = self._call_required(
+                role="lens",
+                subject=lens,
+                backend=self.backend,
+                prompt=prompt,
+                model=model,
+                cwd=worktree,
+                timeout_s=self.config.agent_timeout_s,
+                validate=validate_findings,
+            )
             return _tag_lens(FindingsReport.from_dict(answer.data).findings, lens)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(len(lenses), 1)) as pool:
@@ -534,24 +568,25 @@ class GatePipeline:
         prompt = verify_prompt(
             finding=finding,
             worktree=str(worktree),
-            base_branch=self.config.base_branch,
+            base_branch=resolve_diff_base(worktree, self.config.base_branch),
             head_sha=(self._head_sha(worktree) or "")[:9],
             pr_number=self.pr_number,
             test_dir_hint=runner.test_dir_hint(finding.file or "x"),
             pytest_cmd_hint=runner.pytest_hint("tests/test_gate_x.py"),
         )
-        try:
-            answer = self._call(
-                backend=self.backend,
-                prompt=prompt,
-                model=model,
-                cwd=worktree,
-                timeout_s=self.config.agent_timeout_s,
-                validate=validate_verify,
-            )
-        except StructuredCallError as exc:
+        answer = self._call_required(
+            role="verify",
+            subject=finding.id,
+            invalid_ok=True,
+            backend=self.backend,
+            prompt=prompt,
+            model=model,
+            cwd=worktree,
+            timeout_s=self.config.agent_timeout_s,
+            validate=validate_verify,
+        )
+        if answer is None:
             self.evidence.rejected += 1
-            self._log("gate.verify.failed", finding=finding.id, error=str(exc)[:200])
             return
         report = VerifyReport.from_dict(answer.data)
         if report.verdict is VerifyVerdict.UNTESTABLE:
@@ -603,25 +638,23 @@ class GatePipeline:
         )
         prompt = judge_prompt(
             worktree=str(worktree),
-            base_branch=self.config.base_branch,
+            base_branch=resolve_diff_base(worktree, self.config.base_branch),
             head_sha=ref.short_sha,
             pr_number=self.pr_number,
             confirmed=_json_blob(self.evidence.confirmed, 6000),
             untestable=_json_blob(self.evidence.untestable, 6000),
             task_text=self._task_text()[:8000],
         )
-        try:
-            answer = self._call(
-                backend=self.judge_backend,
-                prompt=prompt,
-                model=model,
-                cwd=worktree,
-                timeout_s=self.config.judge_timeout_s,
-                validate=validate_judge,
-            )
-        except StructuredCallError as exc:
-            self._log("gate.judge.failed", error=str(exc)[:200])
-            return
+        answer = self._call_required(
+            role="judge",
+            subject="judge",
+            backend=self.judge_backend,
+            prompt=prompt,
+            model=model,
+            cwd=worktree,
+            timeout_s=self.config.judge_timeout_s,
+            validate=validate_judge,
+        )
         report = JudgeReport.from_dict(answer.data)
         for ruling in report.confirmed_untestable:
             self.evidence.confirmed.append(

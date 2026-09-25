@@ -86,8 +86,49 @@ class TestPackage:
     rel_dir: str
     tests: list[str] = field(default_factory=list)
 
+    @property
+    def local_tests(self) -> list[str]:
+        """``tests`` relative to :attr:`dir` — pytest runs with ``cwd=dir``."""
+        return [to_package_path(self.rel_dir, t) for t in self.tests]
+
     def command(self, extra: Sequence[str] = ()) -> list[str]:
-        return ["uv", "run", "pytest", "-q", "--no-header", *extra, *self.tests]
+        return [*uv_run_prefix(self.dir), "pytest", "-q", "--no-header", *extra, *self.local_tests]
+
+
+def to_package_path(rel_dir: str, repo_path: str) -> str:
+    """Repo-relative *repo_path* -> path relative to the package at *rel_dir*."""
+    if rel_dir in ("", "."):
+        return repo_path
+    prefix = rel_dir.rstrip("/") + "/"
+    return repo_path[len(prefix) :] if repo_path.startswith(prefix) else repo_path
+
+
+def to_repo_node_id(rel_dir: str, node_id: str) -> str:
+    """Package-relative pytest node id -> repo-relative (verify/fix/recheck use repo paths)."""
+    if rel_dir in ("", "."):
+        return node_id
+    prefix = rel_dir.rstrip("/") + "/"
+    return node_id if node_id.startswith(prefix) else prefix + node_id
+
+
+def is_uv_workspace_root(package_dir: Path) -> bool:
+    """True when *package_dir*'s pyproject declares a uv workspace.
+
+    ``uv run`` at a workspace root syncs only the root project, so tests that
+    import workspace members fail with ModuleNotFoundError in a fresh worktree.
+    """
+    try:
+        text = (package_dir / "pyproject.toml").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return re.search(r"^\[tool\.uv\.workspace\]", text, re.M) is not None
+
+
+def uv_run_prefix(package_dir: Path | None) -> list[str]:
+    """``uv run`` (+ ``--all-packages`` at a uv workspace root)."""
+    if package_dir is not None and is_uv_workspace_root(package_dir):
+        return ["uv", "run", "--all-packages"]
+    return ["uv", "run"]
 
 
 @dataclass(frozen=True)
@@ -164,11 +205,14 @@ def build_pytest_command(
     *,
     memory: str = "6G",
     use_systemd: bool | None = None,
+    package_dir: Path | None = None,
 ) -> list[str]:
-    """Build the pytest command, wrapped in a memory cap when possible."""
+    """Build the pytest command, wrapped in a memory cap when possible.
+
+    *test_files* must be relative to *package_dir* (the cwd pytest runs in).
+    """
     inner = [
-        "uv",
-        "run",
+        *uv_run_prefix(package_dir),
         "pytest",
         "-q",
         "--no-header",
@@ -207,7 +251,9 @@ def run_pytest(
     """
     if not test_files:
         return PytestResult(returncode=PYTEST_OK, stdout="", stderr="")
-    cmd = build_pytest_command(test_files, memory=memory, use_systemd=use_systemd)
+    cmd = build_pytest_command(
+        test_files, memory=memory, use_systemd=use_systemd, package_dir=package_dir
+    )
     logger.debug("gate pytest: %s (cwd=%s)", " ".join(cmd), package_dir)
     try:
         completed = subprocess.run(
