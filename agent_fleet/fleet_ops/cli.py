@@ -47,6 +47,7 @@ def cmd_lane_run(args: argparse.Namespace) -> int:
             if args.worktree_parent
             else None,
             known_gate_subcommands=known,
+            gate=not args.no_gate,
         )
     except ModelPolicyError as exc:
         print(f"error: model policy: {exc}", file=sys.stderr)
@@ -142,6 +143,11 @@ def register_lane_commands(sub: argparse._SubParsersAction) -> None:
         "--status-file",
         default=None,
         help="Append the final status line here (automerge tails this file)",
+    )
+    run_p.add_argument(
+        "--no-gate",
+        action="store_true",
+        help="Stop after the PR is guaranteed; an external gate reviews it (status: GATE-SKIPPED)",
     )
     run_p.add_argument("--json", action="store_true", help="Emit the full result as JSON")
     run_p.set_defaults(func=cmd_lane_run, _known_subcommands=gate_known)

@@ -202,6 +202,7 @@ def run_lane(
     status_file: Path | str | None = None,
     config: FleetOpsConfig | None = None,
     known_gate_subcommands: set[str] | None = None,
+    gate: bool = True,
     run_dir: Path | str | None = None,
     expected_slug: str | None = None,
     worktree_parent: Path | str | None = None,
@@ -489,16 +490,22 @@ def run_lane(
     assert bound.binding is not None
     result.binding = bound.binding
 
-    # --- 6. gate (feature-detected) ---------------------------------------
-    outcome = gate_mod.run_gate(
-        lane=lane,
-        binding=bound.binding,
-        cwd=workdir,
-        judge_engine=spec.judge_engine if spec else None,
-        known_subcommands=known_gate_subcommands,
-        env={**os.environ, **binding_mod.gate_env(bound.binding)},
-        runner=gate_runner,
-    )
+    # --- 6. gate (feature-detected; off when an external gate owns review) --
+    if gate:
+        outcome = gate_mod.run_gate(
+            lane=lane,
+            binding=bound.binding,
+            cwd=workdir,
+            judge_engine=spec.judge_engine if spec else None,
+            known_subcommands=known_gate_subcommands,
+            env={**os.environ, **binding_mod.gate_env(bound.binding)},
+            runner=gate_runner,
+        )
+    else:
+        outcome = gate_mod.GateOutcome(
+            available=False,
+            reason="gate disabled (--no-gate); PR is guaranteed, an external gate reviews it",
+        )
     result.gate = outcome
 
     if outcome.skipped:

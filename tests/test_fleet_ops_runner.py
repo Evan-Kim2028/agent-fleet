@@ -369,6 +369,31 @@ def test_a_matching_binding_reaches_the_gate(repo: Path, task_file: Path, tmp_pa
     assert result.approved
 
 
+def test_no_gate_stops_at_the_guaranteed_pr(repo: Path, task_file: Path, tmp_path: Path) -> None:
+    _git(repo, "checkout", "-b", "fb/movers")
+    (repo / "feature.py").write_text("x = 1\n", encoding="utf-8")
+    calls: list[object] = []
+
+    def gate_runner(args, **_kwargs: object) -> subprocess.CompletedProcess[str]:  # noqa: ANN001
+        calls.append(args)
+        return subprocess.CompletedProcess(list(args), 0, "PREMERGE-APPROVED abcdef123\n", "")
+
+    result = _run(
+        repo,
+        task_file,
+        tmp_path,
+        known_gate_subcommands={"gate"},
+        gate=False,
+        runner=_lane_runner(existing_pr=3544),
+        gate_runner=gate_runner,
+    )
+    assert calls == []
+    assert not result.approved
+    assert result.pr == 3544
+    assert result.gate is not None and result.gate.skipped
+    assert "--no-gate" in (result.reason or "")
+
+
 # ---------------------------------------------------------------------- hooks
 
 
