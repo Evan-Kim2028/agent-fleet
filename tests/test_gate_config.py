@@ -16,7 +16,7 @@ def test_absent_section_yields_defaults() -> None:
     assert cfg is not None
     assert cfg.lenses == DEFAULT_LENS_ORDER
     assert cfg.backend == "cmd"
-    assert cfg.judge_backend == "grok"
+    assert cfg.judge_backend == "cmd"
     assert cfg.max_fix_rounds == 4
 
 

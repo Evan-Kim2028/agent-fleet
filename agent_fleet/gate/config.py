@@ -69,7 +69,7 @@ class GateConfig:
     lens_focus: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_LENSES))
     backend: str = "cmd"
     model: str | None = None
-    judge_backend: str = "grok"
+    judge_backend: str = "cmd"  # owner policy: judge on cmd/space-bunny; grok is opt-in only
     judge_model: str | None = None
     max_findings: int = 12
     max_candidates: int = 12

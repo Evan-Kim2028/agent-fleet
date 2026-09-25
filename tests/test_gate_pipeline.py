@@ -797,3 +797,34 @@ def test_metrics_carry_the_full_funnel(tmp_path: Path) -> None:
     assert metric.failing_by_round == [2, 2]
     assert metric.outcome == gm.OUTCOME_STALLED
     assert metric.head_sha == "def456"
+
+
+def test_lens_marked_untestable_claims_reach_the_judge(tmp_path: Path) -> None:
+    """A finding the lens marked testable=false must not be silently dropped."""
+    pipe = _pipeline(tmp_path, _FakeBackend())
+    pipe.verify(tmp_path / "wt", [_finding("u-1", testable=False)], source="lens")
+    assert [c["id"] for c in pipe.evidence.untestable] == ["u-1"]
+
+
+def test_finish_keeps_the_converge_round_trace(tmp_path: Path) -> None:
+    """_finish must record converge()'s per-round metrics, not a synthetic round 0."""
+    from agent_fleet.contracts.gate import GateOutcome
+
+    pipe = _pipeline(tmp_path, _FakeBackend())
+    rounds = [
+        gm.RoundMetric(round=0, head="aaa", failing=3),
+        gm.RoundMetric(round=1, head="bbb", failing=0),
+    ]
+    metric = gm.GateMetrics(run_id="r", repo="x", pr=1, start_sha="aaa", rounds=rounds)
+    result = pipe._finish(GateOutcome.APPROVED, "bbb", [], None, metric=metric)
+    assert result.metrics is metric
+    assert [r.failing for r in result.metrics.rounds] == [3, 0]
+    assert result.metrics.outcome == gm.OUTCOME_CONVERGED
+
+
+def test_verify_schema_accepts_a_null_test_file() -> None:
+    import json as _json
+
+    from agent_fleet.gate.pipeline import validate_verify
+
+    validate_verify(_json.loads('{"verdict": "UNTESTABLE", "test_file": null, "reason": "r"}'))

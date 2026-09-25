@@ -541,6 +541,11 @@ class GatePipeline:
 
     def verify(self, worktree: Path, findings: list[Finding], *, source: str) -> None:
         """Verify each testable claim with one failing test, run by the pipeline."""
+        for finding in findings:
+            if not finding.testable:
+                # Never drop a claim the lens could not frame as a test: the judge rules on it.
+                self.evidence.untestable.append(finding.to_dict())
+                self._log("gate.verify.untestable", finding=finding.id, reason="lens-marked")
         testable = [f for f in findings if f.testable]
         if not testable:
             return
@@ -922,6 +927,7 @@ class GatePipeline:
         worktree = self.gate_dir / "wt"
         outcome = GateOutcome.NEEDS_ESCALATION
         sha = ""
+        converged_metric: gate_metrics.GateMetrics | None = None
         try:
             fetch_base(self.repo, self.config.base_branch)
             ref = resolve_pull_request(self.repo, self.pr_number)
@@ -944,6 +950,7 @@ class GatePipeline:
                 outcome = GateOutcome.APPROVED
             else:
                 sha, metric = self.converge(ref=ref, pr_tests=pr_tests)
+                converged_metric = metric
                 if metric.outcome == gate_metrics.OUTCOME_CONVERGED:
                     outcome = GateOutcome.APPROVED
                 else:
@@ -965,7 +972,7 @@ class GatePipeline:
         finally:
             remove_worktree(self.repo, worktree)
 
-        return self._finish(outcome, sha, reasons, ref)
+        return self._finish(outcome, sha, reasons, ref, metric=converged_metric)
 
     def _finish(
         self,
@@ -973,7 +980,16 @@ class GatePipeline:
         sha: str,
         reasons: list[str],
         ref: PullRequestRef | None,
+        *,
+        metric: gate_metrics.GateMetrics | None = None,
     ) -> GateResult:
+        """Record the outcome. Keeps converge()'s per-round trace when one exists."""
+        if metric is not None:
+            if outcome is GateOutcome.APPROVED:
+                metric.outcome = gate_metrics.OUTCOME_CONVERGED
+            metric.reasons = list(reasons)
+            metric.append_metrics()
+            return self._finish_result(outcome, sha, reasons, metric)
         metric = self._metrics(
             gate_metrics.RoundMetric(round=0, head=(sha or "")[:9], failing=0),
             ref or PullRequestRef(number=self.pr_number, head_ref="", head_sha=sha, state=""),
@@ -986,6 +1002,15 @@ class GatePipeline:
         )
         metric.reasons = list(reasons)
         metric.append_metrics()
+        return self._finish_result(outcome, sha, reasons, metric)
+
+    def _finish_result(
+        self,
+        outcome: GateOutcome,
+        sha: str,
+        reasons: list[str],
+        metric: gate_metrics.GateMetrics,
+    ) -> GateResult:
         line = status_line_for(outcome, sha, reasons)
         if self.status_file is not None:
             _write_status_line(self.status_file, line)

@@ -3,10 +3,26 @@
   "title": "VerifyReport",
   "type": "object",
   "additionalProperties": false,
-  "required": ["verdict"],
+  "required": [
+    "verdict"
+  ],
   "properties": {
-    "verdict": {"type": "string", "enum": ["CONFIRMED", "REJECTED", "UNTESTABLE"]},
-    "test_file": {"type": "string"},
-    "reason": {"type": "string"}
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "CONFIRMED",
+        "REJECTED",
+        "UNTESTABLE"
+      ]
+    },
+    "test_file": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reason": {
+      "type": "string"
+    }
   }
 }
