@@ -307,7 +307,7 @@ def run_lane(
             lane=lane,
             branch=configured_branch,
             base=base,
-            parent=worktree_parent,
+            parent=Path(worktree_parent) if worktree_parent is not None else None,
             runner=runner,
         )
     except (FileNotFoundError, FileExistsError, RuntimeError) as exc:

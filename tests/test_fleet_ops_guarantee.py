@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -23,6 +23,7 @@ from agent_fleet.fleet_ops.guarantee import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 
@@ -67,7 +68,7 @@ def _fake_gh(
     created_pr: int | None = 3510,
     ahead: int = 1,
     head_ref: str | None = None,
-) -> object:
+) -> Callable[..., subprocess.CompletedProcess[str]]:
     """A runner that fakes only ``gh``.
 
     Git is NOT intercepted: the commit, the hook behaviour and the push all run
@@ -76,7 +77,7 @@ def _fake_gh(
     ``git rev-list`` commit-count probe are stubbed.
     """
 
-    def runner(args, **kwargs: object):  # noqa: ANN001, ANN202
+    def runner(args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:  # noqa: ANN401
         argv = list(args)
         if argv and argv[0] == "gh":
             if "list" in argv:

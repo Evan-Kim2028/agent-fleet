@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import Any
 
 from agent_fleet.fleet_ops import gate as g
 from agent_fleet.fleet_ops.binding import LaneBinding
 
 
-def _binding(**overrides) -> LaneBinding:  # noqa: ANN003
-    base = {
+def _binding(**overrides: Any) -> LaneBinding:  # noqa: ANN401
+    base: dict[str, Any] = {
         "repo_slug": "Evan-Kim2028/lake-of-rage",
         "branch": "fb/lane",
         "pr": 3544,
@@ -37,7 +38,7 @@ def test_detection_never_raises_when_the_binary_is_missing() -> None:
 
 
 def test_detection_handles_a_failing_probe() -> None:
-    def runner(_args, **_kwargs: object):  # noqa: ANN001, ANN202
+    def runner(_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:  # noqa: ANN401
         return subprocess.CompletedProcess([], 1, "", "boom")
 
     assert g.gate_available(runner=runner) is False
@@ -74,7 +75,7 @@ def test_missing_gate_is_a_skip_not_an_error() -> None:
 
 
 def test_gate_approval_is_read_from_the_status_line() -> None:
-    def runner(_args, **_kwargs: object):  # noqa: ANN001, ANN202
+    def runner(_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:  # noqa: ANN401
         return subprocess.CompletedProcess([], 0, "12:00:00 PREMERGE-APPROVED abc123def\n", "")
 
     out = g.run_gate(
@@ -88,7 +89,7 @@ def test_gate_approval_is_read_from_the_status_line() -> None:
 def test_a_bare_approve_word_is_not_an_approval() -> None:
     """Only the exact status contract approves; a stray "APPROVE" never reaches the merge path."""
 
-    def runner(_args, **_kwargs: object):  # noqa: ANN001, ANN202
+    def runner(_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:  # noqa: ANN401
         return subprocess.CompletedProcess([], 0, "APPROVE\n", "")
 
     out = g.run_gate(
@@ -99,7 +100,7 @@ def test_a_bare_approve_word_is_not_an_approval() -> None:
 
 
 def test_an_approval_line_with_a_failing_exit_is_rejected() -> None:
-    def runner(_args, **_kwargs: object):  # noqa: ANN001, ANN202
+    def runner(_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:  # noqa: ANN401
         return subprocess.CompletedProcess([], 5, "12:00:00 PREMERGE-APPROVED abcdef123\n", "")
 
     out = g.run_gate(
@@ -109,7 +110,7 @@ def test_an_approval_line_with_a_failing_exit_is_rejected() -> None:
 
 
 def test_stderr_logs_do_not_hide_the_stdout_status_line() -> None:
-    def runner(_args, **_kwargs: object):  # noqa: ANN001, ANN202
+    def runner(_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:  # noqa: ANN401
         return subprocess.CompletedProcess(
             [], 0, "12:00:00 PREMERGE-APPROVED abcdef123\n", "INFO trailing log line\n"
         )
@@ -128,7 +129,7 @@ def test_needs_escalation_output_is_not_an_approval() -> None:
     this a pass. It is the most dangerous possible false positive here.
     """
 
-    def runner(_args, **_kwargs: object):  # noqa: ANN001, ANN202
+    def runner(_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:  # noqa: ANN401
         return subprocess.CompletedProcess([], 1, "NEEDS-ESCALATION: did not APPROVE the fix\n", "")
 
     out = g.run_gate(
@@ -138,7 +139,7 @@ def test_needs_escalation_output_is_not_an_approval() -> None:
 
 
 def test_nonzero_exit_without_approval_is_a_rejection() -> None:
-    def runner(_args, **_kwargs: object):  # noqa: ANN001, ANN202
+    def runner(_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:  # noqa: ANN401
         return subprocess.CompletedProcess([], 3, "gate crashed\n", "")
 
     out = g.run_gate(
@@ -151,7 +152,7 @@ def test_nonzero_exit_without_approval_is_a_rejection() -> None:
 def test_gate_prose_tail_is_not_an_approval() -> None:
     """`PREMERGE-APPROVED <prose>` is not the status contract: no approval, no sha9."""
 
-    def runner(_args, **_kwargs: object):  # noqa: ANN001, ANN202
+    def runner(_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:  # noqa: ANN401
         return subprocess.CompletedProcess([], 0, "12:00:00 PREMERGE-APPROVED everything\n", "")
 
     out = g.run_gate(
@@ -169,7 +170,7 @@ def test_commit_env_overlays_skip_on_the_real_environment(monkeypatch, tmp_path)
     """A bare {"SKIP": ...} env stripped PATH/HOME and broke the hooks it meant to keep."""
     from agent_fleet.fleet_ops import guarantee
 
-    seen: dict[str, object] = {}
+    seen: dict[str, Any] = {}
 
     def runner(args, **kwargs):  # noqa: ANN001, ANN003, ANN202
         seen.setdefault("env", kwargs.get("env"))

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from agent_fleet.fleet_ops.config import (
     DEFAULT_PUSH_BRANCH,
     DEFAULT_STALL_MINUTES,
+    FleetOpsConfig,
+    OperatorSpec,
     effective_stall_minutes,
     expand_template,
     load_fleet_ops_config,
@@ -37,6 +39,20 @@ FULL = {
 }
 
 
+def _load(raw: Any) -> FleetOpsConfig:  # noqa: ANN401
+    """Load a config that the test knows is well-formed, failing loudly if it is not."""
+    cfg = load_fleet_ops_config(raw)
+    assert cfg is not None
+    return cfg
+
+
+def _spec(cfg: FleetOpsConfig, name: str) -> OperatorSpec:
+    """The named operator, failing loudly when the config does not define it."""
+    spec = cfg.operator(name)
+    assert spec is not None
+    return spec
+
+
 def test_parses_operators_and_globals() -> None:
     cfg = load_fleet_ops_config(FULL)
     assert cfg is not None
@@ -54,9 +70,9 @@ def test_missing_section_returns_none() -> None:
 
 
 def test_lane_placeholder_expands_per_operator() -> None:
-    cfg = load_fleet_ops_config(FULL)
-    zero_e = cfg.operator("documents-0e")
-    one_d = cfg.operator("documents-1d")
+    cfg = _load(FULL)
+    zero_e = _spec(cfg, "documents-0e")
+    one_d = _spec(cfg, "documents-1d")
     assert zero_e.branch_for("stampinplace") == "fb/stampinplace"
     assert one_d.branch_for("stampinplace") == "ops/stampinplace"
     assert zero_e.task_file_for("stampinplace") == "prompts/stampinplace.task.md"
@@ -71,19 +87,18 @@ def test_expand_template_does_not_choke_on_stray_braces() -> None:
 
 
 def test_skip_env_lists_only_named_hooks() -> None:
-    cfg = load_fleet_ops_config(FULL)
+    cfg = _load(FULL)
     assert cfg.skip_env() == {"SKIP": "ruff-format,pyright"}
 
 
 def test_skip_env_empty_when_no_baseline_hooks() -> None:
-    cfg = load_fleet_ops_config({"fleet_ops": {"operators": {}}})
+    cfg = _load({"fleet_ops": {"operators": {}}})
     assert cfg.skip_env() == {}
 
 
 def test_defaults_applied_when_section_is_sparse() -> None:
-    cfg = load_fleet_ops_config({"fleet_ops": {"operators": {"op": {}}}})
-    assert cfg is not None
-    spec = cfg.operator("op")
+    cfg = _load({"fleet_ops": {"operators": {"op": {}}}})
+    spec = _spec(cfg, "op")
     assert spec.engine == "cmd"
     assert spec.push_branch == DEFAULT_PUSH_BRANCH
     assert spec.branch_for("l") == "fb/l"
@@ -97,14 +112,14 @@ def test_operator_stall_minutes_override_global() -> None:
             "operators": {"slow": {"stall_minutes": 45}, "normal": {}},
         }
     }
-    cfg = load_fleet_ops_config(raw)
+    cfg = _load(raw)
     assert effective_stall_minutes(cfg, "slow") == 45
     assert effective_stall_minutes(cfg, "normal") == 20
     assert effective_stall_minutes(cfg, "unknown-operator") == 20
 
 
 def test_malformed_operator_entries_are_skipped() -> None:
-    cfg = load_fleet_ops_config(
+    cfg = _load(
         {"fleet_ops": {"operators": {"good": {"engine": "cmd"}, "bad": "not-a-dict", "": {}}}}
     )
     assert sorted(cfg.operators) == ["good"]
@@ -122,7 +137,7 @@ def test_load_from_repo_yaml_file(tmp_path: Path) -> None:
     cfg = load_fleet_ops_config_from_repo(tmp_path)
     assert cfg is not None
     assert cfg.baseline_skip_hooks == ("api-consumer-docs-check",)
-    assert cfg.operator("documents-0e").engine == "cmd"
+    assert _spec(cfg, "documents-0e").engine == "cmd"
 
 
 def test_load_from_repo_without_section(tmp_path: Path) -> None:

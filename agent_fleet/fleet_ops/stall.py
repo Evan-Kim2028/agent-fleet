@@ -22,8 +22,20 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 DEFAULT_STALL_MINUTES = 20
+
+
+class _StatLike(Protocol):
+    """What stall detection actually needs from a stat result: the mtime.
+
+    Narrower than ``os.stat_result`` on purpose — *stat* is an injection point,
+    and the real ``os.stat_result`` satisfies this structurally.
+    """
+
+    st_mtime: float
+
 
 #: The stall action, in order: continue once, then escalate.
 ACTION_CONTINUE = "continue"
@@ -57,12 +69,12 @@ def stream_idle_seconds(
     stream_path: Path | str,
     *,
     now: float | None = None,
-    stat: object = None,
+    stat: _StatLike | None = None,
 ) -> float:
     """Seconds since the stream file was last written, or ``inf`` if absent.
 
-    *stat* is an injectable ``os.stat_result`` (tests pass a fake); when omitted
-    the file is stat'ed directly.
+    *stat* is an injectable stat result (tests pass a fake); when omitted the
+    file is stat'ed directly.
     """
     if stat is None:
         try:
@@ -70,7 +82,7 @@ def stream_idle_seconds(
         except OSError:
             return float("inf")
     else:
-        mtime = stat.st_mtime  # type: ignore[attr-defined]
+        mtime = stat.st_mtime
     return max(0.0, (now if now is not None else time.time()) - mtime)
 
 

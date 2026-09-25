@@ -21,6 +21,7 @@ from agent_fleet.fleet_ops.binding import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 
@@ -34,8 +35,8 @@ def _fake_git_and_gh(
     *,
     remote: str | None = "git@github.com:Evan-Kim2028/lake-of-rage.git",
     pr: dict[str, Any] | None = None,
-) -> object:
-    def runner(args, **_kwargs: object):  # noqa: ANN001, ANN202
+) -> Callable[..., subprocess.CompletedProcess[str]]:
+    def runner(args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:  # noqa: ANN401
         argv = list(args)
         if argv[:2] == ["git", "remote"]:
             return _completed(
@@ -84,7 +85,7 @@ def test_resolves_a_matching_binding(tmp_path: Path) -> None:
     wt = tmp_path / "wt"
     wt.mkdir()
     runner = _fake_git_and_gh(pr={"number": 3544, "headRefName": "fb/lane", "headRefOid": "a" * 40})
-    result = b.resolve(wt, branch="fb/lane", runner=runner)  # type: ignore[arg-type]
+    result = b.resolve(wt, branch="fb/lane", runner=runner)
     assert result.ok
     assert result.binding is not None
     assert result.binding.repo_slug == "Evan-Kim2028/lake-of-rage"
@@ -99,7 +100,7 @@ def test_refuses_when_pr_head_is_a_different_branch(tmp_path: Path) -> None:
     runner = _fake_git_and_gh(
         pr={"number": 3544, "headRefName": "dq1d/other-lane", "headRefOid": "b" * 40}
     )
-    result = b.resolve(wt, branch="fb/lane", runner=runner)  # type: ignore[arg-type]
+    result = b.resolve(wt, branch="fb/lane", runner=runner)
     assert not result.ok
     assert result.reason == REFUSED_HEAD_MISMATCH
     assert "dq1d/other-lane" in result.detail
@@ -112,7 +113,7 @@ def test_refuses_when_no_origin_remote(tmp_path: Path) -> None:
         wt,
         branch="fb/lane",
         runner=_fake_git_and_gh(remote=None, pr={"number": 1, "headRefName": "fb/lane"}),
-    )  # type: ignore[arg-type]
+    )
     assert not result.ok
     assert result.reason == REFUSED_NO_ORIGIN
 
@@ -126,7 +127,7 @@ def test_refuses_when_expected_slug_does_not_match(tmp_path: Path) -> None:
         wt,
         branch="fb/lane",
         expected_slug="Evan-Kim2028/silphcoanalytics",
-        runner=runner,  # type: ignore[arg-type]
+        runner=runner,
     )
     assert not result.ok
     assert result.reason == REFUSED_SLUG_MISMATCH
@@ -136,13 +137,13 @@ def test_refuses_when_expected_slug_does_not_match(tmp_path: Path) -> None:
 def test_refuses_when_no_pr_for_the_branch(tmp_path: Path) -> None:
     wt = tmp_path / "wt"
     wt.mkdir()
-    result = b.resolve(wt, branch="fb/lane", runner=_fake_git_and_gh(pr=None))  # type: ignore[arg-type]
+    result = b.resolve(wt, branch="fb/lane", runner=_fake_git_and_gh(pr=None))
     assert not result.ok
     assert result.reason == REFUSED_NO_PR
 
 
 def test_refuses_when_the_worktree_is_missing(tmp_path: Path) -> None:
-    result = b.resolve(tmp_path / "nope", branch="fb/lane", runner=_fake_git_and_gh())  # type: ignore[arg-type]
+    result = b.resolve(tmp_path / "nope", branch="fb/lane", runner=_fake_git_and_gh())
     assert not result.ok
 
 
@@ -154,7 +155,7 @@ def test_slug_comparison_is_case_insensitive(tmp_path: Path) -> None:
         wt,
         branch="fb/lane",
         expected_slug="evan-kim2028/lake-of-rage",
-        runner=runner,  # type: ignore[arg-type]
+        runner=runner,
     )
     assert result.ok
 

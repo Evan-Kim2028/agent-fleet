@@ -69,6 +69,8 @@ def test_operators_get_separate_files_for_the_same_lane_name() -> None:
 
     zero_e = load_record("documents-0e", "shared")
     one_d = load_record("documents-1d", "shared")
+    assert zero_e is not None
+    assert one_d is not None
     assert zero_e.pr == 1
     assert one_d.pr == 2
     assert len(list(iter_records())) == 2

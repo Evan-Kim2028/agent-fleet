@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import overload
 
 import pytest
 
@@ -92,24 +93,32 @@ def test_capping_an_empty_command_is_an_error() -> None:
         plan_memory_cap([], use_systemd=False)
 
 
-def test_systemd_requested_but_missing_raises_rather_than_running_uncapped() -> None:
+def test_systemd_requested_but_missing_raises_rather_than_running_uncapped(monkeypatch) -> None:  # noqa: ANN001
     """Never silently run unbounded — a visible failure is the correct outcome."""
     import shutil
 
     real = shutil.which
 
-    def fake_which(name: str) -> str | None:
-        return None if name == "systemd-run" else real(name)
+    @overload
+    def fake_which(cmd: str, mode: int = 1, path: str | None = None) -> str | None: ...
+
+    @overload
+    def fake_which(cmd: bytes, mode: int = 1, path: str | None = None) -> bytes | None: ...
+
+    def fake_which(
+        cmd: str | bytes,
+        mode: int = 1,
+        path: str | None = None,
+    ) -> str | bytes | None:
+        if cmd == "systemd-run":
+            return None
+        return real(cmd, mode, path)
 
     import agent_fleet.fleet_ops.memcap as memcap_mod
 
-    original = memcap_mod.shutil.which
-    memcap_mod.shutil.which = fake_which  # type: ignore[assignment]
-    try:
-        with pytest.raises(MemoryCapError, match="not on PATH"):
-            plan_memory_cap(["pytest"], use_systemd=True)
-    finally:
-        memcap_mod.shutil.which = original  # type: ignore[assignment]
+    monkeypatch.setattr(memcap_mod.shutil, "which", fake_which)
+    with pytest.raises(MemoryCapError, match="not on PATH"):
+        plan_memory_cap(["pytest"], use_systemd=True)
 
 
 # --------------------------------------------------------------- test scoping

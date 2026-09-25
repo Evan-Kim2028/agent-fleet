@@ -232,11 +232,19 @@ def resolve(
             f"PR #{pr.get('number')} in {slug} has headRefName {head_ref!r}, expected {branch!r}",
         )
 
+    number = pr.get("number")
+    if not isinstance(number, int):
+        return BindingResult(
+            None,
+            REFUSED_PR_LOOKUP_FAILED,
+            f"gh returned a PR for {slug} head {branch} with a non-numeric number {number!r}",
+        )
+
     return BindingResult(
         LaneBinding(
             repo_slug=slug,
             branch=branch,
-            pr=int(pr["number"]),
+            pr=number,
             head_ref=head_ref,
             head_sha=str(pr.get("headRefOid") or ""),
             worktree=worktree,

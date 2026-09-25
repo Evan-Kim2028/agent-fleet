@@ -32,8 +32,18 @@ def _parser() -> argparse.ArgumentParser:
 # ---------------------------------------------------------------- registration
 
 
+def _subparser_choices() -> dict[str, argparse.ArgumentParser]:
+    """The registered subcommand names, via the subparsers action's public mapping."""
+    group = _parser()._subparsers
+    assert group is not None
+    for action in group._group_actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return dict(action.choices)
+    raise AssertionError("no subparsers action registered")
+
+
 def test_lane_and_lanes_are_registered() -> None:
-    assert set(_parser()._subparsers._group_actions[0].choices) >= {"lane", "lanes"}  # type: ignore[union-attr]
+    assert set(_subparser_choices()) >= {"lane", "lanes"}
 
 
 def test_lane_run_exposes_the_documented_flags() -> None:

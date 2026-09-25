@@ -14,6 +14,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -46,8 +47,8 @@ def _spawn_sleeper() -> subprocess.Popen[bytes]:
     )
 
 
-def _record_for(proc: subprocess.Popen[bytes], **overrides: object) -> LaneRecord:
-    base = {
+def _record_for(proc: subprocess.Popen[bytes], **overrides: Any) -> LaneRecord:  # noqa: ANN401
+    base: dict[str, Any] = {
         "lane": "movers",
         "operator": "documents-0e",
         "pid": proc.pid,

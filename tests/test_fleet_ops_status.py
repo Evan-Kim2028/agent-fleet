@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from typing import Any
 
 import pytest
 
@@ -32,8 +33,8 @@ def _isolated_home(tmp_path, monkeypatch):  # noqa: ANN001, ANN202
     return tmp_path
 
 
-def _record(**overrides) -> LaneRecord:  # noqa: ANN003
-    base = {"lane": "movers", "operator": "documents-0e", "state": STATE_RUNNING}
+def _record(**overrides: Any) -> LaneRecord:  # noqa: ANN401
+    base: dict[str, Any] = {"lane": "movers", "operator": "documents-0e", "state": STATE_RUNNING}
     return LaneRecord(**{**base, **overrides})
 
 

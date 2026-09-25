@@ -378,6 +378,7 @@ def run_devin_engine(
     workdir: Path,
     prompt: str,
     model: str | None = None,
+    run_dir: Path | str | None = None,
     name: str = "impl",
     timeout_s: int = DEFAULT_IMPL_TIMEOUT_S,
     devin_bin: str | None = None,
@@ -391,6 +392,10 @@ def run_devin_engine(
     The ladder is walked only on a *capacity* error. A truncated run that still
     has no PR gets exactly ``max_continues`` continue attempts. If a PR exists
     by then, the continue is skipped entirely — there is nothing left to do.
+
+    *run_dir* mirrors :func:`run_cmd_engine`: the per-attempt output is written
+    there and recorded on the result, so a devin lane leaves the same auditable
+    artifact trail the cmd engine does.
     """
     selected = model or DEVIN_MODEL_LADDER[0]
     # Validate against policy without pinning devin to a single model: the
@@ -402,6 +407,12 @@ def run_devin_engine(
             f"devin is restricted to the model ladder {list(DEVIN_MODEL_LADDER)}; "
             f"refusing to run {selected!r}"
         )
+
+    run_path = Path(run_dir) if run_dir is not None else None
+    output_path: Path | None = None
+    if run_path is not None:
+        run_path.mkdir(parents=True, exist_ok=True)
+        output_path = run_path / f"{name}.out"
 
     ladder: list[str] = []
     last_result: EngineResult | None = None
@@ -453,6 +464,10 @@ def run_devin_engine(
             result.exit_code = cont.exit_code
             if not looks_truncated(f"{cont.final_text}\n{cont.detail}"):
                 break
+
+    if output_path is not None:
+        output_path.write_text(result.final_text, encoding="utf-8")
+        result.output_path = output_path
 
     return result
 

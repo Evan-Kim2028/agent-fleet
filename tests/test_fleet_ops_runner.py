@@ -16,13 +16,14 @@ import json
 import subprocess
 from collections.abc import Callable  # noqa: TC003
 from pathlib import Path  # noqa: TC003
+from typing import Any
 
 import pytest
 
 from agent_fleet.fleet_ops import registry
 from agent_fleet.fleet_ops.config import FleetOpsConfig, OperatorSpec, load_fleet_ops_config
 from agent_fleet.fleet_ops.registry import STATE_APPROVED, STATE_PR_GUARANTEED
-from agent_fleet.fleet_ops.runner import run_lane, write_status_line
+from agent_fleet.fleet_ops.runner import LaneRunResult, run_lane, write_status_line
 
 #: A cmd JSONL stream that looks like real work: tool calls, then a result.
 STREAM = "\n".join(
@@ -87,7 +88,7 @@ def task_file(tmp_path: Path) -> Path:
     return path
 
 
-def _config(**operator_overrides: object) -> FleetOpsConfig:
+def _config(**operator_overrides: Any) -> FleetOpsConfig:  # noqa: ANN401
     return FleetOpsConfig(
         operators={"documents-1d": OperatorSpec(name="documents-1d", **operator_overrides)}
     )
@@ -115,7 +116,7 @@ def _lane_runner(
     """
     created: dict[str, int | None] = {"number": existing_pr}
 
-    def runner(args, **kwargs: object):  # noqa: ANN001, ANN202
+    def runner(args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:  # noqa: ANN401
         argv = list(args)
         if argv[:3] == ["git", "remote", "get-url"]:
             return subprocess.CompletedProcess(argv, 0, f"git@github.com:{slug}.git\n", "")
@@ -141,9 +142,9 @@ def _lane_runner(
     return runner
 
 
-def _run(repo: Path, task: Path, tmp_path: Path, **kwargs: object) -> object:
+def _run(repo: Path, task: Path, tmp_path: Path, **kwargs: Any) -> LaneRunResult:  # noqa: ANN401
     """Run a lane with the test's paths, merging *kwargs* over the defaults."""
-    opts = {
+    opts: dict[str, Any] = {
         "operator": "documents-1d",
         "lane": "movers",
         "repo_path": repo,
@@ -278,7 +279,7 @@ def test_a_pr_whose_head_is_another_branch_is_refused(
     (repo / "feature.py").write_text("x = 1\n", encoding="utf-8")
 
     def make_runner(head_ref: str) -> Callable[..., subprocess.CompletedProcess[str]]:
-        def runner(args, **kwargs: object):  # noqa: ANN001, ANN202
+        def runner(args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:  # noqa: ANN401  # noqa: ANN401
             argv = list(args)
             if argv[:3] == ["git", "remote", "get-url"]:
                 return subprocess.CompletedProcess(
