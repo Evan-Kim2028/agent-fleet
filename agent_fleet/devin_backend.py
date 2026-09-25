@@ -891,10 +891,13 @@ class DevinBackend:
         cwd: Path | None = None,
         model: str | None = None,
         mode: str | None = None,
+        runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     ) -> DevinLLMResult:
         del max_tokens, memory_limit
         ok, detail, fix = check_devin_auth()
         if not ok:
+            # Both halves matter: `detail` says what is wrong and `fix` says what
+            # to run about it, so an auth failure names the remedy too.
             msg = detail if not fix else f"{detail}; {fix}"
             return DevinLLMResult(stdout="", stderr=msg, exit_code=1, duration_s=0.0)
 
@@ -923,6 +926,7 @@ class DevinBackend:
                 devin_bin=self.devin_bin,
                 mode=selected_mode,
                 on_progress=_on_progress if run_log is not None else None,
+                runner=runner,
             )
             duration_s = time.monotonic() - t0
             ctx = get_run_context()
