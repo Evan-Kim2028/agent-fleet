@@ -93,9 +93,10 @@ def test_shipped_example_config_matches_the_owner_policy() -> None:
     example = Path(__file__).resolve().parent.parent / "examples" / "fleet.gate.yaml"
     raw = yaml.safe_load(example.read_text(encoding="utf-8"))
     policy = parse_model_policy(raw)
-    assert policy.backend("cmd") is not None
-    assert policy.backend("cmd").allowed_models == frozenset({"stealth/space-bunny-alpha"})
-    assert policy.backend("cmd").roles is None  # cmd may serve any gate role
+    cmd = policy.backend("cmd")
+    assert cmd is not None
+    assert cmd.allowed_models == frozenset({"stealth/space-bunny-alpha"})
+    assert cmd.roles is None  # cmd may serve any gate role
     grok = policy.backend("grok")
     assert grok is not None
     assert grok.allowed_models == frozenset({"step-5-preview"})

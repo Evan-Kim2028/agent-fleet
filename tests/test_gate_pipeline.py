@@ -112,7 +112,7 @@ def _policy() -> ModelPolicy:
 
 
 def _config(**overrides: Any) -> GateConfig:  # noqa: ANN401
-    base = {
+    base: dict[str, Any] = {
         "backend": "cmd",
         "model": "m",
         "judge_backend": "cmd",

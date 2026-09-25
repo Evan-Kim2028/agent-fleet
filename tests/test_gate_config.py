@@ -146,4 +146,4 @@ def test_default_config_is_frozen() -> None:
     """A frozen config means one gate run cannot mutate another's settings."""
     cfg = GateConfig()
     with pytest.raises(Exception, match=r"frozen|assign"):
-        cfg.max_fix_rounds = 9  # type: ignore[misc]
+        cfg.max_fix_rounds = 9  # type: ignore[misc]  # ty: ignore[invalid-assignment]

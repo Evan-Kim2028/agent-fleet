@@ -236,12 +236,12 @@ def test_call_structured_holds_a_slot_while_running(tmp_path: Path) -> None:
     pool = SlotPool("agent", root=tmp_path / "slots", size=1)
 
     class _Observing(_ScriptedBackend):
-        def run(self, _prompt: str, **_kwargs: Any) -> _Result:  # noqa: ANN401
+        def run(self, prompt: str, **_kwargs: Any) -> _Result:  # noqa: ANN401, ARG002
             seen.append(pool.in_use() == 1)
             return _Result(stdout='{"verdict": "CONFIRMED"}')
 
     call_structured(
-        _Observing([""]),
+        _Observing([""]),  # type: ignore[arg-type]
         "prompt",
         model="m",
         cwd=tmp_path,

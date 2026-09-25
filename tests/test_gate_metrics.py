@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path  # noqa: TC003 - built into concrete paths at runtime
+from typing import cast
 
 from agent_fleet.gate.metrics import (
     OUTCOME_CONVERGED,
@@ -86,7 +87,8 @@ def test_to_dict_is_json_serialisable() -> None:
     assert payload["outcome"] == OUTCOME_CONVERGED
     assert payload["failing_by_round"] == [2, 0]
     assert payload["candidates"] == 9
-    assert payload["rounds"][1]["fixed"] == 2
+    rounds = cast("list[dict[str, object]]", payload["rounds"])
+    assert rounds[1]["fixed"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +161,7 @@ def test_table_on_no_rows() -> None:
 
 
 def test_table_shows_the_funnel_and_the_trace() -> None:
-    rows = [
+    rows: list[dict[str, object]] = [
         {
             "at": "2026-09-25T10:00:00",
             "pr": 42,
@@ -211,7 +213,7 @@ def test_summary_of_no_runs() -> None:
 
 
 def test_summary_counts_outcomes_and_approval_rate() -> None:
-    rows = [
+    rows: list[dict[str, object]] = [
         {"outcome": OUTCOME_CONVERGED, "failing_by_round": [3, 0], "candidates": 4, "confirmed": 2},
         {"outcome": OUTCOME_STALLED, "failing_by_round": [3, 3], "candidates": 6, "confirmed": 1},
         {"outcome": OUTCOME_CONVERGED, "failing_by_round": [1, 0], "candidates": 2, "confirmed": 1},
