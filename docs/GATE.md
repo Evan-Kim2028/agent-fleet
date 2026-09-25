@@ -263,11 +263,84 @@ Machine-wide (`~/.agent-fleet/fleet.yaml`):
 | `gate.test_memory` | `6G` | `MemoryMax` for every pytest |
 | `gate.agent_slots` | `24` | machine-wide agent slot count |
 | `gate.test_slots` | `4` | machine-wide test slot count |
+| `gate.openrouter_slots` | `32` | separate pool for remote (OpenRouter) calls |
+| `gate.roles.<role>.backend` / `.model` | falls back to the global keys | per-role backend (see below) |
+| `gate.inline_diff_chars` | `60000` | cap on the inlined diff for a no-tool backend |
+| `gate.inline_file_chars` | `20000` | cap per inlined file |
+| `gate.inline_total_chars` | `120000` | total cap on inlined content |
 | `gate.package_dir` | auto | force all tests into one package dir |
 
 `gate: false` disables the gate entirely. An absent or malformed section falls
 back to the documented defaults, so `agent-fleet gate` works in a repo with no
 config at all.
+
+---
+
+## Running find/judge on OpenRouter
+
+The gate's four roles do not need the same capabilities. **find** and **judge**
+are read-only: they read a change and answer JSON. **verify** and **fix** need
+tools — verify has to write a test file, fix has to edit code, run pytest, commit
+and push. Only the first pair can move to a remote backend.
+
+`gate.roles` pins a backend per role:
+
+```yaml
+model_policy:
+  backends:
+    cmd:
+      allowed_models: [stealth/space-bunny-alpha]
+    openrouter:
+      allowed_models: [stealth/space-bunny-alpha]
+      roles: [find, judge]          # verify/fix are refused, fail-fast
+
+gate:
+  roles:
+    find:  { backend: openrouter, model: stealth/space-bunny-alpha }
+    judge: { backend: openrouter, model: stealth/space-bunny-alpha }
+    verify: { backend: cmd, model: stealth/space-bunny-alpha }
+    fix:    { backend: cmd, model: stealth/space-bunny-alpha }
+```
+
+**Backward compatible.** A role absent from `gate.roles` resolves to the single
+global keys: `find`/`verify`/`fix` fall back to `gate.backend`/`gate.model`,
+`judge` to `gate.judge_backend`/`gate.judge_model`. An existing config with no
+`roles:` block behaves exactly as it always did. A role entry that names a
+backend but no model inherits that role's fallback model.
+
+**Policy is enforced before dispatch.** All four roles are checked against
+`model_policy` before any backend is constructed, so a violation — an
+`openrouter` role outside `[find, judge]`, an unlisted model, a missing model —
+fails in a second rather than after a fan-out has spent the budget. `find` and
+`lens` are the same role under two vocabularies; a policy may spell it either
+way. The mapping between a `gate.roles` key and a policy role lives in one place
+(`_ROLE_POLICY_ROLE` in `agent_fleet/gate/pipeline.py`) so the check and the
+dispatch cannot drift.
+
+**The change is inlined, not fetched.** A backend that cannot be trusted to read
+the worktree gets the change pasted into the prompt: the full
+`git diff <base>...HEAD` plus the post-change content of every changed
+non-test file, each part capped (`inline_diff_chars` 60 000, `inline_file_chars`
+20 000, `inline_total_chars` 120 000). The lens prompt is then written for a
+model with no shell — it is told it has no tools and is never told to run
+`git diff`. Three properties make that review trustworthy:
+
+- the diff is included whole, because a half diff invents phantom context (a
+  deleted line only means something next to the line that replaced it);
+- when the total cap is hit, files are **dropped, not truncated to a stub**, and
+  the count of omitted files is stated in the context footer — a 200-char head
+  of a file reads as a whole file and invites findings about unseen code;
+- changed *test* files are not pasted in full (the gate runs those tests
+  instead), and that scoping is declared too.
+
+**Admission is separate.** OpenRouter calls draw from their own `openrouter`
+slot pool (`gate.openrouter_slots`, default 32) rather than the local `agent`
+pool, so remote reviews never consume or queue behind the cmd agent budget.
+
+**Fail-closed is unchanged.** A dead or invalid remote answer is still not
+evidence of a clean PR: it goes through the same repair turn and retry, then
+raises and the run ends in `NEEDS_ESCALATION`. A missing
+`OPENROUTER_API_KEY` surfaces as a dead call, not as a passing review.
 
 ---
 

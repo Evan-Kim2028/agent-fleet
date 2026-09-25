@@ -47,6 +47,10 @@ _SCALARS: tuple[str, ...] = (
     "max_fix_rounds",
     "agent_slots",
     "test_slots",
+    "openrouter_slots",
+    "inline_diff_chars",
+    "inline_file_chars",
+    "inline_total_chars",
 )
 
 _STRINGS: tuple[str, ...] = (
@@ -59,6 +63,37 @@ _STRINGS: tuple[str, ...] = (
 _OPTIONAL_STRINGS: tuple[str, ...] = ("model", "judge_model", "push_branch", "package_dir")
 
 _BOOLS: tuple[str, ...] = ("enable_fix", "enable_judge")
+
+_ROLES: tuple[str, ...] = ("find", "judge", "verify", "fix")
+
+# Per-role fallback to the single global keys. ``find``/``verify``/``fix`` share
+# ``backend``/``model``; ``judge`` has always had its own pair. A role absent from
+# ``gate.roles`` resolves through this map, so a config written before per-role
+# backends existed behaves exactly as it did.
+_ROLE_FALLBACK: dict[str, tuple[str, str]] = {
+    "find": ("backend", "model"),
+    "verify": ("backend", "model"),
+    "fix": ("backend", "model"),
+    "judge": ("judge_backend", "judge_model"),
+}
+
+# A backend that gets the change inlined into the prompt instead of being trusted
+# to read the repo itself. OpenRouter reviews see the diff and the changed files
+# pasted in; see agent_fleet/gate/inline.py.
+_NO_TOOL_BACKENDS: frozenset[str] = frozenset({"openrouter"})
+
+
+@dataclass(frozen=True)
+class RoleTarget:
+    """Which backend and model serves one gate role."""
+
+    backend: str
+    model: str | None = None
+
+    @property
+    def needs_inline_context(self) -> bool:
+        """True when this backend cannot be relied on to read the repo itself."""
+        return self.backend.lower() in _NO_TOOL_BACKENDS
 
 
 @dataclass(frozen=True)
@@ -90,10 +125,35 @@ class GateConfig:
     max_fix_rounds: int = 4
     agent_slots: int = 24
     test_slots: int = 4
+    # Remote (OpenRouter) calls are admitted from their own pool so they never
+    # queue behind — or consume — the local cmd agent budget.
+    openrouter_slots: int = 32
+    # Caps on the change pasted into a no-tool backend's prompt. The evidence is
+    # inlined rather than read by the model, so it must be bounded.
+    inline_diff_chars: int = 60_000
+    inline_file_chars: int = 20_000
+    inline_total_chars: int = 120_000
+    # Per-role backend/model overrides. A role absent here resolves through
+    # ``_ROLE_FALLBACK`` to the single global keys, so existing configs are
+    # unaffected.
+    roles: dict[str, RoleTarget] = field(default_factory=dict)
 
     def focus_for(self, lens: str) -> str:
         """Reviewer focus text for *lens* (custom or default)."""
         return self.lens_focus.get(lens) or DEFAULT_LENSES.get(lens) or lens
+
+    def role_target(self, role: str) -> RoleTarget:
+        """Backend + model for one gate *role*, falling back to the global keys.
+
+        This is the single place a role's dispatch target is resolved, so the
+        config parser, the pre-dispatch policy check, and the pipeline's dispatch
+        can never disagree about where a role runs.
+        """
+        override = self.roles.get(role)
+        if override is not None:
+            return override
+        backend_key, model_key = _ROLE_FALLBACK.get(role, ("backend", "model"))
+        return RoleTarget(backend=getattr(self, backend_key), model=getattr(self, model_key))
 
 
 def load_gate_config(raw: dict[str, Any] | None) -> GateConfig | None:
@@ -138,4 +198,33 @@ def load_gate_config(raw: dict[str, Any] | None) -> GateConfig | None:
         kwargs[key] = str(value) if value else getattr(defaults, key)
     for key in _BOOLS:
         kwargs[key] = bool(section.get(key, getattr(defaults, key)))
+    # Parsed last, so a role entry that names no model inherits the *resolved*
+    # global model rather than the dataclass default.
+    kwargs["roles"] = _parse_roles(section.get("roles"), kwargs)
     return GateConfig(**kwargs)
+
+
+def _parse_roles(raw: Any, resolved: dict[str, Any]) -> dict[str, RoleTarget]:  # noqa: ANN401
+    """Parse ``gate.roles:`` into per-role targets.
+
+    A role is only overridden when it names a backend; a role entry that omits
+    ``backend`` is ignored rather than silently resolving to an empty backend
+    name, so a half-written entry falls back to the global keys instead of
+    breaking the run with an unroutable backend. A role that names a backend but
+    no model inherits the resolved fallback model for that role.
+    """
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    out: dict[str, RoleTarget] = {}
+    for name, spec in raw.items():
+        if not isinstance(spec, dict):
+            continue
+        backend = str(spec.get("backend") or "").strip()
+        if not backend:
+            continue
+        model = spec.get("model")
+        if not model:
+            model = _ROLE_FALLBACK.get(str(name), ("backend", "model"))[1]
+            model = resolved.get(model)
+        out[str(name)] = RoleTarget(backend=backend, model=str(model) if model else None)
+    return out

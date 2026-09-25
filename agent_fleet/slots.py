@@ -47,6 +47,12 @@ DEFAULT_POOL_NAME = "agent"
 DEFAULT_POOL_SIZE = 24
 DEFAULT_TEST_POOL_NAME = "test"
 DEFAULT_TEST_POOL_SIZE = 4
+# Remote (OpenRouter) calls get their own pool: they are HTTP requests that
+# occupy no local agent process, so budgeting them against the local agent pool
+# would let them queue behind cmd sessions (or, worse, be blocked by them) for
+# no reason.
+DEFAULT_OPENROUTER_POOL_NAME = "openrouter"
+DEFAULT_OPENROUTER_POOL_SIZE = 32
 
 _POLL_INTERVAL_S = 0.25
 _LOCK_NB = fcntl.LOCK_EX | fcntl.LOCK_NB
@@ -63,6 +69,7 @@ class PoolConfig:
     root: Path
     agent_slots: int = DEFAULT_POOL_SIZE
     test_slots: int = DEFAULT_TEST_POOL_SIZE
+    openrouter_slots: int = DEFAULT_OPENROUTER_POOL_SIZE
     poll_interval_s: float = _POLL_INTERVAL_S
 
 
@@ -158,10 +165,12 @@ class SlotPool:
         root: Path | str | None = None,
         size: int | None = None,
         poll_interval_s: float = _POLL_INTERVAL_S,
+        default_size: int = DEFAULT_POOL_SIZE,
     ) -> None:
         self.name = name
         self.root = Path(root) if root is not None else default_slots_root()
         self._size = size
+        self._default_size = default_size
         self._poll_interval_s = poll_interval_s
 
     @property
@@ -169,7 +178,7 @@ class SlotPool:
         """Effective slot count: the configured size, else the recorded one."""
         if self._size is not None:
             return self._size
-        return declared_size(self.root, self.name) or DEFAULT_POOL_SIZE
+        return declared_size(self.root, self.name) or self._default_size
 
     @property
     def dir(self) -> Path:
@@ -258,4 +267,16 @@ def test_slot_pool(cfg: PoolConfig | None = None) -> SlotPool:
         root=conf.root,
         size=conf.test_slots,
         poll_interval_s=conf.poll_interval_s,
+    )
+
+
+def openrouter_slot_pool(cfg: PoolConfig | None = None) -> SlotPool:
+    """The pool bounding concurrent OpenRouter calls, separate from local agents."""
+    conf = cfg or PoolConfig(root=default_slots_root())
+    return SlotPool(
+        DEFAULT_OPENROUTER_POOL_NAME,
+        root=conf.root,
+        size=conf.openrouter_slots,
+        poll_interval_s=conf.poll_interval_s,
+        default_size=DEFAULT_OPENROUTER_POOL_SIZE,
     )

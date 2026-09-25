@@ -63,8 +63,16 @@ def find_prompt(
     pr_number: int,
     task_text: str,
     prior_claims: str = "",
+    inlined_context: str = "",
 ) -> str:
-    """Prompt for one lens reviewer: BLOCKERS ONLY, with a repro per claim."""
+    """Prompt for one lens reviewer: BLOCKERS ONLY, with a repro per claim.
+
+    ``inlined_context`` is non-empty when the reviewer runs on a backend that is
+    not given repo tools (OpenRouter). The change is then pasted in below, and
+    the prompt must not tell the model to run ``git diff`` — a model with no
+    shell would either fail the call or, worse, report a clean review of a diff
+    it never saw.
+    """
     prior_block = ""
     if prior_claims.strip():
         prior_block = (
@@ -73,12 +81,24 @@ def find_prompt(
             f"the current code):\n----- PRIOR CLAIMS -----\n{prior_claims}\n"
             "----- END PRIOR -----\n"
         )
+    if inlined_context:
+        source_block = (
+            f"You have NO tools, NO shell and NO access to the repository — the only "
+            f"code you can see is the change pasted below. Review ONLY that change "
+            f"(PR #{pr_number}, head {head_sha}). Do not try to run git, read other "
+            "files, or list directories.\n\n"
+            f"----- INLINED CHANGE -----\n{inlined_context}\n----- END INLINED CHANGE -----\n"
+        )
+    else:
+        source_block = (
+            f"Repository worktree (read-only for you; do NOT edit, commit or push): "
+            f"{worktree}, detached at PR #{pr_number} head {head_sha}. Review ONLY the "
+            f"change: `git diff {base_branch}...HEAD` (run it). Read surrounding code "
+            "as needed.\n\n"
+        )
     return PROCESS_SAFETY + (
         f"You are a pre-merge reviewer with ONE focus: **{lens}** — {focus}\n"
-        f"Repository worktree (read-only for you; do NOT edit, commit or push): "
-        f"{worktree}, detached at PR #{pr_number} head {head_sha}. Review ONLY the "
-        f"change: `git diff {base_branch}...HEAD` (run it). Read surrounding code "
-        "as needed.\n\n"
+        f"{source_block}"
         f"{_blockers_only()}\n"
         "Each blocker MUST name the exact file/line and a concrete repro: the "
         "input/state and the observable wrong outcome, precise enough that someone "
@@ -182,12 +202,24 @@ def judge_prompt(
     confirmed: str,
     untestable: str,
     task_text: str,
+    inlined_context: str = "",
 ) -> str:
     """Prompt for the single judge call: rule on untestable claims + own blocker pass."""
+    if inlined_context:
+        source_block = (
+            f"You have NO tools, NO shell and NO access to the repository — the only "
+            f"code you can see is the change pasted below. Do not try to run git, read "
+            f"other files, or list directories.\n\n"
+            f"----- INLINED CHANGE -----\n{inlined_context}\n----- END INLINED CHANGE -----\n"
+        )
+    else:
+        source_block = (
+            f"PR #{pr_number} in worktree {worktree} (detached at {head_sha}). Read-only: "
+            f"do not edit, commit or push. The change is `git diff {base_branch}...HEAD`.\n\n"
+        )
     return PROCESS_SAFETY + (
-        f"You are the final pre-merge judge for PR #{pr_number} in worktree "
-        f"{worktree} (detached at {head_sha}). Read-only: do not edit, commit or "
-        f"push. The change is `git diff {base_branch}...HEAD`.\n"
+        f"You are the final pre-merge judge for PR #{pr_number}.\n"
+        f"{source_block}"
         f"Evidence so far — confirmed blockers (each has a failing test):\n{confirmed}\n\n"
         "Claims a test could not show (rule on each: is it a real merge blocker in "
         f"the current code?):\n{untestable}\n\n"

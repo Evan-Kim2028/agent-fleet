@@ -61,7 +61,7 @@ from agent_fleet.contracts.gate import (
     validate_verify,
 )
 from agent_fleet.gate import metrics as gate_metrics
-from agent_fleet.gate.config import GateConfig, load_gate_config
+from agent_fleet.gate.config import GateConfig, RoleTarget, load_gate_config
 from agent_fleet.gate.gitops import (
     GateError,
     PullRequestRef,
@@ -74,6 +74,7 @@ from agent_fleet.gate.gitops import (
     resolve_pull_request,
     worktree_head_sha,
 )
+from agent_fleet.gate.inline import build_review_context
 from agent_fleet.gate.prompts import (
     find_prompt,
     fix_prompt,
@@ -98,6 +99,7 @@ from agent_fleet.slots import (
     SlotPool,
     agent_slot_pool,
     default_slots_root,
+    openrouter_slot_pool,
     test_slot_pool,
 )
 
@@ -111,6 +113,13 @@ ROLE_LENS = "lens"
 ROLE_VERIFIER = "verifier"
 ROLE_FIX = "fix"
 ROLE_JUDGE = "judge"
+
+# Config keys naming the four roles ``gate.roles:`` may pin. These are NOT the
+# policy role strings: ``lens``/``verifier``/``fix`` are the *pipeline* roles the
+# model policy is written against, and a role's policy role follows from it.
+ROLE_FIND = "find"
+ROLE_VERIFIER_CONFIG = "verify"
+ROLE_FIX_CONFIG = "fix"
 
 _NO_TASK_TEXT = "(no task file supplied; judge against the PR description)"
 
@@ -362,6 +371,7 @@ class GatePipeline:
         run_id: str | None = None,
         agent_pool: SlotPool | None = None,
         test_pool: SlotPool | None = None,
+        openrouter_pool: SlotPool | None = None,
         use_systemd: bool | None = None,
     ) -> None:
         self.repo = repo.resolve()
@@ -376,11 +386,73 @@ class GatePipeline:
         self.run_id = run_id or f"gate-{pr_number}-{uuid.uuid4().hex[:8]}"
         self.agent_pool = agent_pool
         self.test_pool = test_pool
+        self.openrouter_pool = openrouter_pool
         self.use_systemd = systemd_run_available() if use_systemd is None else use_systemd
         self.evidence = _Evidence()
         self.archive = GateTestArchive(gate_dir)
         self._candidates: list[dict[str, Any]] = []
         self._runner: GateTestRunner | None = None
+        # One backend instance per distinct backend name, shared by every role
+        # routed to it. ``run_gate`` fills this in; seeding the judge here keeps
+        # a pipeline built by an older caller behaving exactly as before.
+        self._role_backends: dict[str, LLMBackend] = {}
+        if judge_backend is not None:
+            self._role_backends[ROLE_JUDGE] = judge_backend
+        self._inlined: dict[str, str] = {}
+
+    # -- role routing ----------------------------------------------------
+
+    def _role_backend(self, role: str) -> LLMBackend:
+        """The backend serving *role*.
+
+        Falls back to ``self.backend`` (the configured ``gate.backend``) when the
+        role was not mapped, so a pipeline built without the per-role map behaves
+        exactly as it did before per-role backends existed.
+        """
+        return self._role_backends.get(role, self.backend)
+
+    def _pool_for(self, role: str) -> SlotPool | None:
+        """Admission pool for *role*'s backend.
+
+        A remote (OpenRouter) role draws from the openrouter pool so it neither
+        consumes nor waits on the local cmd agent budget; everything else keeps
+        the agent pool.
+        """
+        target = self.config.role_target(role)
+        if target.needs_inline_context:
+            return self.openrouter_pool
+        return self.agent_pool
+
+    def _role_context(self, role: str, worktree: Path) -> str:
+        """The change rendered into the prompt, for a backend without repo tools.
+
+        Built once per role per run and memoised: every lens in a parallel fan-out
+        reviews the same change, and re-running git for each one would be N times
+        the work for identical text.
+        """
+        target = self.config.role_target(role)
+        if not target.needs_inline_context:
+            return ""
+        if role in self._inlined:
+            return self._inlined[role]
+        context = build_review_context(
+            worktree,
+            self.config.base_branch,
+            max_diff_chars=self.config.inline_diff_chars,
+            max_file_chars=self.config.inline_file_chars,
+            max_total_chars=self.config.inline_total_chars,
+        )
+        rendered = context.render()
+        self._inlined[role] = rendered
+        self._log(
+            "gate.inline",
+            role=role,
+            files=len(context.files),
+            omitted=context.omitted,
+            diff_truncated=context.diff_truncated,
+            chars=len(rendered),
+        )
+        return rendered
 
     # -- helpers ---------------------------------------------------------
 
@@ -409,9 +481,16 @@ class GatePipeline:
         """The commit the gate is currently looking at (agents need it in prompts)."""
         return worktree_head_sha(worktree)
 
-    def _model_for(self, *, backend_name: str, model: str | None, role: str) -> str:
-        """Resolve the model for one role, failing fast on a policy violation."""
-        return self.policy.check(backend=backend_name, model=model, role=role)
+    def _model_for(
+        self, *, backend_name: str, model: str | None, role: str, aliases: tuple[str, ...] = ()
+    ) -> str:
+        """Resolve the model for one role, failing fast on a policy violation.
+
+        *aliases* lets a config spell the role the way its own vocabulary does
+        (``gate.roles.find`` vs the policy's ``lens``) without either spelling
+        silently escaping the policy.
+        """
+        return self.policy.check(backend=backend_name, model=model, role=role, aliases=aliases)
 
     def _call(
         self,
@@ -423,6 +502,7 @@ class GatePipeline:
         timeout_s: int,
         validate: Any,  # noqa: ANN401
         mode: AgentMode = "plan",
+        slot: SlotPool | None = None,
     ) -> Any:  # noqa: ANN401 - StructuredAnswer
         return call_structured(
             backend,
@@ -432,7 +512,7 @@ class GatePipeline:
             timeout_s=timeout_s,
             validate=validate,
             mode=mode,
-            slot=self.agent_pool,
+            slot=self.agent_pool if slot is None else slot,
         )
 
     def _call_required(
@@ -502,9 +582,13 @@ class GatePipeline:
 
     def find(self, worktree: Path, ref: PullRequestRef) -> list[Finding]:
         """Run the lens reviewers in parallel and dedupe their candidate claims."""
+        target = self.config.role_target(ROLE_FIND)
         model = self._model_for(
-            backend_name=self.config.backend, model=self.config.model, role=ROLE_LENS
+            backend_name=target.backend, model=target.model, role=ROLE_LENS, aliases=(ROLE_FIND,)
         )
+        backend = self._role_backend(ROLE_FIND)
+        slot = self._pool_for(ROLE_FIND)
+        inlined = self._role_context(ROLE_FIND, worktree)
         task_text = self._task_text()
         lenses = self.config.lenses[: self.config.max_parallel_lenses]
 
@@ -517,16 +601,18 @@ class GatePipeline:
                 head_sha=ref.short_sha,
                 pr_number=self.pr_number,
                 task_text=task_text,
+                inlined_context=inlined,
             )
             answer = self._call_required(
                 role="lens",
                 subject=lens,
-                backend=self.backend,
+                backend=backend,
                 prompt=prompt,
                 model=model,
                 cwd=worktree,
                 timeout_s=self.config.agent_timeout_s,
                 validate=validate_findings,
+                slot=slot,
             )
             return _tag_lens(FindingsReport.from_dict(answer.data).findings, lens)
 
@@ -549,13 +635,27 @@ class GatePipeline:
         testable = [f for f in findings if f.testable]
         if not testable:
             return
+        target = self.config.role_target(ROLE_VERIFIER_CONFIG)
         model = self._model_for(
-            backend_name=self.config.backend, model=self.config.model, role=ROLE_VERIFIER
+            backend_name=target.backend,
+            model=target.model,
+            role=ROLE_VERIFIER,
+            aliases=(ROLE_VERIFIER_CONFIG,),
         )
+        backend = self._role_backend(ROLE_VERIFIER_CONFIG)
+        slot = self._pool_for(ROLE_VERIFIER_CONFIG)
         runner = self._runner_for(worktree)
 
         def _one(finding: Finding) -> None:
-            self._verify_one(finding, worktree=worktree, runner=runner, model=model, source=source)
+            self._verify_one(
+                finding,
+                worktree=worktree,
+                runner=runner,
+                model=model,
+                backend=backend,
+                slot=slot,
+                source=source,
+            )
 
         workers = max(1, self.config.max_parallel_verifiers)
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
@@ -568,6 +668,8 @@ class GatePipeline:
         worktree: Path,
         runner: GateTestRunner,
         model: str,
+        backend: LLMBackend,
+        slot: SlotPool | None,
         source: str,
     ) -> None:
         prompt = verify_prompt(
@@ -583,12 +685,13 @@ class GatePipeline:
             role="verify",
             subject=finding.id,
             invalid_ok=True,
-            backend=self.backend,
+            backend=backend,
             prompt=prompt,
             model=model,
             cwd=worktree,
             timeout_s=self.config.agent_timeout_s,
             validate=validate_verify,
+            slot=slot,
         )
         if answer is None:
             self.evidence.rejected += 1
@@ -636,11 +739,11 @@ class GatePipeline:
 
     def judge(self, worktree: Path, ref: PullRequestRef) -> None:
         """One judge call: rule on untestable claims and do its own blocker pass."""
-        if not self.config.enable_judge or self.judge_backend is None:
+        if not self.config.enable_judge:
             return
-        model = self._model_for(
-            backend_name=self.config.judge_backend, model=self.config.judge_model, role=ROLE_JUDGE
-        )
+        target = self.config.role_target(ROLE_JUDGE)
+        backend = self._role_backend(ROLE_JUDGE)
+        model = self._model_for(backend_name=target.backend, model=target.model, role=ROLE_JUDGE)
         prompt = judge_prompt(
             worktree=str(worktree),
             base_branch=resolve_diff_base(worktree, self.config.base_branch),
@@ -649,16 +752,18 @@ class GatePipeline:
             confirmed=_json_blob(self.evidence.confirmed, 6000),
             untestable=_json_blob(self.evidence.untestable, 6000),
             task_text=self._task_text()[:8000],
+            inlined_context=self._role_context(ROLE_JUDGE, worktree),
         )
         answer = self._call_required(
             role="judge",
             subject="judge",
-            backend=self.judge_backend,
+            backend=backend,
             prompt=prompt,
             model=model,
             cwd=worktree,
             timeout_s=self.config.judge_timeout_s,
             validate=validate_judge,
+            slot=self._pool_for(ROLE_JUDGE),
         )
         report = JudgeReport.from_dict(answer.data)
         for ruling in report.confirmed_untestable:
@@ -686,14 +791,14 @@ class GatePipeline:
 
         Returns True when nothing is left unresolved.
         """
-        if not self.config.enable_judge or self.judge_backend is None:
+        if not self.config.enable_judge:
             return True
         untestable = [c for c in self.evidence.confirmed if c.get("source") == "judge-untestable"]
         if not untestable:
             return True
-        model = self._model_for(
-            backend_name=self.config.judge_backend, model=self.config.judge_model, role=ROLE_JUDGE
-        )
+        backend = self._role_backend(ROLE_JUDGE)
+        target = self.config.role_target(ROLE_JUDGE)
+        model = self._model_for(backend_name=target.backend, model=target.model, role=ROLE_JUDGE)
         prompt = recheck_prompt(
             worktree=str(worktree),
             head_sha=head_sha[:9],
@@ -703,12 +808,13 @@ class GatePipeline:
         )
         try:
             answer = self._call(
-                backend=self.judge_backend,
+                backend=backend,
                 prompt=prompt,
                 model=model,
                 cwd=worktree,
                 timeout_s=self.config.judge_timeout_s,
                 validate=validate_recheck,
+                slot=self._pool_for(ROLE_JUDGE),
             )
         except StructuredCallError as exc:
             # A failed recheck is not a pass: we could not confirm resolution.
@@ -756,9 +862,15 @@ class GatePipeline:
             return current, self._metrics(metric, ref, outcome=gate_metrics.OUTCOME_CONVERGED)
 
         push_branch = self.config.push_branch or ref.head_ref
+        target = self.config.role_target(ROLE_FIX_CONFIG)
         model = self._model_for(
-            backend_name=self.config.backend, model=self.config.model, role=ROLE_FIX
+            backend_name=target.backend,
+            model=target.model,
+            role=ROLE_FIX,
+            aliases=(ROLE_FIX_CONFIG,),
         )
+        fix_backend = self._role_backend(ROLE_FIX_CONFIG)
+        fix_slot = self._pool_for(ROLE_FIX_CONFIG)
         outcome = gate_metrics.OUTCOME_CAP
 
         for round_number in range(1, max(1, self.config.max_fix_rounds) + 1):
@@ -779,7 +891,7 @@ class GatePipeline:
                     pytest_cmd_hint=self._runner_for(fix_wt).pytest_hint("tests/test_gate_x.py"),
                     task_text=self._task_text()[:6000],
                 )
-                self._run_fixer(prompt, model=model, cwd=fix_wt)
+                self._run_fixer(prompt, model=model, cwd=fix_wt, backend=fix_backend, slot=fix_slot)
             finally:
                 remove_worktree(self.repo, fix_wt)
 
@@ -869,15 +981,21 @@ class GatePipeline:
 
         return current, self._metrics(metric, ref, outcome=outcome, rounds=rounds, head=current)
 
-    def _run_fixer(self, prompt: str, *, model: str, cwd: Path) -> None:
+    def _run_fixer(
+        self,
+        prompt: str,
+        *,
+        model: str,
+        cwd: Path,
+        backend: LLMBackend | None = None,
+        slot: SlotPool | None = None,
+    ) -> None:
         """One fix round. Free-form output (it commits and pushes), so no schema."""
-        guard = (
-            self.agent_pool.slot(timeout_s=None)
-            if self.agent_pool is not None
-            else (contextlib.nullcontext())
-        )
+        target = backend if backend is not None else self.backend
+        pool = self.agent_pool if slot is None else slot
+        guard = pool.slot(timeout_s=None) if pool is not None else contextlib.nullcontext()
         with guard:
-            result = self.backend.run(
+            result = target.run(
                 prompt,
                 max_tokens=0,
                 timeout_s=self.config.agent_timeout_s,
@@ -1163,22 +1281,22 @@ def run_gate(
     policy = parse_model_policy(raw)
     gate_cfg = load_gate_config(raw) or GateConfig()
 
-    # Fail fast on policy before constructing anything expensive.
-    policy.check(backend=gate_cfg.backend, model=gate_cfg.model, role=ROLE_LENS)
-    if gate_cfg.enable_judge:
-        policy.check(backend=gate_cfg.judge_backend, model=gate_cfg.judge_model, role=ROLE_JUDGE)
+    # Fail fast on policy before constructing anything expensive, and check
+    # EVERY role — not just find/judge — so a bad verify/fix target also costs a
+    # second rather than a fan-out. The policy role each config role maps to is
+    # declared here, once, so this check and the pipeline's dispatch cannot drift.
+    role_backends = _build_role_backends(gate_cfg, policy)
 
-    backend = build_gate_backend(gate_cfg.backend)
-    judge_backend = (
-        build_gate_backend(gate_cfg.judge_backend)
-        if gate_cfg.judge_backend and gate_cfg.judge_backend != gate_cfg.backend
-        else backend
-    )
+    # ``backend`` is the pre-per-role default: any role the map does not cover
+    # falls back to it, and it is what a judge-disabled run uses.
+    backend = role_backends[ROLE_FIND]
+    judge_backend = role_backends[ROLE_JUDGE] if gate_cfg.enable_judge else backend
 
     pool_cfg = PoolConfig(
         root=default_slots_root(),
         agent_slots=gate_cfg.agent_slots,
         test_slots=gate_cfg.test_slots,
+        openrouter_slots=gate_cfg.openrouter_slots,
     )
     resolved_gate_dir = gate_dir or (repo / ".agent-fleet" / "gate" / str(pr_number))
     resolved_gate_dir.mkdir(parents=True, exist_ok=True)
@@ -1196,9 +1314,49 @@ def run_gate(
         run_id=run_id,
         agent_pool=agent_slot_pool(pool_cfg),
         test_pool=test_slot_pool(pool_cfg),
+        openrouter_pool=openrouter_slot_pool(pool_cfg),
         use_systemd=use_systemd,
     )
+    pipeline._role_backends = role_backends
     return pipeline.run()
+
+
+# Which pipeline role each ``gate.roles`` key dispatches as, for the model policy.
+# ``find`` runs the lens reviewers, so the policy may spell it either way.
+_ROLE_POLICY_ROLE: dict[str, tuple[str, tuple[str, ...]]] = {
+    ROLE_FIND: (ROLE_LENS, (ROLE_FIND,)),
+    ROLE_JUDGE: (ROLE_JUDGE, ()),
+    ROLE_VERIFIER_CONFIG: (ROLE_VERIFIER, (ROLE_VERIFIER_CONFIG,)),
+    ROLE_FIX_CONFIG: (ROLE_FIX, (ROLE_FIX_CONFIG,)),
+}
+
+
+def _build_role_backends(config: GateConfig, policy: ModelPolicy) -> dict[str, LLMBackend]:
+    """Validate every role against the policy, then build one backend per name.
+
+    The policy check for all four roles happens *before* the first backend is
+    constructed, so a violation fails in a second rather than after a fan-out has
+    spent the budget. One instance is built per distinct backend name and shared
+    by every role routed to it, so a run does not re-initialise a session-capable
+    backend once per role.
+    """
+    resolved: dict[str, LLMBackend] = {}
+    targets: dict[str, RoleTarget] = {}
+    # Pass 1: validate EVERY role against the policy. Nothing is constructed
+    # until all four pass, so a violation costs a second rather than a fan-out.
+    for role in (ROLE_FIND, ROLE_JUDGE, ROLE_VERIFIER_CONFIG, ROLE_FIX_CONFIG):
+        target = config.role_target(role)
+        policy_role, aliases = _ROLE_POLICY_ROLE[role]
+        policy.check(backend=target.backend, model=target.model, role=policy_role, aliases=aliases)
+        targets[role] = target
+    # Pass 2: one instance per distinct backend name, shared by the roles routed
+    # to it, so a run does not re-initialise a session-capable backend per role.
+    built: dict[str, LLMBackend] = {}
+    for role, target in targets.items():
+        if target.backend not in built:
+            built[target.backend] = build_gate_backend(target.backend)
+        resolved[role] = built[target.backend]
+    return resolved
 
 
 def gate_metrics_summary(limit: int = 20) -> dict[str, Any]:

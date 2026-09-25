@@ -50,9 +50,17 @@ class BackendPolicy:
             )
         return model
 
-    def check_role(self, role: str) -> None:
-        """Raise if this backend is not permitted to serve *role*."""
-        if self.roles is not None and role not in self.roles:
+    def check_role(self, role: str, aliases: tuple[str, ...] = ()) -> None:
+        """Raise if this backend is not permitted to serve *role*.
+
+        *aliases* are additional names for the same dispatch. A role may be
+        spelled either way without breaking a policy: the gate's find step is the
+        ``find`` role under ``gate.roles`` but the ``lens`` role in the policy
+        vocabulary, and both name the same call.
+        """
+        if self.roles is None:
+            return
+        if not (self.roles & {role, *aliases}):
             raise ModelPolicyError(
                 f"model_policy: backend {self.name!r} may not serve role {role!r}; "
                 f"allowed roles: {sorted(self.roles)}"
@@ -68,7 +76,14 @@ class ModelPolicy:
     def backend(self, name: str) -> BackendPolicy | None:
         return self.backends.get(name.lower())
 
-    def check(self, *, backend: str, model: str | None, role: str) -> str:
+    def check(
+        self,
+        *,
+        backend: str,
+        model: str | None,
+        role: str,
+        aliases: tuple[str, ...] = (),
+    ) -> str:
         """Validate one dispatch and return the model to use.
 
         A backend absent from the policy is unrestricted (an operator who pins
@@ -79,7 +94,7 @@ class ModelPolicy:
             if not model:
                 raise ModelPolicyError(f"model_policy: no model given for backend {backend!r}")
             return model
-        policy.check_role(role)
+        policy.check_role(role, aliases)
         return policy.check_model(model)
 
 

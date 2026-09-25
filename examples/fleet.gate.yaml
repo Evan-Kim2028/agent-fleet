@@ -33,11 +33,24 @@ model_policy:
       roles:
         - judge
 
+    # OpenRouter serves the READ-ONLY roles only. find and judge read a change
+    # and answer JSON; verify must write a test file and fix must edit code and
+    # push, so they are refused here — and the refusal is fail-fast, before any
+    # backend is built, rather than after a fan-out has spent the budget.
+    openrouter:
+      allowed_models:
+        - stealth/space-bunny-alpha
+      roles:
+        - find
+        - judge
+
 # ---------------------------------------------------------------------------
 # Gate pipeline
 # ---------------------------------------------------------------------------
 gate:
   # Backend + model for the find / verify / fix roles (must satisfy model_policy).
+  # A role absent from `roles:` falls back to this pair, so a config without a
+  # `roles:` block behaves exactly as it always did.
   backend: cmd
   model: stealth/space-bunny-alpha
 
@@ -46,6 +59,23 @@ gate:
   # untestable claims.
   judge_backend: grok
   judge_model: step-5-preview
+
+  # Per-role backend. find and judge are read-only, so they can run remotely in
+  # parallel with the local cmd work; verify and fix need repo tools and stay
+  # on cmd. See "Running find/judge on OpenRouter" in docs/GATE.md.
+  roles:
+    find:
+      backend: openrouter
+      model: stealth/space-bunny-alpha
+    judge:
+      backend: openrouter
+      model: stealth/space-bunny-alpha
+    verify:
+      backend: cmd
+      model: stealth/space-bunny-alpha
+    fix:
+      backend: cmd
+      model: stealth/space-bunny-alpha
 
   # Parallel lens reviewers, each with ONE focus. Report blockers only; an
   # empty findings list is a normal, good outcome. Replace the mapping to
@@ -100,6 +130,18 @@ gate:
   # what exhausts memory.
   agent_slots: 24
   test_slots: 4
+
+  # Remote (OpenRouter) calls are HTTP requests that occupy no local agent
+  # process, so they draw from their own pool: they neither consume nor queue
+  # behind the local cmd agent budget.
+  openrouter_slots: 32
+
+  # Caps on the change pasted into a no-tool backend's prompt (see
+  # "Running find/judge on OpenRouter"). When the total cap is hit, files are
+  # dropped and the omission is stated in the prompt rather than hidden.
+  inline_diff_chars: 60000
+  inline_file_chars: 20000
+  inline_total_chars: 120000
 
   # Force every test into one package directory when the repo's root
   # pyproject.toml is not the one that owns the tests. Leave unset for the

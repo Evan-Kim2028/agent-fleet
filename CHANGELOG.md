@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### Added
+
+- **Per-role gate backends; find/judge on OpenRouter:** `gate.roles` pins a
+  backend and model per gate role, so the read-only `find` and `judge` roles run
+  on OpenRouter in parallel with the local cmd work while `verify` and `fix` stay
+  on cmd (verify must write a test file, fix must edit code and push). A role
+  absent from `roles:` falls back to the existing single `gate.backend`/`model`
+  (or `judge_backend`/`judge_model`) keys, so existing configs are unchanged.
+  A backend pinned to `[find, judge]` is enforced against `model_policy` before
+  any backend is constructed — all four roles are checked up front, so a
+  violation costs a second rather than a fan-out. OpenRouter calls draw from
+  their own `openrouter` slot pool (default 32) so they neither consume nor
+  queue behind the cmd agent budget. For a backend without repo tools the change
+  is inlined into the prompt (capped diff + changed non-test file contents,
+  dropped-not-stubbed when over budget, with any omission stated); the lens is
+  told it has no tools rather than being told to run `git diff`. Fail-closed
+  semantics are unchanged: a dead or invalid remote answer still ends the run in
+  NEEDS_ESCALATION, never in an approval.
+- `ModelPolicy.check`/`BackendPolicy.check_role` accept a role `alias`, so a
+  policy may spell the find role as either `find` or the pipeline's `lens`.
+
 ## 0.16.0
 
 ### Fixed
