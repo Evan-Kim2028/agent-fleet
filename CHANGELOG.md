@@ -23,6 +23,38 @@
 - `ModelPolicy.check`/`BackendPolicy.check_role` accept a role `alias`, so a
   policy may spell the find role as either `find` or the pipeline's `lens`.
 
+### Fixed
+
+- **A role the config disables is no longer policy-checked:** the up-front check
+  covered all four roles unconditionally, so a config with `enable_judge: false`
+  and no `judge_model` — a valid, documented setup (`docs/GATE.md`) — raised
+  `ModelPolicyError` before the pipeline ran, turning every such gate invocation
+  into a hard failure with no `GateResult`, no status line and no metrics row. A
+  policy pinning a backend away from `judge` aborted the run the same way. The
+  disabled role is now exempt and gets no backend, exactly as on `origin/main`.
+- **`judge_backend=None` means "no judge" again:** `judge()` and
+  `recheck_untestable()` lost the `judge_backend is None` early return, so a
+  public-API caller passing it (the documented way to disable the judge without
+  flipping `enable_judge`) silently got a judge call on the *find* backend —
+  either a mid-run `ModelPolicyError` or untestable claims promoted to confirmed
+  blockers.
+- **The judge recheck inlines the change for a no-tool backend:** the recheck
+  dispatched to the OpenRouter judge but built a prompt with no inlined change
+  and live `git fetch`/`git diff` directives, so a shell-less judge was asked to
+  inspect a diff it could not see. Its "nothing unresolved" answer alone cleared
+  a confirmed blocker and could flip the run to APPROVED.
+- **An unresolvable diff range no longer reads as a clean review:** `git diff`
+  failures were swallowed, so a PR with no merge base against the base branch
+  rendered the non-empty `(no change detected)` placeholder, which was pasted
+  under a "the change under review" header and returned an empty findings list —
+  an approval over a change nobody saw. The range now falls back to the two-dot
+  form with the wider scope stated, and a diff that cannot be computed at all
+  fails the run closed, like a dead agent.
+- **Inlined review context no longer follows symlinks out of the worktree:** a
+  PR could add a symlink to any local file and have its contents read out of the
+  gate worktree and pasted into a prompt sent to the third-party OpenRouter API.
+  Only regular files contained in the worktree are inlined now.
+
 ## 0.16.0
 
 ### Fixed

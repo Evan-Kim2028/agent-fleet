@@ -239,12 +239,33 @@ def recheck_prompt(
     pr_number: int,
     start_sha: str,
     untestable: str,
+    inlined_context: str = "",
 ) -> str:
-    """Prompt for the single judge recheck: which untestable blockers remain."""
+    """Prompt for the single judge recheck: which untestable blockers remain.
+
+    ``inlined_context`` is non-empty when the judge runs on a backend that is not
+    given repo tools (OpenRouter). The change is then pasted in below and the
+    prompt must not order a ``git fetch``/``git diff`` the model cannot run: a
+    shell-less judge told to inspect a diff it never saw can only answer "nothing
+    unresolved", and that answer alone clears a confirmed blocker.
+    """
+    if inlined_context:
+        source_block = (
+            f"You have NO tools, NO shell and NO access to the repository — the only "
+            f"code you can see is the change pasted below (PR #{pr_number} at "
+            f"{head_sha}). Do not try to run git, read other files, or list "
+            f"directories.\n\n"
+            f"----- INLINED CHANGE -----\n{inlined_context}\n----- END INLINED CHANGE -----\n"
+        )
+    else:
+        source_block = (
+            f"Recheck for PR #{pr_number} in worktree {worktree} at {head_sha} "
+            f"(read-only; use a fresh `git fetch` and inspect `git diff {start_sha} "
+            f"{head_sha}`).\n"
+        )
     return PROCESS_SAFETY + (
-        f"Recheck for PR #{pr_number} in worktree {worktree} at {head_sha} "
-        f"(read-only; use a fresh `git fetch` and inspect `git diff {start_sha} "
-        f"{head_sha}`). These blockers were ruled real earlier and had no test:\n"
+        f"{source_block}"
+        f"These blockers were ruled real earlier and had no test:\n"
         f"{untestable}\n"
         "For each: is it resolved now? Report only unresolved ones.\n\n"
         "Final answer: exactly one fenced json block:\n"

@@ -66,12 +66,19 @@ class ReviewContext:
     omitted: int = 0
     diff_truncated: bool = False
     skipped_test_files: tuple[str, ...] = field(default_factory=tuple)
+    unavailable: str = ""
+    degraded: str = ""
 
     def is_empty(self) -> bool:
         return not self.diff and not self.files
 
     def render(self) -> str:
         """The full context block, ready to concatenate into a prompt."""
+        if self.unavailable:
+            # Not "(no change detected)": that placeholder is indistinguishable
+            # from a clean PR, and a reviewer handed it under a "the change
+            # under review" header would report a review of code it never saw.
+            return f"[REVIEW CONTEXT UNAVAILABLE: {self.unavailable}]"
         if self.is_empty():
             return "(no change detected)"
         parts: list[str] = []
@@ -87,6 +94,8 @@ class ReviewContext:
             )
         parts.extend(f.render() for f in self.files)
         notes: list[str] = []
+        if self.degraded:
+            notes.append(self.degraded)
         if self.omitted:
             notes.append(f"{self.omitted} further changed file(s) were omitted by the size cap")
         if self.skipped_test_files:
@@ -99,17 +108,35 @@ class ReviewContext:
         return "\n\n".join(parts)
 
 
-def _read_text(path: str) -> str | None:
-    from pathlib import Path  # local import keeps this module import-light
+def _read_text(root: Path, rel: str) -> str | None:
+    """Read one changed file's post-change content, or None if it is not safe to.
 
-    target = Path(path)
-    if not target.is_file():
+    The path is assembled from ``git diff --name-only`` output, so it is chosen by
+    the PR — and it may be a symlink pointing anywhere on the host. This text is
+    transmitted to a third-party backend, so the file read must be a *regular*
+    file contained in the worktree: ``is_symlink()`` rejects the link itself, and
+    the resolved-parent check rejects one that escapes via an intermediate
+    directory symlink.
+    """
+    target = root / rel
+    if target.is_symlink():
+        logger.warning("gate: not inlining %s for prompt inlining: it is a symlink", rel)
         return None
     try:
-        return target.read_text(encoding="utf-8", errors="replace")
+        if not target.is_file():
+            return None
+        resolved = target.resolve(strict=True)
+    except OSError as exc:
+        logger.warning("gate: could not resolve %s for prompt inlining: %s", rel, exc)
+        return None
+    if not resolved.is_relative_to(root):
+        logger.warning("gate: not inlining %s for prompt inlining: it escapes the worktree", rel)
+        return None
+    try:
+        return resolved.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         # A single unreadable file must not lose the whole review.
-        logger.warning("gate: could not read %s for prompt inlining: %s", path, exc)
+        logger.warning("gate: could not read %s for prompt inlining: %s", rel, exc)
         return None
 
 
@@ -130,31 +157,57 @@ def build_review_context(
     diff_base = resolve_diff_base(root, base_branch)
     range_spec = f"{diff_base}...HEAD"
 
-    def _git(*args: str) -> str:
+    def _diff(*args: str) -> subprocess.CompletedProcess[str]:
         try:
-            done = subprocess.run(
-                ["git", "-C", str(root), *args],
+            return subprocess.run(
+                ["git", "-C", str(root), "diff", *args],
                 capture_output=True,
                 text=True,
                 timeout=120,
                 check=False,
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            logger.warning("gate: git %s failed for prompt inlining: %s", args[0], exc)
-            return ""
-        return done.stdout or ""
+            logger.warning("gate: git diff %s failed for prompt inlining: %s", args, exc)
+            return subprocess.CompletedProcess(args=[], returncode=128, stdout="", stderr=str(exc))
 
-    diff = _git("diff", range_spec)
+    # A diff that cannot be computed is NOT a PR with no changes. git reports an
+    # unresolvable range (no merge base, wrong base ref) on stderr with nothing on
+    # stdout, so swallowing the exit code would hand the reviewer the empty
+    # placeholder as "the change under review" and record a clean review of code
+    # nobody saw. Retry the two-dot form, and if that fails too, fail visibly.
+    done = _diff(range_spec)
+    resolved_range = range_spec
+    degraded = ""
+    if done.returncode != 0:
+        retry = _diff(f"{diff_base}..HEAD")
+        if retry.returncode == 0:
+            done = retry
+            resolved_range = f"{diff_base}..HEAD"
+            # The merge-base range is the one the reviewer would have run. The
+            # two-dot form is a strictly wider diff (it also shows what the base
+            # moved), so say so rather than let the reviewer assume it reviewed
+            # exactly the PR's change.
+            degraded = (
+                f"the merge-base diff against {diff_base} is unavailable (no merge "
+                f"base with HEAD), so this is the wider '{diff_base}..HEAD' diff and "
+                "it may include changes that are not part of this PR"
+            )
+        else:
+            lines = (retry.stderr or retry.stdout or "").strip().splitlines()
+            detail = lines[0][:200] if lines else f"git diff exited {retry.returncode}"
+            logger.warning("gate: could not diff for prompt inlining: %s", detail)
+            return ReviewContext(unavailable=detail)
+
+    diff = done.stdout or ""
     diff_truncated = False
     if len(diff) > max_diff_chars:
         diff = diff[:max_diff_chars]
         diff_truncated = True
 
-    changed = [
-        line.strip()
-        for line in _git("diff", "--name-only", range_spec).splitlines()
-        if line.strip()
-    ]
+    # The changed-file set is derived from the range that actually resolved, so
+    # the pasted files and the pasted diff can never describe different ranges.
+    names = _diff("--name-only", resolved_range)
+    changed = [line.strip() for line in (names.stdout or "").splitlines() if line.strip()]
     test_files = [p for p in changed if is_test_file(p)]
     source_files = [p for p in changed if not is_test_file(p)]
 
@@ -163,7 +216,7 @@ def build_review_context(
     # The diff is the mandatory part, so it is charged against the total first.
     budget = max(0, max_total_chars - len(diff))
     for rel in source_files:
-        text = _read_text(str(root / rel))
+        text = _read_text(root, rel)
         if text is None:
             continue
         truncated = len(text) > max_file_chars
@@ -182,4 +235,5 @@ def build_review_context(
         omitted=omitted,
         diff_truncated=diff_truncated,
         skipped_test_files=tuple(test_files),
+        degraded=degraded,
     )

@@ -429,6 +429,12 @@ class GatePipeline:
         Built once per role per run and memoised: every lens in a parallel fan-out
         reviews the same change, and re-running git for each one would be N times
         the work for identical text.
+
+        Raises :class:`GateInfraError` when the change cannot be rendered at all.
+        A reviewer with no repo tools that cannot be shown the change has no
+        evidence to review, and its only reachable answer is "no blockers" — so
+        an unresolvable diff must fail the run closed, exactly as a dead agent
+        does, rather than be recorded as a clean review.
         """
         target = self.config.role_target(role)
         if not target.needs_inline_context:
@@ -442,6 +448,12 @@ class GatePipeline:
             max_file_chars=self.config.inline_file_chars,
             max_total_chars=self.config.inline_total_chars,
         )
+        if context.unavailable:
+            self._log("gate.inline.unavailable", role=role, reason=context.unavailable[:200])
+            raise GateInfraError(
+                f"fail-closed: could not build the review context for the {role} role "
+                f"({context.unavailable})"
+            )
         rendered = context.render()
         self._inlined[role] = rendered
         self._log(
@@ -739,7 +751,7 @@ class GatePipeline:
 
     def judge(self, worktree: Path, ref: PullRequestRef) -> None:
         """One judge call: rule on untestable claims and do its own blocker pass."""
-        if not self.config.enable_judge:
+        if not self.config.enable_judge or self.judge_backend is None:
             return
         target = self.config.role_target(ROLE_JUDGE)
         backend = self._role_backend(ROLE_JUDGE)
@@ -791,7 +803,7 @@ class GatePipeline:
 
         Returns True when nothing is left unresolved.
         """
-        if not self.config.enable_judge:
+        if not self.config.enable_judge or self.judge_backend is None:
             return True
         untestable = [c for c in self.evidence.confirmed if c.get("source") == "judge-untestable"]
         if not untestable:
@@ -805,6 +817,7 @@ class GatePipeline:
             pr_number=self.pr_number,
             start_sha=start_sha[:9],
             untestable=_json_blob(untestable, 6000),
+            inlined_context=self._role_context(ROLE_JUDGE, worktree),
         )
         try:
             answer = self._call(
@@ -1282,15 +1295,17 @@ def run_gate(
     gate_cfg = load_gate_config(raw) or GateConfig()
 
     # Fail fast on policy before constructing anything expensive, and check
-    # EVERY role — not just find/judge — so a bad verify/fix target also costs a
-    # second rather than a fan-out. The policy role each config role maps to is
-    # declared here, once, so this check and the pipeline's dispatch cannot drift.
+    # every role that will dispatch — not just find/judge — so a bad verify/fix
+    # target also costs a second rather than a fan-out. A role the config
+    # disables is exempt (see _build_role_backends). The policy role each config
+    # role maps to is declared there, once, so this check and the pipeline's
+    # dispatch cannot drift.
     role_backends = _build_role_backends(gate_cfg, policy)
 
     # ``backend`` is the pre-per-role default: any role the map does not cover
     # falls back to it, and it is what a judge-disabled run uses.
     backend = role_backends[ROLE_FIND]
-    judge_backend = role_backends[ROLE_JUDGE] if gate_cfg.enable_judge else backend
+    judge_backend = role_backends.get(ROLE_JUDGE, backend)
 
     pool_cfg = PoolConfig(
         root=default_slots_root(),
@@ -1332,19 +1347,27 @@ _ROLE_POLICY_ROLE: dict[str, tuple[str, tuple[str, ...]]] = {
 
 
 def _build_role_backends(config: GateConfig, policy: ModelPolicy) -> dict[str, LLMBackend]:
-    """Validate every role against the policy, then build one backend per name.
+    """Validate every dispatched role against the policy, then build one backend per name.
 
     The policy check for all four roles happens *before* the first backend is
     constructed, so a violation fails in a second rather than after a fan-out has
     spent the budget. One instance is built per distinct backend name and shared
     by every role routed to it, so a run does not re-initialise a session-capable
     backend once per role.
+
+    A role the config switches off is exempt and is absent from the result. Its
+    target is never dispatched, so it need not be dispatchable: a config with
+    ``enable_judge: false`` and no ``judge_model`` is a valid, documented setup
+    (docs/GATE.md) whose judge target is simply an unmapped model-less pair.
     """
     resolved: dict[str, LLMBackend] = {}
     targets: dict[str, RoleTarget] = {}
-    # Pass 1: validate EVERY role against the policy. Nothing is constructed
-    # until all four pass, so a violation costs a second rather than a fan-out.
+    # Pass 1: validate every role that will actually dispatch. Nothing is
+    # constructed until they all pass, so a violation costs a second rather than
+    # a fan-out.
     for role in (ROLE_FIND, ROLE_JUDGE, ROLE_VERIFIER_CONFIG, ROLE_FIX_CONFIG):
+        if role == ROLE_JUDGE and not config.enable_judge:
+            continue
         target = config.role_target(role)
         policy_role, aliases = _ROLE_POLICY_ROLE[role]
         policy.check(backend=target.backend, model=target.model, role=policy_role, aliases=aliases)
