@@ -736,7 +736,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         )
         backend = config.default_backend
         model = config.default_model
-    except OSError, ValueError, yaml.YAMLError:
+    except (OSError, ValueError, yaml.YAMLError):
         if getattr(args, "backend", None):
             backend = str(args.backend).lower().strip()
     workspace = Path(args.workspace).resolve() if args.workspace else Path.cwd()

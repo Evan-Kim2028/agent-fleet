@@ -422,7 +422,7 @@ def _execute_tool(
     """
     try:
         return _execute_tool_inner(name, args, cwd=cwd, scope_prefixes=scope_prefixes)
-    except KeyboardInterrupt, SystemExit:
+    except (KeyboardInterrupt, SystemExit):
         raise
     except Exception as exc:  # deliberately broad to protect the session loop
         logger.warning("OpenRouter tool %r raised %s: %s", name, type(exc).__name__, exc)

@@ -95,7 +95,7 @@ def load_bridge_state() -> dict[str, Any] | None:
         return None
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except OSError, json.JSONDecodeError:
+    except (OSError, json.JSONDecodeError):
         return None
 
 
@@ -105,7 +105,7 @@ def _load_supervisor_pid() -> int | None:
         return None
     try:
         return int(path.read_text(encoding="utf-8").strip())
-    except OSError, ValueError:
+    except (OSError, ValueError):
         return None
 
 
@@ -227,7 +227,7 @@ def _terminate_process_group(
         return
     try:
         pgid = os.getpgid(proc.pid)
-    except ProcessLookupError, PermissionError, OSError:
+    except (ProcessLookupError, PermissionError, OSError):
         return
     with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
         os.killpg(pgid, signal.SIGTERM)

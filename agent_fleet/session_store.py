@@ -54,7 +54,7 @@ def load_session_id(worktree: str, *, store_dir: Path | None = None) -> str | No
         if not path.is_file():
             return None
         data = json.loads(path.read_text(encoding="utf-8"))
-    except OSError, UnicodeDecodeError, json.JSONDecodeError:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
     if isinstance(data, dict):
         session_id = data.get("session_id")

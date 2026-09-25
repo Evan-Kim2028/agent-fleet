@@ -63,7 +63,7 @@ def check_cmd_auth() -> tuple[bool, str, str]:
             if not raw:
                 continue
             data = json.loads(raw)
-        except OSError, json.JSONDecodeError:
+        except (OSError, json.JSONDecodeError):
             continue
         if isinstance(data, dict) and data:
             return True, f"authenticated ({auth})", ""
@@ -133,7 +133,7 @@ def _parse_cmd_stream(stdout: str, stderr: str) -> tuple[str, str | None, dict[s
                         continue
                     try:
                         usage[dst] = int(val)
-                    except TypeError, ValueError:
+                    except (TypeError, ValueError):
                         continue
                 if not usage:
                     usage = None

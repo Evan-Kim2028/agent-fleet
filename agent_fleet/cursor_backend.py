@@ -70,7 +70,7 @@ def _normalize_usage(raw: Mapping[str, Any] | None) -> dict[str, int] | None:
             continue
         try:
             out[dst] = int(val)
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             continue
     return out or None
 

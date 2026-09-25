@@ -20,7 +20,7 @@ def pid_is_fleet_dispatch(pid: int) -> bool:
         with Path(f"/proc/{pid}/cmdline").open("rb") as handle:
             cmdline = handle.read()
             return any(module in cmdline for module in _DISPATCH_MODULES)
-    except FileNotFoundError, ProcessLookupError, PermissionError:
+    except (FileNotFoundError, ProcessLookupError, PermissionError):
         return False
 
 

@@ -84,7 +84,7 @@ def load_queue_items(
             continue
         try:
             issue = int(issue_raw)
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             continue
         note = str(entry.get("note") or "").strip()
         items.append(QueueItem(issue=issue, persona=persona, note=note))

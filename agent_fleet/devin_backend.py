@@ -269,7 +269,7 @@ def _read_export_session_id(export_path: str) -> str | None:
         if not path.is_file():
             return None
         data = json.loads(path.read_text(encoding="utf-8"))
-    except OSError, UnicodeDecodeError, json.JSONDecodeError:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
     if isinstance(data, dict):
         session_id = data.get("session_id")
@@ -304,7 +304,7 @@ def _read_export_usage(export_path: str) -> dict[str, int] | None:
         if not path.is_file():
             return None
         data = json.loads(path.read_text(encoding="utf-8"))
-    except OSError, UnicodeDecodeError, json.JSONDecodeError:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
     if not isinstance(data, dict):
         return None
@@ -384,7 +384,7 @@ def _read_sessions_db_usage(session_id: str) -> dict[str, int] | None:
         for (raw,) in cur.fetchall():
             try:
                 msg = json.loads(raw)
-            except TypeError, json.JSONDecodeError:
+            except (TypeError, json.JSONDecodeError):
                 continue
             if not isinstance(msg, dict):
                 continue

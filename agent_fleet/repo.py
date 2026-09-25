@@ -143,7 +143,7 @@ def load_repo_config(
     commit_preflight_commands = list(raw.get("commit_preflight_commands") or [])
     try:
         verify_timeout_s = int(raw.get("verify_timeout_s") or 600)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         verify_timeout_s = 600
     if verify_timeout_s < 1:
         verify_timeout_s = 600

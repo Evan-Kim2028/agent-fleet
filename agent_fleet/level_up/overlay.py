@@ -86,7 +86,7 @@ def _load_meta(directory: Path) -> dict[str, Any]:
         return {}
     try:
         raw = json.loads(meta_path.read_text(encoding="utf-8"))
-    except OSError, json.JSONDecodeError:
+    except (OSError, json.JSONDecodeError):
         return {}
     return raw if isinstance(raw, dict) else {}
 
@@ -95,7 +95,7 @@ def _load_meta_generation(directory: Path) -> int:
     generation = _load_meta(directory).get("generation", 0)
     try:
         return int(generation)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return 0
 
 
