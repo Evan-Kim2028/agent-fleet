@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.16.0
+
 ### Fixed
 
 - **Gate fails CLOSED on dead agents:** a killed, crashed or empty lens,
