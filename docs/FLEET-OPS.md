@@ -35,9 +35,57 @@ lost in the bash era.
    PR's `headRefName` must be this lane's branch. A mismatch is a hard refusal.
 6. **Gate** — feature-detected; skipped cleanly when the gate pipeline is not
    installed.
-7. **Status line** — `HH:MM:SS PREMERGE-APPROVED <sha9>` or
-   `HH:MM:SS NEEDS-ESCALATION <reason>`, appended to `--status-file`.
+7. **Status line** — appended to `--status-file` as one of three lines:
+   `HH:MM:SS PREMERGE-APPROVED <sha9>`,
+   `HH:MM:SS NEEDS-ESCALATION <reason>`, or
+   `HH:MM:SS GATE-SKIPPED PR #<n> @<sha9> (<reason>)`.
 8. **Hooks** — the operator's `on_approved` or `on_escalated` command.
+
+### Run logs never reach the branch
+
+The engine writes its JSONL stream and final text to
+`~/.agent-fleet/runs/<operator>/<lane>/<run-id>/` — **outside** the lane
+worktree. Two things depend on that:
+
+* the guarantee stages with `git add -A`, so anything inside the worktree
+  becomes part of the PR unless it is excluded;
+* one directory per lane meant a second run of the same lane overwrote the
+  first run's transcript — the artifact an operator needs when a lane has to be
+  explained afterwards.
+
+Belt and braces: `ensure_lane_worktree` also adds `.agent-fleet/` to the repo's
+`info/exclude` (idempotently, on every path including worktree reuse), and the
+guarantee passes `:(exclude).agent-fleet` to `git add` itself. The two overlap
+on purpose — the exclude file covers a caller who passed an explicit run dir,
+and the pathspec covers a repo whose exclude file could not be written.
+
+This is what stopped a lane that changed *nothing* from being reported as
+`commit_failed`: the run log used to be the only untracked file in the
+worktree, so the guarantee staged it, committed only it, and died on the
+repo's hooks.
+
+### When the implementer produces nothing
+
+A lane whose worktree is clean and whose branch is ahead of nothing has no PR
+to guarantee. That is not a plumbing failure, and the manager now says which of
+the two real things happened:
+
+| Reason | Meaning | Automatic action |
+| --- | --- | --- |
+| `no_changes_stopped` | the implementer **decided** to stop — a fence, an owner decision, it needed clarification — and explained why | none; the reason is in `detail` and on the status line, for a decision list |
+| `lazy_exit` | the final text is short and phrased as work *about to happen* ("Now I'll update the manifest:") | one automatic retry with a nudge, then escalate if it is still lazy |
+| `no_commits_ahead` | there was no final text to judge at all | none |
+
+The implementer's own final message (the last ~1500 characters — the part where
+a model that reached a decision explains itself) goes into `detail` and into the
+status line, so an orchestrator can route it without opening the transcript.
+
+The lazy heuristic is deliberately biased against retrying: a final text that
+*claims completion* ("opened the PR") is not treated as unfinished, and an
+ambiguous mix resolves to not-retrying. An engine narrates a completion it did
+not achieve far more often than it stops mid-sentence, and a needless retry
+costs a full engine run.
+
 
 ### The PR guarantee
 
@@ -57,6 +105,30 @@ environment naming the hook ids the repo declared as baseline-red in
 narrower than disabling hooks. If a *non*-baseline hook fails, the commit fails
 and the lane escalates with the hook output attached, which is correct: that is
 a real problem with the diff, not something to bypass.
+
+When a hook does refuse, the failing hook **ids** are parsed out of pre-commit's
+`- hook id: <id>` blocks and reported as `hooks_failed=[...]` — on
+`LaneRunResult.hooks_failed`, in the escalation `detail`, and in the status
+line. The transcript is long and truncated at an arbitrary offset; the ids are
+the one part that says which hook to fix, so they lead.
+
+### The status-line vocabulary
+
+Three lines, appended to the status file:
+
+```
+HH:MM:SS PREMERGE-APPROVED <sha9>
+HH:MM:SS NEEDS-ESCALATION <reason> [hooks_failed=[...]] [the implementer's reason]
+HH:MM:SS GATE-SKIPPED PR #<n> @<sha9> (<reason>)
+```
+
+`GATE-SKIPPED` is its own token rather than an escalation because it is not
+one: the PR is guaranteed, the state is `pr_guaranteed`, `approved` is `False`,
+and an external gate owns review from there. Writing it as `NEEDS-ESCALATION`
+made a healthy lane read as a broken one. `gate.is_approval_line` is the single
+definition of what counts as an approval, and a `GATE-SKIPPED` line does not
+satisfy it.
+
 
 ### The binding (why a lane cannot judge the wrong PR)
 
@@ -250,7 +322,9 @@ A lane that is already gone reports `already_gone` as success, not failure.
 **Nothing downstream has to change.** The status-file format, the
 `PREMERGE-APPROVED <sha9>` token and the `NEEDS-ESCALATION <reason>` line are
 byte-compatible, so `automerge.sh` and both operators' monitors keep working
-against a lane that is now managed.
+against a lane that is now managed. `GATE-SKIPPED` is a third, *additional*
+line type: a consumer that only looks for the first two sees exactly what it saw
+before.
 
 A sha that is not a real short sha is never written as an approval: the old
 automerge took the last field of the line and would otherwise try to merge a PR

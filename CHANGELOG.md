@@ -43,6 +43,45 @@
   "we tried and ran out of rounds". It now escalates immediately as
   `untestable-needs-review` with the reason `untestable blocker(s) need human
   review: ...`, and spends no fix rounds.
+### Fixed
+
+- **Run logs no longer reach the branch or the PR.** The engine's run dir
+  defaulted to `<lane worktree>/.agent-fleet/runs/<lane>/`, and the PR guarantee
+  stages with `git add -A`. Every lane PR carried `impl.jsonl` / `impl.out`, and
+  a lane whose implementer changed *nothing* had the run log as its only
+  untracked file — so the guarantee staged it, committed only it, and died on the
+  repo's hooks, reported as `commit_failed`. The default run dir now lives outside
+  the worktree, under `~/.agent-fleet/runs/<operator>/<lane>/<run-id>/`, which
+  also stops a second run of the same lane overwriting the first run's
+  transcript. `ensure_lane_worktree` additionally adds `.agent-fleet/` to the
+  repo's `info/exclude` (idempotently, on every path including worktree reuse),
+  and the guarantee passes `:(exclude).agent-fleet` to `git add` itself so it is
+  correct even when the exclude file could not be written.
+- **A lane that produces no changes says which of the two things happened.**
+  `no_commits_ahead` conflated an implementer that *decided* to stop (a fence, an
+  owner decision, it needed clarification) with one that ran out of steam. The
+  former is now `no_changes_stopped`, carrying the implementer's own final
+  message in `detail` and in the status line so an orchestrator can route it to a
+  decision list. The latter is `lazy_exit`: a short final text that reads as work
+  about to happen ("Now I'll update the manifest:"), which gets exactly **one**
+  automatic retry with a nudge before being escalated. The retry is recorded as a
+  `lane.engine.retry` event. A stream with no final text at all keeps the plain
+  `no_commits_ahead` verdict rather than inventing a reason. The lazy heuristic is
+  biased against retrying: a final text claiming completion is not treated as
+  unfinished, and an ambiguous mix resolves to not-retrying.
+- **`--no-gate` is no longer reported as an escalation.** The status line read
+  `NEEDS-ESCALATION PR #N guaranteed; gate disabled ...` for a lane that was
+  working exactly as asked, so operators read healthy lanes as broken ones. It is
+  now `GATE-SKIPPED PR #<n> @<sha9> (<reason>)`, with the lane state
+  `pr_guaranteed` and `approved=False` unchanged. `gate.is_approval_line` is the
+  single definition of what counts as an approval and does not match a
+  `GATE-SKIPPED` line; the `PREMERGE-APPROVED` line format is byte-identical.
+- **A hook failure names the hooks that refused it.** The guarantee reported
+  `commit_failed` with 2000 characters of pre-commit transcript and no way to
+  tell *which* hook had failed short of reading it. The failing ids are now
+  parsed from pre-commit's `- hook id: <id>` blocks and reported as
+  `hooks_failed=[...]` on `LaneRunResult.hooks_failed`, at the head of the
+  escalation `detail`, and in the status line.
 
 ### Added
 

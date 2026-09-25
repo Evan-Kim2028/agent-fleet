@@ -78,6 +78,18 @@ CONTINUE_PROMPT = (
     "with gh pr create. Keep each response short and do the work through tool calls."
 )
 
+#: The one retry a lane gets when it stopped mid-intention without touching the
+#: tree. Deliberately *not* the original prompt: re-sending the task would make
+#: the agent re-read and re-plan what it already read, which is the expensive way
+#: to ask "finish what you were doing". One retry, no loop.
+NUDGE_PROMPT = (
+    "You stopped before doing the work. Your last message announced what you were about "
+    "to do and the run ended there. Continue and complete the task; do not re-plan. "
+    "Do the work through tool calls: make the changes, run the targeted tests, commit, "
+    "push, and open the PR with gh pr create. If you are stopping for a reason — a fence, "
+    "an owner decision, or a genuine ambiguity — say so explicitly and name the reason."
+)
+
 
 @dataclass
 class EngineResult:

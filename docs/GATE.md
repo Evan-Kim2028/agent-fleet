@@ -184,6 +184,12 @@ HH:MM:SS NEEDS-ESCALATION <first reason>
 
 That single line is what the automerge watcher reads.
 
+The status file has a third line type, written by the *lane* rather than by the
+gate: `HH:MM:SS GATE-SKIPPED PR #<n> @<sha9> (<reason>)`. It means the PR was
+guaranteed but the gate did not run — `--no-gate`, or no gate installed. It is
+not an escalation and not an approval; `gate.is_approval_line` does not match
+it, so a `GATE-SKIPPED` line can never be read as a gate that cleared a PR.
+
 ---
 
 ## Machine-wide admission
