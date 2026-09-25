@@ -4,6 +4,69 @@
 
 ### Fixed
 
+- **Gate fails CLOSED on dead agents:** a killed, crashed or empty lens,
+  verifier or judge raises `GateInfraError` (NEEDS_ESCALATION) instead of
+  reading as "0 findings". A verifier that answers without proof still
+  rejects the claim. Regression from a live incident where a mass SIGKILL
+  of agent wrappers produced an approval on "0 candidates".
+- **Gate test plumbing on multi-package repos:** tests run with paths
+  relative to their owning package (cwd = package dir) and failing node ids
+  map back to repo-relative; uv workspace roots run `uv run --all-packages`
+  so tests importing workspace members work in a fresh gate worktree.
+- **Gate diffs against `origin/<base>`** (fallback: local base when no
+  remote), in step0 and every lens/verify/judge prompt — a stale local base
+  branch no longer inflates "the PR's changed tests".
+- **Slot pool bookkeeping race:** `pool.json` writes use a unique temp file
+  per writer under an flock and retry transient IO errors.
+
+### Added
+
+- **`gate` pipeline — evidence-based PR merge gate:** `agent-fleet gate
+  --repo-path <path> --pr <n> [--task-file f] [--status-file f]` runs an
+  evidence-based gate against an existing PR head. A claim is not a blocker
+  until a test demonstrates it: step0 runs the PR's own changed tests at head
+  (per-package, `pyproject.toml`-dir aware; a pytest exit >= 2 is an infra error,
+  never a finding), N parallel lens reviewers propose blockers only, and one
+  verifier per claim must write a failing test that **the pipeline re-runs
+  itself** — a verifier claiming CONFIRMED whose test passes is discarded. At
+  most one judge call (plus one recheck) runs on a separately configured
+  backend for untestable claims and its own blocker pass, whose new claims go
+  back through verify. Writes `APPROVED(sha)` or `NEEDS_ESCALATION(reasons)` to
+  the JSONL run log and, with `--status-file`, the automerge line
+  `HH:MM:SS PREMERGE-APPROVED <sha9>` / `HH:MM:SS NEEDS-ESCALATION <reason>`.
+- **Convergence instead of a fix-round cap:** the gate continues fixing while
+  the failing set **strictly shrinks and no new failures appear**, and stops on
+  evidence — 0 failing approves, no measurable progress escalates. Per-round
+  metrics (`failing`, `fixed`, `new_failures`) are recorded so a stall is
+  distinguishable from steady progress. `max_fix_rounds` (default 4) is only a
+  safety net, reported as a distinct `cap` outcome.
+- **`agent-fleet gate metrics`:** per-gate metrics appended to
+  `~/.agent-fleet/gate/metrics.jsonl` (candidates, confirmed, rejected,
+  untestable, per-round failing counts, terminal outcome), with
+  `--format table` and `--limit N`.
+- **Model policy:** a `fleet.yaml` `model_policy` pins the allowed models per
+  backend and, via `roles`, which pipeline roles a backend may serve. The gate
+  validates every dispatch **before** starting, so a config drift fails in a
+  second rather than after a fan-out. Ships `examples/fleet.gate.yaml` with the
+  approved policy: backend `cmd` → `stealth/space-bunny-alpha` only; backend
+  `grok` → `step-5-preview` only, restricted to the `judge` role.
+- **Machine-wide admission (`agent_fleet.slots`):** cross-process concurrency
+  slots under `~/.agent-fleet/slots`, one lock file per slot held with an
+  advisory `flock`. The kernel releases a slot when the holding process exits —
+  including on `SIGKILL` — so a crashed run cannot leak capacity. Every backend
+  session and every gate-held test run takes a slot, so several independent
+  fleet processes share one budget. A separate, much smaller `test` pool bounds
+  concurrent pytest processes, each of which is memory-capped via
+  `systemd-run --user --scope -p MemoryMax=<test_memory> -p MemorySwapMax=0`
+  (a runaway suite once consumed 36GB).
+- **Gate contracts:** `agent_fleet/contracts/gate.py` with frozen dataclasses,
+  hand-written draft-07 schemas in `agent_fleet/schemas/gate_{findings,verify,
+  judge,recheck}.schema.json`, and `validate_*` functions, so a malformed model
+  answer is rejected at the boundary rather than propagating into the blocker
+  list.
+
+### Fixed
+
 - **Devin / concurrent `fleet run` worktree steal:** every single-task
   `fleet run` uses `task_index=0`, so resume attached to any dirty
   `fleet/task-0-*` branch — including one a live Devin dispatcher still

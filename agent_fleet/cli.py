@@ -900,6 +900,48 @@ def cmd_summon(args: argparse.Namespace) -> int:
     return doctor_rc
 
 
+def cmd_gate(args: argparse.Namespace) -> int:
+    """Run the evidence-based pre-merge gate against an existing PR head.
+
+    Exit code 0 only on APPROVED: NEEDS_ESCALATION, an unusable PR, or a
+    deterministic step that could not run all exit 1, so an automerge wrapper
+    can gate on the exit code alone as well as on the status line.
+    """
+    from agent_fleet.gate.pipeline import run_gate
+    from agent_fleet.model_policy import ModelPolicyError
+
+    if getattr(args, "pr", None) is None:
+        print("error: gate requires --pr <n> (or 'fleet gate metrics')", file=sys.stderr)
+        return 2
+    try:
+        result = run_gate(
+            repo_path=Path(getattr(args, "repo_path", None) or Path.cwd()),
+            pr_number=int(args.pr),
+            task_file=getattr(args, "task_file", None),
+            status_file=getattr(args, "status_file", None),
+            config_path=getattr(args, "config", None),
+        )
+    except ModelPolicyError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if result.status_line:
+        print(result.status_line, file=sys.stderr)
+    print(json.dumps(result.to_dict(), indent=2, default=str))
+    return 0 if result.approved else 1
+
+
+def cmd_gate_metrics(args: argparse.Namespace) -> int:
+    """Show recent gate runs: the candidate->confirmed funnel and convergence trace."""
+    from agent_fleet.gate.pipeline import gate_metrics_summary
+
+    payload = gate_metrics_summary(limit=int(getattr(args, "limit", 20) or 20))
+    if getattr(args, "format", "json") == "table":
+        print(payload["table"])
+    else:
+        print(json.dumps(payload, indent=2, default=str))
+    return 0
+
+
 def cmd_self_update(_args: argparse.Namespace) -> int:
     """Upgrade agent-fleet itself via ``uv tool upgrade agent-fleet``."""
     try:
@@ -1270,6 +1312,44 @@ def main(argv: list[str] | None = None) -> int:
     )
     summon_p.add_argument("--workspace", help="Repo path (default: cwd)")
     summon_p.set_defaults(func=cmd_summon)
+
+    gate_p = sub.add_parser(
+        "gate",
+        help="Run the evidence-based pre-merge gate against an existing PR head",
+    )
+    gate_p.add_argument(
+        "--repo-path",
+        default=None,
+        help="Path to the git repo holding the PR (default: cwd)",
+    )
+    gate_p.add_argument("--pr", type=int, default=None, help="PR number to gate")
+    gate_p.add_argument(
+        "--task-file",
+        default=None,
+        help="Task specification file, used as the yardstick by the spec lens and the judge",
+    )
+    gate_p.add_argument(
+        "--status-file",
+        default=None,
+        help=(
+            "Append the automerge status line here: "
+            "'HH:MM:SS PREMERGE-APPROVED <sha9>' or 'HH:MM:SS NEEDS-ESCALATION <reason>'"
+        ),
+    )
+    gate_p.set_defaults(func=cmd_gate, pr=None)
+
+    gate_sub = gate_p.add_subparsers(dest="gate_command")
+    gate_metrics_p = gate_sub.add_parser(
+        "metrics",
+        help="Show recent gate runs: candidate->confirmed funnel and convergence trace",
+    )
+    gate_metrics_p.add_argument(
+        "--limit", type=int, default=20, help="How many recent gate runs to show (default 20)"
+    )
+    gate_metrics_p.add_argument(
+        "--format", choices=("json", "table"), default="json", help="Output format"
+    )
+    gate_metrics_p.set_defaults(func=cmd_gate_metrics)
 
     self_p = sub.add_parser("self", help="Maintenance commands for agent-fleet itself")
     self_sub = self_p.add_subparsers(dest="self_command", required=True)

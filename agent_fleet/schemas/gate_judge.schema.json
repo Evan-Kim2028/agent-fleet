@@ -1,0 +1,38 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "JudgeReport",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["untestable_rulings", "new_blockers"],
+  "properties": {
+    "untestable_rulings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "real", "reason"],
+        "properties": {
+          "id": {"type": "string"},
+          "real": {"type": "boolean"},
+          "reason": {"type": "string"}
+        }
+      }
+    },
+    "new_blockers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "file", "line", "claim", "repro", "testable"],
+        "properties": {
+          "id": {"type": "string"},
+          "file": {"type": "string"},
+          "line": {"type": "integer", "minimum": 0},
+          "claim": {"type": "string"},
+          "repro": {"type": "string"},
+          "testable": {"type": "boolean"}
+        }
+      }
+    }
+  }
+}

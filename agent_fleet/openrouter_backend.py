@@ -1236,7 +1236,9 @@ class OpenRouterSession:
         ]
         logger.info(
             "OpenRouter context compacted: %d -> %d messages, estimated input_tokens=%d",
-            before, len(self._messages), int(self._history_chars() * ratio),
+            before,
+            len(self._messages),
+            int(self._history_chars() * ratio),
         )
         return usage
 
@@ -1355,7 +1357,7 @@ class OpenRouterSession:
                 new_command = True
             try:
                 outcome = json.loads(result)
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 return False
             return name in _MUTATING_TOOLS and outcome.get("ok") is True
 
@@ -1370,9 +1372,13 @@ class OpenRouterSession:
             )
             _emit_summary(reason, iteration + 1)
             return OpenRouterLLMResult(
-                stdout=text, stderr=stderr, exit_code=code,
-                duration_s=time.monotonic() - t0, agent_id=self._agent_id,
-                usage=total_usage or None, mcp_tool_calls=tuple(tool_calls_made),
+                stdout=text,
+                stderr=stderr,
+                exit_code=code,
+                duration_s=time.monotonic() - t0,
+                agent_id=self._agent_id,
+                usage=total_usage or None,
+                mcp_tool_calls=tuple(tool_calls_made),
             )
 
         def _after_iteration(
@@ -1416,11 +1422,13 @@ class OpenRouterSession:
                 recent_calls.clear()
                 repeated_calls = False
                 no_progress_iters = 0
-                self._messages.append({
-                    "role": "user",
-                    "content": "You appear to be looping/reading without progress; "
-                    "commit to a change or state the blocker",
-                })
+                self._messages.append(
+                    {
+                        "role": "user",
+                        "content": "You appear to be looping/reading without progress; "
+                        "commit to a change or state the blocker",
+                    }
+                )
                 logger.warning("OpenRouter stall detected; nudging once before abort")
 
             if not iter_mutated and consecutive_no_mutation in _STALL_WARNING_THRESHOLDS:
@@ -1458,7 +1466,8 @@ class OpenRouterSession:
             for iteration in range(_MAX_TOOL_ITERATIONS):
                 call_base_max_tokens = max(effective_max_tokens, self._reasoning_floor or 0)
                 for key, value in self._budget_history(
-                    timeout_s=timeout_s, max_tokens=call_base_max_tokens,
+                    timeout_s=timeout_s,
+                    max_tokens=call_base_max_tokens,
                 ).items():
                     total_usage[key] = total_usage.get(key, 0) + value
                 self._trim_history()
@@ -1479,7 +1488,7 @@ class OpenRouterSession:
                     )
                     if data.get("choices") or _ec_attempt >= _empty_choice_retries:
                         break
-                    _ec_delay = min(20.0 * (2 ** _ec_attempt), 180.0)
+                    _ec_delay = min(20.0 * (2**_ec_attempt), 180.0)
                     logger.warning(
                         "OpenRouter returned no choices (error=%s), retry %d/%d in %.0fs",
                         json.dumps(data.get("error"))[:300],
@@ -1644,30 +1653,45 @@ class OpenRouterSession:
                     if completion_nudges >= contract.max_nudges:
                         return _guard_failure(
                             "contract_unmet" if completion_contract else "empty_reply",
-                            2, content,
+                            2,
+                            content,
                             "completion contract unmet" if completion_contract else "empty reply",
                         )
                     completion_nudges += 1
                     required = ", ".join(contract.required_patterns) or "a non-empty final message"
                     what_missing = ", ".join(missing)
                     if not content:
-                        what_missing = ", ".join(filter(None, (
-                            what_missing, "a non-empty final message",
-                        )))
+                        what_missing = ", ".join(
+                            filter(
+                                None,
+                                (
+                                    what_missing,
+                                    "a non-empty final message",
+                                ),
+                            )
+                        )
                     logger.info(
                         "completion contract: nudge %d/%d — missing: %s (cleaned text length %d)",
-                        completion_nudges, contract.max_nudges, what_missing, len(content),
+                        completion_nudges,
+                        contract.max_nudges,
+                        what_missing,
+                        len(content),
                     )
-                    self._messages.append({
-                        "role": "user",
-                        "content": (
-                            "Your final message did not satisfy the completion contract: "
-                            f"{what_missing}. Continue the task; finish with {required}. "
-                            "If it is impossible, state the blocker explicitly."
-                            + (f" Blocker format: {contract.or_blocker_pattern}"
-                               if contract.or_blocker_pattern else "")
-                        ),
-                    })
+                    self._messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "Your final message did not satisfy the completion contract: "
+                                f"{what_missing}. Continue the task; finish with {required}. "
+                                "If it is impossible, state the blocker explicitly."
+                                + (
+                                    f" Blocker format: {contract.or_blocker_pattern}"
+                                    if contract.or_blocker_pattern
+                                    else ""
+                                )
+                            ),
+                        }
+                    )
                     continue
 
                 _after_iteration(iteration, [], False, final=True)
