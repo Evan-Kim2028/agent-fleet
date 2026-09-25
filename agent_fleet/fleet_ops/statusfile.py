@@ -38,6 +38,12 @@ logger = logging.getLogger(__name__)
 APPROVED_TOKEN = "PREMERGE-APPROVED"
 ESCALATION_TOKEN = "NEEDS-ESCALATION"
 
+#: A lane that stopped after guaranteeing its PR because the gate did not run —
+#: either ``--no-gate`` or no gate installed. It is neither of the two above:
+#: writing it as an escalation made operators read a working lane as a broken
+#: one, and made the merge planner's approval sweep treat it as needing a human.
+GATE_SKIPPED_TOKEN = "GATE-SKIPPED"
+
 #: Default cap for a hook command. A hook that hangs must not wedge the lane.
 DEFAULT_HOOK_TIMEOUT_S = 300
 
@@ -59,6 +65,27 @@ def approved_line(sha: str | None) -> str:
 
 def escalation_line(reason: str) -> str:
     return format_line(ESCALATION_TOKEN, (reason or "").strip())
+
+
+def gate_skipped_line(pr: int | None, *, sha: str | None, reason: str) -> str:
+    """``HH:MM:SS GATE-SKIPPED PR #<n> @<sha9> (<reason>)``.
+
+    The PR number and head are in the line because this is the outcome an
+    external gate or a merge planner picks up from, and it should not have to
+    cross-reference the registry to learn which PR is waiting on it.
+
+    A missing sha contributes no ``@`` field at all rather than a placeholder:
+    the old automerge took the trailing field of a status line as a commit id,
+    and a literal stand-in there is a sha that matches no PR.
+    """
+    parts = [GATE_SKIPPED_TOKEN]
+    if pr is not None:
+        parts.append(f"PR #{pr}")
+    head = short_sha(sha)
+    if head and all(c in "0123456789abcdef" for c in head.lower()):
+        parts.append(f"@{head}")
+    clean = " ".join((reason or "gate did not run").split())[:200]
+    return f"{local_hhmmss()} {' '.join(parts)} ({clean})"
 
 
 def append_status(path: Path | str, line: str) -> Path:
@@ -231,11 +258,13 @@ __all__ = [
     "APPROVED_TOKEN",
     "DEFAULT_HOOK_TIMEOUT_S",
     "ESCALATION_TOKEN",
+    "GATE_SKIPPED_TOKEN",
     "HookResult",
     "append_status",
     "approved_line",
     "escalation_line",
     "format_line",
+    "gate_skipped_line",
     "hook_env",
     "last_status_line",
     "read_status_lines",
