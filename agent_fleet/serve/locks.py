@@ -261,6 +261,7 @@ class LockRegistry:
         starttime: int | None = None,
         wanting: str = "",
         now: float | None = None,
+        waiting_for: str | None = None,
     ) -> Iterator[bool]:
         """Take a lock, recording intent on both the wait and the acquisition.
 
@@ -268,6 +269,14 @@ class LockRegistry:
         ``waiting`` record naming it. The caller decides what to do; the
         registry never blocks and never retries, because a supervisor that
         blocks is a supervisor that cannot answer ``serve status``.
+
+        ``waiting_for`` names the lock whose holder the acquisition is blocked
+        behind — the edge the deadlock walk follows. When it is not given, it is
+        inferred: the lock *holder* is itself already holding, if any, otherwise
+        the lock that could not be had. A component that holds one lock and then
+        blocks on a second is exactly the two-way block the detector exists to
+        find, and without this edge the only real acquisition path could never
+        record one.
         """
         if pid is None:
             pid = os.getpid()
@@ -284,7 +293,7 @@ class LockRegistry:
                     holder=holder,
                     pid=pid,
                     starttime=starttime,
-                    waiting_for=None,
+                    waiting_for=waiting_for or self._inferred_edge(holder, name),
                     wanting=wanting,
                     now=now,
                 )
@@ -296,7 +305,25 @@ class LockRegistry:
             try:
                 yield True
             finally:
-                self.release(name)
+                # Only reset the record if *this* hold is still the holder. A
+                # failed acquisition by another component turns the record into
+                # a ``waiting`` edge while we still hold the flock; clobbering
+                # that back to ``free`` on exit would erase the very block the
+                # deadlock detector exists to find, and a block that has
+                # unwound would be indistinguishable from one that never
+                # happened.
+                current = self.read(name)
+                if current is None or current.holder == holder:
+                    self.release(name)
+
+    def _inferred_edge(self, holder: str, blocked_name: str) -> str:
+        """The lock this holder is already sitting on, else the blocked one."""
+        for record in self.all_records().values():
+            if record.state != STATE_HELD or record.holder != holder:
+                continue
+            if record.name != blocked_name:
+                return record.name
+        return blocked_name
 
     # -------------------------------------------------------------- inspection
 

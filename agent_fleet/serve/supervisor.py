@@ -539,6 +539,23 @@ class Supervisor:
                     continue
                 self.start(spec.name)
 
+    def note_event(self, name: str, *, epoch: float | None = None) -> bool:
+        """Record that a component just did something.
+
+        ``last_event_epoch`` is otherwise pinned to the moment the process was
+        started or adopted, so "time since the last event" is really "time since
+        the component launched" and a component that is working perfectly is
+        indistinguishable from one that has been wedged since it came up. This is
+        the API a component calls when it completes a unit of work, so the
+        watchdog can tell silence from uptime. Returns False for a component
+        serve is not tracking.
+        """
+        state = self.children.get(name)
+        if state is None:
+            return False
+        state.last_event_epoch = self.clock.time() if epoch is None else epoch
+        return True
+
     def request_restart(self, name: str, *, reason: str) -> bool:
         """The watchdog's "this component is wedged" path.
 

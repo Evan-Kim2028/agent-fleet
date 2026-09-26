@@ -244,13 +244,19 @@ def action_for(reason_class: str, *, attempts: int = 0) -> str:
     return ACTION_DECIDE
 
 
-def read_decisions(path: Path) -> list[Decision]:
-    """Every queued decision, oldest first."""
+#: Marks a line in the decision log as recording a spent automatic retry rather
+#: than raising (or closing) a human decision. The log is append-only so it
+#: survives a serve restart; the retry budget has to be reconstructed from it for
+#: the same reason a human's resolution is honoured from it.
+RECORD_ATTEMPT = "attempt"
+
+
+def _read_log(path: Path) -> list[dict[str, Any]]:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return []
-    out: list[Decision] = []
+    out: list[dict[str, Any]] = []
     for line in text.splitlines():
         line = line.strip()
         if not line:
@@ -260,10 +266,86 @@ def read_decisions(path: Path) -> list[Decision]:
         except json.JSONDecodeError:
             continue
         if isinstance(raw, dict):
-            decision = Decision.from_dict(raw)
-            if decision is not None:
-                out.append(decision)
+            out.append(raw)
     return out
+
+
+def _persisted_attempts(path: Path) -> dict[str, int]:
+    """Automatic retries already spent per item, rebuilt from the log.
+
+    Counted over the whole file since the last resolution of that item, so a
+    human who resolved a fence and let the item come back gets a fresh budget,
+    exactly as an in-memory :attr:`EscalationRouter.attempts` reset does.
+    """
+    counts: dict[str, int] = {}
+    for raw in _read_log(path):
+        item_id = raw.get("item_id")
+        if not isinstance(item_id, str) or not item_id:
+            continue
+        if raw.get("resolved"):
+            counts.pop(item_id, None)
+        elif raw.get("record") == RECORD_ATTEMPT:
+            counts[item_id] = counts.get(item_id, 0) + 1
+    return counts
+
+
+def _open_decisions(text: str) -> list[Decision]:
+    """Fold an append-only decision log into its still-open decisions.
+
+    Resolutions are applied *after* the whole log is read rather than as the
+    lines are scanned. A single forward pass gets this wrong in a way that
+    matters: a decision raised after a resolution for the same item would look
+    open, and one raised before it would look resolved, even though the item is
+    plainly still waiting. A human who resolved a fence, watched the lane come
+    back, watched it fence again, and then checked the queue would be told their
+    answer had already been given.
+    """
+    open_by_id: dict[str, Decision] = {}
+    order: list[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            raw = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(raw, dict):
+            continue
+        item_id = raw.get("item_id")
+        if not isinstance(item_id, str) or not item_id:
+            continue
+        if raw.get("resolved"):
+            open_by_id.pop(item_id, None)
+            if item_id in order:
+                order.remove(item_id)
+            continue
+        if raw.get("record") == RECORD_ATTEMPT:
+            continue
+        decision = Decision.from_dict(raw)
+        if decision is None:
+            continue
+        if item_id not in open_by_id:
+            order.append(item_id)
+        open_by_id[item_id] = decision
+    return [open_by_id[item_id] for item_id in order if item_id in open_by_id]
+
+
+def read_decisions(path: Path) -> list[Decision]:
+    """Open decisions in *path*, oldest first.
+
+    Resolutions are applied here too, not only in
+    :meth:`EscalationRouter.pending`. The queue is a log, so a human's answer
+    is a line in it, and a reader that ignored those lines would report a
+    resolved item as still waiting and fabricate a phantom empty decision from
+    the resolution record itself. Both readers fold the file the same way, so
+    they cannot disagree.
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    return _open_decisions(text)
 
 
 class EscalationRouter:
@@ -287,7 +369,28 @@ class EscalationRouter:
         return self._decisions_file or decisions_path(self.operator)
 
     def attempts_for(self, item_id: str) -> int:
-        return self.attempts.get(item_id, 0)
+        """Automatic retries *item_id* has already spent, across serve restarts.
+
+        Reconstructed from the on-disk log whenever the in-memory ledger has no
+        entry, so a serve that restarts does not hand a still-failing infra item
+        a fresh budget. The in-memory dict is the fast path for the common case
+        of a router that has been routing this process's whole life.
+        """
+        spent = self.attempts.get(item_id)
+        if spent is not None:
+            return spent
+        return _persisted_attempts(self.decisions_path).get(item_id, 0)
+
+    def _record_attempt(self, item_id: str) -> None:
+        path = self.decisions_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "item_id": item_id,
+            "record": RECORD_ATTEMPT,
+            "epoch": self.clock.time(),
+        }
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, default=str) + "\n")
 
     def route(
         self,
@@ -306,7 +409,10 @@ class EscalationRouter:
         action = action_for(reason_class, attempts=attempts)
 
         if action == ACTION_RETRY:
+            # The spent retry is written to the append-only log, not just to
+            # memory, so a restarted serve reconstructs the same budget.
             self.attempts[item_id] = attempts + 1
+            self._record_attempt(item_id)
         elif action == ACTION_DECIDE and reason_class == CLASS_INFRA:
             # The one automatic retry was already spent; stop trying.
             self.attempts[item_id] = attempts + 1
@@ -379,44 +485,15 @@ class EscalationRouter:
     def pending(self) -> list[Decision]:
         """Open decisions — raised, and not resolved since they were raised.
 
-        Resolutions are applied *after* the whole log is read rather than as
-        the lines are scanned. A single forward pass gets this wrong in a way
-        that matters: a decision raised after a resolution for the same item
-        would look open, and one raised before it would look resolved, even
-        though the item is plainly still waiting. A human who resolved a fence,
-        watched the lane come back, watched it fence again, and then checked
-        the queue would be told their answer had already been given.
+        Resolutions are re-read from disk on every call, so a human's answer is
+        honoured immediately, including by a router that has just been built by a
+        restarted serve.
         """
         try:
             text = self.decisions_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return []
-        open_by_id: dict[str, Decision] = {}
-        order: list[str] = []
-        for line in text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                raw = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(raw, dict):
-                continue
-            item_id = raw.get("item_id")
-            if not isinstance(item_id, str) or not item_id:
-                continue
-            if raw.get("resolved"):
-                if open_by_id.pop(item_id, None) is not None and item_id in order:
-                    order.remove(item_id)
-                continue
-            decision = Decision.from_dict(raw)
-            if decision is None:
-                continue
-            if item_id not in open_by_id:
-                order.append(item_id)
-            open_by_id[item_id] = decision
-        return [open_by_id[item_id] for item_id in order if item_id in open_by_id]
+        return _open_decisions(text)
 
     def resolve(self, item_id: str, resolution: str) -> bool:
         """Append a resolution, closing the decision. Returns False if unknown."""
@@ -452,6 +529,7 @@ __all__ = [
     "CLASS_UNTESTABLE",
     "MAX_INFRA_RETRIES",
     "REASON_CLASSES",
+    "RECORD_ATTEMPT",
     "Decision",
     "EscalationRouter",
     "Route",
