@@ -212,6 +212,174 @@ Any other key is optional and overrides the built-ins:
       risk_globs: ["sql/*.sql"]     # extra paths that count as a migration
 ```
 
+## Running the plan: `fleet merge run`
+
+`merge-plan` decides; `merge run` ships. One tick plans, then takes every
+eligible batch through **merge → deploy → verify**:
+
+```
+fleet merge run                       # one tick, then exit (cron / CI friendly)
+fleet merge run --daemon 180          # loop, SIGINT/SIGTERM to stop
+fleet merge run --dry-run             # report decisions, run nothing, take no lock
+fleet merge holds                     # what is holding merges, and why
+fleet merge release <hold>            # clear a named cluster hold
+```
+
+`--dry-run` is the safe way to try a config change: it runs the same planning
+and reports the same outcomes without spawning a command or creating a lock
+file.
+
+Per tick, per batch, the outcome is one of `merged`, `held`, `locked`,
+`needs_rebase`, `failed`, or `skipped` — and a stopped batch always carries the
+reason, so a queue that is not moving says why. Exit code is `1` only when a
+batch actually failed; held and locked batches are the scheduler working and
+must not page a monitor.
+
+Events go through the normal fleet event path (`RunLog`), so they land in the
+runs-dir JSONL like everything else: `merge.start`, `merge.start_batch`,
+`merge.merged`, `merge.deployed`, `merge.verified`, `merge.needs_rebase`,
+`merge.failed`, `merge.held`, `merge.locked`, `merge.end`.
+
+### Commands per repo
+
+`merge run` holds no repository knowledge. Every step comes from config:
+
+```yaml
+merge_plan:
+  repos:
+    - name: lake-of-rage
+      path: ~/Documents/lake-of-rage
+      merge_template:  "scripts/lake_batch_merge.sh {pr_args}"
+      deploy_template: "scripts/lake_deploy.sh {merge_sha}"
+      verify_template: "scripts/lake_verify.sh {merge_sha}"
+      rebase_template: "scripts/rebase_regate.sh {lane} {repo} {pr} {sha9}"
+```
+
+| Placeholder | Expands to |
+|---|---|
+| `{pr_args}` | `12:1a2b3c4 14:5e6f7a8` — every merged PR in the batch |
+| `{pr}` / `{sha9}` | one PR number / its approved SHA, short form |
+| `{merge_sha}` | the **merge commit** that the deploy builds, not the reviewed head |
+| `{repo}` / `{lane}` | repository name / lane name |
+
+`deploy_template` and `verify_template` are optional; a repo with neither stops
+after the merge. A repo with no merge template at all is reported as
+`(no merge template configured)` — the executor never invents a command.
+
+Commands are `shlex`-split and executed **without a shell**, so a template can
+quote its arguments but can never be re-interpreted. A command that overruns
+`command_timeout_seconds` is killed by the pid the executor started.
+
+### Why the deploy lock is not a marker file
+
+The ad-hoc scripts guarded deploys with `touch lake_deploying` and removed it on
+exit — so a merge that stopped on a conflict leaked the marker, and the next
+repository's merge waited on it for an hour and forty minutes.
+
+`DeployLock` takes an `flock` on an open file descriptor. The lock belongs to
+that descriptor, so the kernel releases it when the process ends — on a normal
+return, on an exception, on `KeyboardInterrupt`, or on a crash. There is no exit
+path that can leak it, and the release is a `finally` rather than a `trap` that a
+later code path can forget.
+
+A sidecar `<repo>.meta` records the holder's pid, boot id, and process start
+time. It is advisory — it explains the lock, it never grants it. A live holder is
+**never** displaced; a record whose pid is gone, whose pid the kernel has since
+recycled, or which predates the last reboot is stale and gets reclaimed.
+
+### Conflicts do not block the queue
+
+A `CONFLICTING` PR is never retried in place. The tick marks it
+`needs_rebase`, drops it from the batch, and hands it to `rebase_template` (or
+the executor-wide `rebase_command`) once. The rest of the batch ships normally,
+and so does every other repository.
+
+The rebase pushes a new head, so the PR re-enters the gate naturally; the
+stale-approval rule then correctly refuses to merge it until a fresh approval
+lands for that head. A merge command that exits with `conflict_exit_code`
+(default `3`, matching the existing merge scripts) is treated the same way.
+
+### Nothing is remembered that GitHub already knows
+
+There is no "already merged" list. Every tick re-reads live PR state and decides
+from it, so a PR is skipped only for a checkable reason:
+
+| Live state | Outcome |
+|---|---|
+| `state == MERGED` | skipped — already shipped |
+| head does not start with the approved SHA | skipped — **stale approval** |
+| `state == OPEN`, `mergeable == MERGEABLE` | eligible |
+| `mergeable == CONFLICTING` | `needs_rebase`, handed to the rebase command |
+| anything unreadable or `UNKNOWN` | skipped — never assumed safe |
+
+A hand-maintained hold list was once seeded with in-flight lanes, and twelve
+approved PRs sat unmerged because the list and reality disagreed. The ledger the
+executor does keep holds only operator intent and fairness counters — never merge
+bookkeeping.
+
+### Cross-repo ordering
+
+`exclusive_groups` names repos that must never deploy at the same time, and
+`post_merge_hold_seconds` adds a quiet period after a deploy:
+
+```yaml
+merge_plan:
+  executor:
+    exclusive_groups: [["lake-of-rage", "silphcoanalytics"]]
+    post_merge_hold_seconds: 300
+```
+
+Two different rules, deliberately kept apart:
+
+* **Exclusion** — at most one repo per group deploys in a single tick, whatever
+  order the plan produced. The loser is reported `held` and goes next tick.
+* **Turn taking** — the repo that deployed last yields to its peer, so a repo
+  with constant work cannot starve one with a single batch ready.
+
+### Cluster holds
+
+A hold blocks merges matching a lane pattern or deploy unit until an operator
+releases it by name:
+
+```yaml
+merge_plan:
+  executor:
+    holds:
+      - name: pass2-downstream
+        match:
+          lanes: ["sales-pass2-*"]
+          deploy_units: ["dbt"]
+```
+
+```
+$ fleet merge holds
+held: pass2-downstream  [lanes sales-pass2-*]
+  release: fleet merge release pass2-downstream
+
+$ fleet merge release pass2-downstream
+released pass2-downstream
+```
+
+### Executor settings
+
+Unlike the repo entries, which stay permissive, the `executor` block is
+validated **strictly**: an unknown key raises rather than being silently dropped,
+because a mistyped key disables a safety setting without saying so.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `holds` | `[]` | named cluster holds (above) |
+| `exclusive_groups` | `[]` | repos that must not deploy concurrently |
+| `post_merge_hold_seconds` | `0` | quiet period after a deploy |
+| `rebase_command` | `""` | fallback when a repo sets no `rebase_template` |
+| `command_timeout_seconds` | `1800` | ceiling on one command |
+| `conflict_exit_code` | `3` | exit code meaning "conflicting" |
+| `state_dir` | `~/.agent-fleet/merge` | locks and ledger live here |
+
+Running the tick on a schedule is an operator step — this command does not
+install a timer or service unit. Point cron, or a supervisor you already run, at
+`fleet merge run`.
+
 ## Emitting for the dashboard
 
 `--emit` writes the plan as a `merge.plan` event so `dash` can show

@@ -54,6 +54,24 @@
   the metrics row carry a per-call `lens_calls` summary (`raw_len`, `parsed_ok`,
   `n_items`, `parse_error`), so a run reporting zero candidates is
   distinguishable from a run whose reviewers genuinely found none.
+- **`agent-fleet merge run`:** the executor for the batches `merge-plan` plans.
+  A tick collects approvals, plans, then merges, deploys, and verifies each
+  eligible batch — with the reliability the hand-run merge scripts lacked. Every
+  command comes from `merge_plan.repos[].{merge,deploy,verify}_template`; there
+  is no built-in repository knowledge, and a repo with no merge template is
+  reported rather than guessed at. `merge run --daemon N` loops, `--dry-run`
+  reports decisions without acting, and `merge holds` / `merge release <hold>`
+  manage cluster holds. Events (`merge.start`, `merge.merged`, `merge.deployed`,
+  `merge.verified`, `merge.needs_rebase`, `merge.failed`, `merge.held`,
+  `merge.locked`, `merge.end`) go through the normal fleet event path. Four
+  properties are enforced with a test each, from failures that actually happened:
+  deploy locks are held by a live process (`flock` on a descriptor, released on
+  every exit path) rather than a marker file that could outlive a crashed merge;
+  a `CONFLICTING` PR is marked `needs_rebase`, dropped from its batch, and handed
+  to a configurable rebase command instead of blocking the queue; merge state is
+  re-derived from live GitHub PR state every tick rather than a hand-maintained
+  list that once stranded twelve approved PRs; and mutually exclusive repos
+  alternate with an optional post-merge hold. See `docs/MERGE-PLAN.md`.
 - **`agent-fleet merge-plan`:** the command center now decides which gate-approved
   PRs ship *together*. Merging and deploying is the slowest serialized step in
   the loop (~15-20 min per lake-of-rage deploy, ~9 min per silphcoanalytics), so
