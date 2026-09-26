@@ -2,8 +2,56 @@
 
 ## Unreleased
 
+### Fixed
+
+- **Gate lenses no longer lose their findings (the `candidates=0` false negative).**
+  Four independent defects dropped reviewer findings on the way to the counter;
+  found on the lake-of-rage #3541 pilot, where all four lenses reported zero
+  parsed findings while the old bash gate confirmed three real blockers on the
+  same PR.
+  - `json_candidates` ranked candidates by *kind* — every fenced ```` ```json ````
+    block first, bare objects second — regardless of position. A reviewer that
+    echoed the schema template in a fence and then answered unfenced had its
+    template returned; `{"findings": []}` validates, so the empty template won
+    and the findings behind it were dropped. Candidates are now ordered by
+    position, last first, across both forms.
+  - A bare top-level `[...]` answer (the findings list without the
+    `{"findings": ...}` wrapper) parsed to nothing at all, which reads exactly
+    like a clean review. The findings schema now accepts it via `list_key`.
+  - `_parse_cmd_stream` overwrote the accumulated assistant text with the
+    `result` event's `finalText` unconditionally. `cmd` exits 8 on the turn cap
+    with an **empty** `finalText`, so a lens that had already found blockers
+    reported nothing. The `finalText` is now only preferred when non-empty.
+  - The repair turn handed the agent back `raw[-12000:]`, silently cutting the
+    tail of a long review. The full answer is now passed through.
+- **A turn-capped reviewer is no longer a clean review.** This was the actual
+  cause of the `candidates=0` pilot result, found by re-running the lens stage
+  against lake-of-rage #3541 with the new per-call trace: all four lenses used
+  the full `--max-turns 80` budget on investigation, never reached a verdict,
+  and exited 8 — but `CmdBackend.run` flattened exit 8 into exit 0. The gate
+  then read the *repair* turn's `{"findings": []}` as the review, so a reviewer
+  that was still mid-investigation produced a perfectly parseable "no blockers".
+  Exit 8 now passes through to callers, and `call_structured` treats it as dead
+  evidence: the gate fails closed and escalates instead of approving on a
+  reviewer that never answered.
+- **A green test set with only untestable blockers no longer reads as a failed
+  fix loop.** When nothing fails and the only blockers are judge-confirmed
+  untestable ones, the gate spent a fix round it could not make progress in and
+  then reported `cap after 1 round(s); failing by round: 0` — which reads as
+  "we tried and ran out of rounds". It now escalates immediately as
+  `untestable-needs-review` with the reason `untestable blocker(s) need human
+  review: ...`, and spends no fix rounds.
+
 ### Added
 
+- **Gate persists every agent call.** Each lens, verifier, judge, recheck and
+  fix call writes `<gate_dir>/calls/<stage>-<n>.json` with the raw final text,
+  the parsed object, the parse error, the exit code and the duration — on
+  failure as well as success, since a dead or unparseable reviewer is exactly
+  the case where the raw text is the only evidence. `GateResult.funnel()` and
+  the metrics row carry a per-call `lens_calls` summary (`raw_len`, `parsed_ok`,
+  `n_items`, `parse_error`), so a run reporting zero candidates is
+  distinguishable from a run whose reviewers genuinely found none.
 - **`agent-fleet merge-plan`:** the command center now decides which gate-approved
   PRs ship *together*. Merging and deploying is the slowest serialized step in
   the loop (~15-20 min per lake-of-rage deploy, ~9 min per silphcoanalytics), so

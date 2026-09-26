@@ -66,16 +66,24 @@ A round counts as progress only when the failing set **strictly shrinks** *and*
 | Condition | Outcome |
 |---|---|
 | 0 failing | `APPROVED` |
+| 0 failing, untestable blockers still open | `NEEDS_ESCALATION` (untestable-needs-review) — see below |
 | Set strictly shrank, nothing new broke | next round |
 | Nothing fixed, or the set did not shrink, or something new broke | `NEEDS_ESCALATION` (stalled) |
 | Fixer pushed nothing | `NEEDS_ESCALATION` (no-push) |
 | Tests could not run at the new head | `NEEDS_ESCALATION` (tests-broken) |
-| Untestable blockers still unresolved | `NEEDS_ESCALATION` (untestable-unresolved) |
+| Untestable blockers still unresolved after a real fix round | `NEEDS_ESCALATION` (untestable-unresolved) |
 
 `max_fix_rounds` (default 4) is **only a safety net** for a run that keeps making
 one-test-at-a-time progress without converging. It is not the stopping rule, and
 hitting it is reported as `cap` — a distinct outcome from a genuine stall, so the
 metrics show which happened.
+
+**A green suite with only untestable blockers never spends a fix round.** A fixer
+cannot demonstrate progress on a passing test set, so dispatching one and then
+reporting `cap` said "we tried and ran out of rounds" about a PR that was never
+attempted. The gate escalates at once with the reason
+`untestable blocker(s) need human review: ...`, naming the blockers — no local
+test can settle them, so the next step is a human.
 
 ---
 
@@ -279,12 +287,28 @@ events into the standard fleet run log.
 
 **Status file** — the one line the automerge watcher reads, described above.
 
+**Per-call artifacts** — every lens, verifier, judge, recheck and fix call writes
+`<gate_dir>/calls/<stage>-<n>.json` holding the raw final text, the parsed
+object, the parse error, the exit code and the duration. Failures are recorded
+too: a dead or unparseable reviewer is exactly the case where the raw text is
+the only evidence of what happened. This is what makes a `candidates=0` result
+diagnosable — you can tell a reviewer that returned nothing from findings that
+were lost between the agent and the counter.
+
+```bash
+ls .agent-fleet/gate/3541/calls/
+cat .agent-fleet/gate/3541/calls/lens-1.json | jq '{raw_len, parsed_ok, n_items, parse_error}'
+```
+
 **Metrics** — one JSONL row per run at `~/.agent-fleet/gate/metrics.jsonl`
 carrying the full funnel (`candidates`, `confirmed`, `rejected`, `untestable`,
-`untestable_real`), the per-round convergence trace, and the terminal outcome.
-Because `max_fix_rounds` is only a safety net, this is what makes convergence
-observable — a run that stalled after three rounds of one-test progress is
-distinguishable from one that converged in a single round.
+`untestable_real`), the per-round convergence trace, the terminal outcome, and a
+`calls` array with the per-call parse state (`raw_len`, `parsed_ok`, `n_items`,
+`parse_error`) for each reviewer. The same summary appears under
+`funnel.lens_calls` in the run's result JSON. Because `max_fix_rounds` is only a
+safety net, this is what makes convergence observable — a run that stalled after
+three rounds of one-test progress is distinguishable from one that converged in
+a single round.
 
 ```bash
 agent-fleet gate metrics --format table

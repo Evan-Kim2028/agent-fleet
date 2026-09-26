@@ -28,6 +28,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "meituan/longcat-2.0:free"
+#: Turn budget for one ``cmd -p`` run. A gate lens that diffs a multi-file PR,
+#: greps call sites and reads surrounding code needs well over a hundred turns;
+#: at 80 it hit the cap mid-investigation and never produced a verdict.
+DEFAULT_MAX_TURNS = 400
 _SESSION_RE = re.compile(r"session:\s*([0-9a-f-]{36})", re.I)
 _DEFAULT_TASTE = Path("/home/evan/Documents/.commandcode/taste/taste.md")
 
@@ -94,12 +98,21 @@ def apply_cmd_taste(work_dir: str, taste_src: str | Path | None) -> Path | None:
 
 
 def _parse_cmd_stream(stdout: str, stderr: str) -> tuple[str, str | None, dict[str, int] | None]:
-    """Return (final_text, session_id, usage) from cmd JSON NDJSON + verbose stderr."""
+    """Return (final_text, session_id, usage) from cmd JSON NDJSON + verbose stderr.
+
+    ``final_text`` is the ``result`` event's ``finalText`` when the run produced
+    one, else the assistant text accumulated from the stream. A turn-capped run
+    (exit 8) ends in a ``result`` event with an **empty** ``finalText``; treating
+    that as the answer erased the assistant text the agent had already written,
+    so a review that did find blockers reported nothing at all.
+    """
     session_id: str | None = None
     m = _SESSION_RE.search(stderr or "")
     if m:
         session_id = m.group(1)
-    final = (stdout or "").strip()
+    final = ""
+    reported = ""
+    assistant_text: list[str] = []
     usage: dict[str, int] | None = None
     for line in (stdout or "").splitlines():
         line = line.strip()
@@ -117,7 +130,7 @@ def _parse_cmd_stream(stdout: str, stderr: str) -> tuple[str, str | None, dict[s
             continue
         if obj.get("type") == "result":
             session_id = obj.get("sessionId") or session_id
-            final = str(obj.get("finalText") or "")
+            reported = str(obj.get("finalText") or "")
             raw_usage = obj.get("usage")
             if isinstance(raw_usage, dict):
                 usage = {}
@@ -141,8 +154,15 @@ def _parse_cmd_stream(stdout: str, stderr: str) -> tuple[str, str | None, dict[s
             if isinstance(ev, dict) and ev.get("sessionId"):
                 session_id = ev["sessionId"]
         ev = obj.get("event") if obj.get("type") == "event" else None
-        if isinstance(ev, dict) and ev.get("type") == "run_start" and ev.get("sessionId"):
+        if not isinstance(ev, dict):
+            continue
+        if ev.get("type") == "run_start" and ev.get("sessionId"):
             session_id = ev["sessionId"]
+        if ev.get("type") == "assistant":
+            text = ev.get("text")
+            if isinstance(text, str) and text.strip():
+                assistant_text.append(text)
+    final = reported.strip() or "\n".join(assistant_text).strip() or (stdout or "").strip()
     return final, session_id, usage
 
 
@@ -157,12 +177,19 @@ def call_cmd(
     session_id: str | None = None,
     resume: bool = False,
     taste_src: str | Path | None = None,
-    max_turns: int = 80,
+    max_turns: int = DEFAULT_MAX_TURNS,
 ) -> tuple[str, str | None, dict[str, int] | None, int]:
     """Run ``cmd -p``. Returns (final_text, session_id, usage, exit_code).
 
     Exit 0 and 8 (turn cap with partial answer) are both returned, not raised.
     Other non-zero exits raise RuntimeError.
+
+    The returned exit code is the *raw* one, including 8: a turn-capped run is
+    not a completed run, and a caller that only sees 0 cannot tell "the agent
+    answered" from "the agent ran out of turns mid-review". The gate's lens
+    stage needs that distinction — a reviewer that spends its whole turn budget
+    investigating and never reaches a verdict produced a silent
+    ``candidates=0`` when exit 8 was flattened into success.
     """
     bin_path = cmd_bin or _find_cmd_bin()
     apply_cmd_taste(work_dir, taste_src)
@@ -282,7 +309,8 @@ class CmdSession:
             return CmdLLMResult(
                 stdout=stdout,
                 stderr="",
-                exit_code=0 if code in (0, 8) else code,
+                # 8 (turn cap) is passed through, not flattened to 0.
+                exit_code=code,
                 duration_s=time.monotonic() - t0,
                 agent_id=self.agent_id,
                 usage=usage,
@@ -407,7 +435,9 @@ class CmdBackend:
             return CmdLLMResult(
                 stdout=stdout,
                 stderr="",
-                exit_code=0 if code in (0, 8) else code,
+                # 8 (turn cap) is passed through, not flattened to 0: the run
+                # stopped early, and a caller deciding on the answer must know.
+                exit_code=code,
                 duration_s=time.monotonic() - t0,
                 agent_id=session_id,
                 usage=usage,
