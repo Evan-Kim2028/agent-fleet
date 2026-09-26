@@ -205,12 +205,17 @@ Five rules, each a detector plus a bounded remediation, each emitting an event.
 | `deadlock` | two components each hold what the other wants, past the threshold | release the older claim |
 | `no_progress` | a component has queued work and has emitted nothing for the window | restart it; escalate once the budget is spent |
 
-Three properties every remediation shares:
+Four properties every remediation shares:
 
 - **Only fleet-owned processes**, by exact pid and matching fingerprint.
 - **Fail closed, then let the owner retry.** A stuck stage is killed and marked
   dead rather than left running, and a stage that is reliably stuck produces an
   escalation a human can read rather than an infinite kill/retry loop.
+- **The KILL escalates the group the TERM went to.** Components are spawned with
+  `start_new_session=True`, so a component leads its own process group and the
+  group holds nothing serve did not put there. A bare-pid KILL after a group TERM
+  reaches only the component: the workers it spawned are not in the supervisor's
+  ledger, and once its leader is gone nothing will ever signal them again.
 - **One budget per tick** (`max_remediations_per_tick`), and the grace before
   escalating TERM to KILL is spent once for the whole tick rather than once per
   victim. Without this, a crash leaving twenty stale children makes one tick

@@ -235,6 +235,16 @@ class Supervisor:
     # ------------------------------------------------------------------ state
 
     @property
+    def stopping(self) -> bool:
+        """True once SIGTERM/SIGINT has been seen, or shutdown has begun.
+
+        The signal handler only sets the flag; the serve loop is what reads it
+        and returns, so the flag is only useful if callers outside this class
+        can see it too.
+        """
+        return self._stopping
+
+    @property
     def state_file(self) -> Path:
         from agent_fleet.serve.paths import state_path
 

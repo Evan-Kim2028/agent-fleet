@@ -274,13 +274,23 @@ class ServeLoop:
                 emit_serve_event(self.operator, "serve.stopped", data={"ticks": self._tick_index})
 
     def _loop(self) -> int:
-        while True:
+        """Tick until the supervisor is stopping or the tick budget is spent.
+
+        ``reaper_signals`` only flips ``supervisor.stopping`` — a handler that
+        waits on children can deadlock against the syscall that interrupted it —
+        so reading the flag here is the only thing that turns ``fleet serve
+        stop`` into a stopped supervisor. Without it the loop ticks forever, the
+        ``finally`` in :meth:`run` never runs, and the operator lock stays held
+        after the CLI has already reported success.
+        """
+        while not self.supervisor.stopping:
             if self.max_ticks is not None and self._tick_index >= self.max_ticks:
                 return 0
             self.tick()
             if self.max_ticks is not None:
                 continue
             self.clock.sleep(self.config.tick_seconds)
+        return 0
 
     # ------------------------------------------------------------------- stop
 

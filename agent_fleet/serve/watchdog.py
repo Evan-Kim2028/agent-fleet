@@ -67,7 +67,6 @@ from agent_fleet.serve.locks import LockRegistry
 from agent_fleet.serve.procs import (
     ProcIdentity,
     boot_time,
-    escalate_kill,
     escalate_kill_group,
     parent_pid,
     terminate_group,
@@ -525,23 +524,24 @@ class Watchdog:
         inside its own rule evaluation cannot keep up with the fleet it is
         protecting, which is how it ends up restarting components it should
         have been watching.
+
+        The TERM these identities took was a *group* TERM, so the escalation
+        has to be a group KILL as well. A bare-pid SIGKILL reaches only the
+        component: the workers it spawned are not in the supervisor's ledger,
+        and after its leader is gone nothing will ever signal them again.
+        """
+        return self.escalate_pending_groups(pending)
+
+    def escalate_pending_groups(self, pending: list[ProcIdentity]) -> list[ProcIdentity]:
+        """KILL the process groups that survived a group TERM's grace.
+
+        A component is spawned with ``start_new_session=True``, so it leads its
+        own group and the group holds only what that component put there — which
+        is what makes a group signal safe here. ``escalate_kill_group`` re-checks
+        the fingerprint and that the pid is still a group leader before sending.
         """
         if self.dry_run:
             return []
-        survivors: list[ProcIdentity] = []
-        for identity in pending:
-            result = escalate_kill(identity, proc_root=self.proc_root)
-            if result.signalled:
-                emit_serve_event(
-                    self.operator,
-                    "serve.watchdog.kill_escalated",
-                    data={"pid": identity.pid, "skipped": result.skipped_reason},
-                )
-            if identity.matches(proc_root=self.proc_root):
-                survivors.append(identity)
-        return survivors
-
-    def escalate_pending_groups(self, pending: list[ProcIdentity]) -> list[ProcIdentity]:
         survivors: list[ProcIdentity] = []
         for identity in pending:
             result = escalate_kill_group(identity, proc_root=self.proc_root)
