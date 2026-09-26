@@ -12,6 +12,7 @@ Built on **[Cursor SDK](https://github.com/cursor/cursor-sdk)** (`cursor-sdk`). 
 | [Personas](docs/PERSONAS.md) | Fleet cookbook |
 | [Schedules](docs/SCHEDULES.md) | Cron-based daily/weekly fleet jobs |
 | [Merge plan](docs/MERGE-PLAN.md) | Batch approved PRs into one deploy |
+| [Post-merge hooks](docs/POST_MERGE.md) | Plan, label, trigger and hand off a merged batch |
 | [Merge gate](docs/GATE.md) | Evidence-based `gate` pipeline before a PR merges |
 | [Fleet ops](docs/FLEET-OPS.md) | Multi-operator lane manager for the `cmd` swarm |
 

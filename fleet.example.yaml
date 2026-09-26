@@ -73,6 +73,28 @@ max_redispatches: 1
 # Global override only with an absolute path to a custom persona tree:
 # personas_dir: /absolute/path/to/my/personas
 
+# --- Optional: post-merge hooks (see docs/POST_MERGE.md) ---
+# What runs after a batch of PRs merges: plan each PR's rebuild, label it,
+# trigger the rebuild jobs once, and write a hand-off note for the data agent.
+# The repo supplies the two domain-specific commands; batching, caching, label
+# diffing, job dedupe, and note rendering are handled by `fleet post-merge`.
+# Run it with: fleet post-merge --repo lake-of-rage --prs 412,415 --deploy-rc 0
+#
+# post_merge:
+#   repos:
+#     - name: lake-of-rage
+#       path: ~/code/lake-of-rage
+#       # Reads changed file paths on stdin, prints a JSON plan on stdout:
+#       #   {"models": [...], "jobs": [{"job","slot"}], "heavy": bool, "verify": [...]}
+#       plan_command: scripts/post_merge_plan.py
+#       # Run once per deduplicated job. Supports {job} and {slot}.
+#       trigger_command: scripts/rebuild.sh --job {job} --slot {slot}
+#       # Where the hand-off note and INDEX are written for the downstream agent.
+#       handoff_inbox: ~/.agent-fleet/handoff
+#       plan_timeout_seconds: 300
+#       trigger_timeout_seconds: 3600
+#       state_dir: ~/.agent-fleet/post-merge
+
 # --- MCP server catalog (v0.5.0) ---
 # Named MCP servers that personas can opt into via mcp_servers: [name, ...].
 # ${VAR} syntax is expanded from the environment at config-load time.
