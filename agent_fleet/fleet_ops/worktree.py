@@ -30,6 +30,24 @@ if TYPE_CHECKING:
 #: Default sibling-worktree root, matching the bash drivers' convention.
 DEFAULT_WORKTREE_PARENT = "~/Documents"
 
+#: Directory the engine writes its run logs into, relative to a worktree root.
+RUN_DIR_NAME = ".agent-fleet"
+
+#: The transcript subtree *inside* that directory, which is the only part that is
+#: ever the manager's scratch output. The exclude line names this, not the
+#: directory: ``.agent-fleet/`` as a whole also hides work a lane legitimately
+#: produces in a repository that tracks that directory, and a file git cannot see
+#: is a file the guarantee never stages.
+RUN_LOGS_DIR_NAME = "runs"
+
+#: The ``info/exclude`` entry that keeps run logs out of git. Written by
+#: :func:`ensure_run_dir_excluded` on every lane worktree: an untracked log file
+#: in a worktree is not "work", it is the manager's own scratch output, and the
+#: PR guarantee stages with ``git add -A`` — so without this a lane commits its
+#: own run log, and a lane that changed nothing commits *only* the log and then
+#: fails on the repo's hooks.
+RUN_DIR_EXCLUDE_LINE = f"{RUN_DIR_NAME}/{RUN_LOGS_DIR_NAME}/"
+
 _SAFE_COMPONENT = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -188,6 +206,78 @@ def _fresh_base(root: Path, base: str, *, runner: Runner | None = None) -> str:
     return remote if probe.returncode == 0 else base
 
 
+def ensure_run_dir_excluded(worktree: Path, *, runner: Runner | None = None) -> bool:
+    """Add the run-log subtree to the repo's ``info/exclude``. Idempotent.
+
+    The exclude file is per-*repository* and shared by every worktree, which is
+    why this is written once per repo rather than per lane: one line serves all
+    lanes, and a second call is a no-op rather than a duplicate. Returns whether
+    the file was changed.
+
+    The line names ``.agent-fleet/runs/`` and not ``.agent-fleet/``: a repository
+    in this fleet tracks the latter as real config, and a blanket ignore hides
+    files a lane creates there from ``git status`` entirely. An invisible file is
+    never staged and never committed, and a lane whose only work was there read as
+    a clean worktree and escalated ``no_commits_ahead`` on real work.
+
+    ``info/exclude`` is used rather than a committed ``.gitignore`` on purpose —
+    this is the manager's own scratch output, and adding it to the project's
+    tracked files would be a change to the repo the lane is working *on*.
+    """
+    probe = _git(
+        ["git", "rev-parse", "--git-path", "info/exclude"], cwd=worktree, runner=runner, timeout=60
+    )
+    if probe.returncode != 0 or not (probe.stdout or "").strip():
+        return False
+    raw = Path(probe.stdout.strip())
+    target = raw if raw.is_absolute() else worktree / raw
+    try:
+        existing = target.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        existing = ""
+    if any(line.strip() == RUN_DIR_EXCLUDE_LINE for line in existing.splitlines()):
+        return False
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        prefix = "" if existing.endswith("\n") or not existing else "\n"
+        with target.open("a", encoding="utf-8") as handle:
+            handle.write(f"{prefix}{RUN_DIR_EXCLUDE_LINE}\n")
+    except OSError:
+        # The guarantee excludes the path at stage time regardless, so a repo
+        # that will not take the exclude line is still correct.
+        return False
+    return True
+
+
+def default_run_dir(operator: str, lane: str, *, run_id: str) -> Path:
+    """``<fleet home>/runs/<operator>/<lane>/<run-id>`` — outside the worktree.
+
+    Two reasons this is not under the worktree, both learned the hard way:
+
+    * **Nothing scratch is ever in the branch.** The PR guarantee stages with
+      ``git add -A``; anything it writes into the worktree becomes part of the
+      PR unless it is excluded, and a repo's hooks then run against a commit
+      that is only a log file.
+    * **Runs do not overwrite each other.** ``<worktree>/.agent-fleet/runs/<lane>``
+      is one directory per lane, so a second run of the same lane clobbered the
+      first run's transcript — the one artifact an operator has when a lane
+      needs explaining.
+
+    *run_id* is supplied by the caller (a timestamp) precisely because the path
+    cannot be derived from the lane alone any more. Note what is *not* a
+    parameter: the worktree. The path must not depend on it.
+    """
+    from agent_fleet.fleet_paths import agent_fleet_home
+
+    return (
+        agent_fleet_home()
+        / "runs"
+        / sanitize_component(operator)
+        / sanitize_component(lane)
+        / sanitize_component(run_id)
+    )
+
+
 def ensure_lane_worktree(
     repo_path: Path,
     *,
@@ -202,6 +292,11 @@ def ensure_lane_worktree(
 
     Never removes or resets anything. If a worktree already holds the branch it
     is reused as-is, with whatever state it is in.
+
+    Every path out of here also ensures the repo's ``info/exclude`` carries the
+    run-dir entry, including the reuse paths: a worktree created by an older
+    build still has the old in-worktree run dir on disk, and reusing it is
+    exactly when that stale directory would get committed.
     """
     repo_path = Path(repo_path).expanduser().resolve()
     if not repo_path.is_dir():
@@ -213,6 +308,7 @@ def ensure_lane_worktree(
 
     existing = find_worktree_for_branch(root, branch, runner=runner)
     if existing is not None:
+        ensure_run_dir_excluded(existing, runner=runner)
         return WorktreeResult(
             path=existing, branch=branch, created=False, reason="branch already checked out"
         )
@@ -228,6 +324,7 @@ def ensure_lane_worktree(
             )
             current_branch = current.stdout.strip() if current.returncode == 0 else ""
             if current_branch == branch:
+                ensure_run_dir_excluded(path, runner=runner)
                 return WorktreeResult(
                     path=path, branch=branch, created=False, reason="adopted existing worktree"
                 )
@@ -253,4 +350,5 @@ def ensure_lane_worktree(
             f"git worktree add failed for {branch} at {path}: "
             f"{(result.stderr or result.stdout).strip()[:500]}"
         )
+    ensure_run_dir_excluded(path, runner=runner)
     return WorktreeResult(path=path, branch=branch, created=True, reason=reason)

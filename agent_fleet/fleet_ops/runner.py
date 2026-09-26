@@ -6,19 +6,22 @@ This is the module the CLI calls. The order is the whole point:
 2. **Register** — record the lane's process identity *before* spawning, so a
    concurrent ``lanes stop`` has something valid to signal.
 3. **Engine** — run the implementer under a memory cap, with the standing
-   fences in its prompt. A lazy exit is recorded but is *not* fatal: the next
-   step still runs.
+   fences in its prompt. The run log goes *outside* the worktree, because the
+   guarantee below stages with ``git add -A``. A run that ends mid-intention
+   without touching the tree is nudged once, and re-judged.
 4. **Guarantee the PR** — runs even when the engine failed, because the recurring
    failure this replaces was exactly "the agent left work, nobody opened the PR".
    An engine that died with real work on the branch is the case that most needs
-   the guarantee.
+   the guarantee. When there is nothing to publish, the implementer's own final
+   message is the reason — see ``no_changes_stopped`` / ``lazy_exit``.
 5. **Binding** — verify the repo came from the worktree's own ``origin`` and the
-   PR's ``headRefName`` is this lane's branch. **Refusing here is the point**: a
-   stray ``REVIEW_REPO`` once sent four review lenses at another repo's PR.
+   PR's ``headRefName`` is this lane's branch. **Refusing here is the point**:
+   a stray ``REVIEW_REPO`` once sent four review lenses at another repo's PR.
 6. **Gate** — feature-detected; skipped cleanly when absent.
-7. **Status line** — append ``HH:MM:SS PREMERGE-APPROVED <sha9>`` or
-   ``HH:MM:SS NEEDS-ESCALATION <reason>``, the contract ``automerge.sh`` and
-   both operators' tooling read.
+7. **Status line** — append ``HH:MM:SS PREMERGE-APPROVED <sha9>``,
+   ``HH:MM:SS NEEDS-ESCALATION <reason>``, or
+   ``HH:MM:SS GATE-SKIPPED PR #<n> @<sha9> (<reason>)``, the contract
+   ``automerge.sh`` and both operators' tooling read.
 8. **Hooks** — the operator's ``on_approved`` or ``on_escalated`` command.
 
 The status file is written even on failure. An operator watching a status file
@@ -50,6 +53,7 @@ from agent_fleet.fleet_ops.config import (
 from agent_fleet.fleet_ops.guarantee import (
     GuaranteeResult,
     ensure_pull_request,
+    has_publishable_work,
     head_sha,
     resolve_push_target,
 )
@@ -66,8 +70,8 @@ from agent_fleet.fleet_ops.registry import (
     process_starttime,
     update_record,
 )
-from agent_fleet.fleet_ops.statusfile import hook_env, run_hook
-from agent_fleet.fleet_ops.worktree import ensure_lane_worktree
+from agent_fleet.fleet_ops.statusfile import gate_skipped_line, hook_env, run_hook
+from agent_fleet.fleet_ops.worktree import default_run_dir, ensure_lane_worktree
 
 if TYPE_CHECKING:
     import subprocess
@@ -81,6 +85,27 @@ logger = logging.getLogger(__name__)
 #: truncated form rather than the raw one — a full sha must still produce a
 #: PREMERGE-APPROVED line, not silently fall through to an escalation.
 _SHA_RE = re.compile(r"^[0-9a-f]{7,9}$")
+
+#: How much of the implementer's final message is kept in an escalation detail
+#: and in the status line. Long enough to carry the reason, short enough that a
+#: model that pasted its whole transcript cannot push the actionable sentence
+#: out of the truncated status line.
+FINAL_TEXT_DETAIL_CHARS = 1500
+
+#: The status line's own field cap. A status line is read by a human scanning a
+#: file and by the automerge's grep; an unbounded reason made both worse.
+STATUS_FIELD_CHARS = 200
+
+#: How much of the implementer's final message rides along in the status line,
+#: after the reason token. The line is capped at :data:`STATUS_FIELD_CHARS` in
+#: total, so this is what is left for the explanation.
+STATUS_REASON_DETAIL_CHARS = 120
+
+#: Reasons that mean "the implementer chose to stop", as opposed to "it ran out
+#: of steam". Both are legitimate lane outcomes; only the second is worth an
+#: automatic retry, and only the first belongs on a human's decision list.
+REASON_NO_CHANGES_STOPPED = "no_changes_stopped"
+REASON_LAZY_EXIT = "lazy_exit"
 
 
 @dataclass
@@ -105,6 +130,11 @@ class LaneRunResult:
     engine_result: engines.EngineResult | None = None
     hook_output: str = ""
     events: list[str] = field(default_factory=list)
+    #: Hook ids that refused the guarantee's commit, and the reason the engine
+    #: produced no publishable work. Both exist so the operator reading only the
+    #: result (or only the status file) sees *which* hook and *why*.
+    hooks_failed: list[str] = field(default_factory=list)
+    no_change_detail: str = ""
 
     @property
     def approved(self) -> bool:
@@ -128,6 +158,8 @@ class LaneRunResult:
             "reason": self.reason,
             "detail": self.detail,
             "head": self.head,
+            "hooks_failed": self.hooks_failed,
+            "no_change_detail": self.no_change_detail,
             "guarantee": self.guarantee.to_dict() if self.guarantee else None,
             "gate": self.gate.to_dict() if self.gate else None,
             "binding": self.binding.to_dict() if self.binding else None,
@@ -151,6 +183,7 @@ def write_status_line(
 
         HH:MM:SS PREMERGE-APPROVED <sha9>
         HH:MM:SS NEEDS-ESCALATION <reason>
+        HH:MM:SS GATE-SKIPPED PR #<n> @<sha9> (<reason>)
 
     Appended, never truncated: automerge tails the file, so history matters.
     A sha that is not a real short sha is *not* emitted — the bash automerge took
@@ -161,9 +194,28 @@ def write_status_line(
     if approved and _SHA_RE.match(short_sha):
         line = f"{local_hhmmss()} PREMERGE-APPROVED {short_sha}"
     else:
-        clean = " ".join((reason or "unknown").split())[:200]
+        clean = " ".join((reason or "unknown").split())[:STATUS_FIELD_CHARS]
         line = f"{local_hhmmss()} NEEDS-ESCALATION {clean}"
 
+    return _append_status(status_file, line, event=event)
+
+
+def write_gate_skipped_line(
+    status_file: Path | str | None,
+    *,
+    pr: int | None,
+    sha: str | None,
+    reason: str,
+    event: Callable[[str], None] | None = None,
+) -> str:
+    """Append the ``GATE-SKIPPED`` line. See
+    :func:`agent_fleet.fleet_ops.statusfile.gate_skipped_line`."""
+    return _append_status(status_file, gate_skipped_line(pr, sha=sha, reason=reason), event=event)
+
+
+def _append_status(
+    status_file: Path | str | None, line: str, *, event: Callable[[str], None] | None
+) -> str:
     if status_file is not None:
         path = Path(status_file).expanduser()
         try:
@@ -175,6 +227,48 @@ def write_status_line(
     if event is not None:
         event(line)
     return line
+
+
+def _no_change_detail(result: LaneRunResult, final_text: str) -> str:
+    """Record the implementer's own account on the result, and return it.
+
+    Set here rather than at the classification site because it must happen on
+    exactly the paths that *use* it: a later, unrelated escalation that inherited
+    a stale ``no_change_detail`` would put a decision that was never made into
+    the next lane's status line.
+
+    The *tail* of the message is kept, because a model that reached a decision
+    explains itself last; the first few hundred characters are a recap of work
+    that was never done.
+    """
+    result.no_change_detail = final_text[-FINAL_TEXT_DETAIL_CHARS:]
+    return result.no_change_detail
+
+
+def _status_reason(reason: str, result: LaneRunResult) -> str:
+    """The one-line reason on the status file, carrying the actionable facts.
+
+    A bare token is not enough for either of the two cases that get read by
+    someone who was not watching: ``commit_failed`` does not say *which* hook
+    refused, and ``no_changes_stopped`` does not say what the implementer
+    decided. Both facts already exist on the result, so the line carries them
+    rather than sending the operator to the transcript.
+    """
+    parts = [reason]
+    if result.hooks_failed:
+        parts.append(f"hooks_failed=[{', '.join(result.hooks_failed)}]")
+    if result.no_change_detail:
+        # The tail of the final message is the decision; the first words are a
+        # recap of work the operator does not need in a status line.
+        text = " ".join(result.no_change_detail.split())
+        parts.append(text[-STATUS_REASON_DETAIL_CHARS:])
+    return " ".join(parts)
+
+
+def _run_id() -> str:
+    """A sortable, filesystem-safe id for one run: ``YYYYmmdd-HHMMSS-<pid>``."""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    return f"{stamp}-{os.getpid()}"
 
 
 def _pr_exists(workdir: Path, branch: str) -> bool:
@@ -274,10 +368,16 @@ def run_lane(
         result.status_line = write_status_line(
             status_file,
             approved=False,
-            reason=reason,
+            reason=_status_reason(reason, result),
             event=lambda line: _event("status", line=line),
         )
         _event("lane.escalated", reason=reason, detail=detail[:500])
+        # The lane is over the moment its verdict is recorded, so the process
+        # identity it wrote before the engine spawn goes with it. The two
+        # no-change escalations below return before the mid-run teardown, and a
+        # record left naming a live-looking process group is what a later
+        # `lanes stop` signals: on a host running many agents that group can
+        # belong to an unrelated tree.
         update_record(
             result.operator,
             result.lane,
@@ -286,6 +386,9 @@ def run_lane(
             reason=reason,
             last_event="lane.escalated",
             status_line=result.status_line,
+            pid=None,
+            pgid=None,
+            starttime=None,
         )
         # documents-1d's monitor keys off `exit=` lines in this hook, so a stall
         # or a lazy exit has to reach it exactly like a gate rejection does.
@@ -364,7 +467,10 @@ def run_lane(
         branch=push_branch,
         extra_fences=config.fences,
     )
-    run_path = Path(run_dir) if run_dir else workdir / ".agent-fleet" / "runs" / lane
+    # Outside the worktree by default: the guarantee stages with `git add -A`,
+    # and a run log that lands in the branch is both PR pollution and, for a
+    # lane that changed nothing, a commit of only a log that then fails hooks.
+    run_path = Path(run_dir) if run_dir else default_run_dir(operator, lane, run_id=_run_id())
 
     # --- 3. engine ---------------------------------------------------------
     # The manager's own identity is recorded *before* the spawn so a concurrent
@@ -386,52 +492,108 @@ def run_lane(
     def pr_probe() -> bool:
         return _pr_exists(workdir, push_branch)
 
-    try:
-        if selected_engine == "devin":
-            engine_result = engines.run_devin_engine(
-                workdir=workdir,
-                prompt=prompt,
-                run_dir=run_path,
-                name="impl",
-                pr_exists=pr_probe,
-                runner=runner,
-            )
-        elif selected_engine == "cmd":
-            engine_result = engines.run_cmd_engine(
-                workdir=workdir,
-                prompt=prompt,
-                run_dir=run_path,
-                name="impl",
-                pr_exists=pr_probe,
-                runner=runner,
-            )
-        else:
-            raise ValueError(f"unsupported engine {selected_engine!r}")
-    except Exception as exc:
-        engine_result = engines.EngineResult(
-            engine=selected_engine,
-            model="",
-            exit_code=1,
-            detail=f"engine invocation failed: {exc}",
-        )
-        _event("lane.engine.error", detail=str(exc)[:500])
-    result.engine_result = engine_result
+    def invoke_engine(engine_prompt: str, *, name: str) -> engines.EngineResult:
+        """One engine invocation. A raised exception becomes a failed result.
 
-    stream_text = ""
-    if engine_result.stream_path is not None:
+        Wrapped rather than inlined because the lazy-exit retry below runs the
+        same call a second time, and a retry that failed to be caught would
+        leave the lane with no verdict at all.
+        """
         try:
-            stream_text = engine_result.stream_path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            stream_text = ""
+            if selected_engine == "devin":
+                return engines.run_devin_engine(
+                    workdir=workdir,
+                    prompt=engine_prompt,
+                    run_dir=run_path,
+                    name=name,
+                    pr_exists=pr_probe,
+                    runner=runner,
+                )
+            if selected_engine == "cmd":
+                return engines.run_cmd_engine(
+                    workdir=workdir,
+                    prompt=engine_prompt,
+                    run_dir=run_path,
+                    name=name,
+                    pr_exists=pr_probe,
+                    runner=runner,
+                )
+            raise ValueError(f"unsupported engine {selected_engine!r}")
+        except Exception as exc:
+            _event("lane.engine.error", detail=str(exc)[:500])
+            return engines.EngineResult(
+                engine=selected_engine,
+                model="",
+                exit_code=1,
+                detail=f"engine invocation failed: {exc}",
+            )
+
+    def record_engine_done(res: engines.EngineResult) -> str:
+        """Log the engine's verdict and return the stream text it produced."""
+        result.engine_result = res
+        text = ""
+        if res.stream_path is not None:
+            try:
+                text = res.stream_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                text = ""
+        _event(
+            "lane.engine.done",
+            exit_code=res.exit_code,
+            tool_calls=res.tool_calls,
+            tool_errors=lazyexit.count_tool_errors(text),
+            lazy=res.lazy,
+            resumes=res.resumes,
+        )
+        return text
+
+    engine_result = invoke_engine(prompt, name="impl")
+    stream_text = record_engine_done(engine_result)
+
+    # A run that stopped mid-intention without touching the tree gets exactly one
+    # more attempt, here rather than by escalating: the difference between "ran
+    # out of steam" and "decided to stop" is not knowable from a single run, and
+    # a nudge costs one engine run while a wrong escalation costs an operator.
+    if not has_publishable_work(
+        workdir, push_branch, base, runner=runner
+    ) and lazyexit.looks_like_unfinished_intention(engine_result.final_text):
+        _event("lane.engine.retry", reason=REASON_LAZY_EXIT, attempt=1)
+        logger.info("lane %s stopped mid-intention with no changes; one nudge", lane)
+        retry_result = invoke_engine(engines.NUDGE_PROMPT, name="impl-nudge")
+        stream_text = f"{stream_text}\n{record_engine_done(retry_result)}"
+        engine_result = retry_result
+        if not has_publishable_work(workdir, push_branch, base, runner=runner):
+            # Still nothing after the nudge, and still talking about work it was
+            # about to do: a genuine lazy exit, not a decision.
+            detail = _no_change_detail(result, engine_result.final_text)
+            return _escalate(
+                result,
+                reason=REASON_LAZY_EXIT,
+                detail=(
+                    f"{detail}\n"
+                    "the implementer produced no changes and ended mid-intention; "
+                    "one automatic retry did not change that"
+                ).strip(),
+                exit_code=engine_result.exit_code,
+            )
+    elif not has_publishable_work(workdir, push_branch, base, runner=runner):
+        # Nothing to publish, but the implementer said why. That reason is the
+        # lane's outcome — a fence or an owner decision belongs on a human's
+        # list, not in a generic "no commits ahead" the operator has to
+        # reconstruct by reading the transcript. A stream with no final text has
+        # no account to give, and inventing one would be worse than saying so:
+        # the guarantee's own `no_commits_ahead` is the honest verdict then.
+        final_text = engine_result.final_text
+        has_own_account = bool(final_text.strip()) and final_text.strip() != "NO RESULT EVENT"
+        if has_own_account and not pr_probe():
+            return _escalate(
+                result,
+                reason=REASON_NO_CHANGES_STOPPED,
+                detail=_no_change_detail(result, final_text),
+                exit_code=engine_result.exit_code,
+            )
+
     tool_errors = lazyexit.count_tool_errors(stream_text)
-    _event(
-        "lane.engine.done",
-        exit_code=engine_result.exit_code,
-        tool_calls=engine_result.tool_calls,
-        tool_errors=tool_errors,
-        lazy=engine_result.lazy,
-        resumes=engine_result.resumes,
-    )
     update_record(
         operator,
         lane,
@@ -454,7 +616,9 @@ def run_lane(
         skip_hooks=config.baseline_skip_hooks,
         runner=runner,
         skip_env=config.skip_env(),
+        no_changes_detail=result.no_change_detail,
     )
+    result.hooks_failed = list(guarantee.hooks_failed)
     result.guarantee = guarantee
     result.pr = guarantee.pr
     result.head = head_sha(workdir, runner=runner, short=9)
@@ -509,13 +673,16 @@ def run_lane(
     result.gate = outcome
 
     if outcome.skipped:
-        _event("gate.skipped", reason=outcome.reason)
+        _event("gate.skipped", reason=outcome.reason, pr=guarantee.pr)
         result.state = STATE_PR_GUARANTEED
         result.reason = outcome.reason
-        result.status_line = write_status_line(
+        # Not an escalation: the PR is guaranteed and the external gate owns it
+        # from here. Writing it as one made a healthy lane read as a broken one.
+        result.status_line = write_gate_skipped_line(
             status_file,
-            approved=False,
-            reason=f"PR #{guarantee.pr} guaranteed; {outcome.reason}",
+            pr=guarantee.pr,
+            sha=result.head,
+            reason=outcome.reason,
             event=lambda line: _event("status", line=line),
         )
         update_record(

@@ -54,6 +54,58 @@ TOOL_EVENT_KEYS = ("tool_completed", "tool_result", "tool_use")
 #: permissions or a wrong path long before it declares itself stalled.
 TOOL_ERROR_KEYS = ("error", "tool_error", "failed")
 
+#: A final text longer than this is a considered answer, not a fragment. Length
+#: alone never makes something lazy — it only disqualifies it, because a real
+#: report of a real decision (a fence, an owner call) is long by nature.
+MAX_INTENTION_CHARS = 400
+
+#: Trailing punctuation that betrays a cut-off mid-thought. A fragment trails off
+#: — into a colon that introduces work never done, or into an ellipsis. A
+#: deliberate stop ends in a full stop and names a reason, so this is the signal
+#: that separates the two shapes the final text can have.
+INTENTION_ENDINGS: tuple[str, ...] = (":", "...")
+
+#: Phrases that announce work rather than describe it. A run whose last words
+#: are one of these stopped mid-intention, which is a different failure from a
+#: run that decided to stop: it is worth one more attempt, not a human.
+INTENTION_PATTERNS: tuple[str, ...] = (
+    r"\blet me\b",
+    r"\blet'?s\b",
+    r"\bi(?:'ll| will)\b",
+    r"\bnow i'?ll\b",
+    r"\bnext,? i\b",
+    r"\bgoing to\b",
+    r"\babout to\b",
+    r"\bthen i\b",
+    r"\bfirst,? i\b",
+)
+
+_INTENTION_RE = re.compile("|".join(INTENTION_PATTERNS), re.IGNORECASE)
+
+#: What the run says it *did*. Checked before the intention patterns because
+#: "opened the PR" and "Let me verify" are both short and agentic, and only one
+#: of them is unfinished — but an engine is far more likely to narrate a
+#: completion it did not achieve than to stop mid-sentence on every run, so
+#: treating the false positive as a needless retry would be the expensive error.
+COMPLETION_PATTERNS: tuple[str, ...] = (
+    r"\bopened\b",
+    r"\bcommitted\b",
+    r"\bpushed\b",
+    r"\bdone\b",
+    r"\bfinished\b",
+    r"\bcomplete[d]?\b",
+    r"\bimplemented\b",
+    r"\btests?\s+pass",
+    r"\ball\s+green\b",
+    r"\bsuccess",
+    r"\bcreated\b",
+    r"\bfixed\b",
+    r"\bupdated\b",
+    r"\bwrote\b",
+)
+
+_COMPLETION_RE = re.compile("|".join(COMPLETION_PATTERNS), re.IGNORECASE)
+
 
 def count_tool_errors(stream_text: str) -> int:
     """Count tool calls that reported an error, using the same tolerance.
@@ -106,6 +158,47 @@ class LazyExitVerdict:
 def looks_like_refusal(text: str) -> bool:
     """True when *text* matches fbrun's refusal patterns."""
     return bool(_REFUSAL_RE.search(text or ""))
+
+
+def looks_like_unfinished_intention(text: str) -> bool:
+    """True when *text* is a fragment announcing work rather than reporting it.
+
+    The shape is "Now I'll update the manifest:" — short, phrased as an action
+    about to be taken, and trailing off into a colon or a half sentence. Such a
+    run did not decide to stop; it ran out of steam, and unlike a deliberate stop
+    it is worth one more attempt with a nudge.
+
+    Every condition must hold, and each one is a way to be wrong in the
+    expensive direction (a needless retry of a real decision), so they are all
+    checked:
+
+    * the text is non-empty and is not the ``NO RESULT EVENT`` sentinel — there
+      is nothing to judge without a final text, and a stream that never produced
+      one is not evidence of a mid-thought stop;
+    * it is short, because a decision explained in detail is not a fragment;
+    * it does not claim the work was *done* — see :data:`COMPLETION_PATTERNS`;
+    * it announces an action, rather than describing a completed one; and
+    * it *ends* on a fragment — see :data:`INTENTION_ENDINGS`.
+
+    That last condition is what keeps a deliberate stop out of the retry. An
+    implementer that decided to stop says so in the first person all the time:
+    "I'll hold off until the owner decides", "I am going to wait for the owner",
+    "and then I would be guessing". Those phrases announce the decision they
+    already took, not work they failed to do, and a run that ends in a full stop
+    has run out of sentence, not of steam. Reading the phrase without the ending
+    cost a full engine run on every fenced decision and reported the lane as a
+    lazy exit instead of the stop it described.
+    """
+    stripped = (text or "").strip()
+    if not stripped or stripped == "NO RESULT EVENT":
+        return False
+    if len(stripped) > MAX_INTENTION_CHARS:
+        return False
+    if _COMPLETION_RE.search(stripped):
+        return False
+    if not stripped.endswith(INTENTION_ENDINGS):
+        return False
+    return _INTENTION_RE.search(stripped[-160:]) is not None
 
 
 def count_tool_calls(stream_text: str) -> int:

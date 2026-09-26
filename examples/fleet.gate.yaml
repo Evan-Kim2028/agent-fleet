@@ -84,9 +84,15 @@ gate:
   # PR's own head branch.
   base_branch: main
 
-  # Timeouts (seconds) and the deterministic test budget.
-  agent_timeout_s: 1800
-  judge_timeout_s: 7200
+  # Per-stage agent budgets (seconds), and the deterministic test budget. The
+  # stages are split because they do different work: a fixer has to commit,
+  # push and wait on a test suite, which never fits in a reviewer's budget.
+  # A stage that runs out of budget is a dead agent and fails closed — the run
+  # escalates rather than reading the silence as "no findings".
+  lens_timeout_s: 2400
+  verify_timeout_s: 2400
+  judge_timeout_s: 2400
+  fix_timeout_s: 5400
   test_timeout_s: 900
 
   # Every pytest the gate launches is memory-capped: a runaway suite once

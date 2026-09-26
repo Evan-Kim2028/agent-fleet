@@ -19,6 +19,113 @@
     reported as saturated. It now delegates to `throttled()` and therefore tracks
     the same `DEFAULT_PSI_AVG10_MAX` ceiling, so the property cannot drift from the
     threshold that actually gates launches.
+- **A deliberate stop is no longer retried as a lazy exit.**
+  `INTENTION_PATTERNS` matched first-person *future* phrasing anywhere in the
+  closing words of the final text, so an implementer that explained a decision it
+  had already taken — "I'll hold off until the owner decides", "I am going to wait
+  for the owner", "and then I would be guessing" — read as a run that ran out of
+  steam. The lane spent a second engine run on a nudge, produced nothing again,
+  and escalated `lazy_exit` instead of the promised `no_changes_stopped`. The
+  announcing phrase is now only evidence when the text also *ends* on a fragment
+  (`:` or an ellipsis), which is the shape a cut-off mid-thought actually has; a
+  sentence that ends in a full stop has run out of sentence, not of steam.
+- **A `GATE-SKIPPED` line is visible to a consumer that predates it.** The
+  terminal line carried a token the two legacy filters could not match, so
+  `last_status_line(path, tokens=("PREMERGE-APPROVED", "NEEDS-ESCALATION"))`
+  fell through to the lane's *previous* verdict: a monitor driving `lanes status`
+  through that filter showed a finished, guaranteed lane as still owing a human.
+  A filter naming exactly the two legacy tokens is now read as the pre-`GATE-SKIPPED`
+  contract and widened to the whole verdict vocabulary, matching each line's
+  verdict field rather than the whole line — so model-authored text on an
+  escalation line cannot forge a verdict either. The unfiltered read is unchanged.
+- **Work under a tracked `.agent-fleet/` is committed again.** The blanket
+  `.agent-fleet/` line in `info/exclude` hid the whole directory from git, so in
+  a repository that tracks it the files a lane created there never appeared in
+  `git status`, were never staged, and were silently dropped from the commit; a
+  lane whose only work was there read as a clean worktree and escalated
+  `no_commits_ahead`. The exclude line is now `.agent-fleet/runs/` — the manager's
+  own transcript subtree and the only part that is ever scratch output.
+- **A finished lane no longer leaves a signallable process identity in the
+  registry.** The `lazy_exit` and `no_changes_stopped` escalations returned before
+  the `update_record(..., pid=None, pgid=None, starttime=None)` teardown, so a lane
+  that had already exited kept its manager's live process group on the record.
+  `stop_lane_by_name` does not filter on state, so a later `lanes stop` signalled
+  that group — on a host running many agents, possibly another operator's tree.
+  Every escalation now clears the identity as part of recording its verdict.
+  `verify_process_identity` also refuses a record with no start-time fingerprint
+  instead of skipping the recycled-pid check: there is nothing to match it
+  against, and the downside of a wrong guess is a stranger's process group.
+- **Judge-confirmed untestable blockers are now fixed, not escalated on first
+  sight.** A blocker that no local test can express — a docs contradiction, a
+  script's behaviour — ended the run the moment it was observed: the test set was
+  green, the convergence rule is defined on a *shrinking failing set*, so
+  `converge()` had nothing to measure and escalated without ever dispatching a
+  fixer. The gate reported "untestable blocker(s) need human review" about work a
+  fixer could have done in one commit, and nothing was ever attempted.
+  A green test set with open untestable blockers now runs **exactly one** fix
+  round carrying the untestable list, and the recheck judge — not the fixer —
+  decides whether they are resolved. Resolved approves; still open, or a round
+  that pushed nothing, escalates as `untestable-needs-review` naming the
+  blockers. One round and not a loop, because with no test to turn green there
+  is no measurable progress, only the judge's yes/no: raising `max_fix_rounds`
+  does not buy more attempts. `enable_fix: false` still dispatches nothing.
+- **Gate test files are named per PR, so concurrent PRs stop colliding.** A
+  verifier's test was named from the finding id alone, so two PRs gating
+  different branches both produced `tests/test_gate_contract_1.py` in the same
+  test directory. Merging one into main turned the other into an add/add
+  conflict, which is what forced a rebase plus a full re-gate for every PR that
+  landed after it. The name is now
+  `test_gate_<lane_slug>_<finding_id>.py`, with the slug from `--lane-slug`, else
+  `gate.lane_slug`, else the PR's own head ref; both halves are folded to
+  alphanumerics and bounded. The name is computed once and passed into the
+  prompt, so the instruction, the run command and the answer example cannot
+  disagree — that drift is how the old `test_gate_x.py` placeholder survived into
+  the fix prompt's run hint.
+- **A stage timeout is now named, and the fixer is covered.** A stage that ran
+  out of budget already failed closed, but only as a generic "gave no usable
+  result (dead)" — an operator could not tell a crash from a budget, and the
+  fixer's timeout was merely logged before the round carried on to report the
+  misleading `no-push`. Exit 124 is now classified as its own failure kind and
+  the escalation names the stage, the budget it blew, and how long it actually
+  ran. A timed-out lens reporting `candidates=0` is indistinguishable from a
+  clean review — the bug class that once approved a PR with three real blockers —
+  so it is asserted not to.
+
+### Added
+
+- **Every gate prompt forbids commands that never exit.** An agent running
+  `tail -f`, `watch`, an interactive pager or a foreground server is not a slow
+  stage but a dead one: the slot is held, no answer arrives, and the stage burns
+  its whole budget before the run escalates. All five role prompts now open with
+  a `NO BLOCKING COMMANDS` rule naming the offenders and requiring bounded polls
+  with timeouts and exit conditions. It composes with the existing
+  `PROCESS_SAFETY` rule into one shared `AGENT_RULES` prefix, so a role added
+  later inherits both by construction.
+- **Per-stage timeouts.** One `agent_timeout_s` (30 min) drove lens, verify and
+  fix while the judge got a separate 7200s — wrong in both directions, since a
+  fixer that commits, pushes and waits on a test suite never fits in a reviewer's
+  budget. Stages now have their own: `lens/verify/judge_timeout_s` default to
+  2400s (40 min) and `fix_timeout_s` to 5400s (90 min), read through a
+  `stage_timeout(role)` helper. `agent_timeout_s` is deprecated but still
+  honoured — applied to the three stages it used to drive, with a warning naming
+  the replacement, and an explicit per-stage key always wins — so no existing
+  `fleet.yaml` silently loses its budget.
+- **`agent-fleet gate recheck --approved-sha OLD --head NEW` carries an approval
+  across a patch-identical rebase.** When a PR is rebased onto a moved `main` the
+  change is often identical, and paying for a full find → verify → judge run to
+  rediscover that is waste — and the common case, since a moving `main` is what
+  forces rebases. `recheck` is deterministic and dispatches no agent: it compares
+  the change's `git patch-id` (excluding `test_gate_*`, which are gate evidence
+  and routinely the cause of the rebase) and re-runs the PR's tests plus the
+  archived gate tests on the new head with the base merged in. An approval is
+  carried only when the approved sha is real, the status file holds a
+  `PREMERGE-APPROVED` line for it, the patch-id is unchanged, and every test
+  passes; anything else, including a suite that could not run at all, says a
+  full gate is required. The emitted status line names the *new* head, and the
+  metrics row is marked as a recheck so a carried approval is not mistaken for a
+  reviewed one.
+- `gate.lane_slug` config key and `--lane-slug` flag, for setting the gate test
+  file name slug explicitly rather than deriving it from the PR's head ref.
 
 ## 0.16.2 — 2026-09-25
 
@@ -106,6 +213,43 @@
     `merge_plan.executor` block is a hard error by design; only `merge run`
     converted it to `error: ...` and exit 2. All three subcommands now report it
     the same way.
+- **Run logs no longer reach the branch or the PR.** The engine's run dir
+  defaulted to `<lane worktree>/.agent-fleet/runs/<lane>/`, and the PR guarantee
+  stages with `git add -A`. Every lane PR carried `impl.jsonl` / `impl.out`, and
+  a lane whose implementer changed *nothing* had the run log as its only
+  untracked file — so the guarantee staged it, committed only it, and died on the
+  repo's hooks, reported as `commit_failed`. The default run dir now lives outside
+  the worktree, under `~/.agent-fleet/runs/<operator>/<lane>/<run-id>/`, which
+  also stops a second run of the same lane overwriting the first run's
+  transcript. `ensure_lane_worktree` additionally adds `.agent-fleet/runs/` to the
+  repo's `info/exclude` (idempotently, on every path including worktree reuse),
+  and the guarantee takes that subtree back out of the index itself so it is
+  correct even when the exclude file could not be written.
+- **A lane that produces no changes says which of the two things happened.**
+  `no_commits_ahead` conflated an implementer that *decided* to stop (a fence, an
+  owner decision, it needed clarification) with one that ran out of steam. The
+  former is now `no_changes_stopped`, carrying the implementer's own final
+  message in `detail` and in the status line so an orchestrator can route it to a
+  decision list. The latter is `lazy_exit`: a short final text that reads as work
+  about to happen ("Now I'll update the manifest:"), which gets exactly **one**
+  automatic retry with a nudge before being escalated. The retry is recorded as a
+  `lane.engine.retry` event. A stream with no final text at all keeps the plain
+  `no_commits_ahead` verdict rather than inventing a reason. The lazy heuristic is
+  biased against retrying: a final text claiming completion is not treated as
+  unfinished, and an ambiguous mix resolves to not-retrying.
+- **`--no-gate` is no longer reported as an escalation.** The status line read
+  `NEEDS-ESCALATION PR #N guaranteed; gate disabled ...` for a lane that was
+  working exactly as asked, so operators read healthy lanes as broken ones. It is
+  now `GATE-SKIPPED PR #<n> @<sha9> (<reason>)`, with the lane state
+  `pr_guaranteed` and `approved=False` unchanged. `gate.is_approval_line` is the
+  single definition of what counts as an approval and does not match a
+  `GATE-SKIPPED` line; the `PREMERGE-APPROVED` line format is byte-identical.
+- **A hook failure names the hooks that refused it.** The guarantee reported
+  `commit_failed` with 2000 characters of pre-commit transcript and no way to
+  tell *which* hook had failed short of reading it. The failing ids are now
+  parsed from pre-commit's `- hook id: <id>` blocks and reported as
+  `hooks_failed=[...]` on `LaneRunResult.hooks_failed`, at the head of the
+  escalation `detail`, and in the status line.
 
 ### Added
 
