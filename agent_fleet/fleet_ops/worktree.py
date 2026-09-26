@@ -159,7 +159,7 @@ def _repo_lock(root: Path) -> Iterator[None]:
         (root / common) if common and not Path(common).is_absolute() else Path(common or root)
     )
     lock_path = lock_dir / "agent-fleet-worktree.lock"
-    with open(lock_path, "a+") as handle:
+    with lock_path.open("a+") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
         try:
             yield
