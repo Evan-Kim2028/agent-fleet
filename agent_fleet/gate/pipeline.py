@@ -599,6 +599,31 @@ class _Evidence:
             gate_tests=[str(p) for p in payload.get("gate_tests", []) or []],
         )
 
+    def merge_restored(self, payload: dict[str, Any]) -> None:
+        """Fold a marker's evidence into what this run has already established.
+
+        Step 0 runs before the reuse branch is even consulted, and a failing PR
+        test it finds is already a confirmed blocker on *this* head. Replacing
+        the evidence object would throw those away and let a PR whose own test
+        is red be approved on the marker's word, so what a marker carries is
+        added to what this run proved — never swapped for it.
+
+        Entries are keyed by source and test id, because the same blocker can
+        legitimately be confirmed twice (a re-run still finds it failing) while
+        a distinct claim that happens to share an id is still worth keeping.
+        """
+        restored = _Evidence.restore(payload)
+        known = {self._entry_key(item) for item in self.confirmed}
+        for item in restored.confirmed:
+            if self._entry_key(item) not in known:
+                self.confirmed.append(item)
+        self.untestable.extend(item for item in restored.untestable if item not in self.untestable)
+        self.gate_tests.extend(path for path in restored.gate_tests if path not in self.gate_tests)
+
+    @staticmethod
+    def _entry_key(item: dict[str, Any]) -> tuple[str, str]:
+        return str(item.get("source", "")), str(item.get("test_id") or item.get("id") or "")
+
 
 class GatePipeline:
     """Runs the gate against one open PR. Owns worktrees, agents, and evidence."""
@@ -1988,7 +2013,7 @@ class GatePipeline:
                 self._log("gate.reuse.abandoned", prior_head=prior.head_sha[:9])
                 prior = None
             if prior is not None:
-                self.evidence = _Evidence.restore(prior.payload.get("evidence", {}))
+                self.evidence.merge_restored(prior.payload.get("evidence", {}))
                 self._candidates = list(prior.payload.get("candidates", []) or [])
                 self._reused = True
                 self._log("gate.reuse.applied", confirmed=len(self.evidence.confirmed))
