@@ -13,11 +13,13 @@ from __future__ import annotations
 import json
 import subprocess
 from collections.abc import Callable  # noqa: TC003
-from pathlib import Path  # noqa: TC003
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+from agent_fleet.fleet_ops import admission as admission_mod
+from agent_fleet.fleet_ops.admission import AdmissionConfig
 from agent_fleet.fleet_ops.config import FleetOpsConfig, OperatorSpec
 from agent_fleet.fleet_ops.runner import LaneRunResult, run_lane
 
@@ -185,3 +187,78 @@ def test_run_lane_does_not_raise_for_any_operator_on_a_default_config(
                 "before the engine try/except and does not exist."
             )
         assert isinstance(result, LaneRunResult)
+
+
+def test_a_wedged_pool_gives_up_after_the_configured_budget(
+    repo: Path, task_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A saturated test pool must cost the operator's budget, not the default.
+
+    ``run_lane`` rebuilds its :class:`AdmissionConfig` from ``config.admission``
+    before it hands the config to :func:`shim_env`, so a knob it fails to copy
+    never reaches the generated shim. With every slot held the lane's
+    ``uv run pytest`` sits inside the shim's acquire loop, so a ``wait_s`` that
+    silently reverted to :data:`DEFAULT_WAIT_S` parks the lane for an hour and
+    the operator sees a hung agent instead of a lane that gave up on schedule.
+    """
+    captured: dict[str, str] = {}
+
+    def fake_write(target: Path, *, real: str, config: AdmissionConfig) -> Path:
+        captured["source"] = admission_mod._shim_source(real, config)
+        return Path(target) / admission_mod.SHIM_NAME
+
+    monkeypatch.setattr(admission_mod, "write_shim", fake_write)
+
+    config = FleetOpsConfig(
+        operators={"documents-1d": OperatorSpec(name="documents-1d")},
+        admission=AdmissionConfig(shared_dir=tmp_path, tests=1, wait_s=1.0),
+    )
+    result = _run(repo, task_file, tmp_path, config=config)
+
+    assert isinstance(result, LaneRunResult)
+    assert "source" in captured, "the engine child never got an admission shim"
+    assert "WAIT_S = 1.0" in captured["source"]
+    assert f"WAIT_S = {admission_mod.DEFAULT_WAIT_S!r}" not in captured["source"]
+
+
+def test_the_repo_configured_wait_budget_reaches_the_generated_shim(
+    repo: Path, task_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole ``fleet_ops.admission`` budget, not a hand-picked subset.
+
+    ``run_lane`` is the only thing that builds the engine's shim env, so a knob
+    it reconstructs field by field is a knob the operator cannot set. The repo
+    config below sets all five, and every one of them has to survive into the
+    source the shim actually runs.
+    """
+    rendered: list[str] = []
+    real_write_shim = admission_mod.write_shim
+
+    def capturing_write(target: Path, *, real: str, config: AdmissionConfig) -> Path:
+        path = real_write_shim(target, real=real, config=config)
+        rendered.append(path.read_text(encoding="utf-8"))
+        return path
+
+    monkeypatch.setattr(admission_mod, "write_shim", capturing_write)
+
+    admission = AdmissionConfig(
+        shared_dir=tmp_path / "pools",
+        tests=7,
+        typecheck=2,
+        nice=3,
+        wait_s=45.5,
+    )
+    config = FleetOpsConfig(
+        operators={"documents-1d": OperatorSpec(name="documents-1d")},
+        admission=admission,
+    )
+    result = _run(repo, task_file, tmp_path, config=config)
+
+    assert isinstance(result, LaneRunResult)
+    assert rendered, "the engine child never got an admission shim"
+    source = rendered[-1]
+    assert f"WAIT_S = {45.5!r}" in source
+    assert f"NICE = {3!r}" in source
+    assert f"{admission_mod.TEST_POOL!r}: {7}" in source
+    assert f"{admission_mod.TYPECHECK_POOL!r}: {2}" in source
+    assert str(tmp_path / "pools" / "slots") in source

@@ -218,11 +218,12 @@ def run_lane(
     if config is None:
         config = load_fleet_ops_config_from_repo(repo) or FleetOpsConfig()
     if admission_config is None:
-        admission_config = AdmissionConfig(
-            shared_dir=Path(config.admission.shared_dir) if config.admission.shared_dir else None,
-            tests=config.admission.tests,
-            typecheck=config.admission.typecheck,
-            nice=config.admission.nice,
+        # The whole repo-configured budget, every knob included. Rebuilding it
+        # field by field is how a configured ``wait_s`` silently became the
+        # default hour, so a wedged pool looked like a hung lane.
+        configured = getattr(config, "admission", None)
+        admission_config = (
+            configured if isinstance(configured, AdmissionConfig) else AdmissionConfig()
         )
 
     spec: OperatorSpec | None = config.operator(operator)
