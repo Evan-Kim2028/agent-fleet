@@ -20,6 +20,7 @@ Buggy behaviour: one launch -- the cached rc=0 is replayed despite the change.
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Mapping  # noqa: TC003 - annotation only
 from pathlib import Path  # noqa: TC003 - concrete paths built at runtime
 
 import pytest
@@ -38,9 +39,26 @@ def _fake_pytest(monkeypatch: pytest.MonkeyPatch, rc: int = 0) -> list[list[str]
     launches: list[list[str]] = []
     real_run = subprocess.run
 
-    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+    def fake_run(
+        cmd: list[str],
+        *,
+        cwd: str | Path | None = None,
+        capture_output: bool = False,
+        text: bool | None = None,
+        check: bool = False,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         if "pytest" not in cmd:
-            return real_run(cmd, **kwargs)  # type: ignore[arg-type, no-any-return]
+            return real_run(
+                cmd,
+                cwd=cwd,
+                capture_output=capture_output,
+                text=text,
+                check=check,
+                env=env,
+                timeout=timeout,
+            )
         launches.append(list(cmd))
         stdout = "1 passed" if rc == 0 else "FAILED api/tests/test_x.py::test_x\n1 failed"
         return subprocess.CompletedProcess(cmd, rc, stdout, "")

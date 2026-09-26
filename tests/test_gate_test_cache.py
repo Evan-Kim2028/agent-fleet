@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import subprocess
 import time
+from collections.abc import Mapping  # noqa: TC003 - annotation only
 from pathlib import Path  # noqa: TC003 - concrete paths are built at runtime
 
 import pytest
@@ -46,9 +47,26 @@ def _fake_pytest(monkeypatch: pytest.MonkeyPatch, rcs: list[int] | int = 0) -> l
     codes = [rcs] if isinstance(rcs, int) else list(rcs)
     real_run = subprocess.run
 
-    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+    def fake_run(
+        cmd: list[str],
+        *,
+        cwd: str | Path | None = None,
+        capture_output: bool = False,
+        text: bool | None = None,
+        check: bool = False,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         if "pytest" not in cmd:
-            return real_run(cmd, **kwargs)  # type: ignore[arg-type, no-any-return]
+            return real_run(
+                cmd,
+                cwd=cwd,
+                capture_output=capture_output,
+                text=text,
+                check=check,
+                env=env,
+                timeout=timeout,
+            )
         launches.append(list(cmd))
         code = codes.pop(0) if len(codes) > 1 else codes[0]
         if code == 1:

@@ -124,16 +124,17 @@ def test_the_pipeline_keeps_the_slug_it_was_given(tmp_path: Path) -> None:
     from agent_fleet.gate.pipeline import GatePipeline
     from agent_fleet.model_policy import ModelPolicy
 
-    def _pipe(**kwargs: str) -> GatePipeline:
+    def _pipe(lane_slug: str = "", *, cfg: str = "") -> GatePipeline:
+        slug = cfg or lane_slug
         return GatePipeline(
             repo=tmp_path / "repo",
             pr_number=1,
-            config=GateConfig(**({"lane_slug": kwargs["cfg"]} if "cfg" in kwargs else {})),
+            config=GateConfig(lane_slug=slug),
             policy=ModelPolicy(backends={}),
             backend=object(),  # type: ignore[arg-type]
             gate_dir=tmp_path / "gate",
             use_systemd=False,
-            **{k: v for k, v in kwargs.items() if k in {"lane_slug"}},
+            lane_slug=slug,
         )
 
     assert _pipe(lane_slug="fb/gaterobust").lane_slug == "fb/gaterobust"
