@@ -38,7 +38,7 @@ from agent_fleet.gate.prompts import AGENT_RULES
 from agent_fleet.integrations.github_cli import gh
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
 
     from agent_fleet.backends import LLMBackend
     from agent_fleet.repo import RepoConfig
@@ -52,6 +52,7 @@ __all__ = [
     "load_findings",
     "own_round",
     "pr_head",
+    "pr_notes_lock_path",
     "pr_notes_path",
     "read_notes",
     "read_task_spec",
@@ -87,6 +88,21 @@ NOTHING_TO_DO = "There is nothing to fix this round."
 def pr_notes_path(repo_path: Path, pr_number: int) -> Path:
     """Where PR *pr_number*'s ownership notes live: ``.agent-fleet/pr/<n>/notes.md``."""
     return Path(repo_path) / ".agent-fleet" / "pr" / str(pr_number) / "notes.md"
+
+
+def pr_notes_lock_path(repo_path: Path, pr_number: int) -> Path:
+    """The sidecar lock that guards PR *pr_number*'s notes.
+
+    A separate file from the notes, and it exists for one reason: ``write_notes``
+    commits by ``os.replace``, so the notes' own inode is replaced on every
+    write. A ``flock`` taken on that inode guards the *old* file, not the name —
+    the instant the rename lands the lock is on an unlinked inode and a second
+    round can walk straight in. This path is opened and flocked but never
+    rewritten, so its inode is stable and the lock outlives every rename of the
+    notes it guards. Same convention as the pool lock in
+    :func:`agent_fleet.slots.record_size`.
+    """
+    return pr_notes_path(repo_path, pr_number).with_name("notes.lock")
 
 
 def read_notes(repo_path: Path, pr_number: int) -> str:
@@ -131,30 +147,67 @@ def write_notes(repo_path: Path, pr_number: int, text: str) -> Path:
     return path
 
 
+@contextlib.contextmanager
+def _flock_path(path: Path, *, create: bool) -> Iterator[int]:
+    """Hold ``LOCK_EX`` on *path* for the body; yield ``-1`` if it cannot be taken.
+
+    A path that cannot be opened degrades to running unguarded rather than
+    failing the round: the notes are the only writer's own record of what it
+    did, and a lock the filesystem will not give us must not cost the round its
+    record entirely. The outer guard in :func:`_append` is a separate, stable
+    path, so a failure here still leaves the section serialised.
+    """
+    handle = -1
+    try:
+        handle = os.open(path, os.O_RDONLY | os.O_CREAT if create else os.O_RDONLY, 0o644)
+        fcntl.flock(handle, fcntl.LOCK_EX)
+    except OSError:
+        if handle >= 0:
+            with contextlib.suppress(OSError):
+                os.close(handle)
+        yield -1
+        return
+    try:
+        yield handle
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(handle, fcntl.LOCK_UN)
+        with contextlib.suppress(OSError):
+            os.close(handle)
+
+
 def _append(repo_path: Path, pr_number: int, block: str) -> None:
     """Add one round's outcome to the notes without losing the earlier ones.
 
     The read and the write are one critical section: a round that reads a
     half-finished notes file, or reads the file and then has another round's
     append land before its own write, would splice a stale copy over the
-    history. The lock is taken on the notes file's own inode and held on that
-    descriptor until the write has been renamed into place, so a caller that
-    replaced the file between rounds is not split from the file it will write.
+    history.
+
+    Two locks guard it, and both are needed because ``write_notes`` commits by
+    ``os.replace``. The *notes-path* flock is what a competing writer of the
+    same shape contends on, but the rename swaps the notes for a new inode, so
+    the moment the write lands that flock guards an unlinked inode and stops
+    excluding — two same-PR rounds can then enter the read-modify-write at once
+    and erase each other's block. The *sidecar* lock is the one that survives
+    the rename: it is never rewritten, so its inode is stable and it keeps
+    serialising every writer for the whole section. The sidecar is taken first
+    and the notes flock second, so the notes flock is always a strictly inner
+    guard, never the outer one. See :func:`pr_notes_lock_path`.
     """
-    path = pr_notes_path(repo_path, pr_number)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        handle = os.open(path, os.O_RDONLY | os.O_CREAT, 0o644)
-    except OSError:
-        base = read_notes(repo_path, pr_number) or _seed(pr_number, "", "", "(none recorded)")
-        write_notes(repo_path, pr_number, f"{base.rstrip()}\n\n{block.rstrip()}\n")
-        return
-    try:
-        fcntl.flock(handle, fcntl.LOCK_EX)
-        base = read_notes(repo_path, pr_number) or _seed(pr_number, "", "", "(none recorded)")
-        write_notes(repo_path, pr_number, f"{base.rstrip()}\n\n{block.rstrip()}\n")
-    finally:
-        os.close(handle)
+    lock_path = pr_notes_lock_path(repo_path, pr_number)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            with _flock_path(pr_notes_path(repo_path, pr_number), create=True):
+                base = read_notes(repo_path, pr_number) or _seed(
+                    pr_number, "", "", "(none recorded)"
+                )
+                write_notes(repo_path, pr_number, f"{base.rstrip()}\n\n{block.rstrip()}\n")
+        finally:
+            with contextlib.suppress(OSError):
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def _seed(pr_number: int, head: str, task_spec: str, test_command: str) -> str:
