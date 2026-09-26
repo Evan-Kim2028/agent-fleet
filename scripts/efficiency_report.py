@@ -60,9 +60,7 @@ def _summarize(runs_dir: Path) -> list[dict]:
         if tpl is None:
             tpl = round(total_tokens / max(changed, 1))
         by_phase = data.get("by_phase", {})
-        phase_breakdown = {
-            phase: info.get("total_tokens", 0) for phase, info in by_phase.items()
-        }
+        phase_breakdown = {phase: info.get("total_tokens", 0) for phase, info in by_phase.items()}
         rows.append(
             {
                 "run_id": run_id,

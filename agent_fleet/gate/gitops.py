@@ -190,11 +190,21 @@ def changed_test_files(worktree: Path, base_branch: str) -> list[str]:
 # Patch identity: is this the same change, re-parented?
 # ---------------------------------------------------------------------------
 
-#: Gate-written test files are excluded from patch identity. They are evidence
-#: the gate drops into the PR's repository, and they carry the PR's own branch
-#: name, so a rename or an add/add on one of them is routinely what forced the
-#: rebase. Excluding them is what lets "same change" survive that.
-GATE_TEST_EXCLUDE = ":(exclude,glob)**/test_gate_*.py"
+#: Shortest sha the gate matches an approval line by. The status line is written
+#: at 9 characters and the automerge's regex accepts 7 to 40, so anything shorter
+#: than the minimum is a prefix too weak to identify a commit: "123" matches
+#: "1234abcd", which is a different one.
+SHA_MIN_CHARS = 7
+
+#: Where a gate-written test file lands: the test directory the verifier was told
+#: to use, keyed on the lane-unique file name that ``gate_test_name`` produces.
+#: Patch identity excludes that *path* rather than a name glob, because a glob
+#: also hides any product code a contributor chose to call ``test_gate_*.py`` —
+#: invisible new code under a name the gate itself chose.
+_GATE_TEST_DIRS = (
+    ":(exclude,glob)tests/test_gate_*.py",
+    ":(exclude,glob)**/tests/test_gate_*.py",
+)
 
 
 def merge_base(repo: Path, a: str, b: str) -> str:
@@ -207,11 +217,35 @@ def merge_base_into(worktree: Path, base: str) -> None:
 
     A rebase means the PR has the base as an ancestor, so this is usually a
     no-op; it matters when the operator rebases by merging instead, or when the
-    PR was approved before a commit landed on main. Non-fatal: the base is
-    already merged in the overwhelming majority of cases, and a real conflict is
-    the recheck's call to refuse, not a crash.
+    PR was approved before a commit landed on main. "Already merged" is not an
+    error, so the exit code is not checked for that. A *conflict* is: the merge
+    leaves conflict markers in the tree, and the deterministic half would then
+    run against a tree no real merge produces — a file pytest cannot even
+    import, or one that passes on a spliced result. So a conflicting merge
+    aborts itself and raises, which is the recheck refusing rather than
+    reporting a verdict it never established.
     """
-    _run_git(worktree, "merge", "--no-edit", base, check=False)
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(worktree), "merge", "--no-edit", base],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise GateError(f"git merge {base} failed to launch: {exc}") from exc
+    if completed.returncode == 0:
+        return
+    output = (completed.stdout or "") + (completed.stderr or "")
+    if "CONFLICT" not in output and "Automatic merge failed" not in output:
+        # Already up to date, or nothing to merge: not a failure.
+        return
+    _run_git(worktree, "merge", "--abort", check=False)
+    raise GateError(
+        f"git merge {base} conflicted: the PR and the base both change the same lines. "
+        f"{(completed.stderr or completed.stdout).strip()[:300]}"
+    )
 
 
 def patch_id(repo: Path, sha: str, base: str) -> str:
@@ -220,8 +254,10 @@ def patch_id(repo: Path, sha: str, base: str) -> str:
     ``git patch-id`` hashes the diff itself, not the commit, so two commits
     carrying the same change hash the same even when their parents, authors and
     timestamps differ — which is exactly the "rebased onto a moved main" case
-    an approval should survive. Returns ``""`` when the diff cannot be computed,
-    so an unknown sha is never mistaken for "identical".
+    an approval should survive. Only the gate's own test directory is dropped
+    from the diff, so product code stays in the identity even when it is named
+    like gate evidence. Returns ``""`` when the diff cannot be computed, so an
+    unknown sha is never mistaken for "identical".
     """
     base_point = merge_base(repo, base, sha)
     if not base_point:
@@ -233,7 +269,7 @@ def patch_id(repo: Path, sha: str, base: str) -> str:
         sha,
         "--",
         ".",
-        GATE_TEST_EXCLUDE,
+        *_GATE_TEST_DIRS,
         check=False,
     )
     if not diff.strip():
@@ -259,30 +295,28 @@ def patch_id(repo: Path, sha: str, base: str) -> str:
 def has_approval_line(status_file: Path, sha: str) -> bool:
     """Whether *status_file* records a ``PREMERGE-APPROVED`` line for *sha*.
 
-    The same line contract the automerge reads, so a carry-over is anchored to
-    exactly the approval an operator can already see. The sha is matched by
-    prefix because the status line is written at 9 characters. A missing file is
-    not an approval.
+    The same line contract the automerge reads, enforced by the automerge's own
+    regex rather than re-derived: a reason quoting the marker inline, a trailing
+    note after the sha, or anything but the marker followed by one hex sha can
+    therefore never read as an approval. The sha is matched by prefix, because
+    the status line is written at 9 characters — and only when it is at least
+    that long, since a three-character prefix would match any sha starting with
+    those three characters, which is a different commit. A missing file is not
+    an approval.
     """
-    from agent_fleet.fleet_ops.gate import APPROVAL_MARKER
+    from agent_fleet.fleet_ops.gate import _APPROVAL_LINE_RE, APPROVAL_MARKER
 
-    if not status_file.is_file() or not sha:
+    if not status_file.is_file() or not sha or len(sha) < SHA_MIN_CHARS:
         return False
     try:
         lines = status_file.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return False
-    prefix = sha[:9]
+    prefix = sha[:SHA_MIN_CHARS]
     for line in lines:
-        stripped = line.strip()
-        if APPROVAL_MARKER not in stripped:
+        if APPROVAL_MARKER not in line:
             continue
-        # The marker must be its own token and the sha must follow it, so a
-        # reason mentioning the marker cannot pass as an approval.
-        parts = stripped.split()
-        if APPROVAL_MARKER not in parts:
-            continue
-        idx = parts.index(APPROVAL_MARKER)
-        if idx + 1 < len(parts) and parts[idx + 1].startswith(prefix):
+        match = _APPROVAL_LINE_RE.match(line.strip())
+        if match is not None and match.group(0).split()[-1].startswith(prefix):
             return True
     return False

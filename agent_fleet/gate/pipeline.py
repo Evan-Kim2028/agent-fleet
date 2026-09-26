@@ -60,6 +60,7 @@ from agent_fleet.contracts.gate import (
     validate_recheck,
     validate_verify,
 )
+from agent_fleet.fleet_ops.gate import APPROVAL_MARKER
 from agent_fleet.gate import metrics as gate_metrics
 from agent_fleet.gate.config import GateConfig, load_gate_config
 from agent_fleet.gate.gitops import (
@@ -274,6 +275,12 @@ def status_line_for(outcome: GateOutcome, sha: str, reasons: list[str]) -> str:
     if outcome is GateOutcome.APPROVED:
         return f"{stamp} PREMERGE-APPROVED {sha[:9]}"
     reason = reasons[0] if reasons else "unspecified"
+    # The marker is replaced rather than merely rejected: a NEEDS-ESCALATION
+    # line must never contain it, since the automerge's contract is that a line
+    # is an approval when the marker stands alone ahead of a sha, and a reason
+    # that quotes the marker verbatim would put a line in front of a reader who
+    # cannot tell an approval from a complaint about one.
+    reason = reason.replace(APPROVAL_MARKER, "the premerge-approved marker")
     return f"{stamp} NEEDS-ESCALATION {reason}"
 
 
@@ -409,6 +416,17 @@ class GateTestArchive:
     def __init__(self, root: Path) -> None:
         self.dir = root / "tests"
         self.dir.mkdir(parents=True, exist_ok=True)
+
+    def stored_tests(self) -> list[Path]:
+        """Every gate-written test the archive still holds, in name order.
+
+        The archive is the only place a verifier's test survives a fixer push,
+        so a later run that wants the gate's own evidence has to be able to ask
+        what is in here. A fresh pipeline's ``evidence.gate_tests`` is always
+        empty — it only records what *this* run produced — so a recheck driven
+        by a new process could never see the archived tests.
+        """
+        return sorted(p for p in self.dir.glob("test_gate_*.py") if p.is_file())
 
     def store(self, source: Path) -> Path | None:
         if not source.is_file():
@@ -1048,11 +1066,21 @@ class GatePipeline:
                 new_failures=new_failures,
             )
             current = new_head
-            if untestable_only:
+            if untestable_only and run.count == 0:
                 # No test existed to go green, so the failing-set numbers above
                 # say nothing about this defect. The recheck judge below rules
                 # on it; until then it is still open.
                 outcome = gate_metrics.OUTCOME_UNTESTABLE_UNRESOLVED
+                break
+            if untestable_only:
+                # The round set out to fix something no test can demonstrate, and
+                # it broke a test on the way past. The recheck judge is only
+                # ever shown the untestable claim, so it cannot see this, and
+                # reading the round as merely "unresolved" would let the judge
+                # rule the untestable blocker fixed and the run converge — an
+                # approval over a head with a red test. The deterministic half
+                # is authoritative at whatever head it ran on, and it is red.
+                outcome = gate_metrics.OUTCOME_STALLED
                 break
             if run.count == 0:
                 # Every test is green. The deterministic half has converged; if
@@ -1159,15 +1187,21 @@ class GatePipeline:
 
         1. there is an ``approved_sha`` and it is a real commit,
         2. the status file records a ``PREMERGE-APPROVED`` line for it,
-        3. the change's patch-id is unchanged (``test_gate_*`` files excluded —
-           they are gate evidence, not the PR's change, and a collision on one
-           is what routinely forced the rebase),
+        3. the change's patch-id is unchanged (the gate's own test directory
+           excluded — those files are gate evidence, not the PR's change, and a
+           collision on one is what routinely forced the rebase),
         4. every test is green on the new head, with a run that actually
-           happened: an infra error is "we could not check", never a pass.
+           happened: an infra error is "we could not check", never a pass, and
+           so is a run that never collected a single test.
 
         Any of them missing and the answer is a full gate. The approved sha is
         never the sha emitted: the status line names the *new* head, since that
         is the commit the automerge will actually take.
+
+        Reasons never name the approval marker. A ``NEEDS-ESCALATION`` line
+        quoting it is a verdict whose text happens to contain a marker, and the
+        automerge must not — and cannot be allowed to — read it as an approval
+        for a head the gate just refused.
         """
         reasons: list[str] = []
         approved = approved_sha.strip()
@@ -1175,7 +1209,7 @@ class GatePipeline:
             return self._carry_over_refusal(head_sha, "no approved sha given")
         if not has_approval_line(status_file, approved):
             return self._carry_over_refusal(
-                head_sha, f"no PREMERGE-APPROVED line for {approved[:9]}"
+                head_sha, f"no premerge-approved status line for {approved[:9]}"
             )
 
         base = resolve_diff_base(self.repo, self.config.base_branch)
@@ -1195,6 +1229,17 @@ class GatePipeline:
         if test_run.infra_error:
             return self._carry_over_refusal(
                 head_sha, f"tests could not run on the rebased head: {test_run.infra_error[:120]}"
+            )
+        if not test_run.ran:
+            # An empty test set gives a TestRun identical to a real green run
+            # on every field this function reads, so "we ran nothing" was being
+            # reported as "the tests passed" and a PREMERGE-APPROVED line was
+            # written for a head nothing ever exercised. Zero verification is
+            # not a pass.
+            return self._carry_over_refusal(
+                head_sha,
+                f"no test ran on the rebased head ({len(test_files)} test file(s) "
+                "in the set), so there is no green run to carry over",
             )
         if test_run.count:
             reasons.append(
@@ -1637,6 +1682,19 @@ def run_gate(
     return pipeline.run()
 
 
+def _test_dir_of(changed: list[str]) -> str:
+    """The directory the recheck's archived tests belong in: *test_dir*.
+
+    The directory the PR's own changed tests already live in, so a multi-package
+    repo restores the gate's test beside the tests it is meant to run with. A PR
+    that changed no test of its own — or keeps them at the repository root —
+    gets ``"tests"``, the directory the gate tells every verifier to write into.
+    """
+    dirs = {str(Path(rel).parent) for rel in changed}
+    only = dirs.pop() if len(dirs) == 1 else ""
+    return "tests" if only in ("", ".") else only
+
+
 def run_gate_recheck(
     *,
     repo_path: Path,
@@ -1698,11 +1756,17 @@ def run_gate_recheck(
             # Merge the base so the tests see what the PR will actually merge
             # into, not just the PR's own tree.
             merge_base_into(worktree, resolve_diff_base(repo, gate_cfg.base_branch))
-            test_files = sorted(
-                set(changed_test_files(worktree, gate_cfg.base_branch))
-                | set(pipeline.evidence.gate_tests)
-            )
-            pipeline.archive.materialise(worktree, pipeline.evidence.gate_tests)
+            # The archive, not this run's evidence, is where the gate's own
+            # tests live: a recheck is a fresh process, so evidence.gate_tests
+            # is always empty and the one test that ever blocked the PR would
+            # never be re-run. The PR's changed tests name the test directory
+            # to restore them into, so the archived test lands where the rebase
+            # actually broke it.
+            archived = pipeline.archive.stored_tests()
+            changed = changed_test_files(worktree, gate_cfg.base_branch)
+            gate_tests = [f"{_test_dir_of(changed)}/{p.name}" for p in archived]
+            pipeline.archive.materialise(worktree, gate_tests)
+            test_files = sorted(set(changed) | set(gate_tests))
             run = pipeline._runner_for(worktree).run(test_files)
         finally:
             remove_worktree(repo, worktree)

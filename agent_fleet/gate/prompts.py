@@ -26,6 +26,7 @@ in each role.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from typing import TYPE_CHECKING
@@ -37,6 +38,9 @@ if TYPE_CHECKING:
 #: so a long branch name cannot produce a path the OS or pytest chokes on.
 SLUG_MAX = 24
 ID_MAX = 30
+#: Extra characters a truncated slug spends on a short digest of the *whole*
+#: branch name, so two branches past the cap stay distinguishable.
+SLUG_DIGEST_CHARS = 10
 
 
 def slugify(text: str, *, limit: int) -> str:
@@ -53,6 +57,24 @@ def slugify(text: str, *, limit: int) -> str:
     return folded[:limit].strip("_")
 
 
+def lane_slug_token(lane_slug: str) -> str:
+    """The lane's filename token, a function of the *whole* branch name.
+
+    Truncation alone is not a function once a branch passes the cap: two
+    branches sharing their first 24 folded characters folded to one token, so
+    two concurrent PRs wrote the same gate test file name, and the shared
+    archive overwrote one lane's confirmed-defect evidence with the other's —
+    the exact add/add collision the lane slug was added to remove. A branch
+    long enough to be truncated therefore spends part of its budget on a digest
+    of the whole name, and short names are left readable.
+    """
+    folded = slugify(lane_slug, limit=SLUG_MAX + SLUG_DIGEST_CHARS)
+    if len(folded) <= SLUG_MAX:
+        return folded
+    digest = hashlib.sha256(lane_slug.encode("utf-8")).hexdigest()[:SLUG_DIGEST_CHARS]
+    return folded[: SLUG_MAX - SLUG_DIGEST_CHARS - 1] + "_" + digest
+
+
 def gate_test_name(lane_slug: str, finding_id: str) -> str:
     """The one name a verifier's new test file must have: ``test_gate_<lane>_<id>.py``.
 
@@ -60,9 +82,10 @@ def gate_test_name(lane_slug: str, finding_id: str) -> str:
     different branches both produced ``test_gate_contract_1.py`` — an add/add
     conflict that forced a rebase and a full re-gate for every PR after it. The
     lane slug makes the name unique per PR, which is what lets concurrent
-    branches each carry their own gate evidence.
+    branches each carry their own gate evidence, so it has to stay unique for
+    branch names longer than :data:`SLUG_MAX`: see :func:`lane_slug_token`.
     """
-    slug = slugify(lane_slug, limit=SLUG_MAX) or "x"
+    slug = lane_slug_token(lane_slug) or "x"
     identifier = slugify(finding_id, limit=ID_MAX) or "x"
     return f"test_gate_{slug}_{identifier}.py"
 

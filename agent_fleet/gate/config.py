@@ -11,7 +11,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from agent_fleet.gate.prompts import SLUG_MAX, slugify
+from agent_fleet.gate.prompts import lane_slug_token
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +76,17 @@ _OPTIONAL_SLUGS: tuple[str, ...] = ("lane_slug",)
 
 _BOOLS: tuple[str, ...] = ("enable_fix", "enable_judge")
 
+#: Pipeline role -> the budget field that governs it. Spelled out rather than
+#: derived as ``f"{role}_timeout_s"`` because the two vocabularies differ: the
+#: verifier role is ``verifier`` and its budget is ``verify_timeout_s``.
+_STAGE_TIMEOUT_FIELDS: dict[str, str] = {
+    "lens": "lens_timeout_s",
+    "verifier": "verify_timeout_s",
+    "verify": "verify_timeout_s",
+    "judge": "judge_timeout_s",
+    "fix": "fix_timeout_s",
+}
+
 
 @dataclass(frozen=True)
 class GateConfig:
@@ -121,16 +132,20 @@ class GateConfig:
         return self.lens_focus.get(lens) or DEFAULT_LENSES.get(lens) or lens
 
     def stage_timeout(self, role: str) -> int:
-        """The agent budget for *role* (``lens``/``verify``/``judge``/``fix``).
+        """The agent budget for *role*, in the pipeline's own vocabulary.
 
-        Taking the role name rather than the field name keeps the call sites in
-        the pipeline reading as the pipeline's own vocabulary. An unmapped role
-        gets the reviewing budget rather than raising: too short a stage for a
-        role added later is recoverable, a crash mid-run is not.
+        The mapping is explicit rather than derived from the role name, because
+        the two vocabularies are not the same: the pipeline's verifier role is
+        ``verifier`` while its budget is ``verify_timeout_s``. Deriving the
+        field as ``f"{role}_timeout_s"`` made ``verify_timeout_s`` dead config —
+        parsed, documented, set in every fleet.yaml, and never applied, so every
+        verifier silently ran on the reviewing budget instead.
+
+        An unmapped role gets the reviewing budget rather than raising: too
+        short a stage for a role added later is recoverable, a crash mid-run is
+        not.
         """
-        field = f"{role}_timeout_s"
-        value = getattr(self, field, None)
-        return int(value) if isinstance(value, int) else self.lens_timeout_s
+        return int(getattr(self, _STAGE_TIMEOUT_FIELDS.get(role, "lens_timeout_s")))
 
 
 def _apply_legacy_timeout(section: dict[str, Any], kwargs: dict[str, Any]) -> None:
@@ -201,8 +216,10 @@ def load_gate_config(raw: dict[str, Any] | None) -> GateConfig | None:
     for key in _OPTIONAL_SLUGS:
         value = section.get(key)
         # A configured slug is folded on the way in so ``fb/lane`` and
-        # ``fb_lane`` cannot produce two different test file names.
-        kwargs[key] = slugify(str(value), limit=SLUG_MAX) if value else getattr(defaults, key)
+        # ``fb_lane`` cannot produce two different test file names, and folded
+        # through the naming rule so a long slug keeps the part of itself that
+        # makes it a different lane.
+        kwargs[key] = lane_slug_token(str(value)) if value else getattr(defaults, key)
     for key in _BOOLS:
         kwargs[key] = bool(section.get(key, getattr(defaults, key)))
     return GateConfig(**kwargs)
