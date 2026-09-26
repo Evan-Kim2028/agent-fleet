@@ -262,6 +262,7 @@ def run_pytest(
     use_systemd: bool | None = None,
     cache_dir: Path | None = None,
     cache_ttl_s: int = DEFAULT_CACHE_TTL_S,
+    tree_root: Path | None = None,
 ) -> PytestResult:
     """Run the given tests from *package_dir* under a memory cap.
 
@@ -273,6 +274,12 @@ def run_pytest(
     stored result is served from disk instead of re-running pytest. A worktree
     that is not a git repo (or a git that cannot write a tree) simply runs
     uncached rather than failing.
+
+    *tree_root* is the directory whose git tree keys the cache. It defaults to
+    *package_dir*, which is only correct for a single-package repo: in a nested
+    one a test imports code from outside its own package dir, and a key computed
+    there cannot see those files change. Pass the worktree root so the key
+    covers everything the test can import.
     """
     if not test_files:
         return PytestResult(returncode=PYTEST_OK, stdout="", stderr="")
@@ -280,7 +287,7 @@ def run_pytest(
     cache_root = cache_dir.expanduser() if cache_dir is not None else None
     if cache_root is not None:
         prune_cache(cache_root, cache_ttl_s)
-        tree = worktree_tree_hash(package_dir)
+        tree = worktree_tree_hash(tree_root if tree_root is not None else package_dir)
         if tree is not None:
             key = cache_key(tree, test_files, package=str(package_dir))
             cached = cache_load(cache_root, key, ttl_s=cache_ttl_s)
@@ -325,7 +332,12 @@ def run_pytest(
 
 
 def worktree_tree_hash(root: Path) -> str | None:
-    """Git tree hash of the WHOLE worktree, or ``None`` if it cannot be computed.
+    """Git tree hash of the WHOLE worktree containing *root*, or ``None``.
+
+    *root* is resolved to the enclosing repository's top level first. A nested
+    package dir would otherwise scope `git add -A` to its own subtree, so an edit
+    to a module the test imports from elsewhere in the worktree would leave the
+    hash identical and the cache would replay a result for code that changed.
 
     ``git write-tree`` on a *temporary* index: the real index is copied first,
     then ``git add -A`` is run against the copy, so the hash covers committed
@@ -337,10 +349,24 @@ def worktree_tree_hash(root: Path) -> str | None:
     The real index is never touched: the gate runs agents against this worktree
     and a clobbered index would be visible to the next caller.
     """
+    try:
+        top = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except OSError, subprocess.SubprocessError:
+        return None
+    if top.returncode != 0 or not top.stdout.strip():
+        return None
+    toplevel = Path(top.stdout.strip())
+
     git_dir = None
     try:
         completed = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--git-path", "index"],
+            ["git", "-C", str(toplevel), "rev-parse", "--git-path", "index"],
             capture_output=True,
             text=True,
             timeout=30,
@@ -357,7 +383,7 @@ def worktree_tree_hash(root: Path) -> str | None:
         index = Path(tmp) / "index"
         source = Path(git_dir)
         if not source.is_absolute():
-            source = root / git_dir
+            source = toplevel / git_dir
         # No index yet (a fresh repo with no staged content) is not an error:
         # start empty and let `add -A` build the whole tree.
         with contextlib.suppress(OSError):
@@ -366,7 +392,7 @@ def worktree_tree_hash(root: Path) -> str | None:
         env = {**os.environ, "GIT_INDEX_FILE": str(index)}
         try:
             added = subprocess.run(
-                ["git", "-C", str(root), "add", "-A", "."],
+                ["git", "-C", str(toplevel), "add", "-A", "."],
                 capture_output=True,
                 env=env,
                 timeout=120,
@@ -376,7 +402,7 @@ def worktree_tree_hash(root: Path) -> str | None:
                 logger.debug("gate test cache: git add -A failed: %s", added.stderr[:200])
                 return None
             written = subprocess.run(
-                ["git", "-C", str(root), "write-tree"],
+                ["git", "-C", str(toplevel), "write-tree"],
                 capture_output=True,
                 text=True,
                 env=env,

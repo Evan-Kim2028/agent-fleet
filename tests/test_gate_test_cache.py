@@ -17,6 +17,7 @@ from pathlib import Path  # noqa: TC003 - concrete paths are built at runtime
 import pytest
 
 from agent_fleet.gate import pytest_runner as pr
+from agent_fleet.gate.pipeline import GateTestRunner
 from agent_fleet.gate.pytest_runner import (
     DEFAULT_CACHE_DIR,
     PytestResult,
@@ -341,3 +342,90 @@ def test_non_git_worktree_still_runs_uncached(
 
 def test_default_cache_dir_is_under_agent_fleet() -> None:
     assert str(DEFAULT_CACHE_DIR) == "~/.agent-fleet/cache/gate-tests"
+
+
+# ---------------------------------------------------------------------------
+# Nested packages — the key must be the worktree root, not the package dir
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def nested_repo(tmp_path: Path) -> Path:
+    """A repo owning tests in a nested ``api/`` package, importing root code.
+
+    ``api/tests/test_a.py`` imports ``rootcode`` from the repo root, so the test
+    observes code that lives outside its own package dir. A key computed from
+    ``api/`` alone is blind to that code.
+    """
+    root = tmp_path / "nested"
+    (root / "api" / "tests").mkdir(parents=True)
+    (root / "pyproject.toml").write_text(
+        '[build-system]\nrequires=["setuptools"]\nbuild-backend="setuptools.build_meta"\n'
+        '[project]\nname="root-pkg"\nversion="0.0.0"\n',
+        encoding="utf-8",
+    )
+    (root / "rootcode.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (root / "api" / "pyproject.toml").write_text(
+        '[build-system]\nrequires=["setuptools"]\nbuild-backend="setuptools.build_meta"\n'
+        '[project]\nname="api-pkg"\nversion="0.0.0"\n',
+        encoding="utf-8",
+    )
+    (root / "api" / "tests" / "test_a.py").write_text(
+        "import sys, pathlib\n"
+        "sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))\n"
+        "import rootcode\n"
+        "def test_a():\n"
+        "    assert rootcode.VALUE == 1\n",
+        encoding="utf-8",
+    )
+    _git("init", "-q", cwd=root)
+    _git("config", "user.email", "gate@local", cwd=root)
+    _git("config", "user.name", "gate", cwd=root)
+    _git("add", "-A", cwd=root)
+    _git("commit", "-qm", "init", cwd=root)
+    return root
+
+
+def test_tree_hash_of_a_package_dir_sees_edits_outside_it(nested_repo: Path) -> None:
+    """`worktree_tree_hash` honours its "WHOLE worktree" promise from any subdir."""
+    before = worktree_tree_hash(nested_repo / "api")
+    (nested_repo / "rootcode.py").write_text("VALUE = 99\n", encoding="utf-8")
+    after = worktree_tree_hash(nested_repo / "api")
+
+    assert before is not None
+    assert after is not None
+    assert before != after, (
+        "hashing a subdirectory cannot see edits made outside it; the caller passes "
+        "a package dir, so the hash must resolve up to the worktree root itself"
+    )
+
+
+def test_runner_misses_the_cache_when_root_code_changes(
+    nested_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An edit to root code the nested test imports must invalidate the key."""
+    cache = tmp_path / "cache"
+    launches = _fake_pytest(monkeypatch, rcs=0)
+    runner = GateTestRunner(
+        root=nested_repo,
+        memory="6G",
+        timeout_s=60,
+        use_systemd=False,
+        cache_dir=cache,
+        cache_ttl_s=3600,
+    )
+    assert [p.rel_dir for p in runner.packages_for(["api/tests/test_a.py"])] == ["api"]
+
+    first = runner.run(["api/tests/test_a.py"])
+    assert not first.tests_failed and not first.infra_error
+    assert len(launches) == 1
+
+    (nested_repo / "rootcode.py").write_text("VALUE = 2\n", encoding="utf-8")
+
+    second = runner.run(["api/tests/test_a.py"])
+
+    assert len(launches) == 2, (
+        "a real change outside the package dir must miss the cache; a single launch "
+        "means the gate replayed evidence for code it never re-ran"
+    )
+    assert not second.tests_failed and not second.infra_error

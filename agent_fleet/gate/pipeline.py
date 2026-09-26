@@ -443,6 +443,7 @@ class GateTestRunner:
                 use_systemd=self.use_systemd,
                 cache_dir=self.cache_dir,
                 cache_ttl_s=self.cache_ttl_s,
+                tree_root=self.root,
             )
 
 

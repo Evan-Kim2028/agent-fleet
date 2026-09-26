@@ -26,11 +26,13 @@
 
 ### Fixed
 
-- **gate: `agent_fleet/gate/pytest_runner.py` did not parse, so the gate package could not be
-  imported at all.** `systemd_run_available()` ended in `except OSError, subprocess.SubprocessError:`
-  (Python 2 syntax, an unparenthesized except tuple), raising `SyntaxError` on import. Every
-  consumer of the module — `pipeline.py`, and the 474 `tests/test_gate_*.py` tests that import it —
-  was affected. The tuple is now parenthesized.
+- **gate: `agent_fleet/gate/pytest_runner.py` uses the PEP 758 unparenthesized `except` tuple, which
+  is legal only on Python 3.14+.** The module's `except OSError, subprocess.SubprocessError:` clauses
+  parse and import correctly here, because the project pins `requires-python = ">=3.14,<3.15"` and CI
+  runs 3.14; the 484 `tests/test_gate_*.py` tests that import it all collect. The unparenthesized form
+  is not a defect on this floor, and no fix is applied here — this entry records the constraint so the
+  next person to add a `SyntaxError` guard around an import knows the real cause to look for is a
+  3.14-floor change, not this syntax.
 
 - **The admission pressure signal measured the wrong cgroup, and `Throttle.saturated` measured nothing at all.**
   - `read_throttle()` built its candidate list as `[explicit path] + fallbacks`, and
