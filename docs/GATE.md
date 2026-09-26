@@ -178,6 +178,48 @@ outcome, precise enough that someone can write a failing test for it.
 Duplicate claims across lenses are de-duplicated on (file, claim) so a defect
 four reviewers rediscovered is verified once.
 
+#### How many reviewers a PR earns
+
+N is not fixed. It is chosen from the shape of the diff, before any model is
+dispatched, and logged as one `gate.tier` line carrying the numbers behind the
+choice:
+
+| Tier | When | Reviewers |
+|---|---|---|
+| **0** | every changed file is docs, a test, or a fixture | none — approved on step0 |
+| **1** | small, and nothing production-sensitive | one reviewer covering all four focuses |
+| **4** | big, or touching anything production-sensitive | the full lens set |
+
+**Tier 0** exists because a PR whose changes are only prose and test code has no
+product behaviour to review — the tests *are* the change, and a reviewer asked to
+find a logic error in it has nothing to work with. It is approved on evidence
+alone: its own changed tests green at head (step0), and the merged-tree
+[recheck](#carrying-an-approval-across-a-patch-identical-rebase) — the same
+deterministic check every other approval depends on — re-establishes that at
+merge time with the base merged in. Every precondition is a refusal, and they are
+all load-bearing:
+
+- `tier0: false` turns the tier off.
+- **Any** confirmed blocker refuses — including a failing PR test. Approving a
+  red PR because its tests are the only thing it changes is exactly backwards.
+- An empty changed-file list refuses, so a git failure can never read as
+  "docs/tests only, therefore approved".
+
+**Tier 1 vs tier 4** is the size-and-sensitivity split. Size is counted in
+**non-test** changed lines (added + deleted): tests, fixtures, docs, `*.snap` and
+`*.json` are excluded, because they inflate a diff without adding review risk.
+Over `big_lines` (default 1200) the full lens set runs. So does any single
+production-sensitive path, however small — the defaults are `infra/vps/`,
+`.github/workflows/`, `scripts/{deploy,lor-api-ship,platform-deploy}`,
+`migrations/`, anything matching `(gold|sales).*(write|publish|restat|backfill|
+apply)`, and `run_prod`. The all-focus reviewer names all four focuses in its own
+prompt: one reviewer has no second reviewer to cover what it skips, so "review
+everything" without the list is the failure mode the lens set exists to prevent.
+
+The tier is a cost decision, so it is deliberately the *number* of configured
+lenses rather than a fixed 4: a repo that configures two lenses gets tier 2, and
+one that configures four gets tier 4. Both are the full-set tier.
+
 ### verify — one failing test per claim
 
 One verifier per testable claim. It must create **exactly one new test file**,
@@ -434,6 +476,9 @@ Machine-wide (`~/.agent-fleet/fleet.yaml`):
 | `gate.backend` / `gate.model` | `cmd` | backend + model for find/verify/fix |
 | `gate.judge_backend` / `gate.judge_model` | `grok` | backend + model for the judge |
 | `gate.lenses` | 4 defaults | lens name → focus text (or a list) |
+| `gate.tier0` | `true` | approve a docs/tests-only PR on step0 evidence, no model review |
+| `gate.big_lines` | `1200` | non-test changed lines above which the full lens set runs |
+| `gate.prodsensitive_paths` | 6 defaults | regexes for changed paths that keep the full lens set at any size |
 | `gate.max_candidates` | `12` | cap on claims carried into verify |
 | `gate.max_parallel_lenses` | `8` | concurrent lens reviewers |
 | `gate.max_parallel_verifiers` | `6` | concurrent verifiers |
@@ -462,9 +507,12 @@ config at all.
 
 ## Outputs
 
-**JSONL run log** — every run emits `gate.start`, `gate.step0`, `gate.find`,
-`gate.verify.*`, `gate.judge`, `gate.recheck`, `gate.round`, and `gate.outcome`
-events into the standard fleet run log.
+**JSONL run log** — every run emits `gate.start`, `gate.step0`, `gate.tier`,
+`gate.find`, `gate.verify.*`, `gate.judge`, `gate.recheck`, `gate.round`, and
+`gate.outcome` events into the standard fleet run log. `gate.tier` carries the
+chosen tier, the lens set, the non-test line count, the production-sensitive
+paths, and a one-line `summary` reading
+`review tier: N (non-test diff X lines, Y production-sensitive files)`.
 
 **Status file** — the one line the automerge watcher reads, described above.
 

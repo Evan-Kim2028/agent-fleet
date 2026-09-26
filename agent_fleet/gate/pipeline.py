@@ -66,19 +66,25 @@ from agent_fleet.gate.config import GateConfig, load_gate_config
 from agent_fleet.gate.gitops import (
     GateError,
     PullRequestRef,
+    changed_paths,
     changed_test_files,
     current_pr_head,
+    diff_line_stats,
     fetch_base,
     has_approval_line,
+    is_docs_or_test,
     merge_base_into,
     patch_id,
     prepare_worktree,
+    prodsensitive_paths,
     remove_worktree,
     resolve_diff_base,
     resolve_pull_request,
     worktree_head_sha,
 )
 from agent_fleet.gate.prompts import (
+    ALL_FOCUS,
+    ALL_FOCUS_LENS,
     find_prompt,
     fix_prompt,
     gate_test_name,
@@ -122,6 +128,37 @@ _NO_TASK_TEXT = "(no task file supplied; judge against the PR description)"
 
 class GateInfraError(RuntimeError):
     """A deterministic step could not run — the gate must not claim a verdict."""
+
+
+@dataclass(frozen=True)
+class ReviewTier:
+    """The review tier a PR earned, and the lens set that goes with it.
+
+    ``tier`` is the number of reviewers, and it is the *number* rather than a
+    label because the configured lens set is what it counts: a repo that
+    configures two lenses gets 2 and a repo that configures four gets 4, and
+    both are the "full lens set" tier. The log line is written from these
+    numbers so a run's depth can be read after the fact without re-deriving the
+    diff.
+    """
+
+    tier: int
+    lenses: tuple[str, ...]
+    #: Non-test changed lines in the PR (see :func:`diff_line_stats`).
+    lines: int
+    #: Changed paths that matched a production-sensitive pattern.
+    risky: list[str] = field(default_factory=list)
+    #: Why this tier was chosen, when the default reason does not explain it.
+    note: str = ""
+
+    @property
+    def summary(self) -> str:
+        """The one line that says which tier ran and on what evidence."""
+        head = (
+            f"review tier: {self.tier} "
+            f"(non-test diff {self.lines} lines, {len(self.risky)} production-sensitive files)"
+        )
+        return f"{head}; {self.note}" if self.note else head
 
 
 # ---------------------------------------------------------------------------
@@ -524,6 +561,9 @@ class GatePipeline:
         self.recorder = GateCallRecorder(gate_dir)
         self._candidates: list[dict[str, Any]] = []
         self._runner: GateTestRunner | None = None
+        #: step0's result, kept for the tier-0 decision. ``None`` means no
+        #: changed test was run at all, which is a green run of nothing.
+        self._step0_run: TestRun | None = None
 
     # -- helpers ---------------------------------------------------------
 
@@ -661,12 +701,17 @@ class GatePipeline:
         A pytest exit >= 2 raises :class:`GateInfraError`: the suite could not
         run, so the gate has no evidence the PR is green. Treating that as a pass
         would approve a PR whose own tests were never executed.
+
+        The result is also kept on :attr:`_step0_run`, because tier 0 approves on
+        exactly this evidence: the PR's own changed tests green at head, with no
+        model involved.
         """
         pr_tests = changed_test_files(worktree, self.config.base_branch)
         if not pr_tests:
             return []
         runner = self._runner_for(worktree)
         run = runner.run(pr_tests)
+        self._step0_run = run
         if run.infra_error:
             raise GateInfraError(f"step0 {run.infra_error}")
         for node_id in run.failing:
@@ -688,20 +733,107 @@ class GatePipeline:
         )
         return pr_tests
 
+    # -- review tiering ---------------------------------------------------
+
+    def review_tier(self, worktree: Path) -> ReviewTier:
+        """How much review this PR earns, from the shape of its diff alone.
+
+        Tiers 1 and 4 are the only ones that differ in cost, so this returns the
+        lens set rather than a bare number. Tier 0 is decided in :meth:`run`,
+        where step0's result is already known — a docs/tests-only PR whose own
+        tests failed has blockers, whatever its diff looks like.
+        """
+        lines = diff_line_stats(worktree, self.config.base_branch)
+        risky = prodsensitive_paths(worktree, self.config.base_branch, self.config)
+        if lines > self.config.big_lines or risky:
+            lenses = self.config.lenses[: self.config.max_parallel_lenses]
+            return ReviewTier(tier=len(lenses), lenses=lenses, lines=lines, risky=risky)
+        return ReviewTier(
+            tier=1,
+            lenses=(ALL_FOCUS_LENS,),
+            lines=lines,
+            note=f"non-test diff {lines} lines under big_lines={self.config.big_lines}",
+        )
+
+    def _lens_focus(self, lens: str) -> str:
+        """Reviewer focus text for *lens*, including the synthetic all-focus lens."""
+        return ALL_FOCUS if lens == ALL_FOCUS_LENS else self.config.focus_for(lens)
+
+    def tier0_eligible(self, worktree: Path) -> list[str]:
+        """The changed paths when this PR can be approved on evidence alone, else ``[]``.
+
+        A PR whose changed files are *only* docs, tests and fixtures carries no
+        product behaviour for a reviewer to reason about — the tests are the
+        change. When they are green at head, approving is a statement about
+        evidence, not a shortcut past it, so no model is dispatched.
+
+        Returning the path list (empty meaning "not eligible") rather than a bool
+        is what lets the caller log which files justified the tier without
+        re-running the same git call.
+
+        Every precondition is a refusal, and the last two matter most:
+
+        - ``tier0: false`` turns the tier off for a repo that wants it off.
+        - a step0 that could not run raised before reaching here, but the check
+          is kept so this method is safe to call on its own.
+        - **any** confirmed blocker — including a failing PR test — refuses.
+          Approving a red PR on the grounds that its tests are the only thing it
+          changes is exactly backwards.
+        - an empty changed-file list refuses, so a git failure can never read as
+          "docs/tests only, therefore approved".
+        """
+        if not self.config.tier0:
+            return []
+        changed = changed_paths(worktree, self.config.base_branch)
+        if not changed or any(not is_docs_or_test(path) for path in changed):
+            return []
+        if self._step0_run is not None and self._step0_run.infra_error:
+            return []
+        return [] if self.evidence.confirmed else changed
+
+    @staticmethod
+    def tier0_tier(changed: list[str]) -> ReviewTier:
+        """The tier-0 record for an already-decided docs/tests-only diff.
+
+        Takes the changed paths rather than re-reading the diff: :meth:`run` has
+        them, and running the same git call twice to format one log line is the
+        kind of duplication that goes stale.
+        """
+        return ReviewTier(
+            tier=0,
+            lenses=(),
+            lines=0,
+            note=f"{len(changed)} changed file(s), all docs/tests/fixtures; no model review",
+        )
+
     # -- step 1 ----------------------------------------------------------
 
-    def find(self, worktree: Path, ref: PullRequestRef) -> list[Finding]:
-        """Run the lens reviewers in parallel and dedupe their candidate claims."""
+    def find(
+        self,
+        worktree: Path,
+        ref: PullRequestRef,
+        lenses: tuple[str, ...] | None = None,
+    ) -> list[Finding]:
+        """Run the lens reviewers in parallel and dedupe their candidate claims.
+
+        *lenses* is the tier's reviewer set. It defaults to the configured lenses
+        so a caller reviewing in isolation still gets the full set; :meth:`run`
+        always passes the tier's. An explicitly empty tuple means *no reviewers*
+        rather than falling back to the default, which is what makes "dispatch
+        nothing" expressible.
+        """
         model = self._model_for(
             backend_name=self.config.backend, model=self.config.model, role=ROLE_LENS
         )
         task_text = self._task_text()
-        lenses = self.config.lenses[: self.config.max_parallel_lenses]
+        chosen = (self.config.lenses if lenses is None else lenses)[
+            : self.config.max_parallel_lenses
+        ]
 
         def _one(lens: str) -> list[Finding]:
             prompt = find_prompt(
                 lens=lens,
-                focus=self.config.focus_for(lens),
+                focus=self._lens_focus(lens),
                 worktree=str(worktree),
                 base_branch=resolve_diff_base(worktree, self.config.base_branch),
                 head_sha=ref.short_sha,
@@ -722,8 +854,8 @@ class GatePipeline:
             )
             return _tag_lens(FindingsReport.from_dict(answer.data).findings, lens)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max(len(lenses), 1)) as pool:
-            batches = list(pool.map(_one, lenses))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(len(chosen), 1)) as pool:
+            batches = list(pool.map(_one, chosen))
 
         return _dedupe_findings([f for batch in batches for f in batch])[
             : self.config.max_candidates
@@ -1350,9 +1482,24 @@ class GatePipeline:
             prepare_worktree(self.repo, worktree, ref.head_sha)
             self._runner = self._runner_for(worktree)
             pr_tests = self.run_pr_tests(worktree)
-            candidates = self.find(worktree, ref)
+
+            # Tier 0: a docs/tests-only PR with its own tests green at head has
+            # nothing for a model to review. Its approval rests on step0 plus the
+            # recheck that runs before the merge, both of which already happened
+            # or already refuse. Every other PR is reviewed, so the tiers below
+            # only ever choose between one reviewer and the full lens set.
+            tier0 = self.tier0_eligible(worktree)
+            if tier0:
+                self._log("gate.tier", **tier_fields(self.tier0_tier(tier0)))
+                sha = ref.head_sha
+                outcome = GateOutcome.APPROVED
+                return self._finish(outcome, sha, reasons, ref)
+
+            tier = self.review_tier(worktree)
+            self._log("gate.tier", **tier_fields(tier))
+            candidates = self.find(worktree, ref, tier.lenses)
             self._candidates = [f.to_dict() for f in candidates]
-            self._log("gate.find", candidates=len(candidates), lenses=list(self.config.lenses))
+            self._log("gate.find", candidates=len(candidates), lenses=list(tier.lenses))
             self.verify(worktree, candidates, source="lens")
             self.judge(worktree, ref)
 
@@ -1485,6 +1632,24 @@ class GatePipeline:
 # ---------------------------------------------------------------------------
 # Small pure helpers
 # ---------------------------------------------------------------------------
+
+
+def tier_fields(tier: ReviewTier) -> dict[str, Any]:
+    """The ``gate.tier`` log payload, including the human-readable summary line.
+
+    The summary is a field rather than the log call's message so the numbers
+    survive structured-log sinks that drop the message, and so one line can
+    carry the whole reason: which tier, on how many lines, touching how many
+    production-sensitive files.
+    """
+    return {
+        "tier": tier.tier,
+        "lenses": list(tier.lenses),
+        "non_test_lines": tier.lines,
+        "prodsensitive": tier.risky[:10],
+        "n_prodsensitive": len(tier.risky),
+        "summary": tier.summary,
+    }
 
 
 def _n_items(data: dict[str, Any]) -> int:

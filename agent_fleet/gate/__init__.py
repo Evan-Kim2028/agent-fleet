@@ -4,6 +4,7 @@ Public surface:
     run_gate              — run the gate for one PR
     GateResult            — the verdict plus its evidence
     GatePipeline          — the step-by-step pipeline (for tests and reuse)
+    ReviewTier            — the tier a PR earned and the lens set for it
     gate_metrics_summary  — the ``gate metrics`` rollup
     status_line_for       — the automerge status line format
 """
@@ -15,6 +16,7 @@ from agent_fleet.gate.pipeline import (
     GateInfraError,
     GatePipeline,
     GateResult,
+    ReviewTier,
     gate_metrics_summary,
     run_gate,
     status_line_for,
@@ -28,6 +30,7 @@ __all__ = [
     "GatePipeline",
     "GateResult",
     "PullRequestRef",
+    "ReviewTier",
     "RoundMetric",
     "gate_metrics_summary",
     "load_gate_config",

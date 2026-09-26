@@ -19,8 +19,12 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path  # noqa: TC003 - used at runtime (path.exists/is_file)
+from typing import TYPE_CHECKING
 
 from agent_fleet.gate.pytest_runner import is_test_file
+
+if TYPE_CHECKING:
+    from agent_fleet.gate.config import GateConfig
 
 logger = logging.getLogger(__name__)
 
@@ -162,12 +166,14 @@ def resolve_diff_base(worktree: Path, base_branch: str) -> str:
     return remote if probe else base_branch
 
 
-def changed_test_files(worktree: Path, base_branch: str) -> list[str]:
-    """Repo-relative ``test_*.py`` paths the PR changed and that still exist.
+def changed_paths(worktree: Path, base_branch: str) -> list[str]:
+    """Repo-relative paths the PR changed, or ``[]`` when the diff is unreadable.
 
-    Deliberately narrow: the gate re-runs the PR's *own* tests as step0, and
-    widening that to the whole suite would turn one slow package into a gate
-    timeout for reasons unrelated to the change.
+    Shared by the two tiering questions — "is this PR docs/tests only" and "does
+    it touch production-sensitive files" — so both see the same file list and a
+    git failure reads as "no changed files" rather than a different answer from
+    each caller. The tiering paths that would approve on an empty list refuse,
+    so failing closed here is safe.
     """
     diff = _run_git(
         worktree,
@@ -176,14 +182,80 @@ def changed_test_files(worktree: Path, base_branch: str) -> list[str]:
         f"{resolve_diff_base(worktree, base_branch)}...HEAD",
         check=False,
     )
+    return [line.strip() for line in diff.splitlines() if line.strip()]
+
+
+def changed_test_files(worktree: Path, base_branch: str) -> list[str]:
+    """Repo-relative ``test_*.py`` paths the PR changed and that still exist.
+
+    Deliberately narrow: the gate re-runs the PR's *own* tests as step0, and
+    widening that to the whole suite would turn one slow package into a gate
+    timeout for reasons unrelated to the change.
+    """
     out: list[str] = []
-    for line in diff.splitlines():
-        rel = line.strip()
-        if not rel or not is_test_file(rel):
+    for rel in changed_paths(worktree, base_branch):
+        if not is_test_file(rel):
             continue
         if (worktree / rel).is_file():
             out.append(rel)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Review tiering: how much review a diff is worth
+# ---------------------------------------------------------------------------
+
+#: A changed path that carries no product behaviour: prose, test code, fixtures.
+#: Tier 0 is defined as *only* these, and the non-test line count excludes them.
+#: The patterns are matched against the whole repo-relative path.
+_DOCS_TEST_RE = re.compile(
+    r"(\.md$|(^|/)docs?/|(^|/)tests?/|(^|/)test_[^/]*\.py$|_test\.py$|(^|/)fixtures?/)"
+)
+
+#: Non-test changed lines, which is what ``big_lines`` is measured against.
+#: Wider than :data:`_DOCS_TEST_RE` on purpose: a JSON fixture or a snapshot is
+#: as much diff bulk as a test file and as little review risk.
+_NON_TEST_LINE_RE = re.compile(
+    r"((^|/)(tests?|fixtures?|docs?)/|(^|/)test_[^/]*\.py$|_test\.py$|\.md$|\.snap$|\.json$)"
+)
+
+
+def is_docs_or_test(path: str) -> bool:
+    """Whether *path* is prose, a test, or a fixture — no product code."""
+    return _DOCS_TEST_RE.search(path) is not None
+
+
+def diff_line_stats(worktree: Path, base_branch: str) -> int:
+    """Non-test changed lines in the PR (added + deleted).
+
+    Test, fixture, docs, snapshot and JSON paths are excluded: they inflate a
+    diff without adding review risk, and counting them put almost every PR over
+    the size threshold that earns the full lens set. Binary files report no
+    numstat line, so they add nothing.
+    """
+    numstat = _run_git(
+        worktree,
+        "diff",
+        "--numstat",
+        f"{resolve_diff_base(worktree, base_branch)}...HEAD",
+        check=False,
+    )
+    total = 0
+    for line in numstat.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3 or _NON_TEST_LINE_RE.search(parts[2]):
+            continue
+        try:
+            total += int(parts[0]) + int(parts[1])
+        except ValueError:
+            # "-" in either column means a binary file; it has no line count.
+            continue
+    return total
+
+
+def prodsensitive_paths(worktree: Path, base_branch: str, config: GateConfig) -> list[str]:
+    """Changed paths *config* considers production-sensitive, in diff order."""
+    return [path for path in changed_paths(worktree, base_branch) if config.is_prodsensitive(path)]
 
 
 # ---------------------------------------------------------------------------
