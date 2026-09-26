@@ -25,6 +25,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: The cmd backend's exit code for "stopped at --max-turns", partial or not.
+#: A run that hit it never reached a verdict, so the gate must not read its
+#: output as one.
+TURN_CAP_EXIT = 8
+
 _FINAL_FORMAT_NOTE = (
     "FINAL ANSWER FORMAT (repeated on purpose): your final message must be exactly "
     "one ```json fenced block matching the schema/example given above. No prose "
@@ -37,7 +42,11 @@ def _repair_prompt(original: str, raw: str, error: str) -> str:
         "Your previous answer below contains the right analysis but not in the "
         "required format. Rewrite it as exactly one ```json fenced block that "
         "conforms to the required schema. Keep every finding/verdict you made; add "
-        "nothing new; no prose outside the block. Do not run any tools.\n\n"
+        "nothing new; no prose outside the block. Do not run any tools.\n"
+        "Report the findings you have ALREADY established. If your investigation "
+        "was cut short before you reached a conclusion, report what you did "
+        "establish rather than an empty list: an empty findings list asserts the "
+        "change is clean, and you have not shown that.\n\n"
         f"Validation error: {error[:300]}\n\n"
         "===== REQUIRED FORMAT (from the original instructions) =====\n"
         f"{original[-4000:]}\n\n"
@@ -68,12 +77,19 @@ class StructuredCallError(RuntimeError):
     """
 
     def __init__(
-        self, message: str, *, kind: str = "invalid", raw: str = "", duration_s: float = 0.0
+        self,
+        message: str,
+        *,
+        kind: str = "invalid",
+        raw: str = "",
+        duration_s: float = 0.0,
+        exit_code: int = 1,
     ) -> None:
         super().__init__(message)
         self.kind = kind
         self.raw = raw
         self.duration_s = duration_s
+        self.exit_code = exit_code
 
 
 def _balanced_spans(text: str, open_ch: str, close_ch: str) -> list[tuple[int, int]]:
@@ -218,6 +234,7 @@ def call_structured(
     last_error = ""
     last_kind = "invalid"
     raw = ""
+    exit_code = 1
     started = time.monotonic()
 
     def elapsed() -> float:
@@ -237,11 +254,24 @@ def call_structured(
                 mode=mode,
             )
         if result.exit_code != 0 or not (result.stdout or "").strip():
-            last_error = f"backend call failed (exit {result.exit_code}): {result.stderr[:300]}"
+            # Exit 8 is the backend's turn cap: the run stopped mid-review
+            # without reaching a verdict. Treating it as a completed answer is
+            # what let a lens spend its whole turn budget investigating, never
+            # write its JSON, and report `candidates=0` — indistinguishable from
+            # a clean review. It is dead evidence, so it fails like a crash.
+            if result.exit_code == TURN_CAP_EXIT:
+                last_error = (
+                    f"turn cap hit (exit {TURN_CAP_EXIT}) before the agent produced a "
+                    f"final answer; last output was {len(result.stdout or '')} chars"
+                )
+            else:
+                last_error = f"backend call failed (exit {result.exit_code}): {result.stderr[:300]}"
             last_kind = "dead"
             raw = result.stdout or ""
+            exit_code = result.exit_code
         else:
             raw = result.stdout
+            exit_code = 0
             data, last_error = _first_valid(raw, validate, list_key=list_key)
             if data is not None:
                 return StructuredAnswer(data=data, raw=raw, duration_s=elapsed())
@@ -274,4 +304,5 @@ def call_structured(
         kind=last_kind,
         raw=raw,
         duration_s=elapsed(),
+        exit_code=exit_code,
     )

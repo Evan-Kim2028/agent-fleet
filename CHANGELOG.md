@@ -24,6 +24,16 @@
     reported nothing. The `finalText` is now only preferred when non-empty.
   - The repair turn handed the agent back `raw[-12000:]`, silently cutting the
     tail of a long review. The full answer is now passed through.
+- **A turn-capped reviewer is no longer a clean review.** This was the actual
+  cause of the `candidates=0` pilot result, found by re-running the lens stage
+  against lake-of-rage #3541 with the new per-call trace: all four lenses used
+  the full `--max-turns 80` budget on investigation, never reached a verdict,
+  and exited 8 — but `CmdBackend.run` flattened exit 8 into exit 0. The gate
+  then read the *repair* turn's `{"findings": []}` as the review, so a reviewer
+  that was still mid-investigation produced a perfectly parseable "no blockers".
+  Exit 8 now passes through to callers, and `call_structured` treats it as dead
+  evidence: the gate fails closed and escalates instead of approving on a
+  reviewer that never answered.
 - **A green test set with only untestable blockers no longer reads as a failed
   fix loop.** When nothing fails and the only blockers are judge-confirmed
   untestable ones, the gate spent a fix round it could not make progress in and

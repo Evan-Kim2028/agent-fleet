@@ -593,7 +593,7 @@ class GatePipeline:
                 raw=getattr(exc, "raw", ""),
                 parsed=None,
                 parse_error=str(exc),
-                exit_code=1,
+                exit_code=getattr(exc, "exit_code", 1),
                 duration_s=getattr(exc, "duration_s", 0.0),
                 lens=str(kwargs.get("lens", "")),
             )
@@ -876,7 +876,7 @@ class GatePipeline:
                 raw=getattr(exc, "raw", ""),
                 parsed=None,
                 parse_error=str(exc),
-                exit_code=1,
+                exit_code=getattr(exc, "exit_code", 1),
                 duration_s=getattr(exc, "duration_s", 0.0),
             )
             return False

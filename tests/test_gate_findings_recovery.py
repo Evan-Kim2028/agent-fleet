@@ -294,7 +294,105 @@ def test_an_unchipped_result_still_wins() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Defect 5: the run reported "cap after 1 round(s)" for a PR it never tried to fix
+# Defect 5: a turn-capped reviewer was recorded as a completed, clean answer
+# ---------------------------------------------------------------------------
+
+
+def test_a_turn_capped_lens_is_not_a_clean_review(tmp_path: Path) -> None:
+    """A reviewer that ran out of turns never reached a verdict.
+
+    Measured on the live #3541 re-run: every lens used all 80 turns of
+    investigation and never wrote its final JSON, exited 8, and the gate read
+    the *repair* turn's ``{"findings": []}`` as its answer. The pipeline must
+    fail closed, exactly as it does for a dead agent.
+    """
+    from agent_fleet.gate.pipeline import GateInfraError
+
+    class _TurnCapped(_ScriptedBackend):
+        """Burns the turn budget investigating, never writes its verdict."""
+
+        def run(self, prompt: str, **_kwargs: Any) -> _Result:  # noqa: ANN401
+            self.prompts.append(prompt)
+            self.calls += 1
+            if "not in the required format" in prompt:
+                # The repair turn: "keep every finding you made" -> nothing found.
+                return _Result('```json\n{"findings": []}\n```')
+            return _Result(
+                "I examined the diff and traced the call sites. Let me keep digging.",
+                exit_code=8,
+            )
+
+    pipe = _pipeline(tmp_path, _TurnCapped())
+    with pytest.raises(GateInfraError):
+        pipe.find(tmp_path / "wt", _ref())
+
+
+def test_a_turn_capped_call_is_recorded_with_its_exit_code(tmp_path: Path) -> None:
+    """The persisted record must show the turn cap, not a clean parsed answer."""
+    from agent_fleet.gate.pipeline import GateInfraError
+
+    class _TurnCapped(_ScriptedBackend):
+        def run(self, prompt: str, **_kwargs: Any) -> _Result:  # noqa: ANN401
+            self.prompts.append(prompt)
+            self.calls += 1
+            if "not in the required format" in prompt:
+                return _Result('```json\n{"findings": []}\n```')
+            return _Result("still investigating", exit_code=8)
+
+    pipe = _pipeline(tmp_path, _TurnCapped())
+    with contextlib.suppress(GateInfraError):
+        pipe.find(tmp_path / "wt", _ref())
+
+    records = [
+        json.loads(p.read_text(encoding="utf-8"))
+        for p in sorted((tmp_path / "gate" / "calls").glob("*.json"))
+    ]
+    assert records
+    assert all(r["exit_code"] == 8 for r in records), records
+    assert all(r["parsed_ok"] is False for r in records)
+
+
+def test_the_cmd_backend_passes_the_turn_cap_exit_through(tmp_path: Path) -> None:
+    """``CmdBackend.run`` flattened exit 8 into 0, hiding the cap from callers."""
+    from unittest.mock import MagicMock, patch
+
+    from agent_fleet.cmd_backend import CmdBackend
+
+    def _run(_cmd: list[str], **_kwargs: object) -> MagicMock:
+        m = MagicMock()
+        m.returncode = 8  # the turn cap
+        m.stdout = json.dumps({"type": "result", "finalText": "partial"})
+        m.stderr = ""
+        return m
+
+    with (
+        patch("agent_fleet.cmd_backend.subprocess.run", side_effect=_run),
+        patch("agent_fleet.cmd_backend.check_cmd_auth", return_value=(True, "ok", "")),
+    ):
+        result = CmdBackend(cmd_bin="/bin/cmd").run(
+            "review", max_tokens=0, timeout_s=10, cwd=tmp_path
+        )
+    assert result.exit_code == 8
+
+
+def test_a_completed_lens_answer_is_unaffected(tmp_path: Path) -> None:
+    """A reviewer that finished on time must still be accepted."""
+    backend = _ScriptedBackend(default='```json\n{"findings": []}\n```')
+    answer = call_structured(
+        backend,  # type: ignore[arg-type]
+        "prompt",
+        model="m",
+        cwd=tmp_path,
+        timeout_s=10,
+        validate=validate_findings,
+        list_key="findings",
+    )
+    assert answer.data == {"findings": []}
+    assert backend.calls == 1
+
+
+# ---------------------------------------------------------------------------
+# Defect 6: the run reported "cap after 1 round(s)" for a PR it never tried to fix
 # ---------------------------------------------------------------------------
 
 
@@ -450,3 +548,32 @@ def _ref() -> Any:  # noqa: ANN401
     from agent_fleet.gate.gitops import PullRequestRef
 
     return PullRequestRef(number=3541, head_ref="fb/lane", head_sha="b" * 40, state="OPEN")
+
+
+# ---------------------------------------------------------------------------
+# The turn budget itself
+# ---------------------------------------------------------------------------
+
+
+def test_the_gate_lens_turn_budget_is_not_the_old_80() -> None:
+    """80 turns was exhausted mid-review; a gate lens needs a real budget.
+
+    Measured: all four lenses on #3541 used every one of 80 turns on
+    investigation and stopped before writing their JSON.
+    """
+    from agent_fleet.cmd_backend import DEFAULT_MAX_TURNS
+
+    assert DEFAULT_MAX_TURNS >= 200
+
+
+def test_the_repair_turn_warns_against_an_empty_list() -> None:
+    """An empty findings list is a claim of cleanliness, not a shrug.
+
+    The turn-capped lenses answered their repair turn with ``{"findings": []}``,
+    which asserted the PR was clean when the reviewer had actually been cut off
+    mid-investigation. The repair turn must say so.
+    """
+    from agent_fleet.gate.structured import _repair_prompt
+
+    prompt = _repair_prompt("original", "still investigating", "no JSON found")
+    assert "an empty findings list asserts the change is clean" in prompt
