@@ -352,6 +352,49 @@ def _repo_sections(raw: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+class ServeConfigError(Exception):
+    """An explicitly named config file does not configure serve."""
+
+
+def _read_named_yaml(path: Path) -> dict[str, Any]:
+    """Read the YAML a ``--serve-config`` named, or explain why it is unusable.
+
+    A named file gets no silence. A typo in the path, a truncated write and a
+    file that holds nothing but whitespace all used to read as "no serve
+    section" and fall through to the built-in defaults, so a supervisor could
+    run for days on thresholds the operator believed they had configured.
+    """
+    import yaml
+
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ServeConfigError(
+            f"--serve-config {path} cannot be read ({exc.strerror or exc}). "
+            f"Point it at a readable file, or drop the flag to use the global "
+            f"fleet.yaml."
+        ) from exc
+    try:
+        raw = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise ServeConfigError(
+            f"--serve-config {path} is not valid YAML ({exc}). Fix the file, or "
+            f"drop the flag to use the global fleet.yaml."
+        ) from exc
+    if raw is None:
+        raise ServeConfigError(
+            f"--serve-config {path} is empty. Point --serve-config at a file that "
+            f"configures serve, or drop the flag to use the global fleet.yaml."
+        )
+    if not isinstance(raw, dict):
+        raise ServeConfigError(
+            f"--serve-config {path} is a {type(raw).__name__}, not a mapping. "
+            f"Point it at a YAML file with a `serve:` section, or drop the flag "
+            f"to use the global fleet.yaml."
+        )
+    return raw
+
+
 def load_serve_config(
     *,
     operator: str = "",
@@ -360,25 +403,25 @@ def load_serve_config(
 ) -> ServeConfig:
     """Resolve serve configuration from every source, in the documented order.
 
-    An explicitly named *config_path* that has no serve section raises
-    :class:`ServeConfigError`. Implicit sources (the global fleet.yaml, the
-    repo config) fall through to the next source without complaint, because a
-    machine that has never configured serve should still get working defaults.
+    An explicitly named *config_path* that cannot be read, is not valid YAML, or
+    has no serve section raises :class:`ServeConfigError`. Implicit sources (the
+    global fleet.yaml, the repo config) fall through to the next source without
+    complaint, because a machine that has never configured serve should still
+    get working defaults.
     """
     sections: list[tuple[dict[str, Any], Path]] = []
 
     if config_path is not None:
-        raw = _read_yaml(config_path)
-        if raw is not None:
-            section = _repo_sections(raw)
-            if section is not None:
-                sections.append((section, config_path))
-            else:
-                raise ServeConfigError(
-                    f"{config_path} has no `serve:` (or `fleet_ops.serve:`) section. "
-                    f"Point --serve-config at a file that configures serve, or drop the "
-                    f"flag to use the global fleet.yaml."
-                )
+        raw = _read_named_yaml(config_path)
+        section = _repo_sections(raw)
+        if section is not None:
+            sections.append((section, config_path))
+        else:
+            raise ServeConfigError(
+                f"{config_path} has no `serve:` (or `fleet_ops.serve:`) section. "
+                f"Point --serve-config at a file that configures serve, or drop the "
+                f"flag to use the global fleet.yaml."
+            )
     else:
         from agent_fleet.fleet_paths import default_fleet_config_path
 
@@ -408,10 +451,6 @@ def load_serve_config(
             return parsed
 
     return ServeConfig(operator=operator)
-
-
-class ServeConfigError(Exception):
-    """An explicitly named config file does not configure serve."""
 
 
 __all__ = [

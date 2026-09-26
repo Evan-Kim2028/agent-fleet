@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import signal
 import subprocess
+import time
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -58,11 +59,17 @@ from agent_fleet.serve.paths import (
     read_json,
     write_json_atomic,
 )
-from agent_fleet.serve.procs import ProcIdentity, pid_alive, starttime_fingerprint, terminate_group
+from agent_fleet.serve.procs import (
+    ProcIdentity,
+    escalate_kill_group,
+    pid_alive,
+    starttime_fingerprint,
+    terminate_group,
+)
 
 if TYPE_CHECKING:
     from agent_fleet.serve.clock import Clock
-    from agent_fleet.serve.config import ServeConfig
+    from agent_fleet.serve.config import ComponentSpec, ServeConfig
 
 #: Why a child exited. Only ``crash`` counts toward the crash-loop budget.
 CAUSE_CRASH = "crash"
@@ -75,6 +82,16 @@ STATE_STARTING = "starting"
 STATE_RUNNING = "running"
 STATE_BACKOFF = "backoff"
 STATE_CRASH_LOOPING = "crash_looping"
+
+#: How long a restart waits for the component it is replacing to be gone before
+#: the replacement is spawned. Zero means "no grace": the old child is already
+#: dead, or the operator has taken the only copy with a SIGKILL.
+RESTART_KILL_GRACE_S = 0.0
+
+#: Causes serve asked for, and which therefore do not consume crash budget. Any
+#: other exit does: a component that stops itself, cleanly and repeatedly, is
+#: the silently-broken shape the detector exists to find.
+REQUESTED_CAUSES = frozenset({CAUSE_REQUESTED, CAUSE_CAPACITY})
 
 #: Cap on remembered crash epochs per component, so a long-lived supervisor's
 #: state file does not grow without bound.
@@ -144,9 +161,16 @@ class ChildState:
     last_exit_epoch: float = 0.0
     last_exit_cause: str = ""
     last_exit_code: int | None = None
-    #: Set when the watchdog asks for a restart, so a requested stop does not
-    #: consume the crash budget.
-    pending_cause: str = CAUSE_REQUESTED
+    #: Cause of the exit still owed an accounting decision, set when the
+    #: supervisor stops a component and cleared by :meth:`_reap`. It defaults
+    #: to *exit*: nobody asked for the first start, so an unasked-for exit is a
+    #: crash and must consume the budget. Only an explicit
+    #: ``stop_component``/``request_restart`` sets ``requested``, and that is the
+    #: only thing that buys a component a free restart.
+    pending_cause: str = CAUSE_EXIT
+    #: When the backoff owed by the last exit is due. A restart waits for the
+    #: deadline rather than sleeping inside :meth:`Supervisor.tick`.
+    restart_due: float = 0.0
     adopted: bool = False
     last_event_epoch: float = 0.0
     #: Restart epochs triggered by the no-progress rule, for its own budget.
@@ -165,6 +189,7 @@ class ChildState:
             "last_exit_cause": self.last_exit_cause,
             "last_exit_code": self.last_exit_code,
             "pending_cause": self.pending_cause,
+            "restart_due": self.restart_due,
             "adopted": self.adopted,
             "last_event_epoch": self.last_event_epoch,
             "no_progress_restarts": list(self.no_progress_restarts[-_MAX_CRASH_HISTORY:]),
@@ -193,7 +218,8 @@ class ChildState:
             last_exit_code=(
                 int(raw["last_exit_code"]) if isinstance(raw.get("last_exit_code"), int) else None
             ),
-            pending_cause=str(raw.get("pending_cause") or CAUSE_REQUESTED),
+            pending_cause=str(raw.get("pending_cause") or CAUSE_EXIT),
+            restart_due=float(raw.get("restart_due") or 0.0),
             adopted=bool(raw.get("adopted")),
             last_event_epoch=float(raw.get("last_event_epoch") or 0.0),
             no_progress_restarts=floats("no_progress_restarts"),
@@ -229,6 +255,9 @@ class Supervisor:
         self.children: dict[str, ChildState] = {}
         self._procs: dict[str, subprocess.Popen[bytes]] = {}
         self._handles: dict[str, Any] = {}
+        #: Components this supervisor adopted rather than spawned. They have no
+        #: Popen, so they are tracked here and stopped by fingerprint.
+        self._adopted: dict[str, ProcIdentity] = {}
         self._stopping = False
         self._restore()
 
@@ -305,6 +334,7 @@ class Supervisor:
         state.state = STATE_RUNNING
         state.adopted = True
         state.last_event_epoch = self.clock.time()
+        self._adopted[name] = ProcIdentity(pid=pid, starttime=starttime)
         emit_serve_event(
             self.operator,
             "serve.component.adopted",
@@ -312,7 +342,7 @@ class Supervisor:
         )
         return True
 
-    def start(self, name: str, *, cause: str = CAUSE_REQUESTED) -> bool:
+    def start(self, name: str, *, cause: str = CAUSE_EXIT) -> bool:
         """Spawn a component, or adopt it if it is already running.
 
         The adoption check runs first and unconditionally, which is what makes
@@ -361,6 +391,10 @@ class Supervisor:
             )
         except (OSError, ValueError) as exc:
             handle.close()
+            # A component that cannot even be exec'd is the worst kind of crash
+            # and has to run on the same budget as any other, or the ensure-
+            # running loop retries a doomed spawn once per tick forever.
+            state.restarts += 1
             self._note_crash(name, cause=CAUSE_CRASH, code=None, message=str(exc))
             emit_serve_event(
                 self.operator,
@@ -368,6 +402,8 @@ class Supervisor:
                 level="error",
                 data={"component": name, "error": str(exc), "argv": argv},
             )
+            if self._crash_looping(name):
+                self._enter_crash_loop(name, spec)
             return False
 
         fingerprint = starttime_fingerprint(proc.pid, proc_root=self.proc_root)
@@ -377,8 +413,10 @@ class Supervisor:
         state.adopted = False
         state.restarts += 1
         state.pending_cause = cause
+        state.restart_due = 0.0
         state.last_event_epoch = self.clock.time()
         self._procs[name] = proc
+        self._adopted.pop(name, None)
         self._handles[name] = handle
         self._write_pidfile(name, state)
         emit_serve_event(
@@ -447,9 +485,13 @@ class Supervisor:
                     handle.close()
             state = self.children.get(name)
             cause = state.pending_cause if state else CAUSE_CRASH
-            # A non-zero exit is a crash whatever we asked for; a zero exit is
-            # only a crash if nobody asked.
-            effective = CAUSE_CRASH if code != 0 else cause
+            if state is not None:
+                state.pending_cause = CAUSE_EXIT
+            # A non-zero exit is a crash whatever we asked for. So is a clean one
+            # nobody asked for: a component that quietly exits on its own is
+            # exactly the failure the crash budget is meant to catch, and letting
+            # it through is what made the detector unreachable for it.
+            effective = CAUSE_CRASH if code != 0 or cause not in REQUESTED_CAUSES else cause
             self._note_crash(name, cause=effective, code=code)
             exits.append((name, code))
         return exits
@@ -461,6 +503,33 @@ class Supervisor:
             return False
         window_s = max(1.0, float(spec.crash_window_minutes) * 60.0)
         return state.crashes_in_window(self.clock.time(), window_s) >= spec.crash_threshold
+
+    def _enter_crash_loop(self, name: str, spec: ComponentSpec) -> None:
+        """Spend the crash budget: stop restarting, alert, leave the rest alone.
+
+        One broken component must not take the pipeline down, so this only
+        touches *name* — the other components keep running and the operator is
+        told which one to look at.
+        """
+        state = self.children.get(name)
+        if state is None:
+            return
+        state.state = STATE_CRASH_LOOPING
+        state.message = (
+            f"{len(state.crash_epochs)} crashes in "
+            f"{spec.crash_window_minutes}m (threshold {spec.crash_threshold}); "
+            f"not restarting"
+        )
+        alert(
+            self.operator,
+            "serve.component.crash_loop",
+            state.message,
+            component=name,
+            exit_code=state.last_exit_code,
+            restarts=state.restarts,
+            crash_threshold=spec.crash_threshold,
+            crash_window_minutes=spec.crash_window_minutes,
+        )
 
     def backoff_for(self, name: str) -> float:
         """Exponential backoff from the restart count, capped by config.
@@ -501,43 +570,75 @@ class Supervisor:
                 },
             )
 
-            if self._crash_looping(name):
-                state.state = STATE_CRASH_LOOPING
-                state.message = (
-                    f"{len(state.crash_epochs)} crashes in "
-                    f"{spec.crash_window_minutes}m (threshold {spec.crash_threshold}); "
-                    f"not restarting"
-                )
-                alert(
-                    self.operator,
-                    "serve.component.crash_loop",
-                    state.message,
-                    component=name,
-                    exit_code=code,
-                    restarts=state.restarts,
-                    crash_threshold=spec.crash_threshold,
-                    crash_window_minutes=spec.crash_window_minutes,
-                )
-                continue
-
+            # The backoff becomes a deadline rather than a sleep. Sleeping here
+            # would park the whole loop behind one crashing component: nothing
+            # else would be reaped, `serve status` would go stale, and a SIGTERM
+            # could not be acted on until the sleep returned. A zero delay is
+            # paid now because it costs nothing and keeps a clean exit promptly
+            # restarted, as the module promises.
             delay = self.backoff_for(name)
-            state.state = STATE_BACKOFF
-            state.message = f"restarting in {delay:.0f}s (cause {state.last_exit_cause})"
             if delay > 0:
-                self.clock.sleep(delay)
-            if self._stopping:
-                return
-            self.start(name, cause=state.last_exit_cause or CAUSE_EXIT)
+                state.state = STATE_BACKOFF
+                state.restart_due = self.clock.time() + delay
+                state.message = f"restarting in {delay:.0f}s (cause {state.last_exit_cause})"
+            else:
+                self._restart(name)
 
+            if self._crash_looping(name):
+                self._enter_crash_loop(name, spec)
+
+        self._ensure_running()
+
+    def _ensure_running(self) -> None:
+        """Start anything that is enabled, not crash-looping, and not ours.
+
+        A component in its backoff is left alone until its deadline passes, so
+        a failing component cannot be retried once per tick regardless of how
+        long its backoff is.
+        """
+        now = self.clock.time()
         for spec in self.config.enabled_components:
-            if spec.name not in self._procs and not pid_alive(
-                (self.children.get(spec.name) or ChildState(name=spec.name)).pid or -1,
-                proc_root=self.proc_root,
-            ):
-                state = self.children.get(spec.name)
-                if state is not None and state.state in (STATE_CRASH_LOOPING,):
-                    continue
-                self.start(spec.name)
+            name = spec.name
+            if name in self._procs or name in self._adopted:
+                continue
+            state = self.children.get(name)
+            if state is None:
+                self.start(name)
+                continue
+            if state.state == STATE_CRASH_LOOPING or self._is_ours(name):
+                continue
+            if state.restart_due > now:
+                continue
+            self._restart(name)
+
+    def _restart(self, name: str) -> bool:
+        """Spawn a replacement for a component that is owed one.
+
+        The old child is reaped and gone before this runs, so ``start`` cannot
+        put two live copies of one role on the box — the double-dispatch failure
+        the whole module is built to prevent.
+        """
+        state = self.children.get(name)
+        cause = (state.last_exit_cause if state else "") or CAUSE_EXIT
+        if not self.start(name, cause=cause):
+            return False
+        state = self.children.get(name)
+        if state is not None:
+            state.pending_cause = CAUSE_EXIT
+        return True
+
+    def _is_ours(self, name: str) -> bool:
+        """True when the recorded pid is still the process we started.
+
+        Fingerprint-gated for the same reason every kill in this package is: a
+        bare ``pid_alive`` on a recorded pid accepts a recycled one, so a
+        stranger's process would suppress this component's start for good while
+        ``serve status`` reported the stranger as ours.
+        """
+        state = self.children.get(name)
+        if state is None or state.identity is None:
+            return False
+        return state.identity.matches(proc_root=self.proc_root)
 
     def request_restart(self, name: str, *, reason: str) -> bool:
         """The watchdog's "this component is wedged" path.
@@ -561,35 +662,94 @@ class Supervisor:
         state.no_progress_restarts.append(self.clock.time())
         return self.start(name, cause=CAUSE_REQUESTED)
 
-    def stop_component(self, name: str, *, cause: str = CAUSE_REQUESTED) -> bool:
-        """TERM a component's group, by recorded fingerprint only."""
+    def stop_component(
+        self,
+        name: str,
+        *,
+        cause: str = CAUSE_REQUESTED,
+        grace_s: float = RESTART_KILL_GRACE_S,
+    ) -> bool:
+        """Stop a component's group and do not return until it is gone.
+
+        TERM, wait out the grace, then KILL the group. A component that ignores
+        or blocks SIGTERM used to survive this, and because the next ``start``
+        overwrote the entry in ``_procs`` the old process became invisible: two
+        live copies of one role, and one orphan per watchdog restart. *grace_s*
+        is zero on the restart path, where a copy that will not go is killed
+        outright rather than left to fight the replacement.
+        """
         state = self.children.get(name)
         if state is None:
             return False
         state.pending_cause = cause
+        identity = self._adopted.pop(name, None) or state.identity
         proc = self._procs.get(name)
         if proc is not None and proc.poll() is None:
-            terminate_group(state.identity, proc_root=self.proc_root)
+            terminate_group(identity, proc_root=self.proc_root)
         self._clear_pidfile(name)
         state.state = STATE_STOPPED
         state.pid = None
         state.starttime = None
+        return self._await_gone(proc, identity, grace_s=grace_s)
+
+    def _await_gone(
+        self,
+        proc: subprocess.Popen[bytes] | None,
+        identity: ProcIdentity | None,
+        *,
+        grace_s: float,
+    ) -> bool:
+        """Block until a component is dead, escalating to a group KILL, and reap it.
+
+        A child of this supervisor can only really be reaped through its Popen,
+        so the wait is a poll rather than a ``/proc`` glance: an unreaped child
+        sits in ``/proc`` as a zombie that looks exactly like a live process.
+        """
+        deadline = self.clock.monotonic() + max(0.0, grace_s)
+        while True:
+            if proc is not None and proc.poll() is not None:
+                return True
+            if identity is None or not pid_alive(identity.pid, proc_root=self.proc_root):
+                break
+            if self.clock.monotonic() >= deadline:
+                break
+            time.sleep(0.02)
+        escalate_kill_group(identity, proc_root=self.proc_root)
+        if proc is None:
+            return not pid_alive(identity.pid, proc_root=self.proc_root) if identity else True
+        try:
+            proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired, OSError:
+            return False
         return True
 
     def shutdown(self) -> None:
-        """Stop every child, in reverse start order, then persist state.
+        """Stop every component, in reverse start order, then persist state.
 
-        Children are TERMed as groups, never as bare pids, so a component that
+        Children are signalled as groups, never as bare pids, so a component that
         spawned its own workers takes them with it instead of leaving them
-        running against a serve that has gone away.
+        running against a serve that has gone away. A component this supervisor
+        *adopted* is stopped too: re-attaching to a process and then abandoning
+        it is how a component outlives every serve that ever watched it. The
+        grace is spent once and the KILL goes to whatever survived it, so
+        nothing depends on a child's cooperation to be stopped.
         """
         self._stopping = True
         grace = max(0.1, self.config.shutdown_grace_s)
-        for name in reversed(list(self._procs)):
-            self.stop_component(name)
-        for proc in self._procs.values():
-            with suppress(subprocess.TimeoutExpired, OSError):
-                proc.wait(timeout=grace)
+        names = [*self._procs, *self._adopted]
+        identities: dict[str, ProcIdentity | None] = {}
+        for name in reversed(names):
+            state = self.children.get(name)
+            identities[name] = self._adopted.get(name) or (state.identity if state else None)
+            self.stop_component(name, grace_s=RESTART_KILL_GRACE_S)
+        for name in reversed(names):
+            self._await_gone(self._procs.get(name), identities[name], grace_s=grace)
+            state = self.children.get(name)
+            if state is not None:
+                # Shutdown ends the accounting. Nothing is going to be restarted,
+                # so a component stopped here is not waiting on a cause to be
+                # judged, and the next supervisor must not inherit that.
+                state.pending_cause = CAUSE_EXIT
         for handle in self._handles.values():
             with suppress(OSError):
                 handle.close()
@@ -671,6 +831,7 @@ __all__ = [
     "CAUSE_CRASH",
     "CAUSE_EXIT",
     "CAUSE_REQUESTED",
+    "RESTART_KILL_GRACE_S",
     "STATE_BACKOFF",
     "STATE_CRASH_LOOPING",
     "STATE_RUNNING",

@@ -15,6 +15,11 @@ the watchdog has something to reason about. Two mechanisms, one logical lock:
     <serve>/locks/<name>.lock    the flock
     <serve>/locks/<name>.json    {"holder", "pid", "starttime", "acquired_epoch",
                                   "state", "waiting_for", "wanting"}
+    <serve>/locks/<name>.waiting.json
+                                  the same shape, for a component *waiting* for
+                                  that lock: its own file, because a wait is not
+                                  a hold and sharing one file meant a contender
+                                  overwrote the holder's record
 
 This is what makes watchdog rules (c) and (d) implementable at all:
 
@@ -35,7 +40,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -57,6 +62,18 @@ def record_path(directory: Path, name: str) -> Path:
 
 def flock_path(directory: Path, name: str) -> Path:
     return directory / f"{name}.lock"
+
+
+def intent_record_name(name: str) -> str:
+    """The record name carrying a waiter's intent for *name*.
+
+    A wait is a different fact from a hold, so it gets its own record. When
+    both shared ``<name>.json`` the instant a second component contended for a
+    lock it overwrote the holder's ``held`` record, which destroyed two things
+    at once: the stale-holder rule could no longer see the dead holder, and the
+    deadlock walk had nowhere to read a ``waiting_for`` edge from.
+    """
+    return f"{name}.waiting"
 
 
 @dataclass
@@ -133,6 +150,9 @@ class LockRegistry:
     def path_for(self, name: str) -> Path:
         return record_path(self.directory, name)
 
+    def intent_path_for(self, name: str) -> Path:
+        return record_path(self.directory, intent_record_name(name))
+
     def flock_for(self, name: str) -> Path:
         return flock_path(self.directory, name)
 
@@ -144,8 +164,17 @@ class LockRegistry:
         tmp.replace(path)
 
     def read(self, name: str) -> LockRecord | None:
+        """The record for *name*: the holder's, or the waiter's when unheld.
+
+        A lock nobody holds has no holder record, but it may have a component
+        queued behind it, and that is the fact worth reporting about it.
+        """
+        record = self._read_path(self.path_for(name))
+        return record if record is not None else self._read_path(self.intent_path_for(name))
+
+    def _read_path(self, path: Path) -> LockRecord | None:
         try:
-            raw = json.loads(self.path_for(name).read_text(encoding="utf-8"))
+            raw = json.loads(path.read_text(encoding="utf-8"))
         except OSError, json.JSONDecodeError:
             return None
         return LockRecord.from_dict(raw) if isinstance(raw, dict) else None
@@ -175,7 +204,7 @@ class LockRegistry:
         holder: str,
         pid: int | None,
         starttime: int | None,
-        waiting_for: str | None,
+        waiting_for: str | None = None,
         wanting: str = "",
         now: float | None = None,
     ) -> LockRecord:
@@ -184,19 +213,33 @@ class LockRegistry:
         Written **before** attempting the flock, which is the whole point: if
         the attempt blocks, the graph edge exists for the deadlock detector to
         find. Writing it after would only ever record successes.
+
+        *waiting_for* defaults to *name* — the lock this waiter is stuck behind.
+        ``hold()`` passes nothing because "I am waiting for this lock" is the
+        only edge a contention can produce, and the detector needs it spelled out
+        rather than inferred from the record's own name.
         """
         record = LockRecord(
-            name=name,
+            name=intent_record_name(name),
             state=STATE_WAITING,
             holder=holder,
             pid=pid,
             starttime=starttime,
             acquired_epoch=now if now is not None else time.time(),
-            waiting_for=waiting_for,
+            waiting_for=name if waiting_for is None else waiting_for,
             wanting=wanting,
         )
         self.write(record)
         return record
+
+    def clear_waiting(self, name: str) -> None:
+        """Drop the intent record for *name*, if one is lying around.
+
+        A waiter that is no longer waiting must not stay in the graph: a stale
+        edge turns a component that has moved on into a permanent deadlock.
+        """
+        with suppress(OSError):
+            self.intent_path_for(name).unlink(missing_ok=True)
 
     def mark_held(
         self,
@@ -284,12 +327,12 @@ class LockRegistry:
                     holder=holder,
                     pid=pid,
                     starttime=starttime,
-                    waiting_for=None,
                     wanting=wanting,
                     now=now,
                 )
                 yield False
                 return
+            self.clear_waiting(name)
             self.mark_held(
                 name, holder=holder, pid=pid, starttime=starttime, wanting=wanting, now=now
             )
@@ -324,6 +367,11 @@ class LockRegistry:
         A cycle is ``A waits for L, L held by B, B waits for M, M held by A``.
         Returned oldest-edge-first so the remediation releases the *older* claim,
         which is the one whose owner is least likely to be making progress.
+
+        The walk reads the whole registry, so it sees both kinds of record: a
+        waiter's intent (state ``waiting``) and the holder's claim on the lock
+        that waiter is blocked behind. Both have to be there for an edge to
+        resolve, which is why the intent is written to its own file.
         """
         records = self.all_records()
         threshold_s = max(0.0, threshold_minutes) * 60.0
@@ -377,5 +425,6 @@ __all__ = [
     "LockRecord",
     "LockRegistry",
     "flock_path",
+    "intent_record_name",
     "record_path",
 ]
