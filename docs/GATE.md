@@ -18,6 +18,16 @@ Exit code is `0` only on `APPROVED`. `NEEDS_ESCALATION`, an unusable PR, and a
 deterministic step that could not run all exit `1`, so a wrapper can gate on the
 exit code alone as well as on the status line.
 
+Once a PR has been approved and then rebased onto a moved `main`, the change is
+often identical to what was approved. `gate recheck` re-establishes that cheaply
+instead of paying for a full review again — see [carrying an approval across a
+patch-identical rebase](#carrying-an-approval-across-a-patch-identical-rebase):
+
+```bash
+agent-fleet gate recheck --repo-path /path/to/repo --pr 42 \
+  --approved-sha <approved-head> --status-file /path/to/lane.status
+```
+
 ---
 
 ## Why find → verify → one-fix beats iterative review
@@ -66,24 +76,72 @@ A round counts as progress only when the failing set **strictly shrinks** *and*
 | Condition | Outcome |
 |---|---|
 | 0 failing | `APPROVED` |
-| 0 failing, untestable blockers still open | `NEEDS_ESCALATION` (untestable-needs-review) — see below |
 | Set strictly shrank, nothing new broke | next round |
 | Nothing fixed, or the set did not shrink, or something new broke | `NEEDS_ESCALATION` (stalled) |
 | Fixer pushed nothing | `NEEDS_ESCALATION` (no-push) |
 | Tests could not run at the new head | `NEEDS_ESCALATION` (tests-broken) |
-| Untestable blockers still unresolved after a real fix round | `NEEDS_ESCALATION` (untestable-unresolved) |
+| 0 failing, untestable blockers open | one untestable fix round, then the recheck judge — see below |
+| Untestable blockers still unresolved after that round | `NEEDS_ESCALATION` (untestable-needs-review) |
 
 `max_fix_rounds` (default 4) is **only a safety net** for a run that keeps making
 one-test-at-a-time progress without converging. It is not the stopping rule, and
 hitting it is reported as `cap` — a distinct outcome from a genuine stall, so the
 metrics show which happened.
 
-**A green suite with only untestable blockers never spends a fix round.** A fixer
-cannot demonstrate progress on a passing test set, so dispatching one and then
-reporting `cap` said "we tried and ran out of rounds" about a PR that was never
-attempted. The gate escalates at once with the reason
-`untestable blocker(s) need human review: ...`, naming the blockers — no local
-test can settle them, so the next step is a human.
+---
+
+## Untestable blockers get a fix round
+
+Some confirmed blockers cannot be shown by a test: a documentation file that
+contradicts the shipped behaviour, a script whose arguments do not do what its
+`--help` says. The judge can rule them real, and the gate counts them as
+blockers — but the convergence rule above is defined on a *shrinking failing
+set*, and a green test set gives it nothing to measure.
+
+That used to mean the gate escalated on first sight. The defect was real and
+confirmed, and nobody had been asked to fix it. The gate said "untestable
+blocker(s) need human review" about work that a fixer could have done in one
+commit.
+
+It now works like the reference bash gate's `fix_untestable.sh`:
+
+1. A green test set with open untestable blockers runs **exactly one** fix round,
+   with the untestable list in the fixer's prompt.
+2. The **recheck judge** — not the fixer — decides whether they are resolved.
+3. Resolved → `APPROVED`. Still open, or the fixer pushed nothing →
+   `NEEDS_ESCALATION` (`untestable-needs-review`) naming the blockers.
+
+**One round, not a loop.** With no test to turn green there is no measurable
+progress, only the judge's yes/no, so raising `max_fix_rounds` does not buy more
+attempts at it. A fixer never approves its own work: only a recheck that reports
+nothing unresolved does. A recheck that could not answer is not a pass.
+
+`enable_fix: false` keeps its meaning — no fixer is dispatched at all, and the
+gate escalates immediately as before.
+
+---
+
+## Gate test files are unique per PR
+
+A verifier writes its failing test **into the PR's repository**, so the file
+name has to be unique per PR. It is:
+
+```
+test_gate_<lane_slug>_<finding_id>.py      # e.g. test_gate_fb_gaterobust_contract_1.py
+```
+
+The slug comes from `--lane-slug`, else `gate.lane_slug`, else the PR's own head
+ref. Both halves are folded to alphanumerics and underscores and bounded, so a
+branch like `fb/a.b/c` produces `fb_a_b_c` rather than a path.
+
+This is not cosmetic. With a fixed name, two PRs gating different branches both
+produced `tests/test_gate_contract_1.py`; merging one into main turned the other
+into an **add/add conflict**, which is what forced a rebase and a full re-gate
+for every PR that landed after it. Because the slug is in the name, the
+conflict cannot arise, and [carrying an approval across a
+rebase](#carrying-an-approval-across-a-patch-identical-rebase) can exclude these
+files from its patch comparison for the same reason.
+
 
 ---
 
@@ -192,6 +250,119 @@ it, so a `GATE-SKIPPED` line can never be read as a gate that cleared a PR.
 
 ---
 
+## No blocking commands, and per-stage timeouts
+
+Every gate prompt — lens, verifier, judge, recheck, and fixer — opens with the
+same two-part preamble:
+
+- **No blocking commands.** Never run a command that waits forever: `tail -f`,
+  `journalctl -f`, `watch`, an interactive editor or pager, a sleep loop with no
+  exit condition, or a server in the foreground. To watch something, poll with a
+  bounded loop that has a timeout and an exit condition.
+- **Process safety.** Never kill processes by name or pattern; record the PID of
+  anything you start and kill only that.
+
+The first exists because a command that never returns is not a slow stage, it is
+a **dead** one: the slot is held, the answer never arrives, and the stage burns
+its whole budget before the run escalates. The gate already failed closed in
+that situation, so the run was safe — just wasted. Both rules live in one shared
+prefix (`AGENT_RULES`) rather than being restated per role, so a role added later
+inherits them by construction.
+
+### Per-stage budgets
+
+Each agent stage gets its own budget. One shared number was wrong in both
+directions: a fixer that commits, pushes and waits on a test suite never fits in
+a reviewer's budget, and a review that is going to produce nothing is still
+allowed half an hour before anyone notices.
+
+| Stage | Default | Why |
+|---|---|---|
+| `lens` | 40 min | read the diff, form claims |
+| `verify` | 40 min | write and run one failing test |
+| `judge` | 40 min | rule on untestable claims + one blocker pass |
+| `fix` | 90 min | edit, run tests, commit, push |
+
+Set them with `gate.lens_timeout_s` / `verify` / `judge` / `fix`. The older
+`gate.agent_timeout_s` is **deprecated but still honoured**: it is applied to the
+three stages it used to drive, with a warning naming the replacement, and an
+explicit per-stage key always wins — so an existing `fleet.yaml` loses nothing
+and the deprecation can be resolved one stage at a time.
+
+### A stage timeout is a dead agent
+
+An agent that ran out of time produced **no evidence either way**, so a timeout
+fails closed exactly like a crash. That was already true; what was missing was
+naming it. Exit 124 is now classified as its own failure kind, and the
+escalation says which stage, the budget it blew, and how long it actually ran:
+
+```
+fail-closed: lens stage for correctness timed out after 2412s
+(stage budget 2400s); no verdict was produced
+```
+
+That matters because a timed-out lens reporting `candidates=0` is
+indistinguishable from a clean review — the exact bug class that once approved a
+PR carrying three real blockers. The fixer is covered too: it has no JSON schema,
+so its timeout is visible only from the backend's exit code, and without this it
+was merely logged before the round carried on to report the misleading
+`no-push`.
+
+Raise the stage's budget if the escalation is one you want retried; the reason
+tells you which one.
+
+---
+
+## Carrying an approval across a patch-identical rebase
+
+When a PR must be rebased onto a moved `main`, the change is often **identical** —
+same diff, new parent commit. Paying for a full find → verify → judge run to
+rediscover that is waste, and it is the common case, because the thing that most
+often forces a rebase is `main` moving.
+
+```bash
+agent-fleet gate recheck --pr 42 --approved-sha <old> --head <new> \
+  --status-file /path/to/lane.status
+```
+
+`recheck` is deterministic and dispatches **no agent**: it re-runs the PR's own
+changed tests plus the archived gate tests on the new head with the current base
+merged in, and compares the change's identity.
+
+**Is it the same change?** `git patch-id` over
+`merge-base(base, sha)..sha`, excluding `test_gate_*` files. patch-id hashes the
+diff rather than the commit, so it survives re-parenting; the gate tests are
+excluded because they are evidence the gate writes into the PR's repo, and a
+collision on one is what routinely forced the rebase in the first place (see
+[above](#gate-test-files-are-unique-per-pr)).
+
+All four of these are required:
+
+| Condition | Otherwise |
+|---|---|
+| `--approved-sha` names a real commit | `full gate required: … is not a known commit` |
+| the status file has a `PREMERGE-APPROVED` line for it | `full gate required: no PREMERGE-APPROVED line for …` |
+| the patch-id is unchanged | `full gate required: change differs from the approved patch` |
+| every test passes on the rebased head | `full gate required: N test(s) fail …` |
+
+A pytest **infra error** — a suite that could not run at all — is never a
+carry-over. Neither is a missing git call or an uncreatable worktree: a recheck
+that cannot establish its verdict must not produce one.
+
+On success the status line names the **new** head, since that is the commit the
+automerge takes:
+
+```
+10:00:00 PREMERGE-APPROVED 4f2a1b9c3
+```
+
+with the reason `approval carried over from 9e1c…: patch-identical
+(patch-id 3ab81f0c…, gate tests excluded) and all 12 test(s) green on the rebased
+head`. The metrics row is marked as a recheck rather than a gate run, so a
+carried approval is not mistaken for a reviewed one.
+
+---
+
 ## Machine-wide admission
 
 The gate never works in the caller's checkout. Every step runs in a detached
@@ -271,8 +442,12 @@ Machine-wide (`~/.agent-fleet/fleet.yaml`):
 | `gate.enable_judge` | `true` | run the judge call |
 | `gate.base_branch` | `main` | base for the diff reviewers read |
 | `gate.push_branch` | PR head | branch the fixer pushes to |
-| `gate.agent_timeout_s` | `1800` | per-agent timeout |
-| `gate.judge_timeout_s` | `7200` | judge timeout |
+| `gate.lane_slug` | PR head ref | slug in gate test file names (per-PR uniqueness) |
+| `gate.lens_timeout_s` | `2400` | lens stage budget |
+| `gate.verify_timeout_s` | `2400` | verifier stage budget |
+| `gate.judge_timeout_s` | `2400` | judge / recheck stage budget |
+| `gate.fix_timeout_s` | `5400` | fix stage budget |
+| `gate.agent_timeout_s` | — | **deprecated**; still applied to lens/verify/fix |
 | `gate.test_timeout_s` | `900` | per-pytest timeout |
 | `gate.test_memory` | `6G` | `MemoryMax` for every pytest |
 | `gate.agent_slots` | `24` | machine-wide agent slot count |
