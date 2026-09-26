@@ -27,6 +27,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: Exit code reported when the stage budget ran out before the agent finished.
+#: The shell's ``timeout`` convention, and what ``agent_fleet.gate.structured``
+#: classifies as a timeout rather than a crash. A real budget overrun has to be
+#: distinguishable from a dead agent or the operator is told the wrong thing:
+#: "it broke" invites a retry of the same work, "it ran out of time" points at
+#: the stage budget.
+TIMEOUT_EXIT = 124
+
 DEFAULT_MODEL = "meituan/longcat-2.0:free"
 #: Turn budget for one ``cmd -p`` run. A gate lens that diffs a multi-file PR,
 #: greps call sites and reads surrounding code needs well over a hundred turns;
@@ -164,6 +172,15 @@ def _parse_cmd_stream(stdout: str, stderr: str) -> tuple[str, str | None, dict[s
                 assistant_text.append(text)
     final = reported.strip() or "\n".join(assistant_text).strip() or (stdout or "").strip()
     return final, session_id, usage
+
+
+def _as_text(value: str | bytes | None) -> str:
+    """``subprocess.TimeoutExpired`` captures output as bytes even under ``text=True``."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return value
 
 
 def call_cmd(
@@ -315,6 +332,14 @@ class CmdSession:
                 agent_id=self.agent_id,
                 usage=usage,
             )
+        except subprocess.TimeoutExpired as exc:
+            return CmdLLMResult(
+                stdout=_as_text(exc.stdout),
+                stderr=f"cmd timed out after {timeout_s if timeout_s > 0 else 1800}s",
+                exit_code=TIMEOUT_EXIT,
+                duration_s=time.monotonic() - t0,
+                agent_id=self.agent_id,
+            )
         except Exception as exc:
             return CmdLLMResult(
                 stdout="",
@@ -441,6 +466,17 @@ class CmdBackend:
                 duration_s=time.monotonic() - t0,
                 agent_id=session_id,
                 usage=usage,
+            )
+        except subprocess.TimeoutExpired as exc:
+            # The stage budget ran out with the agent still working. That is
+            # not a crash: report the timeout code so the gate can escalate on
+            # the stage's budget instead of reporting a dead agent, which sends
+            # the operator to look for a bug that was never there.
+            return CmdLLMResult(
+                stdout=_as_text(exc.stdout),
+                stderr=f"cmd timed out after {timeout_s if timeout_s > 0 else 1800}s",
+                exit_code=TIMEOUT_EXIT,
+                duration_s=time.monotonic() - t0,
             )
         except Exception as exc:
             return CmdLLMResult(

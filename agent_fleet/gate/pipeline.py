@@ -44,7 +44,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from agent_fleet.backends import make_backend
 from agent_fleet.contracts.gate import (
@@ -60,6 +60,7 @@ from agent_fleet.contracts.gate import (
     validate_recheck,
     validate_verify,
 )
+from agent_fleet.fleet_ops.gate import APPROVAL_MARKER
 from agent_fleet.gate import metrics as gate_metrics
 from agent_fleet.gate.config import GateConfig, load_gate_config
 from agent_fleet.gate.gitops import (
@@ -68,6 +69,9 @@ from agent_fleet.gate.gitops import (
     changed_test_files,
     current_pr_head,
     fetch_base,
+    has_approval_line,
+    merge_base_into,
+    patch_id,
     prepare_worktree,
     remove_worktree,
     resolve_diff_base,
@@ -77,6 +81,7 @@ from agent_fleet.gate.gitops import (
 from agent_fleet.gate.prompts import (
     find_prompt,
     fix_prompt,
+    gate_test_name,
     judge_prompt,
     recheck_prompt,
     verify_prompt,
@@ -91,7 +96,7 @@ from agent_fleet.gate.pytest_runner import (
     to_package_path,
     to_repo_node_id,
 )
-from agent_fleet.gate.structured import StructuredCallError, call_structured
+from agent_fleet.gate.structured import TIMEOUT_EXIT, StructuredCallError, call_structured
 from agent_fleet.model_policy import ModelPolicy, ModelPolicyError, parse_model_policy
 from agent_fleet.slots import (
     PoolConfig,
@@ -270,6 +275,12 @@ def status_line_for(outcome: GateOutcome, sha: str, reasons: list[str]) -> str:
     if outcome is GateOutcome.APPROVED:
         return f"{stamp} PREMERGE-APPROVED {sha[:9]}"
     reason = reasons[0] if reasons else "unspecified"
+    # The marker is replaced rather than merely rejected: a NEEDS-ESCALATION
+    # line must never contain it, since the automerge's contract is that a line
+    # is an approval when the marker stands alone ahead of a sha, and a reason
+    # that quotes the marker verbatim would put a line in front of a reader who
+    # cannot tell an approval from a complaint about one.
+    reason = reason.replace(APPROVAL_MARKER, "the premerge-approved marker")
     return f"{stamp} NEEDS-ESCALATION {reason}"
 
 
@@ -406,6 +417,17 @@ class GateTestArchive:
         self.dir = root / "tests"
         self.dir.mkdir(parents=True, exist_ok=True)
 
+    def stored_tests(self) -> list[Path]:
+        """Every gate-written test the archive still holds, in name order.
+
+        The archive is the only place a verifier's test survives a fixer push,
+        so a later run that wants the gate's own evidence has to be able to ask
+        what is in here. A fresh pipeline's ``evidence.gate_tests`` is always
+        empty — it only records what *this* run produced — so a recheck driven
+        by a new process could never see the archived tests.
+        """
+        return sorted(p for p in self.dir.glob("test_gate_*.py") if p.is_file())
+
     def store(self, source: Path) -> Path | None:
         if not source.is_file():
             return None
@@ -479,6 +501,7 @@ class GatePipeline:
         agent_pool: SlotPool | None = None,
         test_pool: SlotPool | None = None,
         use_systemd: bool | None = None,
+        lane_slug: str | None = None,
     ) -> None:
         self.repo = repo.resolve()
         self.pr_number = pr_number
@@ -493,6 +516,9 @@ class GatePipeline:
         self.agent_pool = agent_pool
         self.test_pool = test_pool
         self.use_systemd = systemd_run_available() if use_systemd is None else use_systemd
+        # An explicit slug wins; otherwise the config's; otherwise the PR's own
+        # head ref, which is what makes the name unique per PR.
+        self.lane_slug = lane_slug or config.lane_slug
         self.evidence = _Evidence()
         self.archive = GateTestArchive(gate_dir)
         self.recorder = GateCallRecorder(gate_dir)
@@ -600,6 +626,16 @@ class GatePipeline:
             self._log(f"gate.{role}.failed", subject=subject, kind=exc.kind, error=str(exc)[:200])
             if exc.kind == "invalid" and invalid_ok:
                 return None
+            if exc.kind == "timeout":
+                # Out of budget is a dead agent, not an answer. Naming the stage
+                # and how long it actually ran is the difference between an
+                # escalation an operator can act on and one they have to guess at.
+                budget = int(kwargs.get("timeout_s") or 0)
+                raise GateInfraError(
+                    f"fail-closed: {role} stage for {subject} timed out after "
+                    f"{getattr(exc, 'duration_s', 0.0):.0f}s "
+                    f"(stage budget {budget}s); no verdict was produced"
+                ) from exc
             raise GateInfraError(
                 f"fail-closed: {role} agent for {subject} gave no usable result "
                 f"({exc.kind}): {str(exc)[:160]}"
@@ -680,7 +716,7 @@ class GatePipeline:
                 prompt=prompt,
                 model=model,
                 cwd=worktree,
-                timeout_s=self.config.agent_timeout_s,
+                timeout_s=self.config.stage_timeout(ROLE_LENS),
                 validate=validate_findings,
                 list_key="findings",
             )
@@ -726,6 +762,7 @@ class GatePipeline:
         model: str,
         source: str,
     ) -> None:
+        test_name = gate_test_name(self.lane_slug, finding.id)
         prompt = verify_prompt(
             finding=finding,
             worktree=str(worktree),
@@ -733,7 +770,8 @@ class GatePipeline:
             head_sha=(self._head_sha(worktree) or "")[:9],
             pr_number=self.pr_number,
             test_dir_hint=runner.test_dir_hint(finding.file or "x"),
-            pytest_cmd_hint=runner.pytest_hint("tests/test_gate_x.py"),
+            pytest_cmd_hint=runner.pytest_hint(test_name),
+            test_file_name=test_name,
         )
         answer = self._call_required(
             role="verify",
@@ -744,7 +782,7 @@ class GatePipeline:
             prompt=prompt,
             model=model,
             cwd=worktree,
-            timeout_s=self.config.agent_timeout_s,
+            timeout_s=self.config.stage_timeout(ROLE_VERIFIER),
             validate=validate_verify,
         )
         if answer is None:
@@ -814,7 +852,7 @@ class GatePipeline:
             prompt=prompt,
             model=model,
             cwd=worktree,
-            timeout_s=self.config.judge_timeout_s,
+            timeout_s=self.config.stage_timeout(ROLE_JUDGE),
             validate=validate_judge,
         )
         report = JudgeReport.from_dict(answer.data)
@@ -841,10 +879,15 @@ class GatePipeline:
     def recheck_untestable(self, worktree: Path, start_sha: str, head_sha: str) -> bool:
         """One judge recheck: are the untestable blockers resolved at the new head?
 
-        Returns True when nothing is left unresolved.
+        Returns True only when a judge actually ruled that nothing is left
+        unresolved. A missing judge returns False, not True: this function is
+        the only thing that can clear an untestable blocker, and "nobody was
+        available to look" is not "the blocker is gone". Returning True there
+        let a repo running with the judge disabled approve a defect the gate
+        itself had ruled real, on a green suite that never demonstrated it.
         """
         if not self.config.enable_judge or self.judge_backend is None:
-            return True
+            return False
         untestable = [c for c in self.evidence.confirmed if c.get("source") == "judge-untestable"]
         if not untestable:
             return True
@@ -864,7 +907,7 @@ class GatePipeline:
                 prompt=prompt,
                 model=model,
                 cwd=worktree,
-                timeout_s=self.config.judge_timeout_s,
+                timeout_s=self.config.stage_timeout(ROLE_JUDGE),
                 validate=validate_recheck,
             )
         except StructuredCallError as exc:
@@ -930,26 +973,24 @@ class GatePipeline:
         ]
         if run.count == 0 and not untestable_open:
             return current, self._metrics(metric, ref, outcome=gate_metrics.OUTCOME_CONVERGED)
-        if run.count == 0 and untestable_open:
-            # Nothing fails and the only blockers are untestable ones no local
-            # test can demonstrate. A fixer cannot make progress on a green
-            # test set, so spending a round here just produced the misleading
-            # "cap after 1 round(s)" verdict: escalate and name what a human
-            # has to look at.
-            return current, self._metrics(
-                metric,
-                ref,
-                outcome=gate_metrics.OUTCOME_UNTESTABLE_NEEDS_REVIEW,
-                rounds=rounds,
-            )
 
+        # Nothing fails and the only blockers are untestable ones no local test
+        # can demonstrate. The convergence rule below is defined on a shrinking
+        # failing set, so there is no set to shrink here — but "no failing test"
+        # is not "no work": the judge ruled these real, and a docs
+        # contradiction or a script's behaviour is fixed by editing the thing.
+        # So dispatch exactly one fix round carrying the untestable list, then
+        # let the recheck judge decide. One round, not a loop: with no test to go
+        # green there is no measurable progress, only the judge's yes/no.
+        untestable_only = run.count == 0 and bool(untestable_open)
         push_branch = self.config.push_branch or ref.head_ref
         model = self._model_for(
             backend_name=self.config.backend, model=self.config.model, role=ROLE_FIX
         )
         outcome = gate_metrics.OUTCOME_CAP
+        round_limit = 1 if untestable_only else max(1, self.config.max_fix_rounds)
 
-        for round_number in range(1, max(1, self.config.max_fix_rounds) + 1):
+        for round_number in range(1, round_limit + 1):
             fix_wt = self.gate_dir / f"fix{round_number}"
             prepare_worktree(self.repo, fix_wt, current)
             try:
@@ -964,7 +1005,9 @@ class GatePipeline:
                     confirmed=_json_blob(self.evidence.confirmed, 8000),
                     untestable=_json_blob(untestable_open, 4000),
                     all_tests=" ".join(all_tests),
-                    pytest_cmd_hint=self._runner_for(fix_wt).pytest_hint("tests/test_gate_x.py"),
+                    pytest_cmd_hint=self._runner_for(fix_wt).pytest_hint(
+                        gate_test_name(self.lane_slug, "x")
+                    ),
                     task_text=self._task_text()[:6000],
                 )
                 self._run_fixer(prompt, model=model, cwd=fix_wt)
@@ -974,7 +1017,11 @@ class GatePipeline:
             fetch_base(self.repo, self.config.base_branch)
             new_head = current_pr_head(self.repo, self.pr_number)
             if new_head == current:
-                outcome = gate_metrics.OUTCOME_NO_PUSH
+                outcome = (
+                    gate_metrics.OUTCOME_UNTESTABLE_NEEDS_REVIEW
+                    if untestable_only
+                    else gate_metrics.OUTCOME_NO_PUSH
+                )
                 self._log("gate.round", round=round_number, head=new_head[:9], outcome=outcome)
                 break
 
@@ -1024,6 +1071,22 @@ class GatePipeline:
                 new_failures=new_failures,
             )
             current = new_head
+            if untestable_only and run.count == 0:
+                # No test existed to go green, so the failing-set numbers above
+                # say nothing about this defect. The recheck judge below rules
+                # on it; until then it is still open.
+                outcome = gate_metrics.OUTCOME_UNTESTABLE_UNRESOLVED
+                break
+            if untestable_only:
+                # The round set out to fix something no test can demonstrate, and
+                # it broke a test on the way past. The recheck judge is only
+                # ever shown the untestable claim, so it cannot see this, and
+                # reading the round as merely "unresolved" would let the judge
+                # rule the untestable blocker fixed and the run converge — an
+                # approval over a head with a red test. The deterministic half
+                # is authoritative at whatever head it ran on, and it is red.
+                outcome = gate_metrics.OUTCOME_STALLED
+                break
             if run.count == 0:
                 # Every test is green. The deterministic half has converged; if
                 # untestable blockers remain, the judge recheck below decides
@@ -1048,17 +1111,31 @@ class GatePipeline:
                 gate_metrics.OUTCOME_CONVERGED,
                 gate_metrics.OUTCOME_UNTESTABLE_UNRESOLVED,
             }
-            if needs_recheck and not self.recheck_untestable(head_wt, start_sha, current):
-                outcome = gate_metrics.OUTCOME_UNTESTABLE_UNRESOLVED
-            elif needs_recheck:
+            if needs_recheck and self.recheck_untestable(head_wt, start_sha, current):
                 outcome = gate_metrics.OUTCOME_CONVERGED
+            elif needs_recheck:
+                outcome = (
+                    # The untestable round was the only shot at a blocker no
+                    # test can demonstrate. It is still open, and repeating it
+                    # would spend fixer budget on a decision only a judge can
+                    # make: name what a human has to look at.
+                    gate_metrics.OUTCOME_UNTESTABLE_NEEDS_REVIEW
+                    if untestable_only
+                    else gate_metrics.OUTCOME_UNTESTABLE_UNRESOLVED
+                )
         finally:
             remove_worktree(self.repo, head_wt)
 
         return current, self._metrics(metric, ref, outcome=outcome, rounds=rounds, head=current)
 
     def _run_fixer(self, prompt: str, *, model: str, cwd: Path) -> None:
-        """One fix round. Free-form output (it commits and pushes), so no schema."""
+        """One fix round. Free-form output (it commits and pushes), so no schema.
+
+        A fixer that runs out of budget is a dead stage, not a failed attempt:
+        without this it was logged and the round carried on to find "no push",
+        which reports the wrong cause and invites a retry of the same budget.
+        """
+        budget = self.config.stage_timeout(ROLE_FIX)
         guard = (
             self.agent_pool.slot(timeout_s=None)
             if self.agent_pool is not None
@@ -1068,22 +1145,158 @@ class GatePipeline:
             result = self.backend.run(
                 prompt,
                 max_tokens=0,
-                timeout_s=self.config.agent_timeout_s,
+                timeout_s=budget,
                 cwd=cwd,
                 model=model,
                 mode="agent",
             )
+        timed_out = result.exit_code == TIMEOUT_EXIT
         self.recorder.record(
             stage="fix",
             model=model,
             raw=result.stdout or "",
             parsed=None,
-            parse_error="" if result.exit_code == 0 else (result.stderr or "")[:400],
+            parse_error=(
+                f"fix stage timed out after {budget}s"
+                if timed_out
+                else ("" if result.exit_code == 0 else (result.stderr or "")[:400])
+            ),
             exit_code=result.exit_code,
             duration_s=getattr(result, "duration_s", 0.0),
         )
+        if timed_out:
+            self._log("gate.fix.timeout", budget_s=budget)
+            raise GateInfraError(
+                f"fail-closed: fix stage timed out after "
+                f"{getattr(result, 'duration_s', 0.0):.0f}s (stage budget {budget}s); "
+                f"no verdict was produced"
+            )
         if result.exit_code != 0:
             self._log("gate.fix.failed", error=(result.stderr or "")[:200])
+
+    # -- approval carry-over ----------------------------------------------
+
+    def recheck_carry_over(
+        self,
+        *,
+        approved_sha: str,
+        head_sha: str,
+        status_file: Path,
+        test_run: TestRun,
+        test_files: list[str],
+    ) -> GateResult:
+        """Decide whether an approval survives a rebase onto a new head.
+
+        Four conditions, all required, because an approval carried onto the
+        wrong code is worse than no approval at all:
+
+        1. there is an ``approved_sha`` and it is a real commit,
+        2. the status file records a ``PREMERGE-APPROVED`` line for it,
+        3. the change's patch-id is unchanged (the gate's own test directory
+           excluded — those files are gate evidence, not the PR's change, and a
+           collision on one is what routinely forced the rebase),
+        4. every test is green on the new head, with a run that actually
+           happened: an infra error is "we could not check", never a pass, and
+           so is a run that never collected a single test.
+
+        Any of them missing and the answer is a full gate. The approved sha is
+        never the sha emitted: the status line names the *new* head, since that
+        is the commit the automerge will actually take.
+
+        Reasons never name the approval marker. A ``NEEDS-ESCALATION`` line
+        quoting it is a verdict whose text happens to contain a marker, and the
+        automerge must not — and cannot be allowed to — read it as an approval
+        for a head the gate just refused.
+        """
+        reasons: list[str] = []
+        approved = approved_sha.strip()
+        if not approved:
+            return self._carry_over_refusal(head_sha, "no approved sha given")
+        if not has_approval_line(status_file, approved):
+            return self._carry_over_refusal(
+                head_sha, f"no premerge-approved status line for {approved[:9]}"
+            )
+
+        base = resolve_diff_base(self.repo, self.config.base_branch)
+        old_patch = patch_id(self.repo, approved, base)
+        new_patch = patch_id(self.repo, head_sha, base)
+        if not new_patch:
+            return self._carry_over_refusal(
+                head_sha, f"head {head_sha[:9]} is not a known commit in this repo"
+            )
+        if not old_patch:
+            return self._carry_over_refusal(
+                head_sha, f"approved sha {approved[:9]} is not a known commit in this repo"
+            )
+        if old_patch != new_patch:
+            return self._carry_over_refusal(head_sha, "change differs from the approved patch")
+
+        if test_run.infra_error:
+            return self._carry_over_refusal(
+                head_sha, f"tests could not run on the rebased head: {test_run.infra_error[:120]}"
+            )
+        if not test_run.ran:
+            # An empty test set gives a TestRun identical to a real green run
+            # on every field this function reads, so "we ran nothing" was being
+            # reported as "the tests passed" and a PREMERGE-APPROVED line was
+            # written for a head nothing ever exercised. Zero verification is
+            # not a pass.
+            return self._carry_over_refusal(
+                head_sha,
+                f"no test ran on the rebased head ({len(test_files)} test file(s) "
+                "in the set), so there is no green run to carry over",
+            )
+        if test_run.count:
+            reasons.append(
+                f"{test_run.count} test(s) fail on the rebased head: "
+                f"{', '.join(test_run.failing[:3])}"
+            )
+            return self._carry_over_refusal(head_sha, reasons[0])
+
+        reasons.append(
+            f"approval carried over from {approved[:9]}: patch-identical "
+            f"(patch-id {new_patch[:12]}, gate tests excluded) and all "
+            f"{len(test_files)} test(s) green on the rebased head"
+        )
+        return self._carry_over_approval(head_sha, reasons)
+
+    def _carry_over_refusal(self, head_sha: str, reason: str) -> GateResult:
+        """NEEDS_ESCALATION with the full gate named as what is required."""
+        message = f"full gate required: {reason}"
+        self._log("gate.recheck.refused", head=head_sha[:9], reason=reason)
+        return self._carry_over_result(GateOutcome.NEEDS_ESCALATION, "", [message])
+
+    def _carry_over_approval(self, head_sha: str, reasons: list[str]) -> GateResult:
+        self._log("gate.recheck.approved", head=head_sha[:9], reason=reasons[0][:160])
+        return self._carry_over_result(GateOutcome.APPROVED, head_sha, reasons)
+
+    def _carry_over_result(self, outcome: GateOutcome, sha: str, reasons: list[str]) -> GateResult:
+        line = status_line_for(outcome, sha, reasons)
+        if self.status_file is not None:
+            _write_status_line(self.status_file, line)
+        metric = gate_metrics.GateMetrics(
+            run_id=self.run_id,
+            repo=self.repo.name,
+            pr=self.pr_number,
+            start_sha=sha or self.run_id,
+            head_sha=sha,
+            outcome=(
+                gate_metrics.OUTCOME_CONVERGED if outcome is GateOutcome.APPROVED else "recheck"
+            ),
+            reasons=list(reasons),
+        )
+        # A carried approval is not a gate run. Marking it keeps the metrics
+        # table honest about how much review a given approval actually had.
+        metric.calls = [{"stage": "recheck", "lens": "carried-over", "exit_code": 0}]
+        metric.append_metrics()
+        return GateResult(
+            outcome=outcome,
+            sha=sha,
+            reasons=list(reasons),
+            metrics=metric,
+            status_line=line,
+            run_id=self.run_id,
+        )
 
     # -- metrics ---------------------------------------------------------
 
@@ -1414,12 +1627,16 @@ def run_gate(
     gate_dir: Path | None = None,
     run_id: str | None = None,
     use_systemd: bool | None = None,
+    lane_slug: str | None = None,
 ) -> GateResult:
     """Run the ``gate`` pipeline for *pr_number* in *repo_path*.
 
     Backends and the model policy are resolved *before* any agent runs, so a
     misconfigured or policy-violating model fails in a second rather than after
     a fan-out has already spent the budget.
+
+    *lane_slug* makes gate test file names unique per PR; when it is omitted the
+    PR's own head ref supplies it, which is unique for any two distinct PRs.
     """
     repo = Path(repo_path).expanduser().resolve()
     raw = _load_raw_config(config_path)
@@ -1430,6 +1647,11 @@ def run_gate(
     policy.check(backend=gate_cfg.backend, model=gate_cfg.model, role=ROLE_LENS)
     if gate_cfg.enable_judge:
         policy.check(backend=gate_cfg.judge_backend, model=gate_cfg.judge_model, role=ROLE_JUDGE)
+
+    resolved_slug = lane_slug or gate_cfg.lane_slug
+    if not resolved_slug:
+        fetch_base(repo, gate_cfg.base_branch)
+        resolved_slug = resolve_pull_request(repo, pr_number).head_ref
 
     backend = build_gate_backend(gate_cfg.backend)
     judge_backend = (
@@ -1460,8 +1682,110 @@ def run_gate(
         agent_pool=agent_slot_pool(pool_cfg),
         test_pool=test_slot_pool(pool_cfg),
         use_systemd=use_systemd,
+        lane_slug=resolved_slug,
     )
     return pipeline.run()
+
+
+def _test_dir_of(changed: list[str]) -> str:
+    """The directory the recheck's archived tests belong in: *test_dir*.
+
+    The directory the PR's own changed tests already live in, so a multi-package
+    repo restores the gate's test beside the tests it is meant to run with. A PR
+    that changed no test of its own — or keeps them at the repository root —
+    gets ``"tests"``, the directory the gate tells every verifier to write into.
+    """
+    dirs = {str(Path(rel).parent) for rel in changed}
+    only = dirs.pop() if len(dirs) == 1 else ""
+    return "tests" if only in ("", ".") else only
+
+
+def run_gate_recheck(
+    *,
+    repo_path: Path,
+    pr_number: int,
+    approved_sha: str,
+    head_sha: str | None = None,
+    status_file: Path | None = None,
+    config_path: str | None = None,
+    gate_dir: Path | None = None,
+    run_id: str | None = None,
+    use_systemd: bool | None = None,
+    lane_slug: str | None = None,
+) -> GateResult:
+    """Decide whether the gate's approval for *approved_sha* still holds at *head_sha*.
+
+    The deterministic half only: the PR's own changed tests plus whatever gate
+    tests the archive still holds, run on the new head with the current base
+    merged in. No agent is dispatched — that is the point, since a rebase that
+    did not change the change should not cost a review.
+
+    Any failure along the way (a git call, a worktree, a test that cannot run)
+    is a refusal, not an approval: ``recheck`` returning a verdict it could not
+    establish is how an unapproved PR reaches the merge path.
+    """
+    repo = Path(repo_path).expanduser().resolve()
+    raw = _load_raw_config(config_path)
+    gate_cfg = load_gate_config(raw) or GateConfig()
+    status = Path(status_file).expanduser() if status_file else None
+    resolved_gate_dir = gate_dir or (repo / ".agent-fleet" / "gate" / str(pr_number))
+    resolved_gate_dir.mkdir(parents=True, exist_ok=True)
+
+    pipeline = GatePipeline(
+        repo=repo,
+        pr_number=pr_number,
+        config=gate_cfg,
+        policy=parse_model_policy(raw),
+        backend=cast("LLMBackend", None),  # a recheck dispatches no agent
+        gate_dir=resolved_gate_dir,
+        status_file=status,
+        run_id=run_id or f"gate-recheck-{pr_number}",
+        test_pool=test_slot_pool(
+            PoolConfig(
+                root=default_slots_root(),
+                agent_slots=0,
+                test_slots=gate_cfg.test_slots,
+            )
+        ),
+        use_systemd=use_systemd,
+        lane_slug=lane_slug or gate_cfg.lane_slug,
+    )
+
+    reasons: list[str] = []
+    try:
+        fetch_base(repo, gate_cfg.base_branch)
+        head = head_sha.strip() if head_sha else current_pr_head(repo, pr_number)
+        worktree = resolved_gate_dir / "recheck-wt"
+        prepare_worktree(repo, worktree, head)
+        try:
+            # Merge the base so the tests see what the PR will actually merge
+            # into, not just the PR's own tree.
+            merge_base_into(worktree, resolve_diff_base(repo, gate_cfg.base_branch))
+            # The archive, not this run's evidence, is where the gate's own
+            # tests live: a recheck is a fresh process, so evidence.gate_tests
+            # is always empty and the one test that ever blocked the PR would
+            # never be re-run. The PR's changed tests name the test directory
+            # to restore them into, so the archived test lands where the rebase
+            # actually broke it.
+            archived = pipeline.archive.stored_tests()
+            changed = changed_test_files(worktree, gate_cfg.base_branch)
+            gate_tests = [f"{_test_dir_of(changed)}/{p.name}" for p in archived]
+            pipeline.archive.materialise(worktree, gate_tests)
+            test_files = sorted(set(changed) | set(gate_tests))
+            run = pipeline._runner_for(worktree).run(test_files)
+        finally:
+            remove_worktree(repo, worktree)
+    except (GateError, OSError) as exc:
+        reasons.append(f"full gate required: recheck could not run: {str(exc)[:160]}")
+        return pipeline._carry_over_result(GateOutcome.NEEDS_ESCALATION, "", reasons)
+
+    return pipeline.recheck_carry_over(
+        approved_sha=approved_sha,
+        head_sha=head,
+        status_file=status or (resolved_gate_dir / "absent.status"),
+        test_run=run,
+        test_files=test_files,
+    )
 
 
 def gate_metrics_summary(limit: int = 20) -> dict[str, Any]:
@@ -1486,5 +1810,6 @@ __all__ = [
     "build_gate_backend",
     "gate_metrics_summary",
     "run_gate",
+    "run_gate_recheck",
     "status_line_for",
 ]

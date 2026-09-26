@@ -15,7 +15,9 @@ To stop a lane we:
    that somehow recorded the caller's group must never be signalled.
 2. Re-read ``/proc/<pid>/stat`` and require the start-time fingerprint to still
    match. A mismatch means the pid was recycled by an unrelated process, and
-   signalling the (now different) pgid would hit the wrong tree.
+   signalling the (now different) pgid would hit the wrong tree. A record with
+   no fingerprint at all is refused on the same reasoning: there is nothing to
+   match it against, and the downside is another operator's shell.
 3. ``killpg(pgid, SIGTERM)``, wait a grace period, then ``SIGKILL`` if needed.
 
 If the process is already gone we report that rather than reporting a failure.
@@ -82,14 +84,22 @@ def verify_process_identity(record: LaneRecord) -> tuple[bool, str]:
     """Check that *record*'s recorded process is still the same process.
 
     Returns ``(ok, reason)``. ``ok`` is True only when the pid is alive **and**
-    its start-time fingerprint matches what was recorded.
+    its start-time fingerprint matches what was recorded — both halves are
+    required, not one of them. A record with no fingerprint cannot be shown to
+    name the process that wrote it, and the only consequence of a recycled pid is
+    ``killpg`` landing on a stranger's process tree, so a fingerprint the machine
+    cannot supply is a refusal rather than a gap in the check. Every writer of
+    this record (the lane manager, :func:`stop_lane_by_name`) records all three
+    fields together, so an absent one means a torn or hand-edited record.
     """
     if not record.pid or not record.pgid:
         return False, REFUSED_NO_PROCESS
     if not process_alive(record.pid):
         return False, OK_ALREADY_GONE
     current = process_starttime(record.pid)
-    if record.starttime is not None and current is not None and current != record.starttime:
+    if record.starttime is None or current is None:
+        return False, REFUSED_PID_REUSED
+    if current != record.starttime:
         # Same pid, different birth time: the original died and the number was
         # reused. Signalling the recorded pgid could hit an unrelated tree.
         return False, REFUSED_PID_REUSED

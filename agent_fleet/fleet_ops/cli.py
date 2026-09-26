@@ -147,7 +147,10 @@ def register_lane_commands(sub: argparse._SubParsersAction) -> None:
     run_p.add_argument(
         "--no-gate",
         action="store_true",
-        help="Stop after the PR is guaranteed; an external gate reviews it (status: GATE-SKIPPED)",
+        help=(
+            "Stop after the PR is guaranteed; an external gate reviews it. "
+            "Status: GATE-SKIPPED PR #<n> @<sha9> (not an escalation)"
+        ),
     )
     run_p.add_argument("--json", action="store_true", help="Emit the full result as JSON")
     run_p.set_defaults(func=cmd_lane_run, _known_subcommands=gate_known)
