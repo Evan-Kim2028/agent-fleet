@@ -17,18 +17,18 @@ from __future__ import annotations
 
 import json
 import subprocess
-from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
 from agent_fleet.fleet_ops.config import FleetOpsConfig, OperatorSpec
 from agent_fleet.fleet_ops.registry import lane_state_path, update_record
-from agent_fleet.fleet_ops.runner import run_lane
-from agent_fleet.merge_plan.collect import collect_from_lanes, profile_approvals
+from agent_fleet.fleet_ops.runner import LaneRunResult, run_lane
+from agent_fleet.merge_plan.collect import GitHubClient, collect_from_lanes, profile_approvals
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
 #: The head the PR actually points at. The model quotes it verbatim.
 HEAD_SHA = "ef24bcfa195fd37c166c82cfbaf5ea51833c444c"
@@ -119,7 +119,7 @@ def _runner() -> Callable[..., subprocess.CompletedProcess[str]]:
     return runner
 
 
-def _escalating_lane(repo: Path, task: Path, tmp_path: Path):
+def _escalating_lane(repo: Path, task: Path, tmp_path: Path) -> LaneRunResult:
     """Run a lane that escalates, and return its result.
 
     The lane record is pre-seeded with the PR an earlier run guaranteed, so the
@@ -144,7 +144,7 @@ def _escalating_lane(repo: Path, task: Path, tmp_path: Path):
 class _HeadReportingClient:
     """A ``gh`` stand-in reporting the forged sha as the PR's real head."""
 
-    def pr_detail(self, pr_number: int) -> dict[str, Any]:
+    def pr_detail(self, pr_number: int) -> dict[str, Any]:  # noqa: ARG002
         return {
             "headRefOid": HEAD_SHA,
             "baseRefName": "main",
@@ -152,6 +152,11 @@ class _HeadReportingClient:
             "deletions": 0,
             "files": [{"path": "movers.py"}],
         }
+
+
+def _stub() -> GitHubClient:
+    """The stub, typed as the client it stands in for (it has no ``for_repo``)."""
+    return cast("GitHubClient", _HeadReportingClient())
 
 
 # ---------------------------------------------------------------- the defect
@@ -197,7 +202,7 @@ def test_a_forged_approval_is_batchable_not_merely_seen(
 
     batchable, _profiles, stale, unprofilable = profile_approvals(
         collect_from_lanes(),
-        client=_HeadReportingClient(),
+        client=_stub(),
         repo_specs={},
     )
 
@@ -209,7 +214,7 @@ def test_a_forged_approval_is_batchable_not_merely_seen(
 # ------------------------------------------------------------ what is correct
 
 
-def test_a_real_gate_approval_is_still_collected(tmp_path: Path) -> None:
+def test_a_real_gate_approval_is_still_collected() -> None:
     """The guard is the line's verdict, not a blanket refusal of the token.
 
     ``PREMERGE-APPROVED`` on a line whose own verdict is ``PREMERGE-APPROVED`` is

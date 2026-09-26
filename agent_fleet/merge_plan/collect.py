@@ -34,15 +34,23 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 #: The approval marker must be the *verdict* of the line that carries it, so the
-#: search is anchored to the start of a line (with the status file's optional
-#: ``HH:MM:SS`` prefix) rather than run over the line's whole text. An unanchored
-#: search is forgeable by anything else that gets written into the line: the lane
-#: manager appends the tail of the implementer's own final message to a
-#: ``NEEDS-ESCALATION`` line, so a lane that was never gated could otherwise
-#: quote the PR's real head and hand the planner an approval for a PR no gate
-#: ever reviewed. ``fleet_ops.gate`` anchors its equivalent for the same reason.
+#: search is anchored to the start of a line rather than run over the line's whole
+#: text. An unanchored search is forgeable by anything else that gets written into
+#: the line: the lane manager appends the tail of the implementer's own final
+#: message to a ``NEEDS-ESCALATION`` line, so a lane that was never gated could
+#: otherwise quote the PR's real head and hand the planner an approval for a PR
+#: no gate ever reviewed. ``fleet_ops.gate`` anchors its equivalent for the same
+#: reason.
+#:
+#: The anchor still admits the three forms the status-file contract actually
+#: writes — a bare ``PREMERGE-APPROVED <sha>``, one behind the ``HH:MM:SS`` stamp,
+#: and one behind the ``owner/repo#<pr>`` reference that names the PR (which
+#: ``docs/MERGE-PLAN.md`` documents as legal "anywhere on the line"), so a status
+#: file naming its PR before the marker keeps being collected.
 _APPROVAL_RE = re.compile(
-    rf"^(?:\d{{2}}:\d{{2}}:\d{{2}}\s+)?{APPROVAL_PREFIX}\s+([0-9a-f]{{7,40}})",
+    rf"^(?:\d{{2}}:\d{{2}}:\d{{2}}\s+)?"
+    rf"(?:[\w.-]+/[\w.-]+#\d+\s+)?"
+    rf"{APPROVAL_PREFIX}\s+([0-9a-f]{{7,40}})",
     re.IGNORECASE | re.MULTILINE,
 )
 #: ``"repo#123"`` in a status file, so a status dir can span repositories.
