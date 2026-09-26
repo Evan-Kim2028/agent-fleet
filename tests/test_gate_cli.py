@@ -124,6 +124,33 @@ def test_gate_surfaces_a_policy_violation_as_exit_one(
     assert "model_policy" in capsys.readouterr().err
 
 
+def test_gate_passes_the_lane_slug_through(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The slug makes gate test names unique per PR; the CLI must reach run_gate."""
+    seen: dict[str, Any] = {}
+
+    def _fake_run_gate(**kwargs: Any) -> GateResult:  # noqa: ANN401
+        seen.update(kwargs)
+        return _result(GateOutcome.APPROVED)
+
+    monkeypatch.setattr("agent_fleet.gate.pipeline.run_gate", _fake_run_gate)
+    main(["gate", "--repo-path", str(tmp_path), "--pr", "1", "--lane-slug", "fb/lane"])
+    assert seen["lane_slug"] == "fb/lane"
+
+
+def test_gate_lane_slug_defaults_to_none_so_the_head_ref_supplies_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def _fake_run_gate(**kwargs: Any) -> GateResult:  # noqa: ANN401
+        seen.update(kwargs)
+        return _result(GateOutcome.APPROVED)
+
+    monkeypatch.setattr("agent_fleet.gate.pipeline.run_gate", _fake_run_gate)
+    main(["gate", "--repo-path", str(tmp_path), "--pr", "1"])
+    assert seen["lane_slug"] is None
+
+
 def test_gate_metrics_json(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

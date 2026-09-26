@@ -30,6 +30,12 @@ logger = logging.getLogger(__name__)
 #: output as one.
 TURN_CAP_EXIT = 8
 
+#: The shell's ``timeout`` exit code: the agent was still working when its
+#: stage budget ran out. Distinct from a crash because the answer is "we ran out
+#: of time", not "the agent broke" — and the operator needs to know which stage
+#: to raise the budget on.
+TIMEOUT_EXIT = 124
+
 _FINAL_FORMAT_NOTE = (
     "FINAL ANSWER FORMAT (repeated on purpose): your final message must be exactly "
     "one ```json fenced block matching the schema/example given above. No prose "
@@ -264,9 +270,19 @@ def call_structured(
                     f"turn cap hit (exit {TURN_CAP_EXIT}) before the agent produced a "
                     f"final answer; last output was {len(result.stdout or '')} chars"
                 )
+                last_kind = "dead"
+            elif result.exit_code == TIMEOUT_EXIT:
+                # Out of budget, still working. Also no evidence either way, but
+                # the reason has to name the stage's budget or the escalation is
+                # unactionable.
+                last_error = (
+                    f"stage timed out after {timeout_s}s (exit {TIMEOUT_EXIT}) "
+                    f"before the agent produced a final answer"
+                )
+                last_kind = "timeout"
             else:
                 last_error = f"backend call failed (exit {result.exit_code}): {result.stderr[:300]}"
-            last_kind = "dead"
+                last_kind = "dead"
             raw = result.stdout or ""
             exit_code = result.exit_code
         else:

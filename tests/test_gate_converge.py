@@ -84,7 +84,10 @@ def _run_converge(
         enable_judge=False,
         enable_fix=enable_fix,
         max_fix_rounds=max_fix_rounds,
-        agent_timeout_s=5,
+        lens_timeout_s=5,
+        verify_timeout_s=5,
+        judge_timeout_s=5,
+        fix_timeout_s=5,
         test_timeout_s=5,
     )
     prompts: list[str] = backend_prompts if backend_prompts is not None else []
@@ -351,37 +354,41 @@ def test_fix_prompt_lists_the_current_failures_and_keeps_the_rest(
 # ---------------------------------------------------------------------------
 
 
-def test_untestable_open_escalates_without_spending_a_fix_round(
+def test_untestable_open_gets_one_fix_round_then_escalates_if_still_open(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Tests green, only untestable blockers left: escalate, and skip the fixer.
+    """Tests green, only untestable blockers left: fix them once, then escalate.
 
-    A fixer cannot make progress on a green test set, so dispatching one only
-    produced the misleading "cap after 1 round(s)".
+    The round is bounded at one by construction — with no test to go green there
+    is no measurable progress to converge on, only the judge's yes/no.
     """
+    prompts: list[str] = []
     script = _Script(
         heads=[_SHA],
         runs=[TestRun(failing=[], ran=1), TestRun(failing=[], ran=1)],
     )
     monkeypatch.setattr(GatePipeline, "recheck_untestable", lambda *_a, **_k: False)
-    head, metric, _ = _run_converge(tmp_path, monkeypatch, script, untestable_open=True)
+    head, metric, _ = _run_converge(
+        tmp_path, monkeypatch, script, untestable_open=True, backend_prompts=prompts
+    )
     assert metric.outcome == gm.OUTCOME_UNTESTABLE_NEEDS_REVIEW
     assert metric.untestable_real == 1
-    assert metric.round_count == 1  # baseline only
-    assert head == _START  # no fix round ran, so the head never moved
+    assert metric.round_count == 2  # baseline + the one untestable round
+    assert len(prompts) == 1
+    assert head == _SHA
 
 
-def test_untestable_only_never_reaches_the_recheck(
+def test_untestable_only_never_reaches_the_recheck_without_a_push(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """With nothing failing there is no fix round, so there is nothing to recheck."""
+    """A fixer that pushed nothing changed no head, so there is nothing to recheck."""
     calls: list[bool] = []
     monkeypatch.setattr(
         GatePipeline,
         "recheck_untestable",
         lambda *_a, **_k: calls.append(True) or False,
     )
-    script = _Script(heads=[_SHA], runs=[TestRun(failing=[], ran=1)])
+    script = _Script(heads=[_START], runs=[TestRun(failing=[], ran=1)])
     _head, metric, _ = _run_converge(tmp_path, monkeypatch, script, untestable_open=True)
     assert calls == []
     assert metric.outcome == gm.OUTCOME_UNTESTABLE_NEEDS_REVIEW

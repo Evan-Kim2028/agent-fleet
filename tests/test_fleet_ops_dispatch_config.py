@@ -7,17 +7,15 @@ gets the numbers it wrote — including when it writes nonsense.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 import pytest
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 from agent_fleet.fleet_ops.config import (
     DEFAULT_MAX_GATES,
     DEFAULT_MAX_LANES,
-    AdmissionPoolConfig,
+    AdmissionConfig,
     DispatchConfig,
     FleetOpsConfig,
     load_fleet_ops_config,
@@ -37,7 +35,7 @@ def _load(section: dict[str, Any]) -> FleetOpsConfig:
 def test_absent_blocks_use_the_documented_defaults() -> None:
     config = _load({"base_branch": "main"})
     assert config.dispatch == DispatchConfig()
-    assert config.admission == AdmissionPoolConfig()
+    assert config.admission == AdmissionConfig()
     assert config.dispatch.max_lanes == DEFAULT_MAX_LANES
     assert config.dispatch.max_gates == DEFAULT_MAX_GATES
     assert config.admission.tests == 12
@@ -102,11 +100,11 @@ def test_admission_block_is_parsed() -> None:
     config = _load({"admission": {"tests": 4, "typecheck": 2, "shared_dir": "/srv/slots"}})
     assert config.admission.tests == 4
     assert config.admission.typecheck == 2
-    assert config.admission.shared_dir == "/srv/slots"
+    assert config.admission.shared_dir == Path("/srv/slots")
 
 
 def test_an_empty_admission_block_keeps_the_defaults() -> None:
-    assert _load({"admission": {}}).admission == AdmissionPoolConfig()
+    assert _load({"admission": {}}).admission == AdmissionConfig()
 
 
 @pytest.mark.parametrize("value", [0, -3, "lots", None])
@@ -116,7 +114,7 @@ def test_a_nonsense_pool_size_falls_back(value: Any) -> None:  # noqa: ANN401
 
 
 def test_a_malformed_admission_block_falls_back() -> None:
-    assert _load({"admission": "no"}).admission == AdmissionPoolConfig()
+    assert _load({"admission": "no"}).admission == AdmissionConfig()
 
 
 def test_nice_zero_is_honoured_because_it_is_a_real_choice() -> None:

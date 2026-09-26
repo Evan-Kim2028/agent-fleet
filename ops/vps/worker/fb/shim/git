@@ -1,0 +1,20 @@
+#!/bin/bash
+# git shim for fleet agents: hooks may never be disabled. Refuses -c core.hooksPath=..., writing core.hooksPath via
+# `git config` (reads are fine), and --no-verify on commit/push/merge/rebase/cherry-pick/am.
+# 2026-09-26: silph's shared .git/config was found with core.hooksPath=/dev/null, so every silph worktree committed
+# with all hooks off.
+REAL=/usr/bin/git
+refuse(){ echo "git shim: refused ($1). Hooks must run; if a hook is red on origin/main for files you did not touch, use SKIP=<hook-id> only." >&2; exit 97; }
+prev=""; sub=""; read_only=0; hp=0
+for a in "$@"; do
+  if [ "$prev" = "-c" ]; then case "${a,,}" in core.hookspath=*) refuse "-c core.hooksPath";; esac; prev=$a; continue; fi
+  if [ -z "$sub" ] && [[ "$a" != -* ]] && [ "$prev" != "-C" ]; then sub=$a; prev=$a; continue; fi
+  if [ "$sub" = config ]; then
+    case "$a" in --get|--get-all|--get-regexp|-l|--list|--show-origin) read_only=1;; esac
+    [ "${a,,}" = core.hookspath ] && hp=1
+  fi
+  case "$sub" in commit|push|merge|rebase|cherry-pick|am) [ "$a" = "--no-verify" ] && refuse "--no-verify";; esac
+  prev=$a
+done
+[ "$sub" = config ] && [ $hp = 1 ] && [ $read_only = 0 ] && refuse "git config core.hooksPath write"
+exec $REAL "$@"

@@ -16,6 +16,16 @@ repo that omits ``fleet_ops:`` is unaffected::
           engine: devin
           push_branch: fb/{lane}
           on_approved: "cp $STATUS $REPO/reviews/$PR-$SHA9.md"
+      admission:
+        shared_dir: ~/.agent-fleet/admission
+        tests: 12
+        typecheck: 4
+        nice: 5
+
+``admission:`` is the lane subprocess budget — the shared ``uv run pytest`` /
+``pyright`` slot pools every operator contends for. Every key is optional and
+every one of them defaults to the machine-global budget, because admission is a
+throttle: a knob a repo omits must never keep a lane from running.
 
 ``baseline_skip_hooks`` is deliberately scoped to ``fleet_ops`` rather than to
 the global repo config: skipping a hook is a decision about the *lane manager's
@@ -26,8 +36,10 @@ globally — every commit the manager makes still runs every hook not listed her
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+from agent_fleet.fleet_ops.admission import AdmissionConfig
 from agent_fleet.repo import REPO_CONFIG_NAMES
 
 DEFAULT_BASE_BRANCH = "main"
@@ -122,21 +134,6 @@ class DispatchConfig:
 
 
 @dataclass(frozen=True)
-class AdmissionPoolConfig:
-    """The ``fleet_ops.admission:`` block — lane subprocess budgets.
-
-    ``shared_dir`` is what makes the pools shared rather than per-operator: two
-    operators pointing at the same directory contend for the same flock slots,
-    which is the point, because the constraint is the hardware.
-    """
-
-    tests: int = 12
-    typecheck: int = 4
-    shared_dir: str | None = None
-    nice: int = 5
-
-
-@dataclass(frozen=True)
 class FleetOpsConfig:
     """The whole ``fleet_ops:`` section."""
 
@@ -149,8 +146,11 @@ class FleetOpsConfig:
     #: can *add* rules; it can never shorten them.
     fences: tuple[str, ...] = ()
     dispatch: DispatchConfig = field(default_factory=DispatchConfig)
-    admission: AdmissionPoolConfig = field(default_factory=AdmissionPoolConfig)
     operators: dict[str, OperatorSpec] = field(default_factory=dict)
+    #: Lane admission budget. ``AdmissionConfig()`` defaults are the whole
+    #: config: a repo that says nothing about admission gets the machine-global
+    #: pools, and a missing knob throttles nobody rather than aborting the lane.
+    admission: AdmissionConfig = field(default_factory=AdmissionConfig)
 
     def operator(self, name: str) -> OperatorSpec | None:
         return self.operators.get(name)
@@ -191,14 +191,6 @@ def _parse_operator(name: str, raw: Any) -> OperatorSpec | None:  # noqa: ANN401
     )
 
 
-def _positive_int(value: Any, fallback: int) -> int:  # noqa: ANN401
-    try:
-        number = int(value)
-    except TypeError, ValueError:
-        return fallback
-    return number if number > 0 else fallback
-
-
 def _parse_dispatch(raw: Any) -> DispatchConfig:  # noqa: ANN401
     defaults = DispatchConfig()
     if not isinstance(raw, dict):
@@ -219,20 +211,54 @@ def _parse_dispatch(raw: Any) -> DispatchConfig:  # noqa: ANN401
     )
 
 
-def _parse_admission(raw: Any) -> AdmissionPoolConfig:  # noqa: ANN401
-    defaults = AdmissionPoolConfig()
+def _parse_admission(raw: Any) -> AdmissionConfig:  # noqa: ANN401
+    """Parse the ``admission:`` sub-section, defaulting every absent knob.
+
+    Admission is a throttle. Every value is optional and an unparseable one
+    falls back to the :class:`AdmissionConfig` default, because a lane that
+    cannot start is strictly worse than a lane that runs unthrottled.
+    """
     if not isinstance(raw, dict):
-        return defaults
-    nice = defaults.nice
-    nice_raw = raw.get("nice")
-    if isinstance(nice_raw, int):
-        nice = nice_raw
-    return AdmissionPoolConfig(
+        return AdmissionConfig()
+    defaults = AdmissionConfig()
+    shared = _optional_str(raw.get("shared_dir"))
+    return AdmissionConfig(
+        shared_dir=Path(shared) if shared else None,
         tests=_positive_int(raw.get("tests"), defaults.tests),
         typecheck=_positive_int(raw.get("typecheck"), defaults.typecheck),
-        shared_dir=_optional_str(raw.get("shared_dir")),
-        nice=nice,
+        nice=_non_negative_int(raw.get("nice"), defaults.nice),
+        wait_s=_positive_float(raw.get("wait_s"), defaults.wait_s),
     )
+
+
+def _positive_int(value: Any, default: int) -> int:  # noqa: ANN401
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int) and value > 0:
+        return value
+    return default
+
+
+def _non_negative_int(value: Any, default: int) -> int:  # noqa: ANN401
+    """Like :func:`_positive_int`, but ``0`` is a real choice rather than a mistake.
+
+    ``nice: 0`` means "do not renice the admitted work", which is a legitimate
+    request for a lane that is meant to run at full priority. A negative value
+    is still nonsense and still falls back.
+    """
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int) and value >= 0:
+        return value
+    return default
+
+
+def _positive_float(value: Any, default: float) -> float:  # noqa: ANN401
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)) and value > 0:
+        return float(value)
+    return default
 
 
 def load_fleet_ops_config(raw: dict[str, Any] | None) -> FleetOpsConfig | None:
@@ -308,7 +334,7 @@ __all__ = [
     "DEFAULT_MAX_LANES",
     "DEFAULT_PUSH_BRANCH",
     "DEFAULT_STALL_MINUTES",
-    "AdmissionPoolConfig",
+    "AdmissionConfig",
     "DispatchConfig",
     "FleetOpsConfig",
     "OperatorSpec",
