@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- **ops/vps: operational scripts that run the fleet (reconciler, tiered evidence gate, remote VPS gate worker, graduated memory guard, batch-window automerge, issue closer, no-model PR triage).** The scripts that
+  actually execute the fleet — the laptop orchestrator (dispatch, gate, merge, deploy/verify, triage,
+  issue closer) and the lor-main worker (remote gate, agent route, OpenRouter engine, memory guard,
+  systemd units) — are now versioned here so GitHub `main` matches what runs. Committed as-is: the only
+  change is that hard-coded machine paths are now variables (`FLEET_OPS_HOME`, `FLEET_WT_ROOT`,
+  `FLEET_VPS_HOST`, `FLEET_GH_OWNER`) with the previous paths as defaults. `ops/vps/README.md`
+  documents each piece, the data flow, the knobs and the VPS memory model;
+  `tests/test_ops_vps_scripts.py` keeps every script parsing and free of machine paths and secrets.
+
 ## 0.16.2 — 2026-09-25
 
 ### Fixed

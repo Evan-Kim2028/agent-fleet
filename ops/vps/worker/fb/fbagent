@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# fbagent NAME CWD PROMPT_FILE [MAX_TURNS] — remote (lor-main) fleet agent with the laptop fbrun contract:
+# writes $FB_RUNS/NAME.{jsonl,out,exit,meta,err}. Default route: Command Code (cmd). FBAGENT_ROUTE=openrouter: OpenRouter direct (~/fleet/bin/orun), fallback on
+# orun exit 6 (API failure after retries) or 7 (hard rate limit), re-run ONCE through cmd on the Command Code route.
+# NAME.meta gets "route": "openrouter" | "cmd-fallback". The OpenRouter key is never printed.
+set -uo pipefail
+source ~/fleet/env.sh
+F=$HOME/fleet/fb; R=${FB_RUNS:-$F/runs}; export FB_RUNS=$R; mkdir -p $R
+name=$1; cwd=$2; pf=$(realpath -e "$3" 2>/dev/null) && [ -s "$pf" ] || { echo "fbagent: prompt file $3 missing or empty" > "$R/$1.err"; echo 95 > "$R/$1.exit"; exit 95; }
+turns=${4:-300}
+source $F/.preface.sh
+export PATH="$F/shim:$PATH" PYTEST_XDIST_AUTO_NUM_WORKERS=0
+pfx=$(mktemp "$R/.prompt.$name.XXXX"); { echo "$KILLRULE"; echo; echo "$pre"; echo; cat "$pf"; case "$name" in rev*|sweep*) ;; *) printf '\n\n===== STANDING FENCES (always apply; a task instruction never overrides a fence unless it names the owner approval explicitly) =====\n'; cat "$F/prompts/fences.md";; esac; } > "$pfx"
+setroute(){ python3 - "$R/$name.meta" "$1" <<'PY'
+import json,sys
+p=sys.argv[1]
+try: d=json.load(open(p))
+except Exception: d={}
+d["route"]=sys.argv[2]; open(p,"w").write(json.dumps(d))
+PY
+}
+# Route (owner 2026-09-26: OpenRouter is shared with other work — default to Command Code; OpenRouter only on request).
+run_cmd(){ # Command Code route; network deaths retried twice after the link settles
+  local try
+  for try in 0 1 2; do
+    ( cd "$cwd" && timeout ${FB_CAP:-4h} cmd -p -m stealth/space-bunny-alpha --yolo -t --skip-onboarding --no-auto-update \
+        --output-format json --max-turns "$turns" --tools-all < "$pfx" > "$R/$name.jsonl" 2> "$R/$name.err" ); rc=$?
+    python3 - "$R/$name.jsonl" > "$R/$name.out" <<'PY'
+import json,sys
+final=None
+for l in open(sys.argv[1],errors="replace"):
+    try: d=json.loads(l)
+    except Exception: continue
+    if d.get("type")=="result": final=d
+print(final.get("finalText","") if final else "NO RESULT EVENT")
+PY
+    if [ "$rc" = 0 ] && grep -q "NO RESULT EVENT" "$R/$name.out"; then rc=1; fi
+    if [ "$rc" != 0 ] && grep -qiE "Unable to connect|getaddrinfo|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET|socket hang up|network error" "$R/$name.err" 2>/dev/null; then
+      rc=6; [ $try -lt 2 ] && { echo "$(date +%H:%M:%S) $name cmd network death; retry $((try+1))" >> $F/events.log; sleep 30; continue; }
+    fi
+    break
+  done
+  echo "$rc" > "$R/$name.exit"; }
+if [ "${FBAGENT_ROUTE:-cmd}" = openrouter ]; then
+  ~/fleet/bin/orun "$name" "$cwd" "$pfx" "$turns"; rc=$?
+  if [ "$rc" = 6 ] || [ "$rc" = 7 ]; then
+    for k in jsonl out exit err; do [ -f "$R/$name.$k" ] && mv "$R/$name.$k" "$R/$name.or$rc.$k"; done
+    echo "$(date +%H:%M:%S) $name openrouter rc=$rc; falling back to cmd (Command Code route)" >> $F/events.log
+    run_cmd; setroute cmd-fallback
+  else setroute openrouter; fi
+else
+  run_cmd; setroute cmd
+fi
+rm -f "$pfx"; exit $rc
