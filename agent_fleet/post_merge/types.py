@@ -129,7 +129,10 @@ class MergedPR:
         return cls(
             number=int(raw.get("number") or number),
             title=str(raw.get("title") or ""),
-            head_sha=str(raw.get("headSha") or raw.get("head_sha") or ""),
+            # headRefOid is the spelling gh uses (PR_FIELDS in flow.py asks for
+            # it); headSha is the older API's. Missing either one is a real
+            # absence and stays "", which the planner refuses to plan on.
+            head_sha=str(raw.get("headRefOid") or raw.get("headSha") or raw.get("head_sha") or ""),
             merge_commit=str(raw.get("mergeCommit") or raw.get("merge_commit") or ""),
             merged_at=str(raw.get("mergedAt") or raw.get("merged_at") or ""),
             files=_str_tuple(raw.get("files"), "pr.files"),

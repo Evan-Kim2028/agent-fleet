@@ -148,7 +148,15 @@ def run_jobs(
         if not spec.trigger_command:
             outcomes.append(JobOutcome(name, slot, "skipped", "no trigger_command configured"))
             continue
-        result = run(render_trigger(spec.trigger_command, job=name, slot=slot))
+        try:
+            result = run(render_trigger(spec.trigger_command, job=name, slot=slot))
+        except OSError as exc:
+            # A mistyped or missing binary is this job's failure, not the
+            # batch's: crashing here would lose the hand-off note that records
+            # the outstanding rebuild, and the labels already applied.
+            detail = str(exc).strip()[-300:] or exc.__class__.__name__
+            outcomes.append(JobOutcome(name, slot, "failed", detail, 127))
+            continue
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip()[-300:]
             outcomes.append(JobOutcome(name, slot, "failed", detail, result.returncode))

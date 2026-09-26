@@ -138,12 +138,39 @@ def index_line(batch: Batch) -> str:
 
 
 def write_note(batch: Batch, inbox: Path, *, generated_at: str = "") -> Path:
-    """Write the note and append its INDEX line. Returns the note path."""
+    """Write the note and append its INDEX line. Returns the note path.
+
+    A second-resolution note id collides on a retry within the same second —
+    which the ledger guarantees, since a retry sees its jobs as already
+    triggered — so a free suffix is added rather than overwriting the record of
+    which jobs actually ran. An identical re-run is the one exception: same
+    content, same path, no second INDEX line, because there is no new fact.
+    """
     inbox.mkdir(parents=True, exist_ok=True)
     note_id = batch.note_id or datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%SZ")
+    body = render_note(batch, generated_at=generated_at or note_id)
+    line = index_line(batch)
     name = f"{note_id}-{batch.repo}-pr{'-'.join(str(r.pr_number) for r in batch.results)}.md"
     path = inbox / name
-    path.write_text(render_note(batch, generated_at=generated_at or note_id), encoding="utf-8")
+    if _already_recorded(path, body, line):
+        return path
+    index = 1
+    while path.exists():
+        index += 1
+        path = inbox / f"{name[:-3]}-{index}.md"
+    path.write_text(body, encoding="utf-8")
     with (inbox / INDEX_NAME).open("a", encoding="utf-8") as handle:
-        handle.write(index_line(batch) + "\n")
+        handle.write(line + "\n")
     return path
+
+
+def _already_recorded(path: Path, body: str, line: str) -> bool:
+    """True when this exact batch is already written at *path* and in INDEX."""
+    if not path.exists():
+        return False
+    try:
+        if path.read_text(encoding="utf-8") != body:
+            return False
+        return line in (path.parent / INDEX_NAME).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False

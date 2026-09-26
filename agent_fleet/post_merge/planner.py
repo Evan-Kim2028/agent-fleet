@@ -13,13 +13,13 @@ import shlex
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from agent_fleet.post_merge.types import MergedPR, Plan, parse_plan
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from pathlib import Path
 
     from agent_fleet.post_merge.config import RepoSpec
 
@@ -97,6 +97,32 @@ class PlanResult:
         return self.pr.head_sha
 
 
+def repo_path(spec: RepoSpec) -> str:
+    """The repo's checkout, with ``~`` expanded, or ``""`` when unset.
+
+    Every other path in this package is expanded, and an unexpanded ``~`` is not
+    a directory: passing it through hands subprocess a literal ``~`` and raises
+    FileNotFoundError.
+    """
+    return str(Path(spec.path).expanduser()) if spec.path else ""
+
+
+def plan_argv(spec: RepoSpec) -> list[str]:
+    """``plan_command`` split into argv, with its program resolved against the repo.
+
+    A command naming a path (``scripts/plan.sh``) is documented as relative to
+    the checkout, so it is anchored there rather than left to the fleet
+    process's cwd — the same rule the trigger runner applies.
+    """
+    argv = shlex.split(spec.plan_command)
+    if not argv:
+        return argv
+    program = argv[0]
+    if "/" in program:
+        argv[0] = str(Path(repo_path(spec)) / program)
+    return argv
+
+
 def plan_for_pr(
     spec: RepoSpec,
     pr: MergedPR,
@@ -105,17 +131,20 @@ def plan_for_pr(
 ) -> PlanResult:
     """The plan for *pr*, from the cache when the head sha already has one."""
     cache_dir = spec.cache_dir()
+    # No head sha means no cache key and nothing to plan. An empty Plan() here
+    # would be indistinguishable from a real "nothing to rebuild", so it would
+    # label the PR rebuild:none and queue no jobs while looking successful.
     if not pr.head_sha:
-        return PlanResult(pr, Plan(), cached=False)
+        raise RuntimeError(f"PR #{pr.number} has no head sha, so it cannot be planned")
 
     hit = cached_plan(cache_dir, pr.head_sha)
     if hit is not None:
         return PlanResult(pr, hit, cached=True)
 
     result = run(
-        shlex.split(spec.plan_command),
+        plan_argv(spec),
         "\n".join(pr.files) + ("\n" if pr.files else ""),
-        spec.path,
+        repo_path(spec),
         spec.plan_timeout_seconds,
     )
     if result.returncode != 0:
