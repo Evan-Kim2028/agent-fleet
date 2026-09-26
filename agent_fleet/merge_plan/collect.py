@@ -33,6 +33,24 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: Everything ``gh pr view`` is asked for, in one place.  ``gh`` emits exactly
+#: the requested keys, so this list is the contract between GitHub and both
+#: readers of the payload: the profiler needs the shape of the change, and the
+#: executor needs to know whether the PR is open, mergeable, and what it
+#: merged to.
+PR_DETAIL_FIELDS = ",".join(
+    (
+        "state",
+        "mergeable",
+        "headRefOid",
+        "baseRefName",
+        "additions",
+        "deletions",
+        "files",
+        "mergeCommit",
+    )
+)
+
 #: The approval marker must be the *verdict* of the line that carries it, so the
 #: search is anchored to the start of a line rather than run over the line's whole
 #: text. An unanchored search is forgeable by anything else that gets written into
@@ -212,17 +230,23 @@ class GitHubClient:
         )
 
     def pr_detail(self, pr_number: int) -> dict[str, Any]:
-        """``gh pr view <n> --json headRefOid,baseRefName,additions,deletions``.
+        """``gh pr view <n> --json <the fields the planner and executor read>``.
 
-        Returns {} on any failure so a PR whose head cannot be read is treated
-        as unverifiable rather than assumed mergeable.
+        ``gh`` returns *only* the fields that were asked for, so a key missing
+        from this list is missing from the payload no matter how true it is on
+        GitHub.  The executor branches on ``state`` and ``mergeable`` and hands
+        ``mergeCommit`` to the deploy command; asking for anything less makes
+        every PR look unreadable and the queue silently never ships.
+
+        Returns {} on any failure so a PR whose state cannot be read is
+        treated as unverifiable rather than assumed mergeable.
         """
         result = self._run(
             "pr",
             "view",
             str(pr_number),
             "--json",
-            "headRefOid,baseRefName,additions,deletions,files",
+            PR_DETAIL_FIELDS,
         )
         if result.returncode != 0:
             logger.debug("gh pr view %s failed: %s", pr_number, result.stderr.strip())
@@ -254,18 +278,20 @@ class GitHubClient:
         return [d for d in data if isinstance(d, dict)] if isinstance(data, list) else []
 
 
-def _scoped_client(client: GitHubClient, repo_path: Path | None) -> GitHubClient:
+def _scoped_client[ScopedT](client: ScopedT, repo_path: Path | None) -> ScopedT:
     """*client* bound to *repo_path*, so gh resolves the PR in that repository.
 
     A client that cannot re-scope itself (an injected test double) is used as
-    given, which keeps the collector usable without a per-repo checkout.
+    given, which keeps the collector usable without a per-repo checkout.  The
+    return type follows the input, so both the concrete client and a structural
+    stand-in survive the call.
     """
     if repo_path is None:
         return client
     for_repo = getattr(client, "for_repo", None)
     if callable(for_repo):
         scoped = for_repo(repo_path)
-        if isinstance(scoped, GitHubClient):
+        if isinstance(scoped, type(client)):
             return scoped
     return client
 

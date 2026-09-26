@@ -45,6 +45,49 @@
   review: ...`, and spends no fix rounds.
 ### Fixed
 
+- **Executor scheduling and command execution.** Six defects that each stopped a
+  merge from happening, or hid one that did not:
+  - *Turn taking against an absent peer.* The exclusive-group alternation rule
+    compared a repo against its own persisted turn, so a repo with a steady
+    approved queue was held on **every** future tick whenever its exclusive peer
+    was idle and never appeared in a plan — a permanent, self-inflicted deadlock
+    of exactly the stalled queue the runner exists to eliminate. A turn is now
+    only owed to a peer the plan actually contains, judged from the whole plan
+    rather than from batch order, so a peer listed later still counts as waiting
+    and a peer that is absent never holds anyone. A repo is also no longer
+    excluded from the tick by its own earlier batch, so every batch of a single
+    repo ships instead of only the first. A batch that breaks more than one rule
+    now reports every reason on one line.
+  - *`--dry-run` mutated durable state.* A preview wrote `last_served` and a
+    post-merge hold into the hold ledger, so `merge run --dry-run` — documented
+    as the safe way to try a config change — consumed a group's turn and held
+    the peer repo for a window protecting a merge that never happened. Nothing
+    durable is written on a dry run now; the preview still reports the outcomes
+    a real run would produce.
+  - *A failed deploy went quiet.* A batch whose merge landed and whose deploy
+    then failed is reported `MERGED` by GitHub forever, so every later tick saw
+    "already merged", reported `skipped`, and exited 0 while production had
+    never seen the work. The executor now records that a batch's deploy is still
+    owed — the one fact GitHub does not keep — and retries it next tick, dropping
+    the record once deploy and verify both succeed.
+  - *`command_timeout_seconds` was not a ceiling.* A command that backgrounded
+    work left a grandchild holding the inherited stdout/stderr pipes, so the
+    follow-up read blocked for the orphan's whole remaining lifetime. Commands
+    now run in their own session and are killed as a group, and output
+    collection is bounded separately.
+  - *`path: ~/Documents/<repo>` never worked.* Merge, deploy, verify, and rebase
+    commands were handed the raw configured string as their working directory;
+    `Popen` performs no tilde expansion, so the documented config form failed
+    every command with rc=127. All of them now expand it.
+  - *`pr_detail` never asked for the fields the executor reads.* It requested
+    only `headRefOid,baseRefName,additions,deletions,files`, and `gh` returns
+    exactly the keys it is asked for — so `state`, `mergeable`, and
+    `mergeCommit` were always empty, every PR was classified unreadable, and the
+    whole queue was skipped with a green exit code, every tick, forever.
+  - *`merge holds` / `merge release` tracebacked on a typo.* A malformed
+    `merge_plan.executor` block is a hard error by design; only `merge run`
+    converted it to `error: ...` and exit 2. All three subcommands now report it
+    the same way.
 - **Run logs no longer reach the branch or the PR.** The engine's run dir
   defaulted to `<lane worktree>/.agent-fleet/runs/<lane>/`, and the PR guarantee
   stages with `git add -A`. Every lane PR carried `impl.jsonl` / `impl.out`, and
@@ -93,6 +136,24 @@
   the metrics row carry a per-call `lens_calls` summary (`raw_len`, `parsed_ok`,
   `n_items`, `parse_error`), so a run reporting zero candidates is
   distinguishable from a run whose reviewers genuinely found none.
+- **`agent-fleet merge run`:** the executor for the batches `merge-plan` plans.
+  A tick collects approvals, plans, then merges, deploys, and verifies each
+  eligible batch — with the reliability the hand-run merge scripts lacked. Every
+  command comes from `merge_plan.repos[].{merge,deploy,verify}_template`; there
+  is no built-in repository knowledge, and a repo with no merge template is
+  reported rather than guessed at. `merge run --daemon N` loops, `--dry-run`
+  reports decisions without acting, and `merge holds` / `merge release <hold>`
+  manage cluster holds. Events (`merge.start`, `merge.merged`, `merge.deployed`,
+  `merge.verified`, `merge.needs_rebase`, `merge.failed`, `merge.held`,
+  `merge.locked`, `merge.end`) go through the normal fleet event path. Four
+  properties are enforced with a test each, from failures that actually happened:
+  deploy locks are held by a live process (`flock` on a descriptor, released on
+  every exit path) rather than a marker file that could outlive a crashed merge;
+  a `CONFLICTING` PR is marked `needs_rebase`, dropped from its batch, and handed
+  to a configurable rebase command instead of blocking the queue; merge state is
+  re-derived from live GitHub PR state every tick rather than a hand-maintained
+  list that once stranded twelve approved PRs; and mutually exclusive repos
+  alternate with an optional post-merge hold. See `docs/MERGE-PLAN.md`.
 - **`agent-fleet merge-plan`:** the command center now decides which gate-approved
   PRs ship *together*. Merging and deploying is the slowest serialized step in
   the loop (~15-20 min per lake-of-rage deploy, ~9 min per silphcoanalytics), so
