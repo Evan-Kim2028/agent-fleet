@@ -113,6 +113,31 @@ fleet_ops:
 for a stall, a lazy exit, a failed commit, a rejected gate, or a refused binding —
 anything that is not an approval.
 
+### Dispatch and admission
+
+Two more optional blocks, used by [`fleet dispatch`](#dispatching-a-queue) and by
+every lane's test runs. Both default, so a repo that omits them is unaffected.
+
+```yaml
+fleet_ops:
+  dispatch:
+    max_lanes: 8                # concurrent `fleet lane run` children
+    max_gates: 4                # concurrent gates. Deliberately low: 18 at once
+                                # is what drove the box to load 200.
+    psi_avg10_max: 25.0         # CPU pressure ceiling, in percent
+    psi_path: /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/agents.slice/cpu.pressure
+    cluster_order: [C0, C1, C2] # launch order; unknown clusters sort last
+  admission:
+    tests: 12                   # shared pytest slots (both operators)
+    typecheck: 4                # shared pyright / pre-commit slots
+    shared_dir: null            # null -> ~/.agent-fleet/admission
+    nice: 5                     # admitted runs yield to a committing lane
+```
+
+`shared_dir` is what makes the pools *shared*: two operators pointing at the
+same directory contend for the same slots, which is the point, because the
+constraint is the hardware rather than the repo.
+
 ### Hook environment
 
 Hooks run through a shell with a **small, explicit environment** — not the
@@ -258,6 +283,168 @@ whose head started with that word, find none, and loop.
 
 ---
 
+## Dispatching a queue
+
+`fleet dispatch QUEUE.jsonl --operator NAME` runs a whole triaged queue: it
+launches `fleet lane run --no-gate` per item, and gates whatever produced a PR.
+
+```bash
+fleet dispatch triage.jsonl \
+    --operator documents-0e \
+    --repo lake-of-rage=/home/evan/Documents/lake-of-rage-wt-fleetbase \
+    --repo silphcoanalytics=/home/evan/Documents/silphcoanalytics-wt-fleetbase \
+    --max-lanes 8 --max-gates 4
+```
+
+Each queue line is a JSON object. Only `lane`, `repo` and `task` are required;
+the rest is triage metadata that is carried into the generated task file and
+into scheduling:
+
+```json
+{"lane": "gold-catalog-batch", "repo": "lake-of-rage", "ref": "R-4821",
+ "cluster": "C0", "depends_on": ["R-4800"], "area": "gold", "size": "M",
+ "task": "...", "evidence": "...", "files": ["pipe/gold/build.py"],
+ "dbt_models": ["gold.listings"]}
+```
+
+`depends_on` names another item's **`ref`** (or its lane name) and is released
+when that lane reaches a terminal state — *approved or escalated*. A dependency
+exists to serialise lanes that touch the same files; a lane that failed must not
+take the rest of its chain hostage with it.
+
+### The state machine and the restart contract
+
+Each lane moves `queued → running → pr → gating → done`, or to `failed` if it
+could not be started at all. That is durable per operator:
+
+```
+~/.agent-fleet/lanes/dispatch/<operator>/state.json
+```
+
+The restart contract is the important part:
+
+- a lane is **never relaunched** once it has a terminal state, and
+- a lane with a **live recorded process** is re-attached to, not relaunched.
+
+Liveness is a recorded `(pid, starttime)` fingerprint, not a command-line match.
+That matters twice over: a recycled pid cannot be mistaken for the original
+lane, and two operators cannot adopt each other's work.
+
+Because the state is durable, a dispatcher that dies mid-queue can simply be
+run again with the same command line. It picks up where it left off.
+
+### Throttling: CPU pressure, not load average
+
+The shell dispatcher this replaces throttled on `os.getloadavg()`, and that was
+wrong for this machine. The agents run inside a cgroup with a **CPU quota**, so
+a quota-throttled task is still counted as *running* by the load average: load
+reads high while the machine is idle-but-stalled, and the dispatcher sat on its
+hands for forty minutes refusing to launch anything.
+
+The throttle is CPU **PSI** — `some avg10` from the agents slice's
+`cpu.pressure`, which is the percentage of the last ten seconds in which at least
+one task was runnable but had to wait. `full` is never used (throttling on it is
+far too strict) and PSI is read **fail-open**: an unreadable file never blocks a
+launch, because the incident this replaces was a false block.
+
+### `--gate-cmd`
+
+With no `--gate-cmd`, a lane that produced a PR goes to the built-in
+`agent-fleet gate`. A template replaces that:
+
+```bash
+--gate-cmd '/opt/fbgate {lane} {repo} {pr}'
+```
+
+Placeholders are `{lane}`, `{pr}`, `{repo}`, `{slug}` and `{operator}`. The
+expanded string is split with `shlex` and executed **without a shell**, so a `;`
+or `&&` in a template stays inert data rather than becoming a second command.
+
+### What this makes impossible
+
+Each of these was a real failure of the shell dispatcher, and each has a test
+named after it in `tests/test_fleet_ops_dispatch.py`:
+
+| Failure | What prevents it |
+| --- | --- |
+| a finished lane missing from the queue crashed the dispatcher (`StopIteration`), so finished lanes were never gated | the queue is a dict; an unresolvable lane is *recorded* as `unknown_item`, never looked up |
+| two operators shared one log and adopted each other's lanes | state is namespaced by operator; events are tagged, and liveness is a pid fingerprint |
+| restarting relaunched lanes that had already run | terminal state and live pids both suppress a launch |
+| eighteen gates released at once (load 200) | `--max-gates` is counted *within* the tick, so the cap is exact |
+| concurrent gates' `prune` deleted a sibling's half-created worktree | worktree add/remove/prune are serialized per repository (see below) |
+| `loadavg` throttling blocked every launch for 40 minutes | CPU PSI, read fail-open; `getloadavg` is never called |
+
+A dependency **cycle** is the remaining way a queue can fail to drain, so it is
+detected and the affected lanes are finished as `dependency_deadlock` rather than
+waited on forever.
+
+---
+
+## Admission pools
+
+Every lane runs a coding agent, and those agents run `uv run pytest` freely. Left
+alone, twenty lanes each start a test suite the moment they are told to.
+
+`fleet lane run` therefore writes a generated `uv` **shim directory** and puts it
+first on the *engine* child's `PATH`. A matching invocation then waits for one of
+N shared flock slots:
+
+- `uv run … pytest` → the test pool (default 12)
+- `uv run … pyright` / `pre-commit` → the typecheck pool (default 4)
+- anything else (`uv sync`, `uv --version`, `uv run python -c 1`) → **passes
+  straight through and takes no slot**
+
+Three details are load-bearing:
+
+- The shim resolves the *real* `uv` with its own directory stripped from `PATH`
+  first, so it can never resolve to itself.
+- The slot fd is made inheritable before `execv`. Python opens files
+  `O_CLOEXEC` by default, so without that the `flock` is released the instant the
+  real `uv` starts — and the pool silently admits everybody.
+- The shim `exec`s rather than forks, so there is no window in which the slot is
+  held but the real `uv` is not yet running.
+
+Admission applies to the **engine only**. The gate and the per-operator hooks
+keep the manager's environment: a gate that quietly queued behind a lane's test
+slots would stall the merge path.
+
+Slots live under `~/.agent-fleet/admission/slots/<pool>/slot.<i>`, so they are
+**shared across operators** by default. They are flock-based, which means the
+kernel releases them however a holder exits, including `SIGKILL` — a crashed
+lane cannot leak a slot.
+
+---
+
+## The gate worktree lock
+
+`agent_fleet/gate/gitops.py` serializes worktree `add`, `remove` and `prune`
+per repository, under
+`~/.agent-fleet/admission/locks/worktree-<slug>.lock`.
+
+`git worktree add` registers a directory under `.git/worktrees` and only then
+populates it. A concurrent `prune` — which is what removing an already-gone
+worktree does — deletes that registration, and the in-flight `add` dies with:
+
+```
+fatal: could not open '.git/worktrees/<name>/locked' for writing: No such file or directory
+```
+
+Reproduced at roughly one failure per 40 single-shot adds against concurrent
+pruners, and it loses a sibling gate's worktree outright. The lock covers all
+three operations *together*: locking only `add` would still let one gate's prune
+run while another's add is mid-flight, which is the actual corruption.
+
+The lock is keyed on the repo's `origin` slug, so two checkouts of the same
+repository share one lock. It is re-entrant per thread (`prepare_worktree` calls
+`remove_worktree`), and it **degrades to running unlocked** if the lock file
+cannot be created — a gate that cannot take a lock is still better than a gate
+that refuses to run.
+
+Every call site in `gate/pipeline.py` goes through `prepare_worktree` /
+`remove_worktree`, so it inherits the lock with no change there.
+
+---
+
 ## Module map
 
 | Module | Responsibility |
@@ -278,7 +465,10 @@ whose head started with that word, find none, and loop.
 | `memcap.py` | the memory cap and targeted-test scoping |
 | `fences.py` | the standing fences carried into every prompt |
 | `runner.py` | the orchestration, in the order above |
-| `cli.py` | `lane run`, `lanes status`, `lanes stop` |
+| `cli.py` | `lane run`, `lanes status`, `lanes stop`, `dispatch QUEUE.jsonl` |
+| `dispatch.py` | durable queue dispatch: scheduling, state, restart safety |
+| `pressure.py` | CPU PSI, the throttle that replaced load average |
+| `admission.py` | the generated `uv` shim and the shared slot pools |
 
 ---
 
