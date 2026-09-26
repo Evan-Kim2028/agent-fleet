@@ -201,6 +201,42 @@ def changed_test_files(worktree: Path, base_branch: str) -> list[str]:
     return out
 
 
+def deleted_test_paths(worktree: Path, base_branch: str) -> list[str]:
+    """Repo-relative ``test_*.py`` paths the PR removed.
+
+    :func:`changed_test_files` cannot report these: it keeps only the paths that
+    still exist, so a PR whose change is a deletion has an empty step0 set, no
+    run happens, and there is no failure to record. The approval tier built on
+    step0 then rests on a green run of nothing, so the removal has to be
+    readable on its own.
+    """
+    diff = _run_git(
+        worktree,
+        "diff",
+        "--diff-filter=D",
+        "--name-only",
+        f"{resolve_diff_base(worktree, base_branch)}...HEAD",
+        check=False,
+    )
+    return [line.strip() for line in diff.splitlines() if is_test_file(line.strip())]
+
+
+#: Suite-level test configuration: not a ``test_*.py``, so never step0-runnable,
+#: and the file pytest reads before it collects anything. Skipped, xfailed or
+#: turned off wholesale, it decides what the suite even executes.
+_TEST_CONFIG_RE = re.compile(r"(^|/)conftest\.py$|(^|/)(pytest\.ini|tox\.ini|setup\.cfg)$")
+
+
+def is_test_config(path: str) -> bool:
+    """Whether *path* is suite-level test configuration rather than a test."""
+    return _TEST_CONFIG_RE.search(path) is not None
+
+
+def changed_test_config_paths(worktree: Path, base_branch: str) -> list[str]:
+    """Changed suite-level test-config paths, whatever the gate's test selector says."""
+    return [path for path in changed_paths(worktree, base_branch) if is_test_config(path)]
+
+
 # ---------------------------------------------------------------------------
 # Review tiering: how much review a diff is worth
 # ---------------------------------------------------------------------------

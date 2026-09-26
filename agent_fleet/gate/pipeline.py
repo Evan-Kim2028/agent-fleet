@@ -67,8 +67,10 @@ from agent_fleet.gate.gitops import (
     GateError,
     PullRequestRef,
     changed_paths,
+    changed_test_config_paths,
     changed_test_files,
     current_pr_head,
+    deleted_test_paths,
     diff_line_stats,
     fetch_base,
     has_approval_line,
@@ -771,7 +773,7 @@ class GatePipeline:
         is what lets the caller log which files justified the tier without
         re-running the same git call.
 
-        Every precondition is a refusal, and the last two matter most:
+        Every precondition is a refusal, and they all matter:
 
         - ``tier0: false`` turns the tier off for a repo that wants it off.
         - a step0 that could not run raised before reaching here, but the check
@@ -781,6 +783,9 @@ class GatePipeline:
           changes is exactly backwards.
         - an empty changed-file list refuses, so a git failure can never read as
           "docs/tests only, therefore approved".
+        - an :meth:`tier0_evidence_gap` refuses, because a PR that deleted the
+          tests it touched, or that only rewrote the suite config, has no step0
+          run for the approval to rest on.
         """
         if not self.config.tier0:
             return []
@@ -789,7 +794,50 @@ class GatePipeline:
             return []
         if self._step0_run is not None and self._step0_run.infra_error:
             return []
+        if self.tier0_evidence_gap(worktree):
+            return []
         return [] if self.evidence.confirmed else changed
+
+    def tier0_evidence_gap(self, worktree: Path) -> list[str]:
+        """Why tier 0's own evidence never ran, or ``[]`` when it did.
+
+        Tier 0 approves on one thing: the PR's own changed tests, green at head.
+        Two shapes of test-only PR have no such run, and both are approved for
+        that reason alone rather than in spite of it.
+
+        - a **deletion** — :func:`changed_test_files` keeps only tests that still
+          exist, so the one the PR removed drops out of the step0 set, the run
+          never happens, and the empty result is indistinguishable from a green
+          one. Removing the regression test that guards a data-loss bug then
+          merges with a ``PREMERGE-APPROVED`` line and no test ever executed,
+          while an edit to that same test is still sent to a model reviewer.
+        - **suite-level test config** — ``conftest.py`` and the rest are not
+          ``test_*.py``, so they are never step0-runnable, and they are what
+          decides what the suite collects. A skip, an xfail or a silenced
+          collection error is invisible to a run that never touched them.
+
+        Nothing else sizes either one as risky either: the non-test line count
+        excludes test paths, and no path matches a production-sensitive pattern.
+        So the gap has to be read off the diff itself. The guard is a refusal
+        *and* an escalation — see :meth:`run`, where a refusal alone would hand
+        the PR to a reviewer that, finding nothing, approves it on the very
+        evidence that never existed.
+        """
+        reasons: list[str] = []
+        deleted = deleted_test_paths(worktree, self.config.base_branch)
+        if deleted:
+            reasons.append(
+                f"the PR deletes {len(deleted)} of its own test file(s) "
+                f"({', '.join(deleted[:3])}), so step0 ran none of them: "
+                "removing a test removes the evidence that approves it"
+            )
+        config_paths = changed_test_config_paths(worktree, self.config.base_branch)
+        if config_paths:
+            reasons.append(
+                f"the PR changes suite-level test config ({', '.join(config_paths[:3])}), "
+                "which is never a step0 test: what the suite collects is not evidence"
+            )
+        return reasons
 
     @staticmethod
     def tier0_tier(changed: list[str]) -> ReviewTier:
@@ -1494,6 +1542,19 @@ class GatePipeline:
                 sha = ref.head_sha
                 outcome = GateOutcome.APPROVED
                 return self._finish(outcome, sha, reasons, ref)
+
+            # Tier 0's evidence is a green run of the PR's own changed tests.
+            # A PR that deletes them, or that only rewrites the suite config
+            # that decides what runs, has no such run — so its approval would
+            # rest on a green run of nothing. Refusing tier 0 is not enough
+            # here: that hands the PR to a lens, and a lens with nothing to
+            # report is exactly the "no blockers, therefore approved" verdict
+            # this refuses. Review is what the tier was skipping, so the run
+            # has to end as the escalation it is.
+            evidence_gap = self.tier0_evidence_gap(worktree)
+            if evidence_gap:
+                self._log("gate.tier0.gap", reasons=evidence_gap)
+                return self._finish(GateOutcome.NEEDS_ESCALATION, "", evidence_gap, ref)
 
             tier = self.review_tier(worktree)
             self._log("gate.tier", **tier_fields(tier))

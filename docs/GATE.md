@@ -204,6 +204,14 @@ all load-bearing:
   red PR because its tests are the only thing it changes is exactly backwards.
 - An empty changed-file list refuses, so a git failure can never read as
   "docs/tests only, therefore approved".
+- A PR that **deletes its own tests** refuses, and a PR that changes
+  suite-level test config (`conftest.py`, `pytest.ini`, `tox.ini`, `setup.cfg`)
+  refuses. Neither shape has a step0 run to approve on: the selector keeps only
+  tests that still exist, so a deleted one leaves step0 with nothing to run, and
+  suite config is not a `test_*.py` at all. Both escalate rather than falling
+  through to a lens — a reviewer with nothing to report would approve the PR on
+  the very evidence that never ran. Note the non-test line count excludes test
+  paths, so neither shape is caught by diff size either.
 
 **Tier 1 vs tier 4** is the size-and-sensitivity split. Size is counted in
 **non-test** changed lines (added + deleted): tests, fixtures, docs, `*.snap` and
