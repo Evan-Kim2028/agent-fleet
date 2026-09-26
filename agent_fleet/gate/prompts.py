@@ -135,6 +135,25 @@ def _blockers_only() -> str:
     )
 
 
+#: The single-reviewer focus, used when a diff is small and touches nothing
+#: production-sensitive. It names all four focuses explicitly rather than
+#: pointing at the configured lens names: one reviewer has no other reviewer to
+#: cover what it skips, so a bare "review everything" is the failure mode the
+#: parallel lens set exists to avoid.
+ALL_FOCUS_LENS = "all"
+ALL_FOCUS = (
+    "Four focuses, check every one: (1) CORRECTNESS: logic errors, wrong results, "
+    "broken edge cases, error handling, concurrency/race bugs, regressions of "
+    "existing behaviour. (2) CONTRACT: public API/MCP/schema contract breaks, "
+    "response shape, params, docs/OpenAPI drift vs behaviour, backwards "
+    "compatibility, missing tests for promised behaviour. (3) PRODSAFETY: data "
+    "loss, destructive writes, unbounded memory/CPU on the VPS, missing "
+    "locks/atomicity, unsafe migrations, hot-path performance regressions, "
+    "secrets exposure. (4) SPEC: required items from the task specification below "
+    "missing or implemented differently from what was asked."
+)
+
+
 def find_prompt(
     *,
     lens: str,

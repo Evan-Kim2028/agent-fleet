@@ -1,0 +1,15 @@
+PR #122 is open. Everything verified: 39 new tests, 471 gate tests, ruff and ty clean.
+
+**What I ported** — the reference bash gate's tiering, as configuration in `agent_fleet/gate/`:
+
+- **tier 0** (`GatePipeline.tier0_eligible`): docs/tests/fixtures-only PRs are approved on evidence alone — step0 green at head plus the merged-tree `gate recheck` every approval already depends on. Four refusals, each with a test: `tier0: false`, a step0 that couldn't run, an empty changed-file list (a git failure must never read as "docs only"), and any confirmed blocker — a red PR is never approved because tests are all it changes.
+- **tier 1 vs 4** (`GatePipeline.review_tier`): non-test changed lines via `git diff --numstat`, excluding tests/fixtures/docs/`*.snap`/`*.json`; over `big_lines`, or any production-sensitive path, keeps the full lens set. Otherwise one reviewer running `ALL_FOCUS`, which spells out all four focuses rather than saying "review everything".
+- **Logging**: one `gate.tier` event with tier, lens set, line count, risky paths, and `review tier: N (non-test diff X lines, Y production-sensitive files)`.
+- **Config**: `gate.tier0`, `gate.big_lines`, `gate.prodsensitive_paths` in the dataclass, `examples/fleet.gate.yaml`, and `docs/GATE.md`.
+
+Two judgement calls worth flagging:
+
+1. **`test_*.py` catches non-test files.** The reference grep treats `src/test_helpers.py` as a test, so tier 0 would approve a PR touching it. I kept the port faithful — it matches `is_test_file`, which step0 already uses, so the two never disagree — and pinned the behaviour in a test rather than silently tightening it.
+2. **Tier 0 has no inline merged-tree run.** The reference bash calls `mergedcheck` before approving; the Python gate's equivalent (`run_gate_recheck`) is a separate operator-invoked command. Rather than add that plumbing and blow the size budget, tier 0 relies on the existing recheck, as every other approval does. I worded the docs and PR body to say that plainly instead of claiming the check is inline. If you want tier 0 to run it itself, that's a clean follow-up.
+
+Also caught a footgun while testing: an explicit empty lens tuple is falsy, so `lenses or default` would have dispatched the full set where tier 0 meant none. `find()` now treats only `None` as "unspecified".
