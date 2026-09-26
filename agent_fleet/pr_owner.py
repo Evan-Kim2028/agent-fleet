@@ -511,6 +511,69 @@ def _failing_from_output(stdout: str, test_ids: Sequence[str]) -> list[str]:
     return failing
 
 
+def _git_capture(argv: Sequence[str], *, cwd: Path, timeout: int = 120) -> tuple[int, str]:
+    """Run a git command, returning ``(returncode, output)``.
+
+    Output is stdout and stderr together: for a rebase or a push, the part that
+    says what went wrong is on stderr, and a caller reporting the failure wants
+    both. A command that times out or cannot be started is a non-zero result
+    with the reason as its output, never an exception, so every caller of this
+    round's own git commands reaches the same reporting path.
+    """
+    try:
+        result = subprocess.run(
+            ["git", *argv],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return 1, f"git {' '.join(argv)} did not complete: {exc}"
+    return result.returncode, f"{result.stdout or ''}\n{result.stderr or ''}".strip()
+
+
+def _push_head(worktree: Path, branch: str, *, timeout: int = 300) -> tuple[bool, str]:
+    """Push the worktree head to *branch*, rebasing once if that is not enough.
+
+    The round's work is committed in the worktree before this runs, so every
+    failure mode here has to be reported rather than raised: a hang must not
+    leave the round unrecorded, and a non-fast-forward must not throw away a
+    round whose fixes are already committed. A commit landing on the branch
+    between the checkout and the push is ordinary — another lane, or the gate
+    fix loop — and re-basing on top of it lands this round's work instead of
+    discarding it.
+    """
+    code, out = _git_capture(["push", "origin", f"HEAD:{branch}"], cwd=worktree, timeout=timeout)
+    if code == 0:
+        return True, ""
+    if "non-fast-forward" not in out and "fetch first" not in out:
+        return False, f"push failed: {out[-500:]}"
+
+    fetched, fetch_out = _git_capture(["fetch", "origin", branch], cwd=worktree, timeout=timeout)
+    if fetched != 0:
+        return (
+            False,
+            f"push rejected as non-fast-forward, and the refetch failed: {fetch_out[-500:]}",
+        )
+    rebased, rebase_out = _git_capture(
+        ["rebase", f"origin/{branch}"], cwd=worktree, timeout=timeout
+    )
+    if rebased != 0:
+        _git_capture(["rebase", "--abort"], cwd=worktree, timeout=timeout)
+        return (
+            False,
+            f"push rejected as non-fast-forward, and the rebase failed: {rebase_out[-500:]}",
+        )
+    retry_code, retry_out = _git_capture(
+        ["push", "origin", f"HEAD:{branch}"], cwd=worktree, timeout=timeout
+    )
+    if retry_code == 0:
+        return True, ""
+    return False, f"push failed after rebasing onto origin/{branch}: {retry_out[-500:]}"
+
+
 def own_round(
     *,
     repo_path: Path,
@@ -605,17 +668,7 @@ def own_round(
     push_detail = ""
     pushed = moved
     if moved:
-        push = subprocess.run(
-            ["git", "push", "origin", f"HEAD:{branch}"],
-            cwd=worktree,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=300,
-        )
-        if push.returncode != 0:
-            pushed = False
-            push_detail = f"push failed: {push.stderr.strip()[-500:]}"
+        pushed, push_detail = _push_head(worktree, branch)
 
     tests = _run_tests(worktree, test_command, failing)
     # Appended before returning in every case: a round that pushed nothing, or
@@ -704,8 +757,12 @@ def run_own(
     Returns ``{"error": ...}`` rather than raising, so the CLI can print one
     message and exit 1 without catching anything. That covers the whole round,
     not just its input parsing: a bad PR number or an unauthenticated ``gh``
-    raises inside :func:`pr_head`, and a worktree held by another live lane
-    raises out of the checkout.
+    raises inside :func:`pr_head`, a worktree held by another live lane raises
+    out of the checkout, and a branch deleted on the remote or an auth failure
+    makes the checkout's ``git fetch`` raise
+    :class:`subprocess.CalledProcessError`. The git commands the round runs
+    itself are handled in :func:`_push_head` rather than here, so a failed or
+    timed-out push is recorded as a round outcome instead of ending the round.
     """
     from agent_fleet.repo import resolve_repo_config
 
@@ -732,7 +789,13 @@ def run_own(
             task_spec=task_spec,
             repo=repo,
         ).to_dict()
-    except (RuntimeError, OSError, ValueError, json.JSONDecodeError) as exc:
+    except (
+        RuntimeError,
+        OSError,
+        ValueError,
+        json.JSONDecodeError,
+        subprocess.SubprocessError,
+    ) as exc:
         return {"error": str(exc)}
 
 

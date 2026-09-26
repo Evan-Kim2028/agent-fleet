@@ -627,8 +627,126 @@ def test_run_own_reports_a_repo_without_fleet_config_instead_of_asserting(
     assert ".agent-fleet.yaml" in result["error"]
 
 
+def test_run_own_reports_a_failed_git_fetch_instead_of_raising(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A branch deleted on the remote, or an auth failure, makes the checkout's
+    ``git fetch`` raise ``CalledProcessError``. The documented contract is one
+    ``{"error": ...}`` the CLI prints and exits 1 on, not a traceback."""
+
+    def _fetch_fails(*_args: object, **_kwargs: object) -> Path:
+        raise subprocess.CalledProcessError(128, ["git", "fetch", "origin", "fb/pr-owner"])
+
+    (repo / ".agent-fleet.yaml").write_text("test_command: true\n", encoding="utf-8")
+    _fake_head(monkeypatch, repo)
+    monkeypatch.setattr("agent_fleet.pr_loop.github_ops.checkout_branch", _fetch_fails)
+    result = run_own(repo_path=repo, pr_number=7)
+    assert "fetch" in result["error"]
+
+
 def test_read_task_spec_with_no_file_is_empty() -> None:
     assert read_task_spec(None) == ""
+
+
+# ---------------------------------------------------------------------------
+# _push_head — the round's own git calls report, they never raise
+# ---------------------------------------------------------------------------
+
+
+def test_push_head_rebases_and_retries_a_non_fast_forward(worktree: Path, tmp_path: Path) -> None:
+    """A commit landing on the branch between the checkout and the push is
+    ordinary — another lane, or the gate fix loop. A plain fetch+rebase lands
+    this round's work; recording it as a dead round throws fixes away."""
+    from agent_fleet.pr_owner import _push_head
+
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True, check=True)
+    _git(worktree, "remote", "add", "origin", str(remote))
+    _git(worktree, "push", "-u", "origin", "fb/pr-owner")
+
+    (worktree / "ours.txt").write_text("ours\n", encoding="utf-8")
+    _git(worktree, "add", "ours.txt")
+    _git(worktree, "commit", "-m", "ours")
+
+    other = tmp_path / "other"
+    subprocess.run(
+        ["git", "clone", "-b", "fb/pr-owner", str(remote), str(other)],
+        capture_output=True,
+        check=True,
+    )
+    _git(other, "config", "user.email", "o@example.com")
+    _git(other, "config", "user.name", "O")
+    (other / "theirs.txt").write_text("theirs\n", encoding="utf-8")
+    _git(other, "add", "theirs.txt")
+    _git(other, "commit", "-m", "theirs")
+    _git(other, "push", "origin", "fb/pr-owner")
+
+    pushed, detail = _push_head(worktree, "fb/pr-owner")
+    assert pushed is True, detail
+    remote_files = subprocess.run(
+        ["git", "ls-tree", "--name-only", "-r", "fb/pr-owner"],
+        cwd=remote,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "ours.txt" in remote_files
+    assert "theirs.txt" in remote_files
+
+
+def test_push_head_reports_a_timeout_instead_of_raising(
+    worktree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The engine has already committed by the time the push runs, so a hung
+    remote must not end the round with a traceback and no recorded outcome."""
+    from agent_fleet.pr_owner import _push_head
+
+    def _hang(argv: list[str], **_kwargs: object):  # noqa: ANN202
+        raise subprocess.TimeoutExpired(argv, 300)
+
+    monkeypatch.setattr("agent_fleet.pr_owner.subprocess.run", _hang)
+    pushed, detail = _push_head(worktree, "fb/pr-owner")
+    assert pushed is False
+    assert "did not complete" in detail
+
+
+def test_a_timed_out_push_is_recorded_as_the_rounds_outcome(
+    repo: Path, worktree: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The round has to end with a written-down outcome either way: the next
+    round reads the notes, so a push that never completed cannot be a traceback."""
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True, check=True)
+    _git(worktree, "remote", "add", "origin", str(remote))
+    _git(worktree, "push", "-u", "origin", "fb/pr-owner")
+    _fake_head(monkeypatch, repo)
+
+    class _CommittingBackend(_CapturingBackend):
+        def run(self, prompt, **kwargs):  # noqa: ANN001, ANN003, ANN202
+            result = super().run(prompt, **kwargs)
+            (worktree / "new.txt").write_text("fix\n", encoding="utf-8")
+            _git(worktree, "add", "new.txt")
+            _git(worktree, "commit", "-m", "fix")
+            return result
+
+    real_run = subprocess.run
+
+    def _hang_on_push(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if argv[:3] == ["git", "push", "origin"]:
+            raise subprocess.TimeoutExpired(argv, 300)
+        return real_run(argv, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("agent_fleet.pr_owner.subprocess.run", _hang_on_push)
+    result = own_round(
+        repo_path=repo,
+        pr_number=7,
+        findings=[_finding()],
+        backend=_CommittingBackend(),
+        worktree=worktree,
+    )
+    assert result.pushed is False
+    assert "did not complete" in result.detail
+    assert "## Round" in read_notes(repo, 7)
 
 
 # ---------------------------------------------------------------------------
