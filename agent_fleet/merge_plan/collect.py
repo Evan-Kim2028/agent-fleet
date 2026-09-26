@@ -229,18 +229,20 @@ class GitHubClient:
         return [d for d in data if isinstance(d, dict)] if isinstance(data, list) else []
 
 
-def _scoped_client(client: GitHubClient, repo_path: Path | None) -> GitHubClient:
+def _scoped_client[ScopedT](client: ScopedT, repo_path: Path | None) -> ScopedT:
     """*client* bound to *repo_path*, so gh resolves the PR in that repository.
 
     A client that cannot re-scope itself (an injected test double) is used as
-    given, which keeps the collector usable without a per-repo checkout.
+    given, which keeps the collector usable without a per-repo checkout.  The
+    return type follows the input, so both the concrete client and a structural
+    stand-in survive the call.
     """
     if repo_path is None:
         return client
     for_repo = getattr(client, "for_repo", None)
     if callable(for_repo):
         scoped = for_repo(repo_path)
-        if isinstance(scoped, GitHubClient):
+        if isinstance(scoped, type(client)):
             return scoped
     return client
 
