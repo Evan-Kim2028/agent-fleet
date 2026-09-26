@@ -361,12 +361,73 @@ class LockRegistry:
                 out.append(record)
         return out
 
+    def _intent_edges(self, records: dict[str, LockRecord]) -> dict[str, LockRecord]:
+        """The ``waiting`` records, keyed by the component that is blocked.
+
+        Keyed by holder because that is what a cycle is made of: a hop names a
+        lock, the lock's record names a holder, and the next hop is that
+        holder's own intent. Keying by record name instead could only ever look
+        for a component's intent under a lock's name, which is never where one
+        is written, so no cycle would ever be closed.
+        """
+        edges: dict[str, LockRecord] = {}
+        for record in records.values():
+            if record.state != STATE_WAITING or not record.waiting_for:
+                continue
+            edges.setdefault(record.holder, record)
+        return edges
+
+    def _follow(
+        self,
+        start: LockRecord,
+        records: dict[str, LockRecord],
+        edges: dict[str, LockRecord],
+    ) -> list[LockRecord] | None:
+        """The alternating locks and intents a cycle is made of, or None.
+
+        A cycle is ``A holds L1 and waits for L2; L2 is held by B; B waits for
+        L1``. Every hop is therefore a pair -- the record for the lock whose
+        holder we are chasing, then that holder's own intent -- and the walk is
+        only a cycle when it closes on a component already in the path.
+
+        What resolves a hop is the record named by ``waiting_for`` and the
+        holder it names, not the record's own ``state``: a lock's record says
+        ``held`` once it is taken, but a lock that two components want before
+        either has it is still a lock with a holder, and refusing to walk
+        through it would hide the cycle that produced the contention.
+
+        Two things it deliberately refuses to call a cycle: a single
+        ``[waiting, held]`` pair, which is an ordinary queue behind a live
+        holder, and a walk that dead-ends. Neither is mutual, and reporting one
+        would have the watchdog release a lock a healthy component is still
+        working inside.
+        """
+        path: list[LockRecord] = [start]
+        seen_holders = {start.holder}
+        current = start
+        while current.waiting_for:
+            target = records.get(current.waiting_for)
+            if target is None or not target.holder:
+                return None
+            if target.holder in seen_holders:
+                return [*path, target]
+            nxt = edges.get(target.holder)
+            if nxt is None:
+                return None
+            path.extend((target, nxt))
+            seen_holders.add(nxt.holder)
+            current = nxt
+        return None
+
     def deadlocks(self, *, now: float, threshold_minutes: float) -> list[list[LockRecord]]:
         """Cycles among waiters, each edge older than the threshold.
 
         A cycle is ``A waits for L, L held by B, B waits for M, M held by A``.
         Returned oldest-edge-first so the remediation releases the *older* claim,
-        which is the one whose owner is least likely to be making progress.
+        which is the one whose owner is least likely to be making progress. The
+        registry is read in filename order, which says nothing about age, so the
+        sort is applied here; without it the freshest cycle is remediated first
+        and the claim that has been stuck for hours keeps its lock.
 
         The walk reads the whole registry, so it sees both kinds of record: a
         waiter's intent (state ``waiting``) and the holder's claim on the lock
@@ -375,47 +436,30 @@ class LockRegistry:
         """
         records = self.all_records()
         threshold_s = max(0.0, threshold_minutes) * 60.0
-        cycles: list[list[LockRecord]] = []
+        edges = self._intent_edges(records)
+        cycles: list[tuple[float, list[LockRecord]]] = []
         seen: set[tuple[str, ...]] = set()
 
-        for start in records.values():
-            if start.state != STATE_WAITING or not start.waiting_for:
+        for start in edges.values():
+            path = self._follow(start, records, edges)
+            if path is None:
                 continue
-            path: list[LockRecord] = [start]
-            visited = {start.name}
-            current = start
-            while current.waiting_for:
-                target = records.get(current.waiting_for)
-                if target is None:
-                    break
-                if target.state == STATE_HELD and target.holder == current.holder:
-                    break
-                if target.name in visited:
-                    break
-                path.append(target)
-                visited.add(target.name)
-                nxt = records.get(target.holder) if target.holder else None
-                if nxt is None or nxt.state != STATE_WAITING or not nxt.waiting_for:
-                    break
-                current = nxt
-            if len(path) < 2:
-                continue
-            oldest_edge_age = min(
-                (
-                    records[r.waiting_for].age_s(now)
-                    for r in path
-                    if r.waiting_for and r.waiting_for in records
-                ),
-                default=0.0,
-            )
-            if oldest_edge_age < threshold_s:
+            # An edge is as old as the waiter blocked on it, which is how long
+            # the queue has been stuck. The lock record's own age says how long
+            # its owner has had it, which is a different fact: a healthy
+            # long-running hold is not a stuck wait, and reading it that way is
+            # what let an ordinary queue be reported as a deadlock.
+            oldest = min((r.age_s(now) for r in path if r.state == STATE_WAITING), default=0.0)
+            if oldest < threshold_s:
                 continue
             key = tuple(sorted(r.name for r in path))
             if key in seen:
                 continue
             seen.add(key)
-            cycles.append(path)
-        return cycles
+            cycles.append((oldest, path))
+
+        cycles.sort(key=lambda pair: pair[0], reverse=True)
+        return [path for _age, path in cycles]
 
 
 __all__ = [

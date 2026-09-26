@@ -21,9 +21,15 @@ the truth, never the truth itself.
 than racing. This is checked before anything is spawned.
 
 **Restart on exit, with backoff that remembers.** Backoff is exponential from
-``backoff_initial_s`` to ``backoff_max_s`` and is computed from the monotonic
-clock, so an NTP correction cannot shorten it. A component that exits cleanly
-is restarted promptly; one that crashes backs off.
+``backoff_initial_s`` to ``backoff_max_s`` and is computed from the restart
+count, so it is a pure function of state rather than an accumulator: a
+supervisor that restarts mid-schedule resumes the same schedule instead of
+resetting to zero and hammering a component that is failing immediately. A
+component that exits cleanly is restarted promptly; one that crashes backs off.
+The wait is recorded on the child as a deadline and is honoured by a later
+tick, never by a sleep inside one — a tick that slept would stall every other
+component, the watchdog and ``serve status`` behind the slowest one for as long
+as ``backoff_max_s``.
 
 **Crash-loop detection counts crashes, not exits.** A component restarted three
 times on purpose — by the no-progress rule, or because its command template
@@ -162,12 +168,13 @@ class ChildState:
     last_exit_cause: str = ""
     last_exit_code: int | None = None
     #: Cause of the exit still owed an accounting decision, set when the
-    #: supervisor stops a component and cleared by :meth:`_reap`. It defaults
-    #: to *exit*: nobody asked for the first start, so an unasked-for exit is a
-    #: crash and must consume the budget. Only an explicit
-    #: ``stop_component``/``request_restart`` sets ``requested``, and that is the
-    #: only thing that buys a component a free restart.
-    pending_cause: str = CAUSE_EXIT
+    #: supervisor stops a component and cleared by :meth:`_reap`. A fresh
+    #: component owes nothing, so it starts at *requested*: nobody has asked for
+    #: its first start, and :meth:`_reap` reads a non-zero exit as a crash
+    #: whatever was pending, while a clean one nobody asked for is also a crash
+    #: -- the silently-broken shape the detector exists to find. Only an exit
+    #: that is both clean and asked-for is free.
+    pending_cause: str = CAUSE_REQUESTED
     #: When the backoff owed by the last exit is due. A restart waits for the
     #: deadline rather than sleeping inside :meth:`Supervisor.tick`.
     restart_due: float = 0.0
@@ -377,6 +384,7 @@ class Supervisor:
 
         log_path = component_log_path(self.operator, name)
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        handle: Any = None
         try:
             handle = log_path.open("ab")
             proc = subprocess.Popen(
@@ -390,7 +398,9 @@ class Supervisor:
                 start_new_session=True,
             )
         except (OSError, ValueError) as exc:
-            handle.close()
+            if handle is not None:
+                with suppress(OSError):
+                    handle.close()
             # A component that cannot even be exec'd is the worst kind of crash
             # and has to run on the same budget as any other, or the ensure-
             # running loop retries a doomed spawn once per tick forever.
@@ -547,11 +557,20 @@ class Supervisor:
         return min(ceiling, initial * (2**attempts))
 
     def tick(self) -> None:
-        """One supervisor pass: reap, wait out the backoff, restart, keep the rest up."""
+        """One supervisor pass: reap, schedule the owed restarts, keep the rest up.
+
+        A backoff is a deadline on the state, never a sleep here. Paying it
+        inside the tick would park the whole loop behind one failing component
+        -- no other component reaped, no watchdog rule run, ``serve status``
+        stale -- for as long as ``backoff_max_s``, which is exactly the "one
+        crash-looping component takes the fleet down" outcome the module exists
+        to prevent. A stop signal arriving mid-tick would not be honoured for
+        the length of the wait either, so ``systemctl stop`` would SIGKILL the
+        supervisor with its children still running.
+        """
         if self._stopping:
             return
         for name, code in self._reap():
-            spec = self.config.component(name)
             state = self.children.get(name)
             if state is None:
                 continue
@@ -570,34 +589,54 @@ class Supervisor:
                 },
             )
 
-            # The wait is taken on the injected clock, so the backoff schedule is
-            # driven by a test in microseconds and by real seconds in production.
-            # A zero delay is still paid: it costs nothing and keeps a clean exit
-            # promptly restarted, as the module promises.
-            delay = self.backoff_for(name)
-            if delay > 0:
-                state.state = STATE_BACKOFF
-                state.restart_due = self.clock.time() + delay
-                state.message = f"restarting in {delay:.0f}s (cause {state.last_exit_cause})"
-            self.clock.sleep(delay)
-
-            # A stop that arrived during the wait wins: spawning here would leave
-            # a child that nothing is left to reap.
-            if self._stopping:
-                return
+            # A component whose exit spent the crash budget is not restarted at
+            # all. It is judged before any deadline is set, so the operator is
+            # told which one broke instead of watching it fail on a schedule.
             if self._crash_looping(name):
-                self._enter_crash_loop(name, spec)
-            else:
-                self._restart(name)
+                self._enter_crash_loop(name, self.config.component(name))
+                continue
+
+            self._defer_restart(name, self.backoff_for(name))
 
         self._ensure_running()
+
+    def _defer_restart(self, name: str, delay: float) -> None:
+        """Park *name* until *now* + *delay*, or until its deadline has passed.
+
+        An elapsed deadline means the wait is over and the restart is owed
+        immediately, which is why the comparison is ``<`` and not ``<=``: a
+        restored deadline that already passed must not buy another full backoff.
+        The zero-delay case is folded in rather than special-cased, so a clean
+        exit is restarted on the same path as a crash, just without a wait.
+        """
+        state = self.children.setdefault(name, ChildState(name=name))
+        now = self.clock.time()
+        due = now + max(0.0, delay)
+        if delay <= 0 or due <= state.restart_due:
+            self._restart(name)
+            return
+        state.state = STATE_BACKOFF
+        state.restart_due = due
+        state.message = f"restarting in {delay:.0f}s (cause {state.last_exit_cause})"
 
     def _ensure_running(self) -> None:
         """Start anything that is enabled, not crash-looping, and not ours.
 
         A component in its backoff is left alone until its deadline passes, so
         a failing component cannot be retried once per tick regardless of how
-        long its backoff is.
+        long its backoff is -- unless that deadline cannot be believed, which is
+        the one case the wait is given up on. ``restart_due`` is a wall-clock
+        epoch written by whichever supervisor last saved the state, and an NTP
+        step backwards, a host resuming behind, or a serve directory restored
+        from a backup all leave it reading hours away from a wait that was
+        seconds. The component would then be parked for good: no tick moves the
+        deadline, and ``serve status`` reports ``backoff`` with no process.
+
+        So a deadline further out than the backoff the component actually owes is
+        treated as unreadable rather than as a promise, and the component is
+        started. The correction never lengthens a wait and never restores a
+        finished one: a deadline already in the past starts the component, which
+        is the other half of the same repair.
         """
         now = self.clock.time()
         for spec in self.config.enabled_components:
@@ -610,7 +649,17 @@ class Supervisor:
                 continue
             if state.state == STATE_CRASH_LOOPING or self._is_ours(name):
                 continue
-            if state.restart_due > now:
+            owed = self.backoff_for(name)
+            remaining = state.restart_due - now
+            if remaining > owed:
+                # The deadline cannot be believed, so the restart is owed now and
+                # the deadline is rewritten to what this clock says is left of
+                # it. Starting first is the point: a component parked on a
+                # deadline it can never reach is one no tick will ever recover.
+                state.restart_due = now + owed
+                self._restart(name)
+                continue
+            if remaining > 0:
                 continue
             self._restart(name)
 
@@ -733,9 +782,14 @@ class Supervisor:
         spawned its own workers takes them with it instead of leaving them
         running against a serve that has gone away. A component this supervisor
         *adopted* is stopped too: re-attaching to a process and then abandoning
-        it is how a component outlives every serve that ever watched it. The
-        grace is spent once and the KILL goes to whatever survived it, so
-        nothing depends on a child's cooperation to be stopped.
+        it is how a component outlives every serve that ever watched it.
+
+        The operator's ``shutdown_grace_s`` is the grace each component is given
+        here, and it has to be granted in the loop that sends the TERM. The KILL
+        is the escalation that follows it, not a substitute for it: a component
+        whose SIGTERM handler flushes state, releases a worktree or closes a
+        lane needs that window to finish, and a group SIGKILL fired on the
+        restart grace destroys the work while leaving nothing to signal.
         """
         self._stopping = True
         grace = max(0.1, self.config.shutdown_grace_s)
@@ -744,7 +798,7 @@ class Supervisor:
         for name in reversed(names):
             state = self.children.get(name)
             identities[name] = self._adopted.get(name) or (state.identity if state else None)
-            self.stop_component(name, grace_s=RESTART_KILL_GRACE_S)
+            self.stop_component(name, grace_s=grace)
         for name in reversed(names):
             self._await_gone(self._procs.get(name), identities[name], grace_s=grace)
             state = self.children.get(name)
