@@ -377,13 +377,22 @@ class EscalationRouter:
         return decision
 
     def pending(self) -> list[Decision]:
-        """Open decisions — everything raised and not yet resolved."""
-        resolutions: dict[str, str] = {}
-        decisions: list[Decision] = []
+        """Open decisions — raised, and not resolved since they were raised.
+
+        Resolutions are applied *after* the whole log is read rather than as
+        the lines are scanned. A single forward pass gets this wrong in a way
+        that matters: a decision raised after a resolution for the same item
+        would look open, and one raised before it would look resolved, even
+        though the item is plainly still waiting. A human who resolved a fence,
+        watched the lane come back, watched it fence again, and then checked
+        the queue would be told their answer had already been given.
+        """
         try:
             text = self.decisions_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return []
+        open_by_id: dict[str, Decision] = {}
+        order: list[str] = []
         for line in text.splitlines():
             line = line.strip()
             if not line:
@@ -394,13 +403,20 @@ class EscalationRouter:
                 continue
             if not isinstance(raw, dict):
                 continue
+            item_id = raw.get("item_id")
+            if not isinstance(item_id, str) or not item_id:
+                continue
             if raw.get("resolved"):
-                resolutions[str(raw.get("item_id"))] = str(raw.get("resolution") or "")
+                if open_by_id.pop(item_id, None) is not None and item_id in order:
+                    order.remove(item_id)
                 continue
             decision = Decision.from_dict(raw)
-            if decision is not None and decision.item_id not in resolutions:
-                decisions.append(decision)
-        return decisions
+            if decision is None:
+                continue
+            if item_id not in open_by_id:
+                order.append(item_id)
+            open_by_id[item_id] = decision
+        return [open_by_id[item_id] for item_id in order if item_id in open_by_id]
 
     def resolve(self, item_id: str, resolution: str) -> bool:
         """Append a resolution, closing the decision. Returns False if unknown."""

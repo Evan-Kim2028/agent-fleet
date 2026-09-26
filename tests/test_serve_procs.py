@@ -277,6 +277,31 @@ def test_terminate_signals_a_real_owned_child() -> None:
         pytest.fail("TERM did not terminate the child")
 
 
+IGNORE_TERM = (
+    "import signal, sys, time\n"
+    # The signal handler is installed before the READY line, so a parent that
+    # waits for READY cannot deliver SIGTERM into the window before Python
+    # starts ignoring it. Without the handshake this test is a coin flip.
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+    "sys.stdout.write('ready\\n')\n"
+    "sys.stdout.flush()\n"
+    "time.sleep(30)\n"
+)
+
+
+def _spawn_ignoring_term() -> subprocess.Popen[bytes]:
+    return subprocess.Popen([sys.executable, "-c", IGNORE_TERM], stdout=subprocess.PIPE)
+
+
+def _await_ready(proc: subprocess.Popen[bytes]) -> None:
+    assert proc.stdout is not None
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        if proc.stdout.readline().strip() == b"ready":
+            return
+    pytest.fail("child never reported ready")
+
+
 def test_terminate_does_not_wait_and_does_not_escalate() -> None:
     """TERM only, in one call — the grace is the caller's per-tick budget.
 
@@ -284,13 +309,8 @@ def test_terminate_does_not_wait_and_does_not_escalate() -> None:
     pid, and a watchdog that blocks falls behind and trips its own no-progress
     rule.
     """
-    proc = subprocess.Popen(
-        [
-            sys.executable,
-            "-c",
-            "import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\ntime.sleep(30)",
-        ]
-    )
+    proc = _spawn_ignoring_term()
+    _await_ready(proc)
     identity = ProcIdentity(pid=proc.pid, starttime=starttime_fingerprint(proc.pid))
     try:
         started = time.monotonic()
@@ -305,13 +325,8 @@ def test_terminate_does_not_wait_and_does_not_escalate() -> None:
 
 
 def test_escalate_kill_terminates_a_child_that_ignores_term() -> None:
-    proc = subprocess.Popen(
-        [
-            sys.executable,
-            "-c",
-            "import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\ntime.sleep(30)",
-        ]
-    )
+    proc = _spawn_ignoring_term()
+    _await_ready(proc)
     identity = ProcIdentity(pid=proc.pid, starttime=starttime_fingerprint(proc.pid))
     try:
         assert terminate(identity).signalled is True

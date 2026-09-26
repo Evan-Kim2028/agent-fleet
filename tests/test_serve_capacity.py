@@ -17,7 +17,6 @@ from __future__ import annotations
 import ast
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import pytest
 
@@ -44,9 +43,6 @@ from agent_fleet.serve.pressure import (
     read_pressure,
     resolve_cgroup,
 )
-
-if TYPE_CHECKING:
-    from collections.abc import Iterator
 
 SERVE_DIR = Path(__file__).resolve().parent.parent / "agent_fleet" / "serve"
 
@@ -511,5 +507,6 @@ def test_every_watermark_ordering_is_validated() -> None:
 
 
 @pytest.fixture(autouse=True)
-def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep every test's capacity file inside its own tmp_path."""
     monkeypatch.setenv("AGENT_FLEET_HOME", str(tmp_path / "home"))

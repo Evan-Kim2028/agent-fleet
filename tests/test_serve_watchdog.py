@@ -73,14 +73,23 @@ def _dead_proc_root(tmp_path: Path) -> Path:
     return root
 
 
-def _supervisor_with_child(command: str = SLEEPER, **component: object) -> Supervisor:
+def _supervisor_with_child(
+    command: str = SLEEPER,
+    *,
+    stage_timeout_minutes: dict[str, int] | None = None,
+    stage_retry_budget: int = 1,
+) -> Supervisor:
     """A supervisor with one live child, and the same config the watchdog gets.
 
     The watchdog reads its restart budget from ``supervisor.config``, so the
     supervisor must be built with the config under test — otherwise the test
     silently asserts against the default budget instead of the one it set.
     """
-    config = _watchdog_config(command=command, **component)
+    config = _watchdog_config(
+        command=command,
+        stage_timeout_minutes=stage_timeout_minutes,
+        stage_retry_budget=stage_retry_budget,
+    )
     sup = Supervisor("op", config, clock=FakeClock())
     sup.start("dispatcher")
     return sup
@@ -210,7 +219,9 @@ def test_release_reports_the_previous_record() -> None:
     registry.mark_held("a", holder="x", pid=1, starttime=1, now=0.0)
     previous = registry.release("a", note="done")
     assert previous is not None and previous.holder == "x"
-    assert registry.read("a").note == "done"  # type: ignore[union-attr]
+    after = registry.read("a")
+    assert after is not None
+    assert after.note == "done"
 
 
 def test_release_of_an_unknown_lock_is_none() -> None:

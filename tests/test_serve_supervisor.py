@@ -27,6 +27,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -35,6 +36,10 @@ from agent_fleet.serve.config import ComponentSpec, ServeConfig, WatchdogConfig
 from agent_fleet.serve.events import read_serve_events
 from agent_fleet.serve.paths import component_pid_path, ensure_serve_dir
 from agent_fleet.serve.procs import starttime_fingerprint
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 from agent_fleet.serve.supervisor import (
     STATE_BACKOFF,
     STATE_CRASH_LOOPING,
@@ -97,10 +102,10 @@ def _supervisor(config: ServeConfig, clock: FakeClock) -> Supervisor:
     return Supervisor("op", config, clock=clock)
 
 
-def _wait_until(predicate: object, timeout: float = 5.0) -> bool:
+def _wait_until(predicate: Callable[[], bool], timeout: float = 5.0) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if predicate():  # type: ignore[operator]
+        if predicate():
             return True
         time.sleep(0.02)
     return False
@@ -308,11 +313,10 @@ def test_a_crashing_child_is_restarted_with_backoff() -> None:
     try:
         sup.start("dispatcher")
         first = sup.children["dispatcher"].pid
+        assert first is not None
         # tick() is what reaps and restarts; drive it until the pid changes.
-        assert _wait_until(
-            lambda: _tick_until_restarted(sup, first),
-            timeout=5.0,
-        ), "a crashing child must come back"
+        restarted = _wait_until(lambda: _tick_until_restarted(sup, first))
+        assert restarted, "a crashing child must come back"
         assert sup.children["dispatcher"].restarts >= 2
         assert clock.slept, "a restart must wait, not hot-loop"
         assert clock.slept[0] == pytest.approx(2.0)
