@@ -92,7 +92,7 @@ from agent_fleet.gate.pytest_runner import (
     to_package_path,
     to_repo_node_id,
 )
-from agent_fleet.gate.structured import StructuredCallError, call_structured
+from agent_fleet.gate.structured import TIMEOUT_EXIT, StructuredCallError, call_structured
 from agent_fleet.model_policy import ModelPolicy, ModelPolicyError, parse_model_policy
 from agent_fleet.slots import (
     PoolConfig,
@@ -605,6 +605,16 @@ class GatePipeline:
             self._log(f"gate.{role}.failed", subject=subject, kind=exc.kind, error=str(exc)[:200])
             if exc.kind == "invalid" and invalid_ok:
                 return None
+            if exc.kind == "timeout":
+                # Out of budget is a dead agent, not an answer. Naming the stage
+                # and how long it actually ran is the difference between an
+                # escalation an operator can act on and one they have to guess at.
+                budget = int(kwargs.get("timeout_s") or 0)
+                raise GateInfraError(
+                    f"fail-closed: {role} stage for {subject} timed out after "
+                    f"{getattr(exc, 'duration_s', 0.0):.0f}s "
+                    f"(stage budget {budget}s); no verdict was produced"
+                ) from exc
             raise GateInfraError(
                 f"fail-closed: {role} agent for {subject} gave no usable result "
                 f"({exc.kind}): {str(exc)[:160]}"
@@ -685,7 +695,7 @@ class GatePipeline:
                 prompt=prompt,
                 model=model,
                 cwd=worktree,
-                timeout_s=self.config.agent_timeout_s,
+                timeout_s=self.config.stage_timeout(ROLE_LENS),
                 validate=validate_findings,
                 list_key="findings",
             )
@@ -751,7 +761,7 @@ class GatePipeline:
             prompt=prompt,
             model=model,
             cwd=worktree,
-            timeout_s=self.config.agent_timeout_s,
+            timeout_s=self.config.stage_timeout(ROLE_VERIFIER),
             validate=validate_verify,
         )
         if answer is None:
@@ -821,7 +831,7 @@ class GatePipeline:
             prompt=prompt,
             model=model,
             cwd=worktree,
-            timeout_s=self.config.judge_timeout_s,
+            timeout_s=self.config.stage_timeout(ROLE_JUDGE),
             validate=validate_judge,
         )
         report = JudgeReport.from_dict(answer.data)
@@ -871,7 +881,7 @@ class GatePipeline:
                 prompt=prompt,
                 model=model,
                 cwd=worktree,
-                timeout_s=self.config.judge_timeout_s,
+                timeout_s=self.config.stage_timeout(ROLE_JUDGE),
                 validate=validate_recheck,
             )
         except StructuredCallError as exc:
@@ -1083,7 +1093,13 @@ class GatePipeline:
         return current, self._metrics(metric, ref, outcome=outcome, rounds=rounds, head=current)
 
     def _run_fixer(self, prompt: str, *, model: str, cwd: Path) -> None:
-        """One fix round. Free-form output (it commits and pushes), so no schema."""
+        """One fix round. Free-form output (it commits and pushes), so no schema.
+
+        A fixer that runs out of budget is a dead stage, not a failed attempt:
+        without this it was logged and the round carried on to find "no push",
+        which reports the wrong cause and invites a retry of the same budget.
+        """
+        budget = self.config.stage_timeout(ROLE_FIX)
         guard = (
             self.agent_pool.slot(timeout_s=None)
             if self.agent_pool is not None
@@ -1093,20 +1109,32 @@ class GatePipeline:
             result = self.backend.run(
                 prompt,
                 max_tokens=0,
-                timeout_s=self.config.agent_timeout_s,
+                timeout_s=budget,
                 cwd=cwd,
                 model=model,
                 mode="agent",
             )
+        timed_out = result.exit_code == TIMEOUT_EXIT
         self.recorder.record(
             stage="fix",
             model=model,
             raw=result.stdout or "",
             parsed=None,
-            parse_error="" if result.exit_code == 0 else (result.stderr or "")[:400],
+            parse_error=(
+                f"fix stage timed out after {budget}s"
+                if timed_out
+                else ("" if result.exit_code == 0 else (result.stderr or "")[:400])
+            ),
             exit_code=result.exit_code,
             duration_s=getattr(result, "duration_s", 0.0),
         )
+        if timed_out:
+            self._log("gate.fix.timeout", budget_s=budget)
+            raise GateInfraError(
+                f"fail-closed: fix stage timed out after "
+                f"{getattr(result, 'duration_s', 0.0):.0f}s (stage budget {budget}s); "
+                f"no verdict was produced"
+            )
         if result.exit_code != 0:
             self._log("gate.fix.failed", error=(result.stderr or "")[:200])
 

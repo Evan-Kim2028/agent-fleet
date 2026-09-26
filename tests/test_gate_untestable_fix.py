@@ -81,7 +81,10 @@ def _run(
         enable_judge=False,
         enable_fix=enable_fix,
         max_fix_rounds=max_fix_rounds,
-        agent_timeout_s=5,
+        lens_timeout_s=5,
+        verify_timeout_s=5,
+        judge_timeout_s=5,
+        fix_timeout_s=5,
         test_timeout_s=5,
     )
     prompts: list[str] = []

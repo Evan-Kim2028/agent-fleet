@@ -89,7 +89,10 @@ def _pipeline(
         enable_judge=False,
         enable_fix=enable_fix,
         max_fix_rounds=4,
-        agent_timeout_s=10,
+        lens_timeout_s=10,
+        verify_timeout_s=10,
+        judge_timeout_s=10,
+        fix_timeout_s=10,
         test_timeout_s=10,
     )
     return GatePipeline(

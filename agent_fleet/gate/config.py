@@ -44,8 +44,10 @@ DEFAULT_LENS_ORDER: tuple[str, ...] = ("correctness", "contract", "prodsafety", 
 _SCALARS: tuple[str, ...] = (
     "max_findings",
     "max_candidates",
-    "agent_timeout_s",
+    "lens_timeout_s",
+    "verify_timeout_s",
     "judge_timeout_s",
+    "fix_timeout_s",
     "test_timeout_s",
     "max_parallel_lenses",
     "max_parallel_verifiers",
@@ -53,6 +55,11 @@ _SCALARS: tuple[str, ...] = (
     "agent_slots",
     "test_slots",
 )
+
+#: Stages the legacy ``agent_timeout_s`` used to drive, in the order the fixer
+#: needed it most. The judge is absent because that key never applied to it.
+_LEGACY_TIMEOUT_KEY = "agent_timeout_s"
+_LEGACY_TIMEOUT_TARGETS: tuple[str, ...] = ("lens_timeout_s", "verify_timeout_s", "fix_timeout_s")
 
 _STRINGS: tuple[str, ...] = (
     "backend",
@@ -86,8 +93,14 @@ class GateConfig:
     push_branch: str | None = None
     enable_fix: bool = True
     enable_judge: bool = True
-    agent_timeout_s: int = 1800
-    judge_timeout_s: int = 7200
+    #: Per-stage agent budgets. A single shared number made the fix budget
+    #: unusable (commit + push + a test suite never fits in a review's budget)
+    #: while letting a doomed review burn a full stage of wall clock. 40 min for
+    #: the reviewing stages, 90 for the one that writes and tests code.
+    lens_timeout_s: int = 2400
+    verify_timeout_s: int = 2400
+    judge_timeout_s: int = 2400
+    fix_timeout_s: int = 5400
     test_timeout_s: int = 900
     max_parallel_lenses: int = 8
     max_parallel_verifiers: int = 6
@@ -106,6 +119,42 @@ class GateConfig:
     def focus_for(self, lens: str) -> str:
         """Reviewer focus text for *lens* (custom or default)."""
         return self.lens_focus.get(lens) or DEFAULT_LENSES.get(lens) or lens
+
+    def stage_timeout(self, role: str) -> int:
+        """The agent budget for *role* (``lens``/``verify``/``judge``/``fix``).
+
+        Taking the role name rather than the field name keeps the call sites in
+        the pipeline reading as the pipeline's own vocabulary. An unmapped role
+        gets the reviewing budget rather than raising: too short a stage for a
+        role added later is recoverable, a crash mid-run is not.
+        """
+        field = f"{role}_timeout_s"
+        value = getattr(self, field, None)
+        return int(value) if isinstance(value, int) else self.lens_timeout_s
+
+
+def _apply_legacy_timeout(section: dict[str, Any], kwargs: dict[str, Any]) -> None:
+    """Honour the pre-per-stage ``agent_timeout_s`` without letting it go stale.
+
+    A fleet.yaml written before per-stage budgets sets one number for every
+    stage that was not the judge. Dropping the key silently would hand those
+    repos the new defaults and quietly change how long their runs take, so the
+    value is still applied — to the stages it actually drove — and a warning
+    names the replacement. An explicit per-stage key always wins, so the
+    deprecation can be resolved one stage at a time.
+    """
+    if _LEGACY_TIMEOUT_KEY not in section:
+        return
+    legacy = int(section[_LEGACY_TIMEOUT_KEY])
+    applied = [key for key in _LEGACY_TIMEOUT_TARGETS if key not in section and legacy > 0]
+    for key in applied:
+        kwargs[key] = legacy
+    logger.warning(
+        "gate: %s is deprecated; set %s instead (applied to: %s)",
+        _LEGACY_TIMEOUT_KEY,
+        " / ".join(_LEGACY_TIMEOUT_TARGETS),
+        ", ".join(applied) or "nothing (per-stage keys already set)",
+    )
 
 
 def load_gate_config(raw: dict[str, Any] | None) -> GateConfig | None:
@@ -143,6 +192,7 @@ def load_gate_config(raw: dict[str, Any] | None) -> GateConfig | None:
     }
     for key in _SCALARS:
         kwargs[key] = int(section.get(key, getattr(defaults, key)))
+    _apply_legacy_timeout(section, kwargs)
     for key in _STRINGS:
         kwargs[key] = str(section.get(key) or getattr(defaults, key))
     for key in _OPTIONAL_STRINGS:
