@@ -4,7 +4,7 @@
 set -uo pipefail
 F=${FLEET_OPS_HOME:-$HOME/fleet/ops}
 R=$F/runs
-S=${FLEET_OPS_HOME:-$HOME/fleet/ops}/..
+H=${FLEET_HOME:-$HOME/fleet}; W=${FLEET_WT_ROOT:-$H/wt}
 name=$1; cwd=$2; pf=$3; turns=${4:-300}
 # Resolve the prompt BEFORE cd "$cwd": a relative path silently became an empty task and the agent replied
 # "what would you like me to work on?" (4 sweep agents lost, 2026-09-26 07:39).
@@ -49,7 +49,7 @@ done
 pfx=$(mktemp "$R/.prompt.$name.XXXX"); { echo "$KILLRULE"; echo; echo "$pre"; echo; cat "$pf"; case "$name" in rev*|sweep*) ;; *) printf '\n\n===== STANDING FENCES (always apply; a task instruction never overrides a fence unless it names the owner approval explicitly) =====\n'; cat "$R/../prompts/fences.md";; esac; } > "$pfx"
 systemd-run --user --scope -q --slice=agents.slice -p MemoryMax=8G -p MemorySwapMax=0 timeout $cap cmd -p -m "$model" --yolo -t --skip-onboarding --no-auto-update \
   --output-format json --max-turns "$turns" --tools-all \
-  --add-dir $S/audit --add-dir $S/wt/silph --add-dir $S/wt/lor --add-dir $S/fb/prompts --add-dir $S/fb/runs \
+  --add-dir $H/audit --add-dir $W/silph --add-dir $W/lor --add-dir $F/prompts --add-dir $F/runs \
   < "$pfx" > "$R/$name.jsonl" 2> "$R/$name.err"
 rc=$?
 # Turn cap is not a failure of the work: continue once in place with double the budget (the worktree keeps its state).
@@ -58,7 +58,7 @@ if grep -q "Reached maximum conversation turns" "$R/$name.err" 2>/dev/null && [ 
   { echo "CONTINUATION: your previous run on this task hit its turn cap. Inspect the current state first (git status/diff, files you created) and FINISH the task from there; do not start over."; echo; cat "$pfx"; } > "$pfx.c"
   systemd-run --user --scope -q --slice=agents.slice -p MemoryMax=8G -p MemorySwapMax=0 timeout $cap cmd -p -m "$model" --yolo -t --skip-onboarding --no-auto-update \
     --output-format json --max-turns "$((turns*2))" --tools-all \
-    --add-dir $S/audit --add-dir $S/wt/silph --add-dir $S/wt/lor --add-dir $S/fb/prompts --add-dir $S/fb/runs \
+    --add-dir $H/audit --add-dir $W/silph --add-dir $W/lor --add-dir $F/prompts --add-dir $F/runs \
     < "$pfx.c" > "$R/$name.jsonl" 2> "$R/$name.err"
   rc=$?; rm -f "$pfx.c"
 fi
@@ -69,7 +69,7 @@ for _nr in 1 2; do
   $F/wait_net.sh
   systemd-run --user --scope -q --slice=agents.slice -p MemoryMax=8G -p MemorySwapMax=0 timeout $cap cmd -p -m "$model" --yolo -t --skip-onboarding --no-auto-update \
     --output-format json --max-turns "$turns" --tools-all \
-    --add-dir $S/audit --add-dir $S/wt/silph --add-dir $S/wt/lor --add-dir $S/fb/prompts --add-dir $S/fb/runs \
+    --add-dir $H/audit --add-dir $W/silph --add-dir $W/lor --add-dir $F/prompts --add-dir $F/runs \
     < "$pfx" > "$R/$name.jsonl" 2> "$R/$name.err"
   rc=$?
 done

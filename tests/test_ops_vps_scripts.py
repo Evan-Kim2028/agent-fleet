@@ -16,7 +16,22 @@ import pytest
 
 OPS_VPS = Path(__file__).resolve().parent.parent / "ops" / "vps"
 
-SHELL_FILES = sorted(p for p in OPS_VPS.rglob("*") if p.suffix == ".sh" and p.is_file())
+BASH_SHEBANGS = ("#!/usr/bin/env bash", "#!/bin/bash")
+
+
+def _is_shell_script(path: Path) -> bool:
+    """A shell script is anything `bash` can be pointed at: a `*.sh` file, or an extensionless
+    script that opens with a bash shebang. The fleet's core scripts -- both `fbgate` copies,
+    `fbrun`, `fbgate_remote`, `orun`, `fbagent` and the admission shims -- carry no extension,
+    so a `.sh`-only selection never syntax-checks them and a broken copy merges green.
+    """
+    if path.suffix == ".sh":
+        return True
+    text = path.read_text(errors="replace")
+    return text.startswith(BASH_SHEBANGS)
+
+
+SHELL_FILES = sorted(p for p in OPS_VPS.rglob("*") if p.is_file() and _is_shell_script(p))
 PYTHON_FILES = sorted(p for p in OPS_VPS.rglob("*.py") if p.is_file())
 ALL_FILES = sorted(p for p in OPS_VPS.rglob("*") if p.is_file())
 
