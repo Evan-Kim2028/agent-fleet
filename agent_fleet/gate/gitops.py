@@ -8,21 +8,48 @@ commit — and the operator's own working tree is never dirtied by a run.
 Every worktree is created with ``--detach`` at an explicit sha. A gate run that
 crashed mid-round leaves a directory behind but no branch to half-update, and
 the next run removes and recreates it.
+
+**Worktree mutation is serialized per repository** (:func:`worktree_lock`).
+``git worktree add`` and ``git worktree prune`` are not safe to run concurrently
+against one repository: prune deletes the administrative entries under
+``.git/worktrees`` for directories it cannot find, including a sibling gate's
+worktree that ``add`` has registered but not yet finished populating. The
+observed failure was ``fatal: could not write new index file`` /
+``could not open '.git/worktrees/<name>/locked' for writing: No such file or
+directory``, which loses the sibling's worktree outright. The lock covers add,
+remove, *and* prune together — locking only ``add`` would still let one gate's
+prune run while another's add is mid-flight, which is the actual corruption.
 """
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
+import hashlib
 import json
 import logging
 import re
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path  # noqa: TC003 - used at runtime (path.exists/is_file)
 
 from agent_fleet.gate.pytest_runner import is_test_file
 
 logger = logging.getLogger(__name__)
+
+#: Per-repo re-entrancy, tracked per **thread**. ``prepare_worktree`` calls
+#: ``remove_worktree``, which would otherwise self-deadlock on the same flock
+#: (flock is per open file description, and a second ``open`` is a *different*
+#: description, so it blocks). A plain process-wide counter would not do: it
+#: cannot tell threads apart, so a second thread would assume the lock was
+#: already held and walk straight into a concurrent worktree add.
+_DEPTH = threading.local()
+
+#: One mutex per repo key, so threads inside one gate process queue.
+_MUTEX_LOCK = threading.Lock()
+_MUTEXES: dict[str, threading.Lock] = {}
 
 
 class GateError(RuntimeError):
@@ -117,21 +144,123 @@ def current_pr_head(repo: Path, pr_number: int) -> str:
     return resolve_pull_request(repo, pr_number).head_sha
 
 
+def _repo_key(repo: Path) -> str:
+    """A stable per-repository lock name: its ``origin`` slug when it has one.
+
+    The slug is read from the repo's own remote so two checkouts of the same
+    repository share one lock — a gate worktree under ``~/Documents`` and one
+    under ``/srv`` are the same repository and must not race. A repo with no
+    ``origin`` (or a local-only test fixture) falls back to a hash of its
+    resolved path.
+    """
+    try:
+        url = _run_git(repo, "config", "--get", "remote.origin.url", check=False).strip()
+    except GateError:  # pragma: no cover - _run_git only raises on launch failure
+        url = ""
+    if url:
+        slug = re.sub(r"[^A-Za-z0-9]+", "-", url).strip("-").lower()
+        if slug:
+            return slug[-80:]
+    resolved = str(repo.expanduser().resolve())
+    digest = hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:16]
+    return f"path-{digest}"
+
+
+def _lock_dir() -> Path:
+    from agent_fleet.fleet_ops.admission import AdmissionConfig
+
+    return AdmissionConfig().locks_dir()
+
+
+def _mutex_for(key: str) -> threading.Lock:
+    """The per-key thread mutex, created on first use."""
+    with _MUTEX_LOCK:
+        mutex = _MUTEXES.get(key)
+        if mutex is None:
+            mutex = threading.Lock()
+            _MUTEXES[key] = mutex
+        return mutex
+
+
+@contextlib.contextmanager
+def worktree_lock(repo: Path):  # noqa: ANN201
+    """Serialize worktree add/remove/prune for *repo* across processes and threads.
+
+    Two layers, and both are needed:
+
+    * a **per-key ``threading.Lock``**, so threads inside one gate process queue
+      instead of racing;
+    * an **``flock``** on a file, so separate *processes* queue — which is the
+      case that actually lost worktrees, since gates are separate processes.
+
+    Re-entrancy is tracked per thread, because ``prepare_worktree`` calls
+    ``remove_worktree`` and that nesting must not deadlock against itself.
+
+    Degrades to running unlocked if the lock file cannot be created: a gate that
+    cannot take a lock is still better than a gate that refuses to run.
+    """
+    key = _repo_key(repo)
+    held = getattr(_DEPTH, "held", None)
+    if held is not None and key in held:
+        # Re-entrant call on this very thread: the lock is already ours.
+        held[key] += 1
+        try:
+            yield
+        finally:
+            held[key] -= 1
+        return
+
+    mutex = _mutex_for(key)
+    with mutex:
+        held = getattr(_DEPTH, "held", None)
+        if held is None:
+            held = {}
+            _DEPTH.held = held
+        held[key] = 1
+        handle = None
+        try:
+            try:
+                directory = _lock_dir()
+                directory.mkdir(parents=True, exist_ok=True)
+                handle = (directory / f"worktree-{key}.lock").open("a+")
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            except OSError as exc:
+                logger.warning(
+                    "worktree lock unavailable for %s (%s); proceeding without it", repo, exc
+                )
+                if handle is not None:
+                    with contextlib.suppress(OSError):
+                        handle.close()
+                    handle = None
+            try:
+                yield
+            finally:
+                if handle is not None:
+                    with contextlib.suppress(OSError):
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                    with contextlib.suppress(OSError):
+                        handle.close()
+        finally:
+            held.pop(key, None)
+
+
 def prepare_worktree(repo: Path, path: Path, sha: str) -> Path:
     """Create a detached worktree at *sha*, replacing any previous one at *path*."""
-    remove_worktree(repo, path)
-    repo.parent.mkdir(parents=True, exist_ok=True)
-    _run_git(repo, "worktree", "add", "--detach", str(path), sha)
+    with worktree_lock(repo):
+        remove_worktree(repo, path)
+        repo.parent.mkdir(parents=True, exist_ok=True)
+        _run_git(repo, "worktree", "add", "--detach", str(path), sha)
     return path
 
 
 def remove_worktree(repo: Path, path: Path) -> None:
     """Remove a gate worktree. Never raises — a missing worktree is fine."""
-    if not path.exists():
-        _run_git(repo, "worktree", "prune", check=False)
-        return
-    _run_git(repo, "worktree", "remove", "--force", str(path), check=False)
-    shutil.rmtree(path, ignore_errors=True)
+    with worktree_lock(repo):
+        if not path.exists():
+            _run_git(repo, "worktree", "prune", check=False)
+            return
+        _run_git(repo, "worktree", "remove", "--force", str(path), check=False)
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def fetch_base(repo: Path, base_branch: str) -> None:
