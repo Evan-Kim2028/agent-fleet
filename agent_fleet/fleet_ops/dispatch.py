@@ -742,14 +742,26 @@ def blocked_lanes(state: DispatchState, *, cluster_order: Sequence[str] = ()) ->
     known = known_dependency_keys(state)
     order = order_lanes(state, cluster_order=cluster_order)
     settled: set[str] = set()
+    # The keys a settled lane releases. This is deliberately *not* `settled`:
+    # a lane releases its ref as well as its name, and `depends_on` is written
+    # in either spelling. Seeding the fixpoint with bare lane names resolved
+    # only name-named dependencies, so a plain serial chain written in refs
+    # (`b depends_on ["R-0"]`) reported every lane past the first as a permanent
+    # deadlock -- a false positive on a queue with no cycle in it, which the
+    # caller then acts on destructively. Mirroring `known_dependency_keys` is
+    # what makes the two spellings mean the same thing here as everywhere else.
+    resolved: set[str] = set(released)
     progressed = True
     while progressed:
         progressed = False
         for lane in order:
             if lane.lane in settled or lane.lane not in queued:
                 continue
-            if dependency_satisfied(lane, released | settled, known):
+            if dependency_satisfied(lane, resolved, known):
                 settled.add(lane.lane)
+                resolved.add(lane.lane)
+                if lane.item is not None:
+                    resolved.add(lane.item.ref or lane.lane)
                 progressed = True
     return [lane.lane for lane in order if lane.lane not in settled]
 
@@ -1065,6 +1077,14 @@ def classify_status(status_line: str, *, exit_code: int | None = None) -> str:
     return "escalated (no approval line)"
 
 
+#: The characters JSON allows between a value and the next token.
+_JSON_WHITESPACE = frozenset(" \t\n\r")
+
+#: The characters that can follow a ``{`` in a JSON *object*: a quoted key, or
+#: the closing brace of the empty object. Anything else cannot open one.
+_JSON_OBJECT_TAIL = frozenset('"}')
+
+
 def _iter_json_objects(text: str) -> Iterator[Any]:
     """Yield each JSON value in *text*, pretty-printed or not.
 
@@ -1072,6 +1092,25 @@ def _iter_json_objects(text: str) -> Iterator[Any]:
     reader cannot see it, and ``indent=2`` puts every key on its own line. Text
     that is not JSON at all (a lane's ordinary log chatter) simply decodes to
     nothing, so the reader never has to guess which lines are payload.
+
+    Finding the values is cheap; *proving a brace is not one* is not. A failed
+    ``raw_decode`` raises ``JSONDecodeError``, and building that exception
+    costs ``O(pos)`` -- it re-walks the document from the start counting
+    newlines to fill in ``lineno``/``colno``. The old loop advanced one brace and
+    retried, so a lane log was rescanned once per ``{`` in it, and each of those
+    scans also built a full-document error. An agent that echoes its own code is
+    mostly braces, and :func:`_reap_lane` hands this the whole lane log, so every
+    reaped lane burned seconds of CPU on the dispatch loop's own thread. Lane
+    logs are never rotated or capped, so the cost grew with how verbose the
+    agents were, and with ``--max-lanes`` children the stalls serialised.
+
+    So the decoder is only called where a JSON object can actually start. After
+    a ``{`` comes either a quoted key or the ``}`` of an empty object, so any
+    brace followed by a newline, a comment, a statement keyword -- i.e. nearly
+    every brace in a log that is not payload -- is rejected by one character
+    test and never reaches the decoder. The decoder still decides what is
+    valid: this is a filter, not a parser, so no text that is genuinely JSON can
+    be skipped.
     """
     decoder = json.JSONDecoder()
     index = 0
@@ -1080,6 +1119,12 @@ def _iter_json_objects(text: str) -> Iterator[Any]:
         brace = text.find("{", index)
         if brace < 0:
             return
+        probe = brace + 1
+        while probe < length and text[probe] in _JSON_WHITESPACE:
+            probe += 1
+        if probe >= length or text[probe] not in _JSON_OBJECT_TAIL:
+            index = brace + 1
+            continue
         try:
             value, end = decoder.raw_decode(text, brace)
         except ValueError:
