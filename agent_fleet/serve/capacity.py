@@ -45,6 +45,7 @@ from agent_fleet.serve.clock import SystemClock
 from agent_fleet.serve.paths import capacity_path, write_json_atomic
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from agent_fleet.serve.clock import Clock
@@ -164,6 +165,17 @@ def classify(reading: PressureReading, marks: Watermarks) -> tuple[str, str]:
     while the CPUs are stalled. Severity is the max of the two, never the first.
     """
     if not reading.ok:
+        # A cgroup v1 host has no per-cgroup PSI but does have a working memory
+        # signal, which `read_pressure` reports with ok=False. Discarding a
+        # measurement we actually have is how a v1 box that is 95% full ends up
+        # indistinguishable from one whose cgroup is missing.
+        ratio = reading.memory_ratio
+        if reading.hierarchy == "v1" and ratio is not None:
+            mem_signal, mem_reason = _resource_signal(
+                ratio * 100.0, marks.memory_low * 100.0, marks.memory_high * 100.0, "%", "memory"
+            )
+            if mem_signal != SIGNAL_EASE:
+                return mem_signal, f"cgroup v1: {mem_reason}"
         return SIGNAL_UNKNOWN, reading.error or "pressure source unavailable"
 
     cpu_signal, cpu_reason = _resource_signal(
@@ -229,14 +241,32 @@ class CapacityController:
     # ------------------------------------------------------------ state carry-over
 
     def restore(self, payload: dict[str, Any]) -> None:
-        """Adopt targets from a previous supervisor's capacity file."""
+        """Adopt targets from a previous supervisor's capacity file.
+
+        Every field is treated as untrusted: a value of the wrong type is
+        ignored rather than coerced, so a truncated or hand-edited file falls
+        back to the current targets instead of taking supervisor startup down
+        with a ``ValueError``. Adopted numbers go through the same
+        ``clamp_*`` calls every adjustment path uses — the bounds are hard, and
+        a stale file written under a wider ceiling is exactly the value
+        ``write_capacity`` would otherwise publish to the dispatcher and gate.
+        """
         targets = payload.get("targets")
         if isinstance(targets, dict):
+            bounds = self.policy.bounds
             self.targets = CapacityTargets(
-                max_lanes=int(targets.get("max_lanes", self.targets.max_lanes)),
-                max_gates=int(targets.get("max_gates", self.targets.max_gates)),
-                test_pool=int(targets.get("test_pool", self.targets.test_pool)),
-                typecheck_pool=int(targets.get("typecheck_pool", self.targets.typecheck_pool)),
+                max_lanes=self._restored_int(
+                    targets, "max_lanes", self.targets.max_lanes, bounds.clamp_lanes
+                ),
+                max_gates=self._restored_int(
+                    targets, "max_gates", self.targets.max_gates, bounds.clamp_gates
+                ),
+                test_pool=self._restored_int(
+                    targets, "test_pool", self.targets.test_pool, bounds.clamp_tests
+                ),
+                typecheck_pool=self._restored_int(
+                    targets, "typecheck_pool", self.targets.typecheck_pool, bounds.clamp_typecheck
+                ),
                 signal=str(targets.get("signal", self.targets.signal)),
                 reason=str(targets.get("reason", self.targets.reason)),
                 gates_priority=bool(targets.get("gates_priority", False)),
@@ -248,6 +278,19 @@ class CapacityController:
         saturated = payload.get("saturated")
         if isinstance(saturated, bool):
             self.saturated = saturated
+
+    @staticmethod
+    def _restored_int(
+        targets: dict[str, Any],
+        key: str,
+        fallback: int,
+        clamp: Callable[[int], int],
+    ) -> int:
+        """A persisted target field: ignore a non-integer, clamp a valid one."""
+        value = targets.get(key)
+        if not isinstance(value, int) or isinstance(value, bool):
+            return fallback
+        return clamp(value)
 
     # -------------------------------------------------------------------- signals
 
