@@ -959,6 +959,8 @@ def cmd_gate(args: argparse.Namespace) -> int:
     from agent_fleet.gate.pipeline import run_gate
     from agent_fleet.model_policy import ModelPolicyError
 
+    if getattr(args, "gate_command", None) == "recheck":
+        return cmd_gate_recheck(args)
     if getattr(args, "pr", None) is None:
         print("error: gate requires --pr <n> (or 'fleet gate metrics')", file=sys.stderr)
         return 2
@@ -967,6 +969,46 @@ def cmd_gate(args: argparse.Namespace) -> int:
             repo_path=Path(getattr(args, "repo_path", None) or Path.cwd()),
             pr_number=int(args.pr),
             task_file=getattr(args, "task_file", None),
+            status_file=getattr(args, "status_file", None),
+            config_path=getattr(args, "config", None),
+            lane_slug=getattr(args, "lane_slug", None),
+        )
+    except ModelPolicyError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if result.status_line:
+        print(result.status_line, file=sys.stderr)
+    print(json.dumps(result.to_dict(), indent=2, default=str))
+    return 0 if result.approved else 1
+
+
+def cmd_gate_recheck(args: argparse.Namespace) -> int:
+    """Carry an approval across a patch-identical rebase.
+
+    Same contract as ``gate``: exit 0 only on APPROVED, the status line on
+    stderr, the JSON on stdout. Anything that is not an established
+    patch-identical, tested, previously-approved head exits 1 and says a full
+    gate is required — a recheck that cannot establish its verdict must not
+    produce one.
+    """
+    from agent_fleet.gate.pipeline import run_gate_recheck
+    from agent_fleet.model_policy import ModelPolicyError
+
+    if not getattr(args, "approved_sha", None):
+        print(
+            "error: gate recheck requires --approved-sha <sha> (the head the gate approved)",
+            file=sys.stderr,
+        )
+        return 2
+    if getattr(args, "pr", None) is None:
+        print("error: gate recheck requires --pr <n>", file=sys.stderr)
+        return 2
+    try:
+        result = run_gate_recheck(
+            repo_path=Path(getattr(args, "repo_path", None) or Path.cwd()),
+            pr_number=int(args.pr),
+            approved_sha=str(args.approved_sha),
+            head_sha=getattr(args, "head", None),
             status_file=getattr(args, "status_file", None),
             config_path=getattr(args, "config", None),
             lane_slug=getattr(args, "lane_slug", None),
@@ -1409,6 +1451,42 @@ def main(argv: list[str] | None = None) -> int:
         "--format", choices=("json", "table"), default="json", help="Output format"
     )
     gate_metrics_p.set_defaults(func=cmd_gate_metrics)
+
+    gate_recheck_p = gate_sub.add_parser(
+        "recheck",
+        help=(
+            "Carry a PREMERGE-APPROVED verdict across a patch-identical rebase "
+            "instead of paying for a full gate again"
+        ),
+    )
+    gate_recheck_p.add_argument(
+        "--approved-sha",
+        default=None,
+        help="The head sha the gate approved; must have a PREMERGE-APPROVED status line",
+    )
+    gate_recheck_p.add_argument(
+        "--head",
+        default=None,
+        help="The rebased head to approve (default: the PR's current head)",
+    )
+    gate_recheck_p.add_argument(
+        "--status-file",
+        default=None,
+        help="Status file holding the original PREMERGE-APPROVED line",
+    )
+    gate_recheck_p.add_argument(
+        "--lane-slug",
+        default=None,
+        help="Slug for gate test file names (default: the PR's head ref)",
+    )
+    # The gate-level --pr/--repo-path are parent options, which argparse only
+    # accepts before the subcommand. Re-declaring them here (same names, same
+    # defaults) means `gate recheck --pr 5 ...` works in the natural position.
+    gate_recheck_p.add_argument("--pr", type=int, default=None, help="PR number")
+    gate_recheck_p.add_argument(
+        "--repo-path", default=None, help="Path to the git repo holding the PR"
+    )
+    gate_recheck_p.set_defaults(func=cmd_gate_recheck, pr=None, approved_sha=None)
 
     self_p = sub.add_parser("self", help="Maintenance commands for agent-fleet itself")
     self_sub = self_p.add_subparsers(dest="self_command", required=True)

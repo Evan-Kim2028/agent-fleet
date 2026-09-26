@@ -44,7 +44,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from agent_fleet.backends import make_backend
 from agent_fleet.contracts.gate import (
@@ -68,6 +68,9 @@ from agent_fleet.gate.gitops import (
     changed_test_files,
     current_pr_head,
     fetch_base,
+    has_approval_line,
+    merge_base_into,
+    patch_id,
     prepare_worktree,
     remove_worktree,
     resolve_diff_base,
@@ -1138,6 +1141,113 @@ class GatePipeline:
         if result.exit_code != 0:
             self._log("gate.fix.failed", error=(result.stderr or "")[:200])
 
+    # -- approval carry-over ----------------------------------------------
+
+    def recheck_carry_over(
+        self,
+        *,
+        approved_sha: str,
+        head_sha: str,
+        status_file: Path,
+        test_run: TestRun,
+        test_files: list[str],
+    ) -> GateResult:
+        """Decide whether an approval survives a rebase onto a new head.
+
+        Four conditions, all required, because an approval carried onto the
+        wrong code is worse than no approval at all:
+
+        1. there is an ``approved_sha`` and it is a real commit,
+        2. the status file records a ``PREMERGE-APPROVED`` line for it,
+        3. the change's patch-id is unchanged (``test_gate_*`` files excluded —
+           they are gate evidence, not the PR's change, and a collision on one
+           is what routinely forced the rebase),
+        4. every test is green on the new head, with a run that actually
+           happened: an infra error is "we could not check", never a pass.
+
+        Any of them missing and the answer is a full gate. The approved sha is
+        never the sha emitted: the status line names the *new* head, since that
+        is the commit the automerge will actually take.
+        """
+        reasons: list[str] = []
+        approved = approved_sha.strip()
+        if not approved:
+            return self._carry_over_refusal(head_sha, "no approved sha given")
+        if not has_approval_line(status_file, approved):
+            return self._carry_over_refusal(
+                head_sha, f"no PREMERGE-APPROVED line for {approved[:9]}"
+            )
+
+        base = resolve_diff_base(self.repo, self.config.base_branch)
+        old_patch = patch_id(self.repo, approved, base)
+        new_patch = patch_id(self.repo, head_sha, base)
+        if not new_patch:
+            return self._carry_over_refusal(
+                head_sha, f"head {head_sha[:9]} is not a known commit in this repo"
+            )
+        if not old_patch:
+            return self._carry_over_refusal(
+                head_sha, f"approved sha {approved[:9]} is not a known commit in this repo"
+            )
+        if old_patch != new_patch:
+            return self._carry_over_refusal(head_sha, "change differs from the approved patch")
+
+        if test_run.infra_error:
+            return self._carry_over_refusal(
+                head_sha, f"tests could not run on the rebased head: {test_run.infra_error[:120]}"
+            )
+        if test_run.count:
+            reasons.append(
+                f"{test_run.count} test(s) fail on the rebased head: "
+                f"{', '.join(test_run.failing[:3])}"
+            )
+            return self._carry_over_refusal(head_sha, reasons[0])
+
+        reasons.append(
+            f"approval carried over from {approved[:9]}: patch-identical "
+            f"(patch-id {new_patch[:12]}, gate tests excluded) and all "
+            f"{len(test_files)} test(s) green on the rebased head"
+        )
+        return self._carry_over_approval(head_sha, reasons)
+
+    def _carry_over_refusal(self, head_sha: str, reason: str) -> GateResult:
+        """NEEDS_ESCALATION with the full gate named as what is required."""
+        message = f"full gate required: {reason}"
+        self._log("gate.recheck.refused", head=head_sha[:9], reason=reason)
+        return self._carry_over_result(GateOutcome.NEEDS_ESCALATION, "", [message])
+
+    def _carry_over_approval(self, head_sha: str, reasons: list[str]) -> GateResult:
+        self._log("gate.recheck.approved", head=head_sha[:9], reason=reasons[0][:160])
+        return self._carry_over_result(GateOutcome.APPROVED, head_sha, reasons)
+
+    def _carry_over_result(self, outcome: GateOutcome, sha: str, reasons: list[str]) -> GateResult:
+        line = status_line_for(outcome, sha, reasons)
+        if self.status_file is not None:
+            _write_status_line(self.status_file, line)
+        metric = gate_metrics.GateMetrics(
+            run_id=self.run_id,
+            repo=self.repo.name,
+            pr=self.pr_number,
+            start_sha=sha or self.run_id,
+            head_sha=sha,
+            outcome=(
+                gate_metrics.OUTCOME_CONVERGED if outcome is GateOutcome.APPROVED else "recheck"
+            ),
+            reasons=list(reasons),
+        )
+        # A carried approval is not a gate run. Marking it keeps the metrics
+        # table honest about how much review a given approval actually had.
+        metric.calls = [{"stage": "recheck", "lens": "carried-over", "exit_code": 0}]
+        metric.append_metrics()
+        return GateResult(
+            outcome=outcome,
+            sha=sha,
+            reasons=list(reasons),
+            metrics=metric,
+            status_line=line,
+            run_id=self.run_id,
+        )
+
     # -- metrics ---------------------------------------------------------
 
     def _metrics(
@@ -1527,6 +1637,88 @@ def run_gate(
     return pipeline.run()
 
 
+def run_gate_recheck(
+    *,
+    repo_path: Path,
+    pr_number: int,
+    approved_sha: str,
+    head_sha: str | None = None,
+    status_file: Path | None = None,
+    config_path: str | None = None,
+    gate_dir: Path | None = None,
+    run_id: str | None = None,
+    use_systemd: bool | None = None,
+    lane_slug: str | None = None,
+) -> GateResult:
+    """Decide whether the gate's approval for *approved_sha* still holds at *head_sha*.
+
+    The deterministic half only: the PR's own changed tests plus whatever gate
+    tests the archive still holds, run on the new head with the current base
+    merged in. No agent is dispatched — that is the point, since a rebase that
+    did not change the change should not cost a review.
+
+    Any failure along the way (a git call, a worktree, a test that cannot run)
+    is a refusal, not an approval: ``recheck`` returning a verdict it could not
+    establish is how an unapproved PR reaches the merge path.
+    """
+    repo = Path(repo_path).expanduser().resolve()
+    raw = _load_raw_config(config_path)
+    gate_cfg = load_gate_config(raw) or GateConfig()
+    status = Path(status_file).expanduser() if status_file else None
+    resolved_gate_dir = gate_dir or (repo / ".agent-fleet" / "gate" / str(pr_number))
+    resolved_gate_dir.mkdir(parents=True, exist_ok=True)
+
+    pipeline = GatePipeline(
+        repo=repo,
+        pr_number=pr_number,
+        config=gate_cfg,
+        policy=parse_model_policy(raw),
+        backend=cast("LLMBackend", None),  # a recheck dispatches no agent
+        gate_dir=resolved_gate_dir,
+        status_file=status,
+        run_id=run_id or f"gate-recheck-{pr_number}",
+        test_pool=test_slot_pool(
+            PoolConfig(
+                root=default_slots_root(),
+                agent_slots=0,
+                test_slots=gate_cfg.test_slots,
+            )
+        ),
+        use_systemd=use_systemd,
+        lane_slug=lane_slug or gate_cfg.lane_slug,
+    )
+
+    reasons: list[str] = []
+    try:
+        fetch_base(repo, gate_cfg.base_branch)
+        head = head_sha.strip() if head_sha else current_pr_head(repo, pr_number)
+        worktree = resolved_gate_dir / "recheck-wt"
+        prepare_worktree(repo, worktree, head)
+        try:
+            # Merge the base so the tests see what the PR will actually merge
+            # into, not just the PR's own tree.
+            merge_base_into(worktree, resolve_diff_base(repo, gate_cfg.base_branch))
+            test_files = sorted(
+                set(changed_test_files(worktree, gate_cfg.base_branch))
+                | set(pipeline.evidence.gate_tests)
+            )
+            pipeline.archive.materialise(worktree, pipeline.evidence.gate_tests)
+            run = pipeline._runner_for(worktree).run(test_files)
+        finally:
+            remove_worktree(repo, worktree)
+    except (GateError, OSError) as exc:
+        reasons.append(f"full gate required: recheck could not run: {str(exc)[:160]}")
+        return pipeline._carry_over_result(GateOutcome.NEEDS_ESCALATION, "", reasons)
+
+    return pipeline.recheck_carry_over(
+        approved_sha=approved_sha,
+        head_sha=head,
+        status_file=status or (resolved_gate_dir / "absent.status"),
+        test_run=run,
+        test_files=test_files,
+    )
+
+
 def gate_metrics_summary(limit: int = 20) -> dict[str, Any]:
     """``agent-fleet gate metrics`` payload: recent runs plus aggregates."""
     rows = gate_metrics.read_metrics(limit=limit)
@@ -1549,5 +1741,6 @@ __all__ = [
     "build_gate_backend",
     "gate_metrics_summary",
     "run_gate",
+    "run_gate_recheck",
     "status_line_for",
 ]
