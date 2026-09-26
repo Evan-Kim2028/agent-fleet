@@ -114,6 +114,11 @@ class WatchdogConfig:
     kill_grace_s: float = 5.0
     #: How many times the owning component may retry a stage the watchdog killed.
     stage_retry_budget: int = 1
+    #: Window over which stage retries are counted. A stage that produces output
+    #: again resets its spent retries immediately (a new episode); this window
+    #: additionally ages out a retry that never recovered, so a long-lived
+    #: wedge does not carry a stale tally forever.
+    stage_retry_budget_window_minutes: int = 60
 
     def timeout_for(self, stage: str) -> int:
         return self.stage_timeout_minutes.get(stage, 120)
@@ -296,6 +301,13 @@ def _load_watchdog(raw: Any) -> WatchdogConfig:  # noqa: ANN401
         ),
         kill_grace_s=_float(raw.get("kill_grace_s"), defaults.kill_grace_s),
         stage_retry_budget=max(0, _int(raw.get("stage_retry_budget"), defaults.stage_retry_budget)),
+        stage_retry_budget_window_minutes=max(
+            1,
+            _int(
+                raw.get("stage_retry_budget_window_minutes"),
+                defaults.stage_retry_budget_window_minutes,
+            ),
+        ),
     )
 
 

@@ -78,7 +78,7 @@ if TYPE_CHECKING:
 
     from agent_fleet.serve.clock import Clock
     from agent_fleet.serve.config import ServeConfig
-    from agent_fleet.serve.supervisor import Supervisor
+    from agent_fleet.serve.supervisor import ChildState, Supervisor
 
 RULE_STUCK_STAGE = "stuck_stage"
 RULE_ORPHAN = "orphan_blocking"
@@ -180,8 +180,31 @@ class Watchdog:
         self.proc_root = proc_root or supervisor.proc_root
         self.locks = locks or LockRegistry(operator, proc_root=self.proc_root)
         self.dry_run = dry_run
-        #: stage -> retries already spent, enforcing ``stage_retry_budget``.
-        self.stage_retries: dict[str, int] = {}
+        #: component -> epochs of the retries spent on its *current* stuck
+        #: episode, enforcing ``stage_retry_budget``. Reset when the stage
+        #: produces output again, so the budget is per incident, not per process.
+        self._stage_retry_epochs: dict[str, list[float]] = {}
+        #: (rule, subject) pairs already escalated for an unchanged condition,
+        #: so a stable wedge alerts once instead of on every tick.
+        self._escalated: set[tuple[str, str]] = set()
+        #: Victim groups TERMed for a stuck stage but not yet confirmed dead,
+        #: mapped to the epoch of the TERM. A survivor is SIGKILLed by the group
+        #: kill once ``kill_grace_s`` has elapsed, so "killed" is load-bearing
+        #: even for a component that ignores SIGTERM.
+        self._pending_group_kills: dict[int, tuple[ProcIdentity, float]] = {}
+        #: component -> the (mtime, size) of its tracked output last observed by
+        #: the no-progress rule, used to tell a component that is producing
+        #: output from one that has gone quiet.
+        self._observed_output: dict[str, tuple[float, int]] = {}
+        #: component -> how many entries of its no-progress restart history were
+        #: already spent when it was last seen making progress. The budget is
+        #: spent per stuck episode, so recovering returns it to full.
+        self._episode_restart_mark: dict[str, int] = {}
+
+    @property
+    def stage_retries(self) -> dict[str, int]:
+        """Retries currently spent per component, on its current stuck episode."""
+        return {name: len(epochs) for name, epochs in self._stage_retry_epochs.items() if epochs}
 
     # ------------------------------------------------------------------ helpers
 
@@ -195,12 +218,12 @@ class Watchdog:
         event: str,
         *,
         level: str = "warning",
+        emit: bool = True,
         **data: Any,  # noqa: ANN401
     ) -> None:
-        if self.dry_run:
-            report.remediations.append(remediation)
-            return
         report.remediations.append(remediation)
+        if self.dry_run or not emit:
+            return
         emit_serve_event(
             self.operator,
             event,
@@ -208,8 +231,60 @@ class Watchdog:
             data={**remediation.to_dict(), **data},
         )
 
+    def _escalate_once(self, rule: str, subject: str) -> bool:
+        """True the first time this (rule, subject) is escalated, else False.
+
+        The condition that selects an escalate branch — a spent retry or restart
+        budget — is stable, so without a latch the branch re-notifies the
+        operator about an unchanged condition on every tick. The latch is
+        cleared when the subject is next seen healthy, so a recovered-then-
+        re-wedged subject alerts again for the genuinely new episode.
+        """
+        key = (rule, subject)
+        if key in self._escalated:
+            return False
+        self._escalated.add(key)
+        return True
+
     def _defer(self, report: WatchdogReport, remediation: Remediation) -> None:
         report.deferred.append(remediation)
+
+    def _await_exit(self, identity: ProcIdentity, *, seconds: float = 0.2) -> bool:
+        """Give a TERMed victim a brief, bounded chance to actually exit.
+
+        A cooperative process is gone within milliseconds, but a watchdog that
+        reported a kill it had not yet observed would be reporting the same
+        unverified success the module exists to avoid. The wait is short and
+        bounded — a process that ignores SIGTERM does not get the benefit of it
+        and is escalated to a group KILL by :meth:`_escalate_stale_group_kills`.
+        """
+        import time as _time
+
+        deadline = _time.monotonic() + max(0.0, seconds)
+        while _time.monotonic() < deadline:
+            if not identity.matches(proc_root=self.proc_root):
+                return True
+            _time.sleep(0.005)
+        return not identity.matches(proc_root=self.proc_root)
+
+    def _escalate_stale_group_kills(self) -> None:
+        """SIGKILL groups that survived the TERM grace from an earlier tick."""
+        if self.dry_run or not self._pending_group_kills:
+            return
+        now = self.clock.time()
+        grace = max(0.0, float(self.config.watchdog.kill_grace_s))
+        due = [
+            (pid, identity)
+            for pid, (identity, epoch) in list(self._pending_group_kills.items())
+            if now - epoch >= grace
+        ]
+        if not due:
+            return
+        survivors = self.escalate_pending_groups([identity for _pid, identity in due])
+        alive = {identity.pid for identity in survivors}
+        for pid, _identity in due:
+            if pid not in alive:
+                self._pending_group_kills.pop(pid, None)
 
     # ------------------------------------------------------- rule (c) stale lock
 
@@ -353,6 +428,13 @@ class Watchdog:
         output file for it — the recorded pid, the fingerprint and the file
         have to agree, because any one of them alone can point at a process
         that has nothing to do with this stage.
+
+        The retry budget is **per stuck episode**, not per serve process. A stage
+        that produced output again has recovered: its episode is over, so the
+        retries it spent are forgotten and a later, unrelated wedge gets the full
+        budget again. Without that reset a single early transient incident would
+        permanently disable the kill remediation, and every subsequent genuine
+        wedge would only be alerted about while the wedged process kept running.
         """
         now = self.clock.time()
         for name, state in list(self.supervisor.children.items()):
@@ -366,8 +448,10 @@ class Watchdog:
             timeout_minutes = self.config.watchdog.timeout_for(stage)
             idle = growth_idle_seconds(output, now=now)
             if idle < timeout_minutes * 60.0:
+                # The stage is producing output: the episode, if any, is over.
+                self._end_stage_episode(name)
                 continue
-            spent = self.stage_retries.get(name, 0)
+            spent = self._retries_in_window(name, now=now)
             if spent >= self.config.watchdog.stage_retry_budget:
                 remediation = Remediation(
                     rule=RULE_STUCK_STAGE,
@@ -382,14 +466,16 @@ class Watchdog:
                 if not self._budget_left(report):
                     self._defer(report, remediation)
                     continue
-                alert(
-                    self.operator,
-                    "serve.watchdog.stage_dead",
-                    remediation.reason,
-                    component=name,
-                    stage=stage,
-                )
-                self._record(report, remediation, "serve.watchdog.stage_dead")
+                first = self._escalate_once(RULE_STUCK_STAGE, name)
+                if first:
+                    alert(
+                        self.operator,
+                        "serve.watchdog.stage_dead",
+                        remediation.reason,
+                        component=name,
+                        stage=stage,
+                    )
+                self._record(report, remediation, "serve.watchdog.stage_dead", emit=first)
                 continue
             remediation = Remediation(
                 rule=RULE_STUCK_STAGE,
@@ -408,8 +494,16 @@ class Watchdog:
             if self.dry_run:
                 self._record(report, remediation, "serve.watchdog.stuck_stage", dry_run=True)
                 continue
-            self.stage_retries[name] = spent + 1
+            self._spend_stage_retry(name, now=now)
             term = terminate_group(identity, proc_root=self.proc_root)
+            if term.signalled:
+                # Remember the victim so a process that ignores SIGTERM is
+                # SIGKILLed by its group once the grace elapses, and give a
+                # cooperative one a moment to actually be gone before the tick
+                # claims the kill landed.
+                self._pending_group_kills[identity.pid] = (identity, now)
+                if self._await_exit(identity):
+                    self._pending_group_kills.pop(identity.pid, None)
             self._record(
                 report,
                 replace(remediation, signalled=term.signalled),
@@ -418,6 +512,21 @@ class Watchdog:
                 stage=stage,
                 skipped=term.skipped_reason,
             )
+
+    def _retries_in_window(self, component: str, *, now: float) -> int:
+        """Retries already spent on the *current* stuck episode of *component*."""
+        window_s = max(1.0, float(self.config.watchdog.stage_retry_budget_window_minutes) * 60.0)
+        epochs = [e for e in self._stage_retry_epochs.get(component, ()) if now - e <= window_s]
+        self._stage_retry_epochs[component] = epochs
+        return len(epochs)
+
+    def _spend_stage_retry(self, component: str, *, now: float) -> None:
+        self._stage_retry_epochs.setdefault(component, []).append(now)
+
+    def _end_stage_episode(self, component: str) -> None:
+        """Forget a component's spent retries once it is healthy again."""
+        self._stage_retry_epochs.pop(component, None)
+        self._escalated.discard((RULE_STUCK_STAGE, component))
 
     def _tracked_output(self, component: str) -> Path | None:
         """The file whose growth proves this component is doing work.
@@ -448,6 +557,17 @@ class Watchdog:
         Restarts are budgeted separately from crashes *and* from each other: a
         component restarted for this rule twice inside its window is a component
         that needs a human, so the third finding escalates instead of looping.
+
+        The restart budget is spent per **stuck episode** rather than over a
+        rolling window. Measured backwards from the newest restart — or over a
+        window that is by default exactly as long as the interval the rule fires
+        at — the count is pinned at one however long the fleet has been churning
+        the component, so a wedge never reaches its budget and the escalation
+        that is supposed to stop the loop is unreachable, with whether it ever
+        fires decided by sub-minute tick alignment. Restarts already spent are
+        forgotten when the component is next seen making progress, so a
+        recovered component starts its next episode with a full budget and a
+        component that never recovers is escalated rather than restarted forever.
         """
         if queued_depth <= 0:
             return
@@ -457,17 +577,14 @@ class Watchdog:
             state = self.supervisor.children.get(spec.name)
             if state is None or state.pid is None:
                 continue
+            if self._note_output_progress(spec.name, state, now=now):
+                continue
             idle_s = now - state.last_event_epoch
             if idle_s < window_s:
                 continue
-            budget_window_s = max(1.0, float(spec.no_progress_window_minutes) * 60.0)
-            # The budget counts a *burst* of restarts: the ones clustered around
-            # the most recent one, measured backwards from it. Measuring
-            # forwards from now would let restarts age out one at a time, so a
-            # component that genuinely needs restarting forever would never
-            # reach its budget and the rule would just churn it forever.
             recent = state.no_progress_restarts
-            restarts = sum(1 for e in recent if recent[-1] - e <= budget_window_s) if recent else 0
+            mark = self._episode_restart_mark.get(spec.name, 0)
+            restarts = max(0, len(recent) - mark)
             if restarts >= spec.no_progress_restarts:
                 remediation = Remediation(
                     rule=RULE_NO_PROGRESS,
@@ -483,13 +600,15 @@ class Watchdog:
                 if not self._budget_left(report):
                     self._defer(report, remediation)
                     continue
-                alert(
-                    self.operator,
-                    "serve.watchdog.no_progress",
-                    remediation.reason,
-                    component=spec.name,
-                )
-                self._record(report, remediation, "serve.watchdog.no_progress")
+                first = self._escalate_once(RULE_NO_PROGRESS, spec.name)
+                if first:
+                    alert(
+                        self.operator,
+                        "serve.watchdog.no_progress",
+                        remediation.reason,
+                        component=spec.name,
+                    )
+                self._record(report, remediation, "serve.watchdog.no_progress", emit=first)
                 continue
             remediation = Remediation(
                 rule=RULE_NO_PROGRESS,
@@ -514,6 +633,46 @@ class Watchdog:
                 "serve.watchdog.no_progress",
                 component=spec.name,
             )
+
+    def _note_output_progress(self, component: str, state: ChildState, *, now: float) -> bool:
+        """Refresh the event clock when the component's output has grown.
+
+        A component proves it is working by producing output, and the only file
+        serve can watch for that is the component's own log. Comparing it with
+        what the rule saw last time is what turns "time since the last event"
+        into something measurable at all: the field is otherwise pinned to the
+        moment the process launched, so a component that has been working since
+        it started is indistinguishable from one that has been wedged since it
+        started, and the rule restarts the first every window forever.
+
+        The first observation has nothing to compare against, so it accepts a
+        log that already carries output as evidence the component has been
+        working. A log stamped in the future — written by a process on a
+        different clock — is never evidence of anything, so it is recorded but
+        not treated as progress.
+
+        Returns True when the component was seen making progress, so the caller
+        skips judging it this tick.
+        """
+        from agent_fleet.serve.paths import component_log_path
+
+        path = component_log_path(self.operator, component)
+        try:
+            st = path.stat()
+        except OSError:
+            self._observed_output.pop(component, None)
+            return False
+        seen = (st.st_mtime, st.st_size)
+        previous = self._observed_output.get(component)
+        self._observed_output[component] = seen
+        if st.st_mtime > now:
+            return False
+        grew = st.st_size > 0 if previous is None else seen != previous
+        if not grew:
+            return False
+        state.last_event_epoch = now
+        self._episode_restart_mark[component] = len(state.no_progress_restarts)
+        return True
 
     # ---------------------------------------------------------- grace escalation
 
@@ -578,6 +737,7 @@ class Watchdog:
         self.check_no_progress(report, queued_depth=queued_depth)
         if pending_kills:
             self.escalate_pending(pending_kills)
+        self._escalate_stale_group_kills()
         if report.deferred:
             emit_serve_event(
                 self.operator,

@@ -25,7 +25,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.serve.capacity import SIGNAL_UNKNOWN, read_capacity
-from agent_fleet.serve.items import STAGES
+from agent_fleet.serve.items import STAGES, TERMINAL_STAGES
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -104,7 +104,9 @@ def status_snapshot(
             for stat in stage_stats
         ],
         "depth": depths,
-        "queue_depth": sum(depths.get(stage, 0) for stage in STAGES if stage not in ("merged",)),
+        "queue_depth": sum(
+            depths.get(stage, 0) for stage in STAGES if stage not in TERMINAL_STAGES
+        ),
         "window_hours": window_hours,
     }
 
