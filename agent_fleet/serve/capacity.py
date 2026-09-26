@@ -54,11 +54,13 @@ if TYPE_CHECKING:
 #: be updated in the same change — the point of having it at all.
 CAPACITY_SCHEMA = "agent-fleet.serve.capacity/1"
 
-#: Signal classes the AIMD rule distinguishes.
+#: Signal classes the AIMD rule distinguishes, in increasing severity.
 SIGNAL_EASE = "ease"
 SIGNAL_HOLD = "hold"
 SIGNAL_PRESSURE = "pressure"
 SIGNAL_UNKNOWN = "unknown"
+
+_SEVERITY = {SIGNAL_EASE: 0, SIGNAL_HOLD: 1, SIGNAL_PRESSURE: 2}
 
 #: How hard memory is allowed to press before it counts as pressure, as a
 #: fraction of memory.max. Deliberately well below 1.0: OOM is not the thing to
@@ -141,31 +143,43 @@ class CapacityTargets:
         }
 
 
-def classify(
-    reading: PressureReading,
-    marks: Watermarks,
+def _resource_signal(
+    value: float, low: float, high: float, unit: str, label: str
 ) -> tuple[str, str]:
+    if value >= high:
+        return SIGNAL_PRESSURE, f"{label} {value:.1f}{unit} >= {high:.1f}{unit}"
+    if value <= low:
+        return SIGNAL_EASE, f"{label} {value:.1f}{unit} <= {low:.1f}{unit}"
+    return SIGNAL_HOLD, f"{label} {value:.1f}{unit} inside [{low:.1f}, {high:.1f}]{unit}"
+
+
+def classify(reading: PressureReading, marks: Watermarks) -> tuple[str, str]:
     """Decide which regime the reading is in. Returns ``(signal, reason)``.
 
-    Memory is weighed first: running out of memory kills work, while CPU stall
-    merely slows it, so the more severe of the two decides.
+    CPU and memory are classified **independently** and the more severe wins.
+    A single early return on the first easy signal is the obvious
+    implementation and it is a serious bug: on a box with plenty of free memory
+    — which is every box that has not filled up yet — memory classifies as
+    ``ease`` and masks CPU stall entirely, so the controller ramps lanes *up*
+    while the CPUs are stalled. Severity is the max of the two, never the first.
     """
     if not reading.ok:
         return SIGNAL_UNKNOWN, reading.error or "pressure source unavailable"
 
+    cpu_signal, cpu_reason = _resource_signal(
+        reading.cpu.some_avg60, marks.low, marks.high, "%", "cpu some-avg60"
+    )
     ratio = reading.memory_ratio
-    if ratio is not None:
-        if ratio >= marks.memory_high:
-            return SIGNAL_PRESSURE, f"memory {ratio:.0%} of max >= {marks.memory_high:.0%}"
-        if ratio <= marks.memory_low:
-            return SIGNAL_EASE, f"memory {ratio:.0%} of max <= {marks.memory_low:.0%}"
+    if ratio is None:
+        # No memory ceiling configured, so memory has no opinion.
+        return cpu_signal, cpu_reason
 
-    stall = reading.cpu.some_avg60
-    if stall >= marks.high:
-        return SIGNAL_PRESSURE, f"cpu some-avg60 {stall:.1f}% >= {marks.high:.1f}%"
-    if stall <= marks.low:
-        return SIGNAL_EASE, f"cpu some-avg60 {stall:.1f}% <= {marks.low:.1f}%"
-    return SIGNAL_HOLD, f"cpu some-avg60 {stall:.1f}% inside [{marks.low:.1f}, {marks.high:.1f}]"
+    mem_signal, mem_reason = _resource_signal(
+        ratio * 100.0, marks.memory_low * 100.0, marks.memory_high * 100.0, "%", "memory"
+    )
+    if _SEVERITY[mem_signal] > _SEVERITY[cpu_signal]:
+        return mem_signal, mem_reason
+    return cpu_signal, cpu_reason
 
 
 @dataclass(frozen=True)

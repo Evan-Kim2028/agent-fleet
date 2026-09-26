@@ -104,15 +104,23 @@ def expand_command(
     """
     import shlex
 
+    def field(name: str) -> str:
+        # A mapping works as well as a CapacityTargets here, and a mapping
+        # returns None for a missing key rather than the getattr default, so
+        # both paths are handled explicitly instead of one shadowing the other.
+        if isinstance(targets, dict):
+            return str(targets.get(name, ""))
+        return str(getattr(targets, name, ""))
+
     substitutions = {
         "{operator}": operator,
         "{serve_dir}": str(serve_dir),
         "{capacity_file}": str(capacity_file),
-        "{max_lanes}": str(getattr(targets, "max_lanes", "")),
-        "{max_gates}": str(getattr(targets, "max_gates", "")),
-        "{test_pool}": str(getattr(targets, "test_pool", "")),
-        "{typecheck_pool}": str(getattr(targets, "typecheck_pool", "")),
-        "{gates_priority}": "1" if getattr(targets, "gates_priority", False) else "0",
+        "{max_lanes}": field("max_lanes"),
+        "{max_gates}": field("max_gates"),
+        "{test_pool}": field("test_pool"),
+        "{typecheck_pool}": field("typecheck_pool"),
+        "{gates_priority}": "1" if field("gates_priority") in ("1", "True", "true") else "0",
     }
     expanded = template
     for token, value in substitutions.items():
