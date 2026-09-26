@@ -51,7 +51,26 @@ PR_DETAIL_FIELDS = ",".join(
     )
 )
 
-_APPROVAL_RE = re.compile(rf"{APPROVAL_PREFIX}\s+([0-9a-f]{{7,40}})", re.IGNORECASE)
+#: The approval marker must be the *verdict* of the line that carries it, so the
+#: search is anchored to the start of a line rather than run over the line's whole
+#: text. An unanchored search is forgeable by anything else that gets written into
+#: the line: the lane manager appends the tail of the implementer's own final
+#: message to a ``NEEDS-ESCALATION`` line, so a lane that was never gated could
+#: otherwise quote the PR's real head and hand the planner an approval for a PR
+#: no gate ever reviewed. ``fleet_ops.gate`` anchors its equivalent for the same
+#: reason.
+#:
+#: The anchor still admits the three forms the status-file contract actually
+#: writes — a bare ``PREMERGE-APPROVED <sha>``, one behind the ``HH:MM:SS`` stamp,
+#: and one behind the ``owner/repo#<pr>`` reference that names the PR (which
+#: ``docs/MERGE-PLAN.md`` documents as legal "anywhere on the line"), so a status
+#: file naming its PR before the marker keeps being collected.
+_APPROVAL_RE = re.compile(
+    rf"^(?:\d{{2}}:\d{{2}}:\d{{2}}\s+)?"
+    rf"(?:[\w.-]+/[\w.-]+#\d+\s+)?"
+    rf"{APPROVAL_PREFIX}\s+([0-9a-f]{{7,40}})",
+    re.IGNORECASE | re.MULTILINE,
+)
 #: ``"repo#123"`` in a status file, so a status dir can span repositories.
 _PR_REF_RE = re.compile(r"(?P<repo>[\w.-]+/[\w.-]+)#(?P<pr>\d+)")
 
@@ -62,7 +81,13 @@ _PR_REF_RE = re.compile(r"(?P<repo>[\w.-]+/[\w.-]+)#(?P<pr>\d+)")
 
 
 def parse_approval(text: str) -> str:
-    """Return the approved short SHA in *text*, or "" when absent."""
+    """Return the approved short SHA in *text*, or "" when absent.
+
+    Only a line whose own verdict is the approval marker counts. A marker that
+    merely appears somewhere in the text is not an approval: the same text can
+    carry an escalation reason and a transcript of what the implementer said,
+    and neither of those is the gate speaking.
+    """
     m = _APPROVAL_RE.search(text or "")
     return m.group(1) if m else ""
 

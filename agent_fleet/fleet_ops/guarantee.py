@@ -49,6 +49,22 @@ AUTO_COMMIT_SUBJECT = "fleet: auto-commit after {engine} run"
 #: Never pass these to git. Asserted in ``_git`` so a refactor cannot regress it.
 FORBIDDEN_GIT_FLAGS = ("--no-verify", "-n")
 
+#: The run-dir path that must never be staged, relative to the worktree. The
+#: guarantee passes it as an explicit ``git add`` pathspec exclusion rather than
+#: trusting ``info/exclude`` to be present and correct — the exclude file is
+#: written by the worktree step, and this function is also called directly.
+RUN_DIR_EXCLUDE = ".agent-fleet"
+
+#: The engine's transcript directory, relative to a worktree root. Staging
+#: excludes this subtree rather than all of ``RUN_DIR_EXCLUDE``, so a lane's
+#: real work under a *tracked* ``.agent-fleet/`` is still committed.
+RUN_DIR_LOGS = f"{RUN_DIR_EXCLUDE}/runs"
+
+#: pre-commit reports each failing hook as a ``- hook id: <id>`` block. The rest
+#: of the output is hundreds of lines of tool output; the id is the only part
+#: that tells an operator which hook to fix.
+_HOOK_ID_RE = re.compile(r"^\s*-\s*hook id:\s*(\S+)\s*$", re.MULTILINE)
+
 
 @dataclass(frozen=True)
 class GuaranteeResult:
@@ -62,6 +78,9 @@ class GuaranteeResult:
     reason: str = ""
     escalated: bool = False
     detail: str = ""
+    #: Hook ids that refused the auto-commit, in the order pre-commit listed them.
+    #: Empty for a commit failure that was not a hook failure.
+    hooks_failed: list[str] = field(default_factory=list)
 
     @property
     def guaranteed(self) -> bool:
@@ -78,7 +97,22 @@ class GuaranteeResult:
             "reason": self.reason,
             "escalated": self.escalated,
             "detail": self.detail,
+            "hooks_failed": self.hooks_failed,
         }
+
+
+def failed_hook_ids(output: str) -> list[str]:
+    """The pre-commit hook ids named in *output*, in order, without duplicates.
+
+    A commit can fail for reasons that are not hooks at all (a rejected
+    ``user.email``, a lock file held by another process). Those produce no ids,
+    which is the correct answer rather than an empty stand-in: ``hooks_failed``
+    being non-empty *is* the claim that a hook refused the commit.
+    """
+    seen: dict[str, None] = {}
+    for match in _HOOK_ID_RE.finditer(output or ""):
+        seen.setdefault(match.group(1), None)
+    return list(seen)
 
 
 def _git(
@@ -104,7 +138,15 @@ def _git(
 
 
 def is_dirty(worktree: Path, *, runner: Runner | None = None) -> bool:
-    """True when the worktree has staged, unstaged, or untracked changes."""
+    """True when the worktree has staged, unstaged, or untracked *work*.
+
+    ``git status --porcelain`` honours the repo's ``info/exclude``, so the run
+    dir is invisible here once :func:`ensure_run_dir_excluded` has run. That
+    matters beyond tidiness: a worktree whose only untracked file was the lane's
+    own run log read as dirty, so the guarantee staged the log, committed it,
+    and then failed the repo's hooks — a ``commit_failed`` for a lane that had
+    produced no work at all.
+    """
     result = _git(
         ["git", "status", "--porcelain", "-uall"], cwd=worktree, runner=runner, timeout=60
     )
@@ -148,6 +190,57 @@ def build_commit_message(
     return "\n".join(lines)
 
 
+def _stage_lane_work(
+    worktree: Path, *, env: dict[str, str] | None = None, runner: Runner | None = None
+) -> tuple[bool, str]:
+    """Stage the lane's work, leaving the engine's run logs out of the index.
+
+    Staging is all-then-unstage rather than an exclusion pathspec, because a
+    single ``git add -A`` cannot express "all of it except the run dir". Given
+    a ``:(exclude)`` pathspec git still walks the ignored paths, and as soon as
+    an ignored ``.agent-fleet`` exists on disk it exits 1 with "The following
+    paths are ignored", aborting the whole add:
+
+    * the stale in-worktree run dir left by a build older than the one that
+      moved the run dir outside the worktree — ``ensure_lane_worktree`` only
+      hides it in ``info/exclude``, it never removes it, so every reused
+      pre-existing lane worktree trips this on its next run; and
+    * a *tracked* ``.agent-fleet/``, where excluding the path additionally
+      drops the lane's real changes to that directory.
+
+    Either way the lane escalates as ``commit_failed`` for a worktree full of
+    real work, which is the exact misreport this guarantee exists to prevent.
+    So the add is unconditional — it cannot fail on an ignore rule — and the
+    run-log subtree is then taken back out of the index. Unstaging also covers
+    a *tracked* transcript, which an exclusion pathspec could not, and
+    ``info/exclude`` still governs the untracked half: a run log that no repo
+    tracks never reaches the index at all.
+    """
+    add = _git(
+        ["git", "add", "-A", "--", "."],
+        cwd=worktree,
+        runner=runner,
+        env=env,
+        timeout=300,
+    )
+    if add.returncode != 0:
+        return False, f"git add failed: {(add.stderr or add.stdout).strip()[:500]}"
+
+    # `git reset` (not `rm --cached`) so an *edit* to a tracked run log is
+    # unstaged back to HEAD rather than turned into a deletion. A path that is
+    # not in the index is a no-op here, so this never fails on a clean lane.
+    unstage = _git(
+        ["git", "reset", "-q", "--", RUN_DIR_LOGS],
+        cwd=worktree,
+        runner=runner,
+        env=env,
+        timeout=300,
+    )
+    if unstage.returncode != 0:
+        return False, f"git reset failed: {(unstage.stderr or unstage.stdout).strip()[:500]}"
+    return True, ""
+
+
 def commit_worktree(
     worktree: Path,
     *,
@@ -156,22 +249,29 @@ def commit_worktree(
     lane: str | None = None,
     skip_hooks: Sequence[str] = (),
     runner: Runner | None = None,
-) -> tuple[bool, str | None, str]:
-    """Stage everything and commit with hooks enabled.
+) -> tuple[bool, str | None, str, list[str]]:
+    """Stage everything *except the run logs* and commit with hooks enabled.
 
-    Returns ``(committed, sha, detail)``. *skip_hooks* becomes the ``SKIP=``
-    environment overlay — pre-commit's own selective-skip mechanism. Hooks not
-    named there run normally; a failure from one of them aborts the commit, and
-    the detail is surfaced to the caller so the lane can escalate with it.
+    Returns ``(committed, sha, detail, hooks_failed)``. *skip_hooks* becomes the
+    ``SKIP=`` environment overlay — pre-commit's own selective-skip mechanism.
+    Hooks not named there run normally; a failure from one of them aborts the
+    commit, and both the ids of the failing hooks and the output are surfaced so
+    the lane can escalate with something actionable.
+
+    The run logs are kept out twice over: ``info/exclude`` (written when the
+    worktree was set up) and the explicit filtering in :func:`_stage_lane_work`
+    — an explicit ``--run-dir`` inside the worktree, or a repo whose exclude
+    file could not be written, must not be able to put a transcript into a
+    commit.
     """
     skip_env = {"SKIP": ",".join(h for h in skip_hooks if h)} if any(skip_hooks) else {}
     # Overlay SKIP on the real environment: a bare {"SKIP": ...} env strips PATH/HOME and
     # breaks the very hooks the manager promises to keep live.
     env = {**os.environ, **skip_env} if skip_env else None
 
-    add = _git(["git", "add", "-A"], cwd=worktree, runner=runner, env=env, timeout=300)
-    if add.returncode != 0:
-        return False, None, f"git add failed: {(add.stderr or add.stdout).strip()[:500]}"
+    staged, stage_detail = _stage_lane_work(worktree, env=env, runner=runner)
+    if not staged:
+        return False, None, stage_detail, []
 
     message = build_commit_message(engine, task_file=task_file, lane=lane)
     commit = _git(
@@ -183,9 +283,9 @@ def commit_worktree(
     )
     if commit.returncode != 0:
         detail = "\n".join(p for p in (commit.stdout, commit.stderr) if p).strip()[:2000]
-        return False, None, detail or "git commit failed"
+        return False, None, detail or "git commit failed", failed_hook_ids(detail)
 
-    return True, head_sha(worktree, runner=runner), ""
+    return True, head_sha(worktree, runner=runner), "", []
 
 
 def resolve_push_target(
@@ -291,6 +391,18 @@ def _commits_ahead(worktree: Path, branch: str, base: str, runner: Runner | None
     return 0
 
 
+def _with_hooks(detail: str, hooks_failed: Sequence[str]) -> str:
+    """Prefix a hook failure's output with the ids that caused it.
+
+    The transcript is long and truncated at an arbitrary offset, so the ids are
+    repeated on the first line where a reader (or a status line) will see them.
+    """
+    if not hooks_failed:
+        return detail
+    ids = ", ".join(hooks_failed)
+    return f"hooks_failed=[{ids}]\n{detail}"
+
+
 def _find_pr(branch: str, *, cwd: Path, runner: Runner | None = None) -> int | None:
     result = _run(
         ["gh", "pr", "list", "--head", branch, "--json", "number", "--limit", "1"],
@@ -369,6 +481,21 @@ def _create_pr(
     return _find_pr(branch, cwd=cwd, runner=runner)
 
 
+def has_publishable_work(
+    worktree: Path, branch: str, base: str, runner: Runner | None = None
+) -> bool:
+    """Whether *branch* has anything a PR could carry.
+
+    True when the worktree holds uncommitted work *or* the branch is ahead of
+    *base*. The caller needs this *before* the guarantee commits anything, because
+    it is the precondition for deciding that a lane produced no work — a
+    judgement about the implementer, not about git plumbing.
+    """
+    if is_dirty(worktree, runner=runner):
+        return True
+    return _commits_ahead(worktree, branch, base, runner=runner) > 0
+
+
 def ensure_pull_request(
     worktree: Path,
     *,
@@ -382,6 +509,7 @@ def ensure_pull_request(
     skip_hooks: Sequence[str] = (),
     runner: Runner | None = None,
     skip_env: dict[str, str] | None = None,
+    no_changes_detail: str = "",
 ) -> GuaranteeResult:
     """Guarantee that *branch* has an open PR. See the module docstring.
 
@@ -389,6 +517,11 @@ def ensure_pull_request(
     if there is something to commit, push only if ahead, and only then look for
     a PR to create. It is idempotent — running it twice on a lane that is
     already published is a no-op that returns the same PR number.
+
+    *no_changes_detail* is the implementer's own account of why it stopped,
+    supplied by the caller which can see the engine's final text. When the lane
+    has nothing to publish, that text — not a boilerplate sentence — is what
+    makes the escalation actionable.
     """
     skip_env = dict(skip_env or {})
     if skip_hooks and "SKIP" not in skip_env:
@@ -402,7 +535,7 @@ def ensure_pull_request(
     committed = False
     commit_sha: str | None = None
     if is_dirty(worktree, runner=runner):
-        ok, sha, detail = commit_worktree(
+        ok, sha, detail, hooks_failed = commit_worktree(
             worktree,
             engine=engine,
             task_file=task_file,
@@ -412,13 +545,15 @@ def ensure_pull_request(
         )
         if not ok:
             # A hook refused the commit. This is a real failure with the diff,
-            # not something to bypass — escalate with the hook output.
+            # not something to bypass — escalate with the hook output, and name
+            # the hooks so the operator does not have to find them in it.
             return GuaranteeResult(
                 pr=None,
                 reason="commit_failed",
                 skip_env=skip_env,
                 escalated=True,
-                detail=detail,
+                detail=_with_hooks(detail, hooks_failed),
+                hooks_failed=hooks_failed,
             )
         committed = True
         commit_sha = sha
@@ -437,18 +572,19 @@ def ensure_pull_request(
         )
 
     if _commits_ahead(worktree, branch, base, runner=runner) <= 0:
+        summary = (
+            f"{branch} has no commits ahead of {base} and the worktree is clean — "
+            "the implementer produced no publishable work"
+        )
         return GuaranteeResult(
             pr=None,
             committed=committed,
             commit_sha=commit_sha,
             pushed=pushed,
             skip_env=skip_env,
-            reason="no_commits_ahead",
+            reason="no_changes_stopped" if no_changes_detail else "no_commits_ahead",
             escalated=True,
-            detail=(
-                f"{branch} has no commits ahead of {base} and the worktree is clean — "
-                "the implementer produced no publishable work"
-            ),
+            detail=f"{summary}\n{no_changes_detail}".strip() if no_changes_detail else summary,
         )
 
     pr = _create_pr(
