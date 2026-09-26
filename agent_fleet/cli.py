@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 from agent_fleet.backends import make_backend, registered_backend_names
 from agent_fleet.cli_core import normalize_argv
@@ -118,7 +119,27 @@ def cmd_pr_own(args: argparse.Namespace) -> int:
     if result.get("error"):
         print(f"error: {result['error']}", file=sys.stderr)
         return 1
-    return emit(result)
+    code = emit(result)
+    if code == 0 and not round_succeeded(result):
+        return 1
+    return code
+
+
+def round_succeeded(result: dict[str, object]) -> bool:
+    """True when a round reached the branch with its tests green.
+
+    ``emit`` only knows the status/verdict/outcome tables, and a round carries
+    none of those keys, so it would report success for an engine that died, a
+    push that was rejected, or tests that are still red. A driver gating on the
+    exit code has to stop escalating on exactly those rounds, so they are not 0.
+    """
+    detail = str(result.get("detail") or "")
+    if detail.startswith(("engine failed", "push failed")):
+        return False
+    tests = result.get("tests")
+    if not isinstance(tests, dict):
+        return True
+    return bool(cast("dict[str, Any]", tests).get("ok", True))
 
 
 def cmd_scope(args: argparse.Namespace) -> int:

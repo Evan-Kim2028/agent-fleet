@@ -18,13 +18,15 @@ from __future__ import annotations
 
 import json
 import subprocess
-from pathlib import Path  # noqa: TC003 - used as a concrete runtime path type
+from pathlib import Path
 
 import pytest
 
 from agent_fleet.contracts.gate import Finding
+from agent_fleet.fleet_ops import memcap as pr_owner_memcap
 from agent_fleet.noop_session import NoopLLMResult
 from agent_fleet.pr_owner import (
+    ANSWER_SPEC,
     ANSWER_TAG,
     NOTES_HISTORY_CHARS,
     build_fix_prompt,
@@ -36,6 +38,7 @@ from agent_fleet.pr_owner import (
     read_notes,
     read_task_spec,
     render_round,
+    resolve_answer,
     run_own,
     write_notes,
 )
@@ -391,7 +394,7 @@ def test_round_two_sees_round_one_s_notes(
     )
 
     prompt = second.prompts[0]
-    assert "disputed: 2: nope" in prompt
+    assert "disputed: b: nope" in prompt
     assert "[c]" in prompt
 
 
@@ -419,12 +422,12 @@ def test_round_reports_what_the_engine_claimed_to_fix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _fake_head(monkeypatch, repo)
-    backend = _CapturingBackend(answer={"fixed": ["1"], "disputed": [{"id": "2", "why": "w"}]})
+    backend = _CapturingBackend(answer={"fixed": ["1"], "disputed": [{"id": "1", "why": "w"}]})
     result = own_round(
-        repo_path=repo, pr_number=7, findings=[_finding()], backend=backend, worktree=worktree
+        repo_path=repo, pr_number=7, findings=[_finding("a")], backend=backend, worktree=worktree
     )
-    assert result.fixed == ["1"]
-    assert result.disputed == [{"id": "2", "why": "w"}]
+    assert result.fixed == ["a"]
+    assert result.disputed == [{"id": "a", "why": "w"}]
 
 
 def test_round_reports_no_push_when_the_head_did_not_move(
@@ -450,7 +453,9 @@ def test_round_pushes_when_the_head_moved(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A real push to a local bare remote: the round must move the remote head
-    to the sha the engine committed, not merely claim to have pushed."""
+    to the sha the engine committed, not merely claim to have pushed. The commit
+    has to land during the round, as the engine's would — a commit that was
+    already in the worktree before the round is the baseline it works from."""
     remote = tmp_path / "remote.git"
     subprocess.run(
         ["git", "init", "--bare", str(remote)],
@@ -459,20 +464,25 @@ def test_round_pushes_when_the_head_moved(
     )
     _git(worktree, "remote", "add", "origin", str(remote))
     _git(worktree, "push", "-u", "origin", "fb/pr-owner")
+    stale = _git(worktree, "rev-parse", "HEAD")
+    _fake_head(monkeypatch, repo, oid=stale)
 
-    _fake_head(monkeypatch, repo, oid="stale000")
-    (worktree / "new.txt").write_text("fix\n", encoding="utf-8")
-    _git(worktree, "add", "new.txt")
-    _git(worktree, "commit", "-m", "fix")
-    expected = _git(worktree, "rev-parse", "HEAD")
+    class _CommittingBackend(_CapturingBackend):
+        def run(self, prompt, **kwargs):  # noqa: ANN001, ANN003, ANN202
+            result = super().run(prompt, **kwargs)
+            (worktree / "new.txt").write_text("fix\n", encoding="utf-8")
+            _git(worktree, "add", "new.txt")
+            _git(worktree, "commit", "-m", "fix")
+            return result
 
     result = own_round(
         repo_path=repo,
         pr_number=7,
         findings=[_finding()],
-        backend=_CapturingBackend(),
+        backend=_CommittingBackend(),
         worktree=worktree,
     )
+    expected = _git(worktree, "rev-parse", "HEAD")
 
     assert result.pushed is True
     assert result.new_head == expected
@@ -585,5 +595,287 @@ def test_run_own_reports_unreadable_findings_instead_of_raising(tmp_path: Path) 
     assert result["error"]
 
 
+def test_run_own_reports_a_failed_gh_lookup_instead_of_raising(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale or unknown PR number makes ``pr_head`` raise. The documented
+    contract is one ``{"error": ...}`` line the CLI can print, not a traceback
+    out of ``main()``."""
+    (repo / ".agent-fleet.yaml").write_text("test_command: true\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "agent_fleet.pr_owner.gh",
+        lambda *a, **k: subprocess.CompletedProcess(  # noqa: ARG005
+            args=a,
+            returncode=1,
+            stdout="",
+            stderr="Could not resolve to a PullRequest",
+        ),
+    )
+    result = run_own(repo_path=repo, pr_number=999999)
+    assert "Could not resolve to a PullRequest" in result["error"]
+
+
+def test_run_own_reports_a_repo_without_fleet_config_instead_of_asserting(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A repo with no ``.agent-fleet.yaml`` resolves to ``None``, which used to
+    trip an assert inside ``own_round`` and escape ``main()`` uncaught."""
+    _fake_head(monkeypatch, repo)
+    monkeypatch.delenv("AGENT_FLEET_TARGET_CONFIG", raising=False)
+    monkeypatch.setattr("agent_fleet.repo.find_repo_config", lambda start=None: None)  # noqa: ARG005
+    result = run_own(repo_path=repo, pr_number=7)
+    assert ".agent-fleet.yaml" in result["error"]
+
+
 def test_read_task_spec_with_no_file_is_empty() -> None:
     assert read_task_spec(None) == ""
+
+
+# ---------------------------------------------------------------------------
+# _run_tests — a shell command, memory-capped, in its own process group
+# ---------------------------------------------------------------------------
+
+
+def test_run_tests_honours_a_quoted_test_command(tmp_path: Path) -> None:
+    """`test_command` is a shell command, as every other executor of that field
+    treats it. A quoted argument must reach the command without its quotes, or
+    pytest's `-k` selects nothing and the round records a false verdict."""
+    from agent_fleet.pr_owner import _run_tests
+
+    script = tmp_path / "f.py"
+    script.write_text(
+        "import sys\n"
+        "args = sys.argv[1:]\n"
+        "sys.exit(0 if args == ['smoke'] or 'smoke' in args else 3)\n",
+        encoding="utf-8",
+    )
+    result = _run_tests(tmp_path, "python3 ./f.py -k", ["smoke"])
+    assert result["ran"] is True
+    assert result["ok"] is True, result["detail"]
+
+
+def test_run_tests_succeeds_for_a_command_that_needs_a_shell(tmp_path: Path) -> None:
+    """`bash -c "…"` and `FOO=1 cmd` only work through a shell. Split into argv
+    they run the wrong thing and the round is written down as a test failure
+    even when the product code is fine."""
+    from agent_fleet.pr_owner import _run_tests
+
+    (tmp_path / "flag.txt").write_text("set\n", encoding="utf-8")
+    result = _run_tests(tmp_path, "FOO=1 sh -c 'echo $FOO > flag.txt'", ["a.py::t"])
+    assert result["ok"] is True, result["detail"]
+    assert (tmp_path / "flag.txt").read_text(encoding="utf-8").strip() == "1"
+
+
+def test_run_tests_runs_through_the_memory_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every test suite this fleet launches is memory-capped; a test re-run that
+    competes unbounded for RAM can OOM-kill other lanes' services."""
+    from agent_fleet import pr_owner
+
+    plans: list[object] = []
+    _real_plan = pr_owner_memcap.plan_memory_cap
+
+    def _spy(argv, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        plan = _real_plan(argv, **kwargs)
+        plans.append(plan)
+        return plan
+
+    monkeypatch.setattr(pr_owner_memcap, "plan_memory_cap", _spy)
+    pr_owner._run_tests(tmp_path, "true", [])
+    assert plans, "the test re-run was launched without a memory cap plan"
+    assert plans[0].mechanism in {"systemd", "ulimit"}  # type: ignore[attr-defined]
+
+
+def test_run_tests_spawns_in_its_own_process_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without `start_new_session` a timed-out run's pytest/xdist workers
+    survive the round and keep holding the worktree and CPU."""
+    from agent_fleet import pr_owner
+
+    seen: dict[str, object] = {}
+    _real_popen = subprocess.Popen
+
+    def _spy(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        seen.update(kwargs)
+        return _real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(pr_owner.subprocess, "Popen", _spy)
+    pr_owner._run_tests(tmp_path, "true", [])
+    assert seen.get("start_new_session") is True
+
+
+def test_run_tests_reports_a_timed_out_run_as_not_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A timeout taught us nothing about the code. Recording failing test ids
+    from a run that never answered would be a lie in the notes."""
+    from agent_fleet import pr_owner
+
+    monkeypatch.setattr(pr_owner, "_run_capped", lambda *a, **k: None)  # noqa: ARG005
+    result = pr_owner._run_tests(tmp_path, "sleep 100", ["a.py::t"])
+    assert result["ran"] is False
+    assert result["ok"] is False
+    assert result["failing"] == ["a.py::t"]
+
+
+def test_run_tests_with_no_command_reports_not_run(tmp_path: Path) -> None:
+    from agent_fleet.pr_owner import _run_tests
+
+    result = _run_tests(tmp_path, "   ", ["a.py::t"])
+    assert result["ran"] is False
+    assert result["ok"] is True
+
+
+def test_run_tests_reads_failing_ids_from_stderr_too(tmp_path: Path) -> None:
+    """A failing id is a failing id whether pytest put it on stdout or stderr."""
+    from agent_fleet.pr_owner import _run_tests
+
+    (tmp_path / "boom.py").write_text(
+        "import sys\nsys.stderr.write('FAILED a.py::t\\n')\nsys.exit(1)\n", encoding="utf-8"
+    )
+    result = _run_tests(tmp_path, "python3 ./boom.py", ["a.py::t"])
+    assert result["failing"] == ["a.py::t"]
+
+
+# ---------------------------------------------------------------------------
+# The answer: numbers in, finding ids out
+# ---------------------------------------------------------------------------
+
+
+def test_answer_spec_asks_for_the_numbers_the_prompt_assigned() -> None:
+    """The prompt tells the model to report by number; the spec example must not
+    contradict it by showing a bare id placeholder."""
+    assert ANSWER_SPEC["fixed"] == ["<finding number>"]
+    assert ANSWER_SPEC["disputed"][0]["id"] == "<finding number>"
+    assert "<finding id>" not in json.dumps(ANSWER_SPEC)
+
+
+def test_prompt_and_answer_spec_agree_on_numbers() -> None:
+    prompt = _prompt(findings=[_finding("a")])
+    assert "by the numbers above" in prompt
+    assert "<finding number>" in prompt
+
+
+def test_resolve_answer_maps_a_reported_number_to_its_finding_id() -> None:
+    findings = [_finding("a"), _finding("b")]
+    assert resolve_answer({"fixed": ["2"], "disputed": []}, findings)["fixed"] == ["b"]
+
+
+def test_resolve_answer_maps_a_disputed_number_too() -> None:
+    findings = [_finding("a"), _finding("b")]
+    resolved = resolve_answer(
+        {"fixed": [], "disputed": [{"id": "1", "why": "does not reproduce"}]}, findings
+    )
+    assert resolved["disputed"] == [{"id": "a", "why": "does not reproduce"}]
+
+
+def test_resolve_answer_still_accepts_an_id_echoed_directly() -> None:
+    """A model that reports the id anyway is understood, not read as having
+    fixed nothing."""
+    findings = [_finding("a")]
+    assert resolve_answer({"fixed": ["a"], "disputed": []}, findings)["fixed"] == ["a"]
+
+
+def test_resolve_answer_drops_a_token_that_matches_no_finding() -> None:
+    """An unmatched entry in the notes is a finding the next round looks for
+    and cannot find."""
+    findings = [_finding("a")]
+    assert resolve_answer({"fixed": ["9", "a"], "disputed": []}, findings)["fixed"] == ["a"]
+
+
+def test_round_records_finding_ids_not_the_numbers_the_engine_answered(
+    repo: Path, worktree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end: the engine answers with numbers, the notes and the result
+    carry the ids, so a round fixed by number is indistinguishable from one
+    fixed by id — which is what makes the record stable."""
+    _fake_head(monkeypatch, repo)
+    result = own_round(
+        repo_path=repo,
+        pr_number=7,
+        findings=[_finding("a"), _finding("b")],
+        backend=_CapturingBackend(answer={"fixed": ["2"], "disputed": []}),
+        worktree=worktree,
+    )
+    assert result.fixed == ["b"]
+    assert "fixed: b" in read_notes(repo, 7)
+
+
+# ---------------------------------------------------------------------------
+# The worktree round: another lane's commit is not this round's
+# ---------------------------------------------------------------------------
+
+
+def test_round_does_not_push_a_commit_it_did_not_make(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`pr_head` snapshots a sha, then the worktree is set up. A push landing in
+    that window leaves the worktree at a foreign commit; measuring against the
+    post-checkout head keeps it out of this round's push and out of the notes."""
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True, check=True)
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    _git(worktree, "init", "-b", "fb/x")
+    _git(worktree, "config", "user.email", "t@example.com")
+    _git(worktree, "config", "user.name", "T")
+    (worktree / "README.md").write_text("x\n", encoding="utf-8")
+    _git(worktree, "add", "README.md")
+    _git(worktree, "commit", "-m", "init")
+    _git(worktree, "remote", "add", "origin", str(remote))
+    _git(worktree, "push", "-u", "origin", "fb/x")
+    stale = _git(worktree, "rev-parse", "HEAD")
+
+    # Another lane pushes between the snapshot and the worktree setup.
+    (worktree / "theirs.txt").write_text("theirs\n", encoding="utf-8")
+    _git(worktree, "add", "theirs.txt")
+    _git(worktree, "commit", "-m", "another lane")
+    _git(worktree, "push", "origin", "fb/x")
+    foreign = _git(worktree, "rev-parse", "HEAD")
+
+    _fake_head(monkeypatch, repo, oid=stale)
+    result = own_round(
+        repo_path=repo,
+        pr_number=7,
+        findings=[_finding()],
+        backend=_CapturingBackend(),
+        worktree=worktree,
+    )
+    assert result.pushed is False
+    assert f"{stale} → `{foreign}`" not in read_notes(repo, 7)
+
+
+def test_round_refuses_a_worktree_locked_by_another_live_process(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`checkout_branch` resets an existing worktree to `origin/<branch>`. Doing
+    that to a directory another lane is working destroys its uncommitted work,
+    so the sidecar lock is checked first — the guard `remove_worktree` uses."""
+    from agent_fleet.pr_loop.worktree import _worktree_lock_path
+    from agent_fleet.pr_owner import WorktreeBusyError
+    from agent_fleet.repo import load_repo_config
+
+    _fake_head(monkeypatch, repo)
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    # A real live process owns the lock, and it is not this test's pid, so the
+    # guard has to refuse.
+    other = subprocess.Popen(["sleep", "30"])
+    try:
+        stat = Path(f"/proc/{other.pid}/stat").read_text()
+        start = stat[stat.rfind(")") + 2 :].split()[19]
+        _worktree_lock_path(locked).write_text(f"{other.pid} {start}\n")
+        monkeypatch.setattr(
+            "agent_fleet.pr_owner._lane_worktree",
+            lambda *a, **k: locked,  # noqa: ARG005
+        )
+
+        config = repo / ".agent-fleet.yaml"
+        config.write_text("test_command: true\n", encoding="utf-8")
+        with pytest.raises(WorktreeBusyError, match="locked by another live process"):
+            own_round(repo_path=repo, pr_number=7, repo=load_repo_config(config))
+    finally:
+        other.kill()
+        other.wait(timeout=10)

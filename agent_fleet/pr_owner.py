@@ -18,8 +18,12 @@ bad claim by citing the earlier round instead of re-deriving it.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
+import os
+import shlex
+import signal
 import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -40,6 +44,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "PrOwnership",
+    "WorktreeBusyError",
     "build_fix_prompt",
     "load_findings",
     "own_round",
@@ -48,6 +53,7 @@ __all__ = [
     "read_notes",
     "read_task_spec",
     "render_round",
+    "resolve_answer",
     "run_own",
     "write_notes",
 ]
@@ -63,8 +69,8 @@ NOTES_HISTORY_CHARS = 6000
 ANSWER_TAG = "AGENT_FLEET_PR_OWNER_ANSWER"
 
 ANSWER_SPEC: dict[str, Any] = {
-    "fixed": ["<finding id>"],
-    "disputed": [{"id": "<finding id>", "why": "<why the claim does not hold>"}],
+    "fixed": ["<finding number>"],
+    "disputed": [{"id": "<finding number>", "why": "<why the claim does not hold>"}],
 }
 
 NOTHING_TO_DO = "There is nothing to fix this round."
@@ -290,9 +296,10 @@ def build_fix_prompt(
             json.dumps(ANSWER_SPEC, indent=2),
             "```",
             "",
-            "Report the findings you actually fixed by the numbers above. If you "
-            "fixed none, say so — an empty round is a real answer, and reporting it "
-            "honestly is what lets the next round move on.",
+            "Report the findings you actually fixed by the numbers above, in the "
+            '"fixed" list — not by their ids. If you fixed none, say so — an empty '
+            "round is a real answer, and reporting it honestly is what lets the next "
+            "round move on.",
         ]
     )
     return "\n".join(lines)
@@ -330,6 +337,39 @@ def parse_answer(stdout: str) -> dict[str, list[Any]]:
         {"id": str(d.get("id", "")), "why": str(d.get("why", ""))}
         for d in cast("list[Any]", raw_disputed or [])
         if isinstance(d, dict)
+    ]
+    return {"fixed": fixed, "disputed": disputed}
+
+
+def resolve_answer(
+    answer: dict[str, list[Any]], findings: Sequence[Finding]
+) -> dict[str, list[Any]]:
+    """Map the numbers the engine answered with back onto finding ids.
+
+    The prompt numbers the findings and the answer spec asks for those numbers,
+    so a round fixed by number is the only round shape there is. This is the
+    seam that turns a number into the id the notes and the caller record, and
+    it also accepts an id echoed directly — a model that reports one anyway is
+    understood rather than silently read as having fixed nothing. A token that
+    is neither is dropped: an unmatched entry in the notes would be a finding
+    the next round looks for and cannot find.
+    """
+    by_number = {str(i): f.id for i, f in enumerate(findings, start=1)}
+    by_id = {f.id: f.id for f in findings}
+
+    def _resolve(token: str) -> str | None:
+        key = token.strip().lstrip("#").strip()
+        if key in by_number:
+            return by_number[key]
+        return by_id.get(key)
+
+    fixed = [
+        resolved for token in map(str, answer.get("fixed") or []) if (resolved := _resolve(token))
+    ]
+    disputed = [
+        {"id": resolved, "why": str(entry.get("why", ""))}
+        for entry in cast("list[Any]", answer.get("disputed") or [])
+        if isinstance(entry, dict) and (resolved := _resolve(str(entry.get("id", ""))))
     ]
     return {"fixed": fixed, "disputed": disputed}
 
@@ -372,20 +412,87 @@ def _head_oid(worktree: Path) -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
+def _kill_process_group(proc: subprocess.Popen[str]) -> None:
+    """Kill the test run we started, and nothing else.
+
+    The run is spawned with ``start_new_session=True``, so it leads its own
+    process group and this reaches the pytest/xdist workers it spawned. Without
+    it a timed-out run leaves orphans holding the worktree and CPU on a machine
+    every other lane is sharing.
+    """
+    with contextlib.suppress(OSError, ProcessLookupError):
+        os.killpg(proc.pid, signal.SIGKILL)
+    with contextlib.suppress(OSError, ProcessLookupError):
+        proc.kill()
+
+
+def _run_capped(
+    command: str, *, cwd: Path, timeout_s: int
+) -> subprocess.CompletedProcess[str] | None:
+    """Run a shell *command* memory-capped, in its own process group.
+
+    Returns ``None`` when the run timed out (its group is killed first, so
+    nothing is left running) or could not be started. A timeout is an infra
+    failure, not a test failure: the caller must not record failing test ids
+    from a run that never got to answer.
+    """
+    from agent_fleet.fleet_ops.memcap import MemoryCapError, plan_memory_cap
+
+    # Always an explicit `sh -c`: the systemd branch of the cap plan execs its
+    # argv directly, so a bare command string would be execed as one word. The
+    # ulimit branch adds its own shell around this one.
+    try:
+        plan = plan_memory_cap(["sh", "-c", command], shell=True)
+    except (MemoryCapError, ValueError) as exc:
+        logger.warning("no memory cap available for the test re-run: %s", exc)
+        return None
+
+    try:
+        proc = subprocess.Popen(
+            plan.argv,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        logger.warning("test re-run could not start: %s", exc)
+        return None
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        _kill_process_group(proc)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.communicate(timeout=5)
+        return None
+    return subprocess.CompletedProcess(
+        plan.argv, proc.returncode if proc.returncode is not None else -1, stdout, stderr
+    )
+
+
 def _run_tests(worktree: Path, test_command: str, test_ids: Sequence[str]) -> dict[str, Any]:
-    """Re-run the PR's tests and report which of *test_ids* still fail."""
+    """Re-run the PR's tests and report which of *test_ids* still fail.
+
+    The repo's ``test_command`` is a shell command, as every other executor of
+    that field treats it (``verify_core.run_shell_verify``,
+    ``command_verifier._run_shell``): it may quote arguments, chain with ``&&``,
+    or set an env var. It is therefore run through a shell rather than split
+    into argv, and the test ids are appended as their own quoted words.
+    """
     if not test_command.strip():
         return {"ran": False, "ok": True, "failing": list(test_ids), "detail": "no test command"}
-    argv = [*test_command.split(), *test_ids] if test_ids else test_command.split()
-    result = subprocess.run(
-        argv,
-        cwd=worktree,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=1800,
-    )
-    failing = _failing_from_output(result.stdout, test_ids)
+    command = " ".join([test_command, *(shlex.quote(t) for t in test_ids)])
+    result = _run_capped(command, cwd=worktree, timeout_s=1800)
+    if result is None:
+        return {
+            "ran": False,
+            "ok": False,
+            "failing": list(test_ids),
+            "detail": "test re-run did not complete (timed out or could not start)",
+        }
+    combined = f"{result.stdout or ''}\n{result.stderr or ''}"
+    failing = _failing_from_output(combined, test_ids)
     return {
         "ran": True,
         "ok": result.returncode == 0 and not failing,
@@ -419,7 +526,9 @@ def own_round(
 
     *backend* and *worktree* are the injection seams: a test passes a fake
     engine and a scratch worktree and never touches the network or git. Omitted,
-    the configured backend is built and the PR's own worktree is reused.
+    the configured backend is built and the PR's own worktree is reused — which
+    needs *repo*, so a caller without one gets a recorded failed round rather
+    than an assertion, and the CLI can still print one line and exit 1.
     """
     repo_path = Path(repo_path)
     branch, start_oid = pr_head(pr_number, repo_path)
@@ -427,11 +536,23 @@ def own_round(
         return PrOwnership(False, "", [], [], {"ran": False, "ok": True}, "PR has no head branch")
 
     if worktree is None:
-        from agent_fleet.pr_loop.github_ops import checkout_branch
+        if repo is None:
+            detail = "no .agent-fleet.yaml for this repo, so there is no test command to run"
+            _append(
+                repo_path,
+                pr_number,
+                render_round(head=start_oid, findings=findings, tests_ok=False, timestamp=_now()),
+            )
+            return PrOwnership(False, start_oid, [], [], {"ran": False, "ok": False}, detail)
+        worktree = _checkout_own_worktree(branch, repo_path)
 
-        assert repo is not None, "own_round needs a RepoConfig to locate the worktree"
-        worktree = checkout_branch(branch, _lane_worktree(repo_path, branch), repo_root=repo_path)
-
+    # The baseline this round is measured against is the head *after* the
+    # worktree exists, not the sha ``pr_head`` snapshotted before the fetch.
+    # ``checkout_branch`` resets to ``origin/<branch>``, so a push landing in
+    # that window leaves the worktree at a sha this round never authored;
+    # measuring against the post-checkout head keeps that commit out of this
+    # round's push and out of the notes.
+    base_oid = _head_oid(worktree) or start_oid
     test_command = (repo.test_command if repo else None) or ""
     prior = read_notes(repo_path, pr_number)
     if not prior.strip():
@@ -478,9 +599,9 @@ def own_round(
         )
         return PrOwnership(False, start_oid, [], [], {"ran": False, "ok": False}, detail)
 
-    answer = parse_answer(result.stdout)
+    answer = resolve_answer(parse_answer(result.stdout), findings)
     new_head = _head_oid(worktree)
-    moved = bool(new_head) and new_head != start_oid
+    moved = bool(new_head) and new_head != base_oid
     push_detail = ""
     pushed = moved
     if moved:
@@ -533,6 +654,34 @@ def _lane_worktree(repo_path: Path, branch: str) -> Path:
     )
 
 
+class WorktreeBusyError(RuntimeError):
+    """The worktree this round would use is owned by a live process."""
+
+
+def _checkout_own_worktree(branch: str, repo_path: Path) -> Path:
+    """Check out *branch* for this round, refusing a worktree another lane owns.
+
+    ``checkout_branch`` resets an existing directory to ``origin/<branch>``.
+    Another lane already working this branch in that directory would lose its
+    uncommitted and unpushed work, so the sidecar lock the rest of the fleet
+    maintains is checked first — the same guard ``remove_worktree`` uses.
+    """
+    from agent_fleet.pr_loop.github_ops import checkout_branch
+    from agent_fleet.pr_loop.worktree import (
+        claim_worktree_lock,
+        worktree_locked_by_other_process,
+    )
+
+    worktree = _lane_worktree(repo_path, branch)
+    if worktree_locked_by_other_process(worktree):
+        raise WorktreeBusyError(
+            f"worktree {worktree} is locked by another live process; refusing to reset it"
+        )
+    checked_out = checkout_branch(branch, worktree, repo_root=repo_path)
+    claim_worktree_lock(checked_out)
+    return checked_out
+
+
 def read_task_spec(task_file: str | None) -> str:
     """The task spec text, or ``""`` when no file was given."""
     if not task_file:
@@ -553,27 +702,38 @@ def run_own(
     Reads the repo's own config and calls the configured engine; the testable
     core is :func:`own_round`, which takes both of those already resolved.
     Returns ``{"error": ...}`` rather than raising, so the CLI can print one
-    message and exit 1 without catching anything.
+    message and exit 1 without catching anything. That covers the whole round,
+    not just its input parsing: a bad PR number or an unauthenticated ``gh``
+    raises inside :func:`pr_head`, and a worktree held by another live lane
+    raises out of the checkout.
     """
     from agent_fleet.repo import resolve_repo_config
 
     repo_path = Path(repo_path).expanduser().resolve()
     if not repo_path.is_dir():
         return {"error": f"repo path is not a directory: {repo_path}"}
+    repo = resolve_repo_config(repo_path)
+    if repo is None:
+        return {
+            "error": f"no .agent-fleet.yaml for {repo_path}, so there is no test command to run"
+        }
     try:
         findings = load_findings(Path(findings_path) if findings_path else None)
         task_spec = read_task_spec(task_file)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         return {"error": str(exc)}
 
-    return own_round(
-        repo_path=repo_path,
-        pr_number=pr_number,
-        findings=findings,
-        failing=failing,
-        task_spec=task_spec,
-        repo=resolve_repo_config(repo_path),
-    ).to_dict()
+    try:
+        return own_round(
+            repo_path=repo_path,
+            pr_number=pr_number,
+            findings=findings,
+            failing=failing,
+            task_spec=task_spec,
+            repo=repo,
+        ).to_dict()
+    except (RuntimeError, OSError, ValueError, json.JSONDecodeError) as exc:
+        return {"error": str(exc)}
 
 
 def _worktree_base(repo_path: Path) -> Path:
