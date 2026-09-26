@@ -1230,17 +1230,24 @@ def run_dispatch(
             # the run forever — but the bound is a wait, never a verdict: no lane
             # is finished here, so the next run re-attaches and collects whatever
             # verdict that child owes.
-            if not throttled:
-                if _dispatchable_lanes(current, cluster_order=cluster_order):
-                    if not _can_launch_now(current, max_lanes=max_lanes):
-                        # Lanes are ready and every slot is held by a child that
-                        # is still running. Nothing but one of those children
-                        # exiting frees a slot, so waiting cannot help.
-                        break
-                elif not current.lanes_in(LANE_SLOT_STATES):
-                    # Nothing queued and nothing running: the plan had nothing to
-                    # do for a reason the checks above do not cover.
-                    break
+            if (
+                not throttled
+                and not _dispatchable_lanes(current, cluster_order=cluster_order)
+                and not current.lanes_in(LANE_SLOT_STATES)
+            ):
+                # Nothing queued and nothing running: the plan had nothing to do
+                # for a reason the checks above do not cover.
+                #
+                # Lanes that *are* ready are not in this branch. Ready work
+                # behind a full pool means every slot is held by a child that is
+                # still running, and one of those children exiting is exactly
+                # what frees the slot — so that is the run waiting on its own
+                # children, a delay and not a verdict, and it falls through to
+                # the bounded wait below. Breaking there instead dropped every
+                # lane queued behind the pool's high-water mark and still exited
+                # 0: the silent-drop failure this module exists to prevent. A
+                # child that never exits is contained by `idle_ticks`.
+                break
             idle_ticks += 1
             if idle_ticks > throttle_max_ticks:
                 # Bounded, but a *wait* and never a verdict on the lanes: no lane
@@ -1370,18 +1377,6 @@ def _poll_exited(state: DispatchState) -> dict[str, int]:
 def _complete(state: DispatchState) -> bool:
     """True when no lane can make further progress."""
     return not any(lane.state in LANE_SLOT_STATES for lane in state.lanes.values())
-
-
-def _can_launch_now(state: DispatchState, *, max_lanes: int) -> bool:
-    """Whether a free lane slot exists for work that is ready to run.
-
-    The plan emitted no launch because the pool is full, not because the queue
-    is empty: the lanes still waiting are ready, and the only thing standing
-    between them and a child is a slot held by a lane that is already running.
-    Nothing but one of those children exiting frees a slot, so a run that only
-    ever sees this state is waiting on itself, not on the machine.
-    """
-    return len(state.lanes_in(LANE_SLOT_STATES)) < max_lanes
 
 
 def _throttled(psi: pressure.Throttle, *, psi_avg10_max: float) -> bool:
