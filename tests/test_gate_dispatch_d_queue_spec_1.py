@@ -189,6 +189,72 @@ def test_an_idle_box_is_not_counted_as_throttled(tmp_path: Path) -> None:
     ), f"a lane went terminal without a verdict: {[lane.state for lane in final.lanes.values()]}"
 
 
+def test_a_saturated_box_also_waits_and_still_collects_the_gate_verdict(tmp_path: Path) -> None:
+    """The same wait, on the reading the branch actually used to loop on forever.
+
+    The other arm of the idle branch -- ``throttled`` true with a lane still
+    holding a slot -- reset the counter and re-looped for as long as the box
+    stayed saturated. A permanently contended box therefore made one
+    ``run_dispatch`` tick indefinitely, which is a hang wearing a delay's
+    clothes. The wait is bounded, and the bound still leaves the gate's verdict
+    uncollected rather than guessing one.
+    """
+    saturated = pressure.Throttle(some_avg10=90.0, path=Path("/fake/cpu.pressure"), available=True)
+    queue = tmp_path / "q.jsonl"
+    queue.write_text(json.dumps({"lane": "g0", "repo": "acme", "task": "t"}), encoding="utf-8")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    out_root = tmp_path / "out"
+    item = DispatchItem.from_dict({"lane": "g0", "repo": "acme", "task": "t"})
+    state = DispatchState(
+        operator="documents-0e-saturated",
+        queue_path=str(queue),
+        lanes={
+            "g0": DispatchLane(
+                lane="g0",
+                item=item,
+                state=DISPATCH_GATING,
+                pr=100,
+                status_file=str(out_root / "lanes" / "g0.status"),
+            )
+        },
+        procs={"g0": _LiveProc(7100)},
+    )
+    sleeps = 0
+
+    def _sleep(_seconds: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps > 2 * THROTTLE_MAX_TICKS + 2:
+            raise AssertionError(f"still waiting after {sleeps} ticks; the wait is unbounded")
+
+    summary = run_dispatch(
+        operator="documents-0e-saturated",
+        queue_path=queue,
+        repos={"acme": str(repo)},
+        max_lanes=1,
+        max_gates=2,
+        state=state,
+        spawn=lambda *_a, **_k: _LiveProc(7200),
+        psi_reader=lambda: saturated,
+        psi_avg10_max=25.0,
+        sleep=_sleep,
+        throttle_max_ticks=THROTTLE_MAX_TICKS,
+        run_dir=out_root,
+    )
+    gate = summary.state.lanes["g0"]
+
+    assert sleeps <= THROTTLE_MAX_TICKS, (
+        f"the run slept {sleeps} times on a permanently saturated box; the wait has "
+        f"to be bounded by throttle_max_ticks={THROTTLE_MAX_TICKS}"
+    )
+    assert gate.state == DISPATCH_GATING and gate.reason is None, (
+        f"lane g0 was resolved to state={gate.state!r} reason={gate.reason!r} while its "
+        "gate was still running; a wait must not finish a lane it has no verdict for"
+    )
+    assert summary.escalated == 0 and summary.errors == 0, f"summary: {summary.to_dict()}"
+
+
 def test_the_throttle_still_holds_back_a_launch_on_a_saturated_box() -> None:
     """Control: the throttle's correct half, so a fix cannot just delete it.
 

@@ -987,6 +987,29 @@ def _status_for(lane: DispatchLane) -> str:
         return ""
 
 
+def _reset_status_file(status_file: str | None) -> None:
+    """Empty the lane's status file so a gate verdict is read from *this* gate.
+
+    ``_status_for`` classifies the last line of this file, and lane names are
+    reused: a re-dispatch whose durable state was lost (``load_state`` warns and
+    starts fresh) resolves to the same ``lanes/<lane>.status`` path, so a
+    ``PREMERGE-APPROVED`` line left by an earlier run of a *different* PR is
+    still sitting there. A gate that then crashes, or writes nothing, has its
+    verdict taken from that stale line and an unreviewed PR is reported approved.
+
+    The file is truncated before the gate is spawned, not after it exits: the
+    gate is told this exact path, so nothing else legitimately writes to it
+    while the gate runs, and the lane's own ``--no-gate`` run has already been
+    reaped — its ``NEEDS-ESCALATION`` line is the stale text this replaces.
+    """
+    if not status_file:
+        return
+    try:
+        Path(status_file).expanduser().write_text("", encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"cannot reset the gate status file {status_file}: {exc}") from exc
+
+
 def classify_status(status_line: str, *, exit_code: int | None = None) -> str:
     """Terminal reason from a gate's status line.
 
@@ -1097,7 +1120,6 @@ def run_dispatch(
         # the state file lands correctly in dispatch/<operator>/state.json.
         else dispatch_dir() / confined_name(operator)
     )
-    throttled_ticks = 0
     idle_ticks = 0
 
     while True:
@@ -1134,7 +1156,6 @@ def run_dispatch(
             # is finished here, so the next run re-attaches and collects whatever
             # verdict that child owes.
             if not throttled:
-                throttled_ticks = 0
                 if _dispatchable_lanes(current, cluster_order=cluster_order):
                     if not _can_launch_now(current, max_lanes=max_lanes):
                         # Lanes are ready and every slot is held by a child that
@@ -1145,49 +1166,42 @@ def run_dispatch(
                     # Nothing queued and nothing running: the plan had nothing to
                     # do for a reason the checks above do not cover.
                     break
-                else:
-                    idle_ticks += 1
-                    if idle_ticks > throttle_max_ticks:
-                        logger.warning(
-                            "dispatch %s: no lane progress for %d ticks; %d lane(s) "
-                            "still in flight, left for the next run",
-                            current.operator,
-                            idle_ticks,
-                            len(current.lanes_in(LANE_SLOT_STATES)),
-                        )
-                        break
-                    sleep(tick_seconds)
-                    continue
-            else:
-                throttled_ticks += 1
-            if throttled_ticks > throttle_max_ticks:
-                # The box never freed up. Say so instead of reporting a run
-                # that launched nothing as a success. A lane that holds a slot
-                # is in flight, not held back: abandoning it would drop a
-                # running child, and any gate it still owes a verdict for.
-                if not _complete(current):
+            idle_ticks += 1
+            if idle_ticks > throttle_max_ticks:
+                # Bounded, but a *wait* and never a verdict on the lanes: no lane
+                # is finished here, so the next run re-attaches and collects
+                # whatever verdict the in-flight child still owes. A box that is
+                # saturated has not cancelled the queue, it has delayed it.
+                if throttled and _complete(current):
+                    # Nothing is in flight and the box never freed up, so waiting
+                    # is not the run's own business: report the queue it never ran
+                    # as an error instead of a green success. The lanes stay
+                    # QUEUED, not terminal — a throttle is a delay, so the next
+                    # run of this queue must still be able to dispatch them.
+                    # Marking them DISPATCH_DONE is how a re-run came to report a
+                    # dropped queue as a clean success.
+                    waiting = len(_dispatchable_lanes(current, cluster_order=cluster_order))
                     logger.warning(
-                        "dispatch %s: still throttled after %d ticks; waiting on %d "
-                        "in-flight lane(s) rather than abandoning them",
+                        "dispatch %s: still throttled after %d ticks; %d lane(s) never dispatched",
                         current.operator,
-                        throttled_ticks,
-                        len(state.lanes_in(LANE_SLOT_STATES)),
+                        idle_ticks,
+                        waiting,
                     )
-                    throttled_ticks = 0
-                    sleep(tick_seconds)
-                    continue
-                # The abandoned lanes stay QUEUED, not terminal: the throttle is
-                # a delay, so the next run of this queue must still be able to
-                # dispatch them. Marking them DISPATCH_DONE is how a re-run came
-                # to report a dropped queue as a clean success.
+                    summary.errors += waiting
+                    save_state(current)
+                    break
+                # Otherwise the run is waiting on its own children, which is a
+                # delay and not a verdict. A lane that holds a slot is in flight,
+                # not held back: finishing it would drop a running child and any
+                # gate verdict that child still owes.
                 logger.warning(
-                    "dispatch %s: still throttled after %d ticks; %d lane(s) never dispatched",
+                    "dispatch %s: no lane progress for %d ticks (%s); %d lane(s) "
+                    "still in flight, left for the next run",
                     current.operator,
-                    throttled_ticks,
-                    len(_dispatchable_lanes(current, cluster_order=cluster_order)),
+                    idle_ticks,
+                    "box throttled" if throttled else "box idle",
+                    len(current.lanes_in(LANE_SLOT_STATES)),
                 )
-                summary.errors += len(_dispatchable_lanes(current, cluster_order=cluster_order))
-                save_state(current)
                 break
             sleep(tick_seconds)
             continue
@@ -1367,7 +1381,7 @@ def _launch_lane(
     task_file.parent.mkdir(parents=True, exist_ok=True)
     task_file.write_text(render_task_file(item, fences=fences), encoding="utf-8")
 
-    log = out_root / "runs" / f"lane-{item.lane}.log"
+    log = out_root / "runs" / f"lane-{confined_name(item.lane)}.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     status_file = status_file_for(out_root, item.lane)
     status_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1432,7 +1446,7 @@ def _reap_lane(
         proc = state.procs.get(action.lane)
         exit_code = proc.poll() if proc is not None else None
 
-    log = out_root / "runs" / f"lane-{action.lane}.log"
+    log = out_root / "runs" / f"lane-{confined_name(action.lane)}.log"
     try:
         stdout = log.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -1513,9 +1527,10 @@ def _launch_gate(
         judge_engine=judge_engine,
         worktree=record.worktree,
     )
-    log = out_root / "gate" / f"gate-{item.lane}.log"
+    log = out_root / "gate" / f"gate-{confined_name(item.lane)}.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     log.open("w", encoding="utf-8").close()
+    _reset_status_file(record.status_file)
 
     proc = spawn(argv, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
 

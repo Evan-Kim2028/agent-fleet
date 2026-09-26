@@ -374,6 +374,19 @@ re-evaluating every `--tick-seconds`. If the queue has still not run after
 never reports success for a queue it dropped; re-running the command resumes
 from the durable state.
 
+The bound is a **wait, never a verdict**. It only abandons lanes when nothing at
+all is in flight — a box that refused to free up with a live child attached is a
+run waiting on itself, and finishing that child would drop a running gate and the
+verdict it still owes. A lane left in flight keeps its state, and the next run
+re-attaches and collects the verdict. The same bound applies on an idle box, so
+a child that never exits cannot hang the run either.
+
+The status file is emptied just before the gate is spawned. Lane names are
+reused, so a `PREMERGE-APPROVED` line from an earlier PR of the same lane would
+otherwise still be the last line in the file; a gate that then crashed, or wrote
+nothing, would have its verdict read back from that stale line and an unreviewed
+PR reported as approved.
+
 ### What this makes impossible
 
 Each of these was a real failure of the shell dispatcher, and each has a test

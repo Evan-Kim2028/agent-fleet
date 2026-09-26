@@ -1,4 +1,4 @@
-"""contract_4: the ``gated`` counter in the JSON summary must count gates.
+"""contract_4: what the dispatcher counts, and whose verdict it counts.
 
 Claim under test
 ----------------
@@ -14,6 +14,14 @@ matches the gates launched -- not that it is merely non-zero, so a hardcoded
 value cannot pass. A cooperative gate stand-in writes its verdict to the lane's
 status file, so the run is a complete, ordinary, all-approved one; the only
 thing under test is the counter.
+
+The same file also pins what a *counted* approval has to mean. ``_status_for``
+classifies the last line of ``lanes/<lane>.status``, and that path is keyed by
+lane name, which is reused: a re-dispatch whose durable state was lost resolves
+to the same file, so a ``PREMERGE-APPROVED`` line from an earlier PR can still
+be sitting there. Unless the dispatcher empties the file before spawning the
+gate, a gate that crashes writes nothing and that stale line is read back as its
+verdict -- an unreviewed PR reported approved, with exit 0.
 """
 
 from __future__ import annotations
@@ -87,6 +95,157 @@ def test_the_gated_counter_appears_in_the_json_document(tmp_path: Path) -> None:
     # Sanity: the rest of the summary is populated, so this is not a run that
     # failed to gate anything.
     assert payload["approved"] == GATED_LANES, f"summary: {payload}"
+
+
+def _run_one_gated_lane(
+    tmp_path: Path, *, gate_exit: int, stale_status: str | None, operator: str
+) -> tuple[Path, Any]:
+    """Run a one-lane queue whose gate either writes a verdict or writes nothing."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    lane = "L1"
+    queue = tmp_path / "q.jsonl"
+    queue.write_text(json.dumps({"lane": lane, "repo": "acme", "task": "t"}), encoding="utf-8")
+    out = tmp_path / "out"
+    status = out / "lanes" / f"{lane}.status"
+    if stale_status is not None:
+        status.parent.mkdir(parents=True, exist_ok=True)
+        status.write_text(stale_status, encoding="utf-8")
+    _pid = 3000
+
+    def spawn(argv: Sequence[str], **kwargs: Any) -> Any:  # noqa: ANN401
+        nonlocal _pid
+        argv = list(argv)
+        _pid += 1
+        if argv[:3] == ["fleet", "lane", "run"]:
+            Path(str(kwargs["stdout"])).write_text(
+                json.dumps({"state": "pr_guaranteed", "pr": 7, "worktree": "/w"}),
+                encoding="utf-8",
+            )
+            return _FakeProc(_pid, 0, polls=1)
+
+        if gate_exit == 0:
+            Path(argv[argv.index("--status-file") + 1]).write_text(
+                "12:05:00 PREMERGE-APPROVED bbb222fff\n", encoding="utf-8"
+            )
+        return _FakeProc(_pid, gate_exit)
+
+    summary = run_dispatch(
+        operator=operator,
+        queue_path=queue,
+        repos={"acme": str(repo)},
+        max_lanes=2,
+        max_gates=2,
+        spawn=spawn,
+        psi_reader=lambda: IDLE,
+        sleep=lambda _s: None,
+        run_dir=out,
+    )
+    return status, summary
+
+
+def test_a_gate_that_wrote_nothing_does_not_inherit_an_earlier_runs_approval(
+    tmp_path: Path,
+) -> None:
+    """Lane names are reused, so a stale approval must not stand in for a verdict.
+
+    ``_status_for`` classifies the last line of ``lanes/<lane>.status``. A
+    re-dispatch whose durable state was lost resolves to that same path, so a
+    ``PREMERGE-APPROVED`` line from an earlier PR is still there. If the status
+    file is not reset before the gate runs, a gate that crashes writes nothing
+    and that stale line is read back as its verdict — an unreviewed PR reported
+    approved, with exit 0.
+    """
+    status, summary = _run_one_gated_lane(
+        tmp_path,
+        gate_exit=1,
+        stale_status="12:00:00 PREMERGE-APPROVED oldrun111\n",
+        operator="documents-0e-stale",
+    )
+
+    record = summary.state.lanes["L1"]
+    assert not summary.approved, (
+        f"a gate that exited {1} and wrote no verdict was reported as approved from "
+        f"the stale line in {status}: {summary.to_dict()}"
+    )
+    assert summary.escalated == 1, f"summary: {summary.to_dict()}"
+    assert summary.exit_code() == 1, f"summary: {summary.to_dict()}"
+    assert record.reason is not None and record.reason.startswith("escalated"), (
+        f"lane L1 was finished as {record.state}/{record.reason!r} instead of escalated"
+    )
+
+
+def test_a_gate_verdict_is_still_approved_by_the_same_run(tmp_path: Path) -> None:
+    """Control: emptying the file costs a real approval nothing.
+
+    The reset above is only safe because the gate appends its own verdict to the
+    same path. A reset that also swallowed that verdict would turn every green
+    gate into an escalation, so the run is driven through the same helper with
+    the stale line removed and has to come back approved.
+    """
+    _status, summary = _run_one_gated_lane(
+        tmp_path, gate_exit=0, stale_status=None, operator="documents-0e-control"
+    )
+
+    assert summary.approved == 1, f"summary: {summary.to_dict()}"
+    assert summary.escalated == 0, f"summary: {summary.to_dict()}"
+    assert summary.exit_code() == 0, f"summary: {summary.to_dict()}"
+
+
+def test_the_status_file_is_empty_before_the_gate_is_spawned(tmp_path: Path) -> None:
+    """The reset has to happen at launch, not after the gate exits.
+
+    Reading the file the moment the gate is spawned is the only point at which
+    the reset is observable from outside: by the time the gate exits it has
+    appended its own verdict. So the gate is told to append nothing and the file
+    is read at the moment of the spawn.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    queue = tmp_path / "q.jsonl"
+    queue.write_text(json.dumps({"lane": "L1", "repo": "acme", "task": "t"}), encoding="utf-8")
+    out = tmp_path / "out"
+    at_spawn: list[str] = []
+    _pid = 4000
+
+    def spawn(argv: Sequence[str], **kwargs: Any) -> Any:  # noqa: ANN401
+        nonlocal _pid
+        argv = list(argv)
+        _pid += 1
+        if argv[:3] == ["fleet", "lane", "run"]:
+            lane_status = Path(argv[argv.index("--status-file") + 1])
+            lane_status.parent.mkdir(parents=True, exist_ok=True)
+            lane_status.write_text("12:00:00 NEEDS-ESCALATION gate disabled (--no-gate)\n")
+            Path(str(kwargs["stdout"])).write_text(
+                json.dumps({"state": "pr_guaranteed", "pr": 7, "worktree": "/w"}),
+                encoding="utf-8",
+            )
+            return _FakeProc(_pid, 0, polls=1)
+
+        at_spawn.append(Path(argv[argv.index("--status-file") + 1]).read_text(encoding="utf-8"))
+        Path(argv[argv.index("--status-file") + 1]).write_text(
+            "12:05:00 PREMERGE-APPROVED bbb222fff\n", encoding="utf-8"
+        )
+        return _FakeProc(_pid, 0)
+
+    summary = run_dispatch(
+        operator="documents-0e-reset",
+        queue_path=queue,
+        repos={"acme": str(repo)},
+        max_lanes=2,
+        max_gates=2,
+        spawn=spawn,
+        psi_reader=lambda: IDLE,
+        sleep=lambda _s: None,
+        run_dir=out,
+    )
+
+    assert at_spawn == [""], (
+        f"the lane's status file still held the --no-gate escalation line when the "
+        f"gate was spawned ({at_spawn!r}); the gate appends to whatever it finds, so "
+        "the dispatcher's own stale text would be classified as the gate's verdict"
+    )
+    assert summary.approved == 1, f"summary: {summary.to_dict()}"
 
 
 def _run_two_gated_lanes(tmp_path: Path) -> tuple[list[str], Any]:
