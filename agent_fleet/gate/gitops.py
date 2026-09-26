@@ -8,6 +8,23 @@ commit — and the operator's own working tree is never dirtied by a run.
 Every worktree is created with ``--detach`` at an explicit sha. A gate run that
 crashed mid-round leaves a directory behind but no branch to half-update, and
 the next run removes and recreates it.
+
+**Worktree mutation is serialized per repository** (:func:`worktree_lock`), and
+under *the same lock every other subsystem takes*
+(:func:`agent_fleet.fleet_ops.worktree_lock.repo_worktree_lock`).
+``git worktree add`` and ``git worktree prune`` are not safe to run concurrently
+against one repository: prune deletes the administrative entries under
+``.git/worktrees`` for directories it cannot find, including a sibling's
+worktree that ``add`` has registered but not yet finished populating. The
+observed failure was ``fatal: could not write new index file`` / ``could not open
+'.git/worktrees/<name>/locked' for writing: No such file or directory``, which
+loses the sibling's worktree outright. The lock covers add, remove, *and* prune
+together — locking only ``add`` would still let one gate's prune run while
+another's add is mid-flight, which is the actual corruption.
+
+One lock per repository is the whole point: a gate lock anywhere but the
+shared one is a second flock over one shared resource, and a lane ``add`` would
+still interleave with this gate's ``prune``.
 """
 
 from __future__ import annotations
@@ -21,6 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path  # noqa: TC003 - used at runtime (path.exists/is_file)
 from typing import TYPE_CHECKING
 
+from agent_fleet.fleet_ops.worktree_lock import repo_key, repo_worktree_lock
 from agent_fleet.gate.pytest_runner import is_test_file
 
 if TYPE_CHECKING:
@@ -121,21 +139,70 @@ def current_pr_head(repo: Path, pr_number: int) -> str:
     return resolve_pull_request(repo, pr_number).head_sha
 
 
+def _repo_key(repo: Path) -> str:
+    """A stable, credential-free name for the repository at *repo*.
+
+    Delegates to :func:`agent_fleet.fleet_ops.worktree_lock.repo_key` so the
+    gate and the admission lock index cannot disagree about a repository's
+    name. The raw ``remote.origin.url`` is never used: after ``gh auth
+    setup-git`` it carries a live token, and a token must not end up in a
+    filename.
+    """
+    return repo_key(repo)
+
+
+def _lock_dir() -> Path:
+    """``~/.agent-fleet/admission/locks``, where the worktree lock is indexed.
+
+    The gate no longer *holds* anything here. A ``flock`` is visible to every
+    process on the box, so the lock file has to outlive a crashed holder, and a
+    file inside a gate worktree would be deleted out from under its holder the
+    moment ``git worktree remove`` took that worktree's administrative
+    directory with it. The lock therefore lives at
+    ``<git-dir>/agent-fleet-worktree.lock`` — see
+    :func:`agent_fleet.fleet_ops.worktree_lock.repo_worktree_lock` — and this
+    directory keeps a pointer to it per repository.
+    """
+    from agent_fleet.fleet_ops.admission import AdmissionConfig
+
+    return AdmissionConfig().locks_dir()
+
+
+def worktree_lock(repo: Path):  # noqa: ANN201
+    """Serialize worktree add/remove/prune for *repo* across processes and threads.
+
+    Delegates to
+    :func:`agent_fleet.fleet_ops.worktree_lock.repo_worktree_lock`, which is
+    what :func:`agent_fleet.fleet_ops.worktree.ensure_lane_worktree` and the
+    merge-plan probe take: one lock per repository, shared by every subsystem
+    that mutates ``.git/worktrees``. In-process it serializes threads and is
+    re-entrant per thread (``prepare_worktree`` calls ``remove_worktree``);
+    across processes it is an ``flock``, which is the case that actually lost
+    worktrees, since gates are separate processes.
+
+    Degrades to running unlocked if the lock file cannot be created: a gate that
+    cannot take a lock is still better than a gate that refuses to run.
+    """
+    return repo_worktree_lock(repo)
+
+
 def prepare_worktree(repo: Path, path: Path, sha: str) -> Path:
     """Create a detached worktree at *sha*, replacing any previous one at *path*."""
-    remove_worktree(repo, path)
-    repo.parent.mkdir(parents=True, exist_ok=True)
-    _run_git(repo, "worktree", "add", "--detach", str(path), sha)
+    with worktree_lock(repo):
+        remove_worktree(repo, path)
+        repo.parent.mkdir(parents=True, exist_ok=True)
+        _run_git(repo, "worktree", "add", "--detach", str(path), sha)
     return path
 
 
 def remove_worktree(repo: Path, path: Path) -> None:
     """Remove a gate worktree. Never raises — a missing worktree is fine."""
-    if not path.exists():
-        _run_git(repo, "worktree", "prune", check=False)
-        return
-    _run_git(repo, "worktree", "remove", "--force", str(path), check=False)
-    shutil.rmtree(path, ignore_errors=True)
+    with worktree_lock(repo):
+        if not path.exists():
+            _run_git(repo, "worktree", "prune", check=False)
+            return
+        _run_git(repo, "worktree", "remove", "--force", str(path), check=False)
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def fetch_base(repo: Path, base_branch: str) -> None:

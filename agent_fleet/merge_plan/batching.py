@@ -44,6 +44,7 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from agent_fleet.fleet_ops.worktree_lock import repo_worktree_lock
 from agent_fleet.merge_plan.types import (
     DEFAULT_MAX_BATCH_SIZE,
     Batch,
@@ -269,6 +270,20 @@ def _scratch_merge_compatible(
         return True
     tmp = Path(tempfile.mkdtemp(prefix="fleet-mergecheck-"))
     worktree = tmp / "wt"
+    # Same per-repository lock the gate and lane worktrees take: this probe
+    # mutates one shared .git/worktrees registry, and an unlocked `add` here
+    # can still lose a sibling's half-registered worktree to a concurrent prune.
+    with repo_worktree_lock(repo_path):
+        return _scratch_merge_probe(repo_path, shas, tmp, worktree)
+
+
+def _scratch_merge_probe(
+    repo_path: Path,
+    shas: Sequence[str],
+    tmp: Path,
+    worktree: Path,
+) -> bool:
+    """Replay the merges, with the repository worktree lock already held."""
     try:
         add = subprocess.run(
             ["git", "worktree", "add", "--detach", str(worktree), shas[0]],
