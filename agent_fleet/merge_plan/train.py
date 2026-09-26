@@ -19,8 +19,10 @@ One run, for one repository
    not hold back work that has nothing to do with it.  The heads are fetched
    first, and a head the checkout cannot hold at all is reported as
    ``UNFETCHABLE`` rather than mistaken for a conflict.  The base branch is the
-   one the PRs, the config, or the remote say (:func:`resolve_base_branch`), not
-   a literal ``main``.
+   one the batch's root PRs, the config, or the remote say
+   (:func:`resolve_base_branch`), not a literal ``main`` — a stacked PR's base
+   names its parent in the same batch and is folded onto the candidate, so only
+   the roots are asked which branch the batch merges into.
 3. **Test once** on the combined tree.  A green batch lands as a unit and
    returns a single result, so the caller deploys once.
 4. **On red, bisect**: split the batch, re-test each half, and keep only the
@@ -614,6 +616,34 @@ def scratch_root(repo: str) -> Path:
     return agent_fleet_home() / "tmp" / "merge-train" / repo
 
 
+def stack_roots(prs: Sequence[TrainPR]) -> list[TrainPR]:
+    """The PRs in *prs* whose base is not another PR in the batch.
+
+    A stacked PR's ``base_ref`` names a sibling's head branch, and that sibling
+    is merged into the candidate before it — so naming the branch every member of
+    a stack declares is naming a branch that only exists in the batch, and the
+    fold has nothing to cut from.  The roots are the members that actually say
+    which branch the batch merges into.
+
+    Head *branches* key the map, for the same reason :func:`order_batch` uses
+    them: a batch whose PRs all target ``main`` would otherwise hand ``main`` to
+    the last of them and treat every other PR as stacked on it.  A member whose
+    base names a PR outside the batch is a root too, because that branch is not
+    going to appear in this run.
+    """
+    owner: dict[str, int] = {}
+    for pr in prs:
+        if pr.head_branch:
+            owner.setdefault(pr.head_branch, pr.number)
+    numbers = {pr.number for pr in prs}
+    roots: list[TrainPR] = []
+    for pr in prs:
+        parent = owner.get(pr.base_ref)
+        if parent is None or parent == pr.number or parent not in numbers:
+            roots.append(pr)
+    return roots
+
+
 def resolve_base_branch(
     repo_path: Path,
     *,
@@ -624,10 +654,15 @@ def resolve_base_branch(
 
     An operator's ``--base-branch`` is an instruction and fleet.yaml's
     ``base_branch`` is a declaration, so both outrank anything read off the
-    repository.  Past those, the base the PRs themselves name wins: a PR the
-    gate approved is a PR whose base ref is the branch it was opened against,
-    and a batch whose PRs disagree with each other has no single base to fold
-    onto.  Only then is the checkout asked, and only for its own answer —
+    repository.  Past those, the base the batch itself declares wins: a PR the
+    gate approved is a PR whose base ref is the branch it was opened against.
+    Only the batch's *roots* are asked (:func:`stack_roots`), because a stacked
+    PR's base names its parent in the same batch and is folded onto the candidate
+    rather than onto any branch — asking the whole batch would read a perfectly
+    good stack as a batch spanning two branches and refuse to run it.  Roots that
+    still disagree have no single base, and saying so beats guessing one.
+
+    Only then is the checkout asked, and only for its own answer —
     ``git ls-remote --symref origin HEAD`` for the remote's default branch,
     then the branch the checkout has checked out.  ``main`` is the last
     fallback, not the assumption: a repository that calls its default branch
@@ -635,7 +670,7 @@ def resolve_base_branch(
     """
     if configured.strip():
         return configured.strip()
-    bases = {pr.base_ref for pr in prs if pr.base_ref.strip()}
+    bases = {pr.base_ref for pr in stack_roots(prs) if pr.base_ref.strip()}
     if len(bases) == 1:
         return bases.pop()
     if len(bases) > 1:
@@ -680,6 +715,12 @@ def ensure_heads_local(repo_path: Path, prs: Sequence[TrainPR]) -> tuple[list[Tr
     ``allowReachableSHA1InWant``.  A head that cannot be materialised at all is
     reported rather than folded, so a broken checkout is named instead of
     mistaken for a branch that needs rebasing.
+
+    The returned pair says which heads the checkout holds *and* which it could
+    not be made to hold, so a caller can never fold a partial batch without also
+    reporting the PRs it dropped: every head in *prs* is in exactly one of the
+    two.  This mutates ``.git``, so it is called from inside the fold's lock —
+    see :meth:`GitFold.ensure_heads_local`.
     """
     missing = [pr for pr in prs if pr.head_sha and not _commit_exists(repo_path, pr.head_sha)]
     if not missing:
@@ -777,6 +818,13 @@ class GitFold:
     repository's worktree lock — a fold mutates the shared ``.git`` directory,
     and an unlocked ``worktree add`` can lose a sibling's half-registered
     worktree to a concurrent prune.
+
+    Entering fetches the base and *refuses to continue if that fetch failed*.
+    The candidate is cut from ``origin/<base>``, so a checkout whose fetch
+    failed folds and tests the batch against whatever commits ``origin/<base>``
+    happened to hold beforehand, and the run then lands a combination that was
+    never tested against the base it is merged into.  There is no honest verdict
+    for that, so it stops the run instead of reporting one.
     """
 
     def __init__(self, repo_path: Path, base_branch: str = DEFAULT_BASE_BRANCH) -> None:
@@ -786,6 +834,11 @@ class GitFold:
         self.conflicted: list[int] = []
         self.unfetchable: list[int] = []
         self.candidate_sha = ""
+        #: PRs the checkout could not be made to hold, and why.  The fetch that
+        #: would fetch them runs inside ``__enter__``, under the same lock as
+        #: the worktree add and the merges — see :meth:`ensure_heads_local`.
+        self.missing: list[int] = []
+        self.missing_reason = ""
 
     @property
     def base_ref(self) -> str:
@@ -793,7 +846,13 @@ class GitFold:
         return f"origin/{self.base_branch}"
 
     def __enter__(self) -> GitFold:
-        self._git(["git", "fetch", "--quiet", "origin", self.base_branch])
+        fetch = self._git(["git", "fetch", "--quiet", "origin", self.base_branch])
+        if fetch.returncode != 0:
+            msg = (
+                f"could not fetch origin/{self.base_branch} to fold onto: "
+                f"{(fetch.stderr or fetch.stdout).strip()}"
+            )
+            raise RuntimeError(msg)
         root = scratch_root(self.repo_path.name) / f"wt-{id(self):x}"
         root.mkdir(parents=True, exist_ok=True)
         add = self._git(
@@ -808,6 +867,26 @@ class GitFold:
             raise RuntimeError(msg)
         self._worktree = root
         return self
+
+    def ensure_heads_local(self, prs: Sequence[TrainPR]) -> list[TrainPR]:
+        """Fetch the heads *prs* needs, and return the ones the checkout holds.
+
+        Called from inside the fold, under the lock :class:`GitTrainer` already
+        holds, because a fetch is a mutation of the shared ``.git`` exactly like
+        the ``worktree add`` beside it.  Run outside the lock it reintroduces the
+        race the lock exists to close: a sibling train can move
+        ``refs/pull/<n>/head`` between this process's ``cat-file -e`` and its
+        ``git merge``, and the merge dereferences the ref to the newer commits —
+        so the candidate advances by code the gate never approved and no test run
+        ever saw.  A head's identity is settled by a merged merge commit that
+        records the SHA, so a bare SHA cannot be swapped underneath it, and
+        moving a ref out from under a locked fold is left to the other train to
+        refuse rather than to be detected after the fact.
+        """
+        foldable, reason = ensure_heads_local(self.repo_path, prs)
+        self.missing = [pr.number for pr in prs if pr.number not in {p.number for p in foldable}]
+        self.missing_reason = reason
+        return foldable
 
     def __exit__(self, *exc: object) -> None:
         if self._worktree is not None:
@@ -834,6 +913,15 @@ class GitFold:
         identity, a refusing hook — is a fault in the *checkout*, not a
         verdict about a PR, so it stops the run instead of quietly setting good
         work aside under a reason that is not true.
+
+        Every git call in the loop names ``self.worktree`` as its directory.
+        That is not tidiness: ``git merge --abort`` and ``git rev-parse HEAD``
+        default to the operator's checkout, where there is no merge to abort and
+        whose ``HEAD`` is whatever commit the operator happened to be on.  An
+        abort left in the candidate instead strands its unmerged entries, and
+        every PR after the conflict is then set aside for a conflict that is not
+        its own; a head read from the wrong directory reports the operator's
+        commit as the tree that was tested.
         """
         self.conflicted = []
         self.unfetchable = []
@@ -845,7 +933,7 @@ class GitFold:
             if merged.returncode == 0:
                 continue
             if _merge_is_conflict(merged, self.worktree):
-                self._git(["git", "merge", "--abort"])
+                self._git(["git", "merge", "--abort"], cwd=self.worktree)
                 self.conflicted.append(pr.number)
                 continue
             if _merge_is_unfetchable(merged, self.worktree):
@@ -856,7 +944,9 @@ class GitFold:
                 f"{self.base_ref}: {(merged.stderr or merged.stdout).strip()}"
             )
             raise RuntimeError(msg)
-        self.candidate_sha = self._git(["git", "rev-parse", "HEAD"]).stdout.strip()
+        self.candidate_sha = self._git(
+            ["git", "rev-parse", "HEAD"], cwd=self.worktree
+        ).stdout.strip()
         return self.candidate_sha
 
     def _merge(self, sha: str) -> subprocess.CompletedProcess[str]:
@@ -884,6 +974,12 @@ class GitTrainer:
     batch's other half.  A test command that outlives ``timeout`` is killed and
     reported red, so a hang is a test outcome the train can bisect rather than
     an exception that abandons the run mid-fold.
+
+    One lock covers the whole call, from fetching the heads to the last merge.
+    The head fetch mutates the shared ``.git`` exactly as the worktree add does,
+    so a fold whose fetch ran outside the lock would leave the window between
+    ``cat-file -e <head>`` and ``git merge <head>`` open to a sibling run moving
+    the PR's ref — and the fold would then advance by commits no test ever saw.
     """
 
     def __init__(
@@ -904,36 +1000,21 @@ class GitTrainer:
         """Fold *prs* onto the base branch and run the test command over the result."""
         if not prs:
             return TestResult(passed=True, summary="empty batch")
-        foldable, reason = ensure_heads_local(self.repo_path, prs)
-        if not foldable:
-            return TestResult(
-                passed=False,
-                summary=reason or "no head in the batch could be fetched",
-                unfetchable=tuple(pr.number for pr in prs),
-            )
         with repo_worktree_lock(self.repo_path), GitFold(self.repo_path, self.base_branch) as fold:
+            foldable = fold.ensure_heads_local(prs)
+            unfetchable = _fold_incomplete(
+                fold,
+                "no head in the batch could be fetched" if not foldable else "",
+            )
+            if unfetchable is not None:
+                return unfetchable
             fold.fold(foldable)
             self.candidate_sha = fold.candidate_sha
-            if fold.unfetchable or fold.conflicted:
-                return TestResult(
-                    passed=False,
-                    summary="fold incomplete before the test run: "
-                    + "; ".join(
-                        filter(
-                            None,
-                            [
-                                f"unfetchable {names_of(fold.unfetchable)}"
-                                if fold.unfetchable
-                                else "",
-                                f"conflicting {names_of(fold.conflicted)}"
-                                if fold.conflicted
-                                else "",
-                            ],
-                        )
-                    ),
-                    conflicts=tuple(fold.conflicted),
-                    unfetchable=tuple(fold.unfetchable),
-                )
+            incomplete = _fold_incomplete(
+                fold, f"fold incomplete before the test run: {fold.missing_reason}"
+            )
+            if incomplete is not None:
+                return incomplete
             argv = self._argv(foldable, fold)
             try:
                 result = _run(argv, cwd=fold.worktree, timeout=self.timeout)
@@ -960,6 +1041,44 @@ class GitTrainer:
         # A configured command may want to know where the tree is; {tree} keeps
         # it from hardcoding a path it cannot know.
         return [a.replace("{tree}", str(fold.worktree)) for a in argv]
+
+
+def _fold_incomplete(fold: GitFold, prefix: str) -> TestResult | None:
+    """A fold that applied only part of the batch, or ``None`` when it applied all.
+
+    Every way the fold can come up short is folded into one verdict here, because
+    they are the same thing to the caller: a PR in the batch was not tested.  A
+    head the checkout never got (:attr:`GitFold.missing`, the fetch that could not
+    materialise it) counts exactly like a head that went missing between the fetch
+    and the merge (:attr:`GitFold.unfetchable`) and like one the merge could not
+    resolve.
+
+    Collapsing them is also what keeps the report honest.  Reporting only the
+    last group means the PRs the fetch dropped are in neither ``landed`` nor
+    ``set_aside``: an approved PR the run simply never looked at, with no verdict
+    and nothing in the text an operator reads.  The whole test run is built from
+    the fold's state this way rather than from whichever field happens to be
+    populated, so no path can report a partial batch as a whole one.
+    """
+    unfetchable = fold.missing + [n for n in fold.unfetchable if n not in fold.missing]
+    if not unfetchable and not fold.conflicted:
+        return None
+    parts = [
+        text
+        for text in (
+            f"unfetchable {names_of(unfetchable)}" if unfetchable else "",
+            f"conflicting {names_of(fold.conflicted)}" if fold.conflicted else "",
+        )
+        if text
+    ]
+    detail = "; ".join(parts)
+    summary = f"{prefix}: {detail}" if prefix else detail
+    return TestResult(
+        passed=False,
+        summary=summary,
+        conflicts=tuple(fold.conflicted),
+        unfetchable=tuple(unfetchable),
+    )
 
 
 def _failing_tests(output: str) -> tuple[str, ...]:
@@ -1036,9 +1155,16 @@ def run_train(
 
     The git/gh entry point the CLI calls.  Ordering and staleness are applied
     here so the cap applies to what will actually be merged rather than to
-    approvals that are about to be dropped.  The base branch is resolved once,
-    before the fold, and carried into the trainer, the run, and the report so
+    approvals that are about to be dropped — and so is the base branch, resolved
+    once before the fold and carried into the trainer, the run, and the report so
     every verdict names the branch the batch was actually folded onto.
+
+    The CLI resolves the base branch itself and hands it in, because it has to
+    ask about the same capped batch it is about to run: two passes over two sets
+    of PRs is how the branch the batch was folded onto stops being the branch the
+    PRs merge into.  A caller that passes ``base_branch=""`` gets the same
+    resolution over its own capped batch, and an empty *prs* is a no-op run
+    rather than a fold of nothing.
     """
     keep, _moved = partition_batch(prs)
     batch = order_batch(keep)[:max_batch_size]

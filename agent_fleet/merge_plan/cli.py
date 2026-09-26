@@ -22,9 +22,10 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import argparse
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping, Sequence
 
     from agent_fleet.merge_plan.execute import EventSink, TickResult
+    from agent_fleet.merge_plan.train import TrainPR
     from agent_fleet.merge_plan.types import ExecutorSpec
 
 
@@ -221,6 +222,15 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
     per-PR merge/deploy/verify commands are rendered but *not* executed: a
     landed train is one deploy, and the operator decides that.  ``--dry-run``
     prints what would run and reports nothing as landed.
+
+    Two things are decided *before* the base branch is, and both of them decide
+    whether there is a batch at all.  The batch is the first eligible PRs in
+    fold order, and the active cluster holds are consulted against it — the same
+    ledger and the same matcher ``merge run`` uses, so a freeze declared for
+    ``merge run`` is a freeze for the train too.  Resolving the branch over a
+    different set than the one that runs would mean asking the batch a question
+    it is not the one being asked, which is how a folded-onto and a landed-onto
+    branch drift apart.
     """
     from agent_fleet.merge_plan.collect import (
         GitHubClient,
@@ -235,6 +245,8 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
     from agent_fleet.merge_plan.plan import normalize_repo
     from agent_fleet.merge_plan.train import (
         TrainPR,
+        order_batch,
+        partition_batch,
         resolve_base_branch,
         run_train,
     )
@@ -258,6 +270,8 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
         print(f"no approved PRs found for {repo}")
         return 0
 
+    config_path = getattr(args, "config", None)
+    lanes = {a.pr_number: a.lane for a in approvals}
     client = GitHubClient().for_repo(repo_path)
     prs: list[TrainPR] = []
     for approval in approvals:
@@ -280,11 +294,14 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
         print(f"no open approved PRs found for {repo}")
         return 0
 
-    if args.dry_run:
-        from agent_fleet.merge_plan.train import order_batch, partition_batch
+    # One batch, resolved once: the PRs that survive the staleness filter, in
+    # fold order, capped.  The cap belongs here rather than inside run_train so
+    # the base branch, the hold check and the run are all answered about the same
+    # set of PRs.
+    keep, moved = partition_batch(prs)
+    batch = order_batch(keep)[: args.max_batch_size]
 
-        keep, moved = partition_batch(prs)
-        batch = order_batch(keep)[: args.max_batch_size]
+    if args.dry_run:
         print(f"merge train dry-run [{repo}]: would test {len(batch)} PR(s) combined")
         for pr in batch:
             print(f"  #{pr.number} {pr.head_sha[:9]} base={pr.base_ref or '-'}")
@@ -292,13 +309,17 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
             print(f"  #{pr.number} SKIPPED-MOVED head moved to {pr.current_head[:9]}")
         return 0
 
-    config_path = getattr(args, "config", None)
+    held = _held_batch(batch, lanes=lanes, args=args)
+    if held is not None:
+        print(held, file=sys.stderr)
+        return 1
+
     try:
         base_branch = resolve_base_branch(
             repo_path,
             configured=getattr(args, "base_branch", "")
             or resolve_train_base_branch(repo, Path(config_path) if config_path else None),
-            prs=prs[: args.max_batch_size],
+            prs=batch,
         )
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -308,7 +329,7 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
         result = run_train(
             repo=repo,
             repo_path=repo_path,
-            prs=prs,
+            prs=batch,
             command=args.test_command,
             max_batch_size=args.max_batch_size,
             report_path=Path(args.report).expanduser() if args.report else None,
@@ -324,6 +345,48 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
         json.dumps(result.to_dict(), indent=2, default=str) if args.json else result.render_text()
     )
     return 0 if result.landed else 1
+
+
+def _held_batch(
+    batch: Sequence[TrainPR], *, lanes: Mapping[int, str], args: argparse.Namespace
+) -> str | None:
+    """Why this batch may not be merged under an active cluster hold, or ``None``.
+
+    A hold is an operator saying *nothing* merges for these lanes until they
+    release it, and it is held in the ledger rather than in the code, so a
+    command that merges without reading it is not subject to the freeze the
+    operator is relying on.  A train lands PRs one after another with no other
+    checkpoint, so it is the one path that has to ask.
+
+    Matching is ``merge run``'s own: the same active holds, the same per-PR
+    ``ClusterHold.matches``, so the set of merges a hold stops is the same set
+    whichever command the operator reaches for.  A train has no deploy unit —
+    one landed batch is one deploy, chosen after the merges — so the hold is
+    matched on lane alone, and a batch none of the PRs match is unaffected.
+    """
+    from agent_fleet.merge_plan.execute import load_ledger
+    from agent_fleet.merge_plan.train import names_of
+
+    if not batch:
+        return None
+    try:
+        spec = _spec(args)
+    except ValueError as exc:
+        return f"error: {exc}"
+    held_by_lane = [
+        (hold.name, pr.number)
+        for pr in batch
+        for hold in load_ledger(spec).active_holds(spec)
+        if hold.matches(lane=lanes.get(pr.number, ""), deploy_unit="")
+    ]
+    if not held_by_lane:
+        return None
+    name, _first = held_by_lane[0]
+    return (
+        f"error: cluster hold {name} is holding "
+        f"{names_of(tuple(sorted(n for held, n in held_by_lane if held == name)))} "
+        f"(release: fleet merge release {name})"
+    )
 
 
 def register_merge_commands(sub: argparse._SubParsersAction) -> None:

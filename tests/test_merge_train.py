@@ -13,6 +13,15 @@ Covers:
 - a conflict sets only that PR aside and the rest of the batch still lands
 - a red batch is bisected: the culprit is named with its failing tests, the
   rest still lands, and the survivors are exactly the PRs proven good
+- the fold's git calls happen in the candidate worktree, and the fetch of the
+  base is a precondition rather than a discarded exit status
+- a batch is folded and tested under the repository worktree lock, fetch
+  included, and the head fetch runs inside it
+- a head that cannot be fetched is set aside even when the rest of the batch
+  folds, and every PR in the run ends up with exactly one verdict
+- the base branch comes from the batch's roots, so a stack is not read as a
+  batch spanning two branches
+- an active cluster hold stops the train exactly as it stops `merge run`
 """
 
 from __future__ import annotations
@@ -38,6 +47,7 @@ from agent_fleet.merge_plan.train import (
     REGRESSION,
     SKIPPED_MOVED,
     UNFETCHABLE,
+    GitFold,
     GitTrainer,
     MergeTrain,
     TrainPR,
@@ -49,6 +59,7 @@ from agent_fleet.merge_plan.train import (
     resolve_base_branch,
     run_train,
     select_test_files,
+    stack_roots,
 )
 from agent_fleet.merge_plan.train import TestResult as _TestResult
 from agent_fleet.merge_plan.train import test_command_for as _test_command_for
@@ -1140,5 +1151,575 @@ def _stub_detail_client_head(head: str) -> Callable[[GitHubClient, Path], StubDe
     def _factory(client: GitHubClient, repo_path: Path) -> StubDetailClient:
         del client, repo_path
         return _AtHead()
+
+    return _factory
+
+
+# ---------------------------------------------------------------------------
+# The candidate worktree: which directory the fold's git calls run in
+# ---------------------------------------------------------------------------
+
+
+def test_the_fold_leaves_no_conflict_behind_for_the_next_pr(
+    origin_repo: OriginRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A PR after a conflict still folds, because the abort ran in the candidate.
+
+    ``git merge --abort`` run in the operator's own checkout exits 128 — there
+    is no merge in progress there — and the candidate keeps its unmerged index
+    entries.  Every merge after that point then fails with "unmerged files", so
+    each remaining PR is recorded as a conflict of its own and a batch with one
+    stale PR in it lands nothing at all.
+
+    Ordering is forced rather than left to :func:`order_batch`: with the head
+    branches GitHub would report, #2 is stacked on #1's branch and would sort
+    first regardless, which would hide the bug this is about.
+    """
+    monkeypatch.setenv("AGENT_FLEET_HOME", str(origin_repo.clone.parent / "home"))
+    clean, conflicted, after = pr(1), pr(2), pr(3)
+    batch = [
+        TrainPR(number=clean.number, head_sha=origin_repo.one, head_branch="p-one"),
+        TrainPR(number=conflicted.number, head_sha=origin_repo.three, head_branch="p-two"),
+        TrainPR(number=after.number, head_sha=origin_repo.two, head_branch="p-three"),
+    ]
+
+    def fake_run(
+        argv: Sequence[str], *, cwd: Path, timeout: int = 600
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout
+        if argv[:1] == ["pytest"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="1 passed", stderr="")
+        return subprocess.run(argv, cwd=cwd, capture_output=True, text=True, check=False)
+
+    monkeypatch.setattr("agent_fleet.merge_plan.train._run", fake_run)
+    result = MergeTrain(tester=GitTrainer(origin_repo.clone).evaluate, repo="demo").run(batch)
+
+    assert [v.pr for v in result.by_status(NEEDS_REBASE)] == [conflicted.number]
+    assert result.landed == (clean.number, after.number)
+
+
+def test_the_reported_candidate_is_the_tree_that_was_tested(
+    origin_repo: OriginRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``candidate_sha`` is the fold's head, not the operator's own HEAD.
+
+    ``git rev-parse HEAD`` run in the operator's checkout answers with whatever
+    commit they are standing on, so the JSON report and the report on disk both
+    name a commit the train never built or tested.  Anyone auditing which commit
+    was tested — an incident review, a rollback — is then reading the wrong SHA.
+    """
+    monkeypatch.setenv("AGENT_FLEET_HOME", str(origin_repo.clone.parent / "home"))
+    # A green pair, so the fold reaches a head and the test run is over it.
+    batch = [
+        TrainPR(number=1, head_sha=origin_repo.one),
+        TrainPR(number=2, head_sha=origin_repo.two),
+    ]
+
+    def fake_run(
+        argv: Sequence[str], *, cwd: Path, timeout: int = 600
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout
+        if argv[:1] == ["pytest"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="1 passed", stderr="")
+        return subprocess.run(argv, cwd=cwd, capture_output=True, text=True, check=False)
+
+    monkeypatch.setattr("agent_fleet.merge_plan.train._run", fake_run)
+    trainer = GitTrainer(origin_repo.clone)
+    MergeTrain(tester=trainer.evaluate, repo="demo").run(batch, merger=FakeMerger())
+
+    operator_head = _git(origin_repo.clone, "rev-parse", "HEAD")
+    assert trainer.candidate_sha
+    assert trainer.candidate_sha != operator_head
+    # It is a merge commit over the two approved heads and the base, and it is
+    # an ancestor of nothing the operator has checked out: the checkout is
+    # untouched, and the train's work exists only in the throwaway worktree.
+    _git(origin_repo.clone, "cat-file", "-e", f"{trainer.candidate_sha}^{{commit}}")
+    assert _git(origin_repo.clone, "rev-parse", "--abbrev-ref", "HEAD") == "main"
+
+
+# ---------------------------------------------------------------------------
+# The base fetch is a precondition, not a courtesy
+# ---------------------------------------------------------------------------
+
+
+def test_a_failed_fetch_of_the_base_stops_the_run(
+    origin_repo: OriginRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A green light is never given for a combination tested on a stale base.
+
+    The candidate is cut from ``origin/<base>``, so a checkout whose fetch of
+    that ref failed folds and tests against whatever commits the ref held
+    before — and then the whole batch lands.  What shipped would omit every
+    commit that arrived on the base since, having been tested without them.
+    Dropping the exit status is what makes that reachable, so it is checked.
+    """
+    monkeypatch.setenv("AGENT_FLEET_HOME", str(origin_repo.clone.parent / "home"))
+
+    def fake_run(
+        argv: Sequence[str], *, cwd: Path, timeout: int = 600
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout
+        if argv[:2] == ["git", "fetch"] and argv[-1] == "main":
+            return subprocess.CompletedProcess(argv, 128, stdout="", stderr="fatal: no route")
+        if argv[:1] == ["pytest"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="1 passed", stderr="")
+        return subprocess.run(argv, cwd=cwd, capture_output=True, text=True, check=False)
+
+    monkeypatch.setattr("agent_fleet.merge_plan.train._run", fake_run)
+    with (
+        pytest.raises(RuntimeError, match="could not fetch origin/main"),
+        GitFold(origin_repo.clone, "main"),
+    ):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# The lock: the head fetch is inside it
+# ---------------------------------------------------------------------------
+
+
+def test_the_head_fetch_happens_while_the_fold_holds_the_worktree_lock(
+    origin_repo: OriginRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fetch and the merge that dereferences a PR ref are one critical section.
+
+    A fetch mutates the shared ``.git`` exactly as ``worktree add`` does, so
+    running it before taking the lock reopens exactly the window the lock is
+    there to close: a sibling run moves ``refs/pull/<n>/head`` between this
+    process's ``cat-file -e`` and its ``git merge``, the merge dereferences the
+    ref to the newer commits, and the candidate advances by code no gate
+    approved and no test run saw.
+
+    The lock is observable rather than inferred: taking it creates the lock file
+    under the repository's common git dir, and a subprocess serving the fetch
+    can look for it right there.  The clone's ``origin`` is a local repository
+    with no pull-request refs, so the refspec that gets fetched is the raw SHA
+    rather than ``refs/pull/1/head`` — both are the fetch, and the SHA one is the
+    one this fixture's remote can actually serve.
+    """
+    monkeypatch.setenv("AGENT_FLEET_HOME", str(origin_repo.clone.parent / "home"))
+    seen: list[tuple[str, bool]] = []
+
+    def fake_run(
+        argv: Sequence[str], *, cwd: Path, timeout: int = 600
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout
+        if argv[:2] == ["git", "fetch"] and origin_repo.one in argv:
+            seen.append(
+                (
+                    argv[-1],
+                    (Path(_git_common_dir(cwd)) / "agent-fleet-worktree.lock").exists(),
+                )
+            )
+        if argv[:1] == ["pytest"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="1 passed", stderr="")
+        return subprocess.run(argv, cwd=cwd, capture_output=True, text=True, check=False)
+
+    monkeypatch.setattr("agent_fleet.merge_plan.train._run", fake_run)
+    MergeTrain(tester=GitTrainer(origin_repo.clone).evaluate, repo="demo").run(
+        [TrainPR(number=1, head_sha=origin_repo.one, head_ref="refs/pull/1/head")]
+    )
+
+    assert seen, f"no head fetch ran for {origin_repo.one}, so this proves nothing"
+    assert all(held for _refspec, held in seen), f"the head fetch ran unlocked: {seen}"
+
+
+def _git_common_dir(repo: Path) -> Path:
+    out = subprocess.run(
+        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    ).stdout.strip()
+    return Path(out)
+
+
+# ---------------------------------------------------------------------------
+# A head that cannot be fetched, in a batch the rest of which folds
+# ---------------------------------------------------------------------------
+
+
+def test_one_unfetchable_head_is_reported_while_the_rest_still_land(
+    origin_repo: OriginRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A PR the fetch could not materialise is named, not silently dropped.
+
+    The remote serves #1 and #2 but has no object for #4 — a deleted fork, a
+    mirror that does not advertise ``allowReachableSHA1InWant``.  A train that
+    folds what it can and reports a clean run leaves #4 in neither ``landed`` nor
+    ``set_aside``: an approved PR that simply vanishes from the run with no
+    signal to the operator that anything needs fetching.
+    """
+    monkeypatch.setenv("AGENT_FLEET_HOME", str(origin_repo.clone.parent / "home"))
+
+    def fake_run(
+        argv: Sequence[str], *, cwd: Path, timeout: int = 600
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout
+        if argv[:2] == ["git", "fetch"] and "refs/pull/4/head" in argv:
+            return subprocess.CompletedProcess(
+                argv, 128, stdout="", stderr="fatal: couldn't find remote ref refs/pull/4/head\n"
+            )
+        if argv[:1] == ["pytest"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="1 passed", stderr="")
+        return subprocess.run(argv, cwd=cwd, capture_output=True, text=True, check=False)
+
+    monkeypatch.setattr("agent_fleet.merge_plan.train._run", fake_run)
+    batch = [
+        TrainPR(number=1, head_sha=origin_repo.one, head_ref="refs/pull/1/head"),
+        TrainPR(number=2, head_sha=origin_repo.two, head_ref="refs/pull/2/head"),
+        TrainPR(number=4, head_sha="0" * 40, head_ref="refs/pull/4/head"),
+    ]
+    result = MergeTrain(tester=GitTrainer(origin_repo.clone).evaluate, repo="demo").run(batch)
+
+    assert [v.pr for v in result.by_status(UNFETCHABLE)] == [4]
+    assert result.landed == (1, 2)
+    # Every PR in the run carries exactly one verdict, in both the JSON report
+    # and the text an operator reads.
+    assert {v.pr for v in result.verdicts} == {1, 2, 4}
+    assert set(result.landed) | set(result.set_aside) == {1, 2, 4}
+    assert "#4" in result.render_text()
+
+
+# ---------------------------------------------------------------------------
+# Stacked batches: which branch they are folded onto
+# ---------------------------------------------------------------------------
+
+
+def test_a_stacked_batch_resolves_the_base_branch_it_declares_at_its_root() -> None:
+    """A stack is not a batch spanning two branches, and must not be refused.
+
+    #11 is based on #10's head branch: it is folded onto the candidate after
+    # #10, not onto a branch of that name.  Asking the whole batch which branch
+    # it targets therefore reads a perfectly good stack as two answers and
+    refuses the run — with exit 2, for exactly the batches the command exists to
+    handle.
+    """
+    stack = [
+        TrainPR(number=10, head_sha="a", base_ref="main", head_branch="feat-a"),
+        TrainPR(number=11, head_sha="b", base_ref="feat-a", head_branch="feat-b"),
+    ]
+    assert [p.number for p in stack_roots(stack)] == [10]
+    assert resolve_base_branch(Path("/nonexistent"), prs=stack) == "main"
+
+
+def test_a_stack_mixed_with_ordinary_work_resolves_one_base() -> None:
+    # The stack parent targets main, the stack child targets the parent's head
+    # branch, and an unrelated PR targets main: the roots still agree on one
+    # branch, and that branch is the one the batch merges into.
+    batch = [
+        pr(10, base="main", head="feat-a"),
+        pr(11, base="feat-a", head="feat-b"),
+        pr(12, base="main", head="feat-c"),
+    ]
+    assert [p.number for p in stack_roots(batch)] == [10, 12]
+    assert resolve_base_branch(Path("/nonexistent"), prs=batch) == "main"
+
+
+def test_roots_that_really_disagree_are_still_refused() -> None:
+    # Two unstacked PRs on two different branches is the case the refusal is
+    # for, and dropping it would fold a develop PR onto main.
+    with pytest.raises(ValueError, match="more than one base branch"):
+        resolve_base_branch(Path("/nonexistent"), prs=[pr(1, base="main"), pr(2, base="develop")])
+    # A base naming a PR outside the batch is a root, and it is the only answer
+    # there is, so the batch is not read as ambiguous.
+    assert resolve_base_branch(Path("/nonexistent"), prs=[pr(1, base="feat/gone")]) == "feat/gone"
+
+
+def test_a_circular_stack_still_resolves_a_base(tmp_path: Path) -> None:
+    # Every member's base is a sibling's head, so there is no root at all.  The
+    # fold still needs a branch, and the checkout is the honest answer: a real
+    # repository on ``develop`` must not be told ``main`` here either.
+    circular = [
+        pr(1, base="feat/pr-2", head="feat/pr-1"),
+        pr(2, base="feat/pr-1", head="feat/pr-2"),
+    ]
+    assert stack_roots(circular) == []
+    checkout, _head = _repo_on_branch(tmp_path, "develop")
+    assert resolve_base_branch(checkout, prs=circular) == "develop"
+
+
+def test_a_stacked_batch_folds_and_lands_end_to_end(
+    origin_repo: OriginRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The batch ``merge train`` refuses used to be the batch it exists for.
+
+    #11 is stacked on #10 and both are approved, so the CLI hands
+    :func:`resolve_base_branch` a two-base batch.  With the roots taken instead
+    the run folds onto main, tests the combination and lands it — one run, no
+    ``--base-branch`` needed.
+    """
+    monkeypatch.setenv("AGENT_FLEET_HOME", str(origin_repo.clone.parent / "home"))
+    stack = [
+        TrainPR(number=1, head_sha=origin_repo.one, base_ref="main", head_branch="feat/one"),
+        TrainPR(number=2, head_sha=origin_repo.two, base_ref="feat/one", head_branch="feat/two"),
+    ]
+    seen: list[tuple[str, ...]] = []
+
+    def fake_run(
+        argv: Sequence[str], *, cwd: Path, timeout: int = 600
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout
+        if argv[:1] == ["pytest"]:
+            seen.append(tuple(sorted(p.name for p in Path(cwd).iterdir())))
+            return subprocess.CompletedProcess(argv, 0, stdout="1 passed", stderr="")
+        return subprocess.run(argv, cwd=cwd, capture_output=True, text=True, check=False)
+
+    monkeypatch.setattr("agent_fleet.merge_plan.train._run", fake_run)
+    base = resolve_base_branch(origin_repo.clone, prs=stack)
+    assert base == "main"
+    merger = FakeMerger()
+    result = MergeTrain(
+        tester=GitTrainer(origin_repo.clone, base_branch=base).evaluate,
+        repo="demo",
+        base_branch=base,
+    ).run(order_batch(stack), merger=merger)
+
+    assert len(seen) == 1
+    assert "a.txt" in seen[0] and "b.txt" in seen[0]
+    assert result.landed == (1, 2)
+    assert merger.landed == [1, 2]
+
+
+# ---------------------------------------------------------------------------
+# Cluster holds
+# ---------------------------------------------------------------------------
+
+
+def _train_args(
+    checkout: Path, *, config: Path, over: dict[str, object] | None = None
+) -> argparse.Namespace:
+    defaults: dict[str, object] = {
+        "repo_path": str(checkout),
+        "repo": "demo",
+        "config": str(config),
+        "base_branch": None,
+        "operator": None,
+        "status_dir": None,
+        "test_command": "pytest",
+        "max_batch_size": 5,
+        "report": None,
+        "dry_run": False,
+        "json": False,
+    }
+    defaults.update(over or {})
+    return argparse.Namespace(**defaults)
+
+
+def _hold_config(tmp_path: Path, checkout: Path) -> Path:
+    config = tmp_path / "fleet.yaml"
+    config.write_text(
+        "merge_plan:\n"
+        "  executor:\n"
+        "    state_dir: " + str(tmp_path / "state") + "\n"
+        "    holds:\n"
+        "      - name: sales-pass2-freeze\n"
+        "        match:\n"
+        "          lanes: ['sales-pass2-*']\n"
+        "  repos:\n"
+        "    - name: demo\n"
+        "      path: " + str(checkout) + "\n",
+        encoding="utf-8",
+    )
+    return config
+
+
+def _status_file(tmp_path: Path, entries: Sequence[tuple[str, str]]) -> Path:
+    status = tmp_path / "status"
+    status.mkdir()
+    (status / "gate.md").write_text(
+        "".join(f"Evan-Kim2028/demo#{n}\nPREMERGE-APPROVED {sha}\n" for n, sha in entries),
+        encoding="utf-8",
+    )
+    return status
+
+
+def test_an_active_cluster_hold_stops_the_train(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A freeze the operator declared stops the train as it stops ``merge run``.
+
+    The hold is operator intent held in a ledger, and ``merge run`` honours it by
+    returning "held" and merging nothing.  A train reads the same approvals and
+    lands PRs one after another with no other checkpoint, so consulting no
+    ledger at all means the freeze protects one command and not the other.
+    """
+    from agent_fleet.merge_plan import cli as merge_cli
+
+    checkout, head = _repo_on_branch(tmp_path, "main", with_pr=True)
+    config = _hold_config(tmp_path, checkout)
+    status = _status_file(tmp_path, [(1, head)])
+    _real_approvals_in_lanes(monkeypatch, tmp_path / "home", {"sales-pass2-api": (1, head)})
+    monkeypatch.setattr(GitHubClient, "for_repo", _client_reporting({"sales-pass2-api": 1}))
+    run_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "agent_fleet.merge_plan.train.run_train", lambda **kwargs: run_calls.append(kwargs)
+    )
+
+    code = merge_cli.cmd_merge_train(
+        _train_args(checkout, config=config, over={"status_dir": str(status)})
+    )
+
+    assert run_calls == [], "the train was run under an active cluster hold"
+    err = capsys.readouterr().err
+    assert "sales-pass2-freeze" in err
+    assert "#1" in err
+    assert code == 1
+
+
+def test_a_released_hold_lets_the_train_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ledger is what makes a hold active, and a release is honoured.
+
+    A hold that stopped every train forever would be fixed the way operators fix
+    everything else — by deleting the hold — so the release has to be read from
+    the same place ``merge run`` reads it.
+    """
+    from agent_fleet.merge_plan import cli as merge_cli
+
+    checkout, head = _repo_on_branch(tmp_path, "main", with_pr=True)
+    config = _hold_config(tmp_path, checkout)
+    status = _status_file(tmp_path, [(1, head)])
+    _real_approvals_in_lanes(monkeypatch, tmp_path / "home", {"sales-pass2-api": (1, head)})
+    state = tmp_path / "state"
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "ledger.json").write_text(
+        json.dumps({"released_holds": ["sales-pass2-freeze"]}), encoding="utf-8"
+    )
+    _real_approvals_in_lanes(monkeypatch, tmp_path / "home", {"sales-pass2-api": (1, head)})
+    monkeypatch.setattr(GitHubClient, "for_repo", _client_reporting({"sales-pass2-api": 1}))
+    run_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "agent_fleet.merge_plan.train.run_train",
+        lambda **kwargs: run_calls.append(kwargs) or _no_land_result(),
+    )
+
+    assert (
+        merge_cli.cmd_merge_train(
+            _train_args(checkout, config=config, over={"status_dir": str(status)})
+        )
+        == 1
+    )
+    assert [call["base_branch"] for call in run_calls] == ["main"]
+
+
+def test_a_hold_on_other_lanes_leaves_the_train_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hold stops the merges it names, not every merge in the fleet.
+
+    The matcher is ``merge run``'s own, so an unrelated lane keeps shipping
+    through the train while a freeze elsewhere is active.
+    """
+    from agent_fleet.merge_plan import cli as merge_cli
+
+    checkout, head = _repo_on_branch(tmp_path, "main", with_pr=True)
+    config = _hold_config(tmp_path, checkout)
+    status = _status_file(tmp_path, [(1, head)])
+    _real_approvals_in_lanes(monkeypatch, tmp_path / "home", {"other-lane": (1, head)})
+    monkeypatch.setattr(GitHubClient, "for_repo", _client_reporting({"other-lane": 1}))
+    run_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "agent_fleet.merge_plan.train.run_train",
+        lambda **kwargs: run_calls.append(kwargs) or _no_land_result(),
+    )
+
+    assert (
+        merge_cli.cmd_merge_train(
+            _train_args(checkout, config=config, over={"status_dir": str(status)})
+        )
+        == 1
+    )
+    assert len(run_calls) == 1
+
+
+def test_a_dry_run_reports_the_batch_through_an_active_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--dry-run`` reports the batch it would fold, hold or no hold.
+
+    A dry run that refuses to say what the batch is makes the hold
+    unanswerable from the command that knows the batch: the operator is left
+    inferring which PRs are frozen by reading lanes out of the report.
+    """
+    from agent_fleet.merge_plan import cli as merge_cli
+
+    checkout, head = _repo_on_branch(tmp_path, "main", with_pr=True)
+    config = _hold_config(tmp_path, checkout)
+    status = _status_file(tmp_path, [(1, head)])
+    _real_approvals_in_lanes(monkeypatch, tmp_path / "home", {"sales-pass2-api": (1, head)})
+    monkeypatch.setattr(GitHubClient, "for_repo", _client_reporting({"sales-pass2-api": 1}))
+    run_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "agent_fleet.merge_plan.train.run_train", lambda **kwargs: run_calls.append(kwargs)
+    )
+
+    code = merge_cli.cmd_merge_train(
+        _train_args(checkout, config=config, over={"status_dir": str(status), "dry_run": True})
+    )
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "#1" in out
+    assert run_calls == []
+
+
+def _real_approvals_in_lanes(
+    monkeypatch: pytest.MonkeyPatch, home: Path, lanes: dict[str, tuple[int, str]]
+) -> None:
+    """Write lane state files the real ``collect_from_lanes`` reads back.
+
+    The lane a PR belongs to is what a hold matches on, and that string is read
+    off the approval rather than off the PR.  Stubbing the collector would let
+    these tests pass against a hold that never matched anything, so the registry
+    is written in the shape the real collector parses and the real collector
+    runs over it.  The home is redirected *before* the registry root is read, so
+    nothing is written to the operator's real lane directory.
+    """
+    from agent_fleet.merge_plan.collect import lanes_dir
+
+    monkeypatch.setenv("AGENT_FLEET_HOME", str(home))
+    operator_dir = lanes_dir() / "Evan-Kim2028"
+    operator_dir.mkdir(parents=True, exist_ok=True)
+    for lane, (number, sha) in lanes.items():
+        (operator_dir / f"{lane}.json").write_text(
+            json.dumps(
+                {
+                    "repo": "demo",
+                    "pr": number,
+                    "status_line": f"PREMERGE-APPROVED {sha}",
+                    "operator": "Evan-Kim2028",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+
+class _LaneDetailClient:
+    """A ``GitHubClient`` reporting one open PR per lane, all at the given head."""
+
+    def __init__(self, lanes: dict[str, int], *, head: str = "") -> None:
+        self.lanes = lanes
+        self.head = head
+
+    def pr_detail(self, pr_number: int) -> dict[str, Any]:
+        lane = next(name for name, number in self.lanes.items() if number == pr_number)
+        return {
+            "state": "OPEN",
+            "headRefOid": self.head,
+            "headRefName": lane,
+            "baseRefName": "main",
+            "files": [{"path": "agent_fleet/thing.py"}],
+        }
+
+
+def _client_reporting(lanes: dict[str, int]) -> Callable[[GitHubClient, Path], _LaneDetailClient]:
+    """A ``for_repo`` whose PRs are open on the given lanes, at no particular head."""
+
+    def _factory(client: GitHubClient, repo_path: Path) -> _LaneDetailClient:
+        del client, repo_path
+        return _LaneDetailClient(lanes)
 
     return _factory
