@@ -1414,17 +1414,25 @@ def run_gate(
     gate_dir: Path | None = None,
     run_id: str | None = None,
     use_systemd: bool | None = None,
+    judge_engine: str | None = None,
 ) -> GateResult:
     """Run the ``gate`` pipeline for *pr_number* in *repo_path*.
 
     Backends and the model policy are resolved *before* any agent runs, so a
     misconfigured or policy-violating model fails in a second rather than after
     a fan-out has already spent the budget.
+
+    *judge_engine* overrides ``gate.judge_backend`` for this run only, so the
+    documented ``--judge-engine`` flag and ``judge_engine`` config key have an
+    observable effect on the gate that actually judges. The lens backend is left
+    alone: the engine that judges is the one the operator asked to change.
     """
     repo = Path(repo_path).expanduser().resolve()
     raw = _load_raw_config(config_path)
     policy = parse_model_policy(raw)
     gate_cfg = load_gate_config(raw) or GateConfig()
+    if judge_engine:
+        gate_cfg = replace(gate_cfg, judge_backend=judge_engine)
 
     # Fail fast on policy before constructing anything expensive.
     policy.check(backend=gate_cfg.backend, model=gate_cfg.model, role=ROLE_LENS)

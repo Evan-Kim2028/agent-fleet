@@ -56,6 +56,15 @@ class GateError(RuntimeError):
     """A gate run cannot proceed (bad PR, unusable worktree, failed git call)."""
 
 
+class GateTargetMismatch(GateError):
+    """The caller's named repo or head is not the one under review.
+
+    Distinct from :class:`GateError` because it is a *caller* error rather than
+    a gate-infrastructure one: the PR is fine, but the gate was pointed at the
+    wrong thing and refusing is the only safe answer.
+    """
+
+
 @dataclass(frozen=True)
 class PullRequestRef:
     """The PR's head, as ``gh`` reports it."""
@@ -142,6 +151,60 @@ def resolve_pull_request(repo: Path, pr_number: int) -> PullRequestRef:
 def current_pr_head(repo: Path, pr_number: int) -> str:
     """Re-read the PR's head sha — how the gate notices a fixer's push."""
     return resolve_pull_request(repo, pr_number).head_sha
+
+
+def origin_slug(repo: Path) -> str:
+    """``owner/name`` for *repo*'s own ``origin``, or "" when it has no remote.
+
+    Read from the checkout rather than from a caller-supplied name, so the
+    cross-check below compares the repo under review against the repo that
+    remote actually points at.
+    """
+    url = _run_git(repo, "config", "--get", "remote.origin.url", check=False).strip()
+    if not url:
+        return ""
+    url = url.removesuffix(".git")
+    if "://" in url:
+        url = url.split("://", 1)[1]
+    if "@" in url.split("/", 1)[0]:
+        url = url.split("@", 1)[1]
+    parts = [p for p in url.split("/") if p]
+    if len(parts) < 2:
+        return ""
+    return f"{parts[-2]}/{parts[-1]}"
+
+
+def cross_check_gate_target(
+    repo_path: Path,
+    pr_number: int,
+    *,
+    repo: str | None = None,
+    head_ref: str | None = None,
+) -> None:
+    """Raise :class:`GateTargetMismatch` when the caller's named target is wrong.
+
+    *repo* is the slug the caller believes it is gating and *head_ref* the
+    branch it believes the PR head is on. Both are asserted against what the
+    checkout and the forge actually say, so a gate can never be pointed at
+    another team's PR, or at a stale head, without saying so.
+
+    A caller that names neither is asserting nothing and is not checked: the
+    gate resolves the PR itself in that case, exactly as it always did.
+    """
+    if not repo and not head_ref:
+        return
+    if repo:
+        actual = origin_slug(repo_path)
+        if actual and actual.lower() != repo.strip().lower():
+            raise GateTargetMismatch(
+                f"--repo {repo!r} is not this checkout's origin (which is {actual!r})"
+            )
+    if head_ref:
+        actual_ref = resolve_pull_request(repo_path, pr_number).head_ref
+        if actual_ref and actual_ref != head_ref:
+            raise GateTargetMismatch(
+                f"--head-ref {head_ref!r} is not PR #{pr_number}'s head (which is {actual_ref!r})"
+            )
 
 
 def _repo_key(repo: Path) -> str:

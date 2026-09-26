@@ -5,6 +5,8 @@ heavy modules, no side effects.  This keeps it cheap to unit-test and safe to
 call before the argparse parser is constructed.
 
 Routing rules (applied in order):
+  0. argv[0] is one of our own console-script names → drop it (it is the
+     program name, not a subcommand)
   1. Empty argv               → ["summon"]  (bare invocation)
   2. First token starts '-'   → passthrough (flag-first; let argparse handle it)
   3. First token in known_subcommands → passthrough (already addressed correctly)
@@ -19,10 +21,12 @@ in tests/test_cli_core.py and ADR 0001).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 
-if TYPE_CHECKING:
-    from pathlib import Path
+#: Console-script names this package installs. A caller that assembled its argv
+#: as a subprocess list puts one of these in argv[0]; the router drops it so the
+#: same list works whether it goes to ``Popen`` or straight to ``main``.
+_PROGRAM_NAMES = frozenset({"agent-fleet", "agent_fleet", "fleet", "fleet.py"})
 
 
 def normalize_argv(
@@ -50,6 +54,12 @@ def normalize_argv(
     """
     if not raw_argv:
         return ["summon"]
+
+    # A caller that built its argv from a ``subprocess`` list — the fleet's own
+    # gate dispatcher does — passes the console-script name as argv[0]. Drop it,
+    # or ``agent-fleet gate --pr 42`` would be read as a goal named "agent-fleet".
+    if len(raw_argv) > 1 and Path(raw_argv[0]).name in _PROGRAM_NAMES:
+        raw_argv = raw_argv[1:]
 
     first = raw_argv[0]
 

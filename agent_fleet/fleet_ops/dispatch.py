@@ -759,6 +759,14 @@ def plan_tick(
     # --- 1. reattach to whatever is still running -------------------------
     for lane in state.lanes.values():
         code = observed.get(lane.lane)
+        # A handle this process spawned is authoritative when it has not
+        # reported an exit: `poll()` returning None means the child is still
+        # running, full stop. Falling through to the pid probe after that would
+        # re-derive liveness from a recorded pid, which is a fallback for
+        # children carried in from a restart (no handle) and nothing more —
+        # probing a pid we do not own misreads a running lane as a dead one.
+        if lane.lane in state.procs and code is None:
+            continue
         if lane.state == DISPATCH_RUNNING:
             if code is None and lane_process_alive(lane):
                 continue
@@ -849,9 +857,11 @@ def plan_tick(
 #: ``{lane}``/``{repo}``/``{slug}``/``{operator}``/``{pr}`` remain available to a
 #: ``--gate-cmd`` template, which is free to take them as positionals.
 GATE_SUBCOMMAND = "gate"
+GATE_LANE_FLAG = "--lane"
 GATE_REPO_FLAG = "--repo-path"
 GATE_TASK_FLAG = "--task-file"
 GATE_STATUS_FLAG = "--status-file"
+GATE_JUDGE_FLAG = "--judge-engine"
 
 
 def gate_argv(
@@ -877,34 +887,31 @@ def gate_argv(
 
     With no template the built-in ``agent-fleet gate`` is used, which is the same
     seam ``lane run`` uses — so a repo that needs no external gate script needs
-    no configuration at all. That argv names only flags the gate subparser
-    actually defines: *judge_engine* has no home there and is a template-only
-    placeholder.
+    no configuration at all.
 
-    *repo_path*, *task_file* and *status_file* are handed on as
-    ``--repo-path``/``--task-file``/``--status-file``. Without them the gate
-    reviews the dispatcher's cwd against no spec, and has nowhere to record its
-    verdict — so the verdict the dispatcher reads back is whatever the previous
-    stage happened to leave behind.
+    That argv names **only** flags the gate subparser defines: ``--pr``,
+    ``--lane``, ``--repo-path``, ``--task-file``, ``--status-file`` and
+    ``--judge-engine``. A flag the parser does not know, or a value the parser
+    reads as a positional, aborts the whole command line with exit 2 — and a
+    gate that cannot start reviews nothing, so every lane is then reported as
+    an escalation. ``--repo-path``/``--task-file``/``--status-file`` are what
+    make the gate review the lane's checkout against the lane's own spec and
+    record its verdict where ``_reap_gate`` reads it; without them the verdict
+    read back is whatever the previous stage happened to leave behind.
+
+    ``--repo``/``--head-ref`` are deliberately not emitted. They are cross-checks
+    (:func:`agent_fleet.gate.gitops.cross_check_gate_target`), and a value this
+    module invents — the slug is derived, and the branch is *assumed* to be
+    ``fb/<lane>`` rather than read from the PR — would assert something it has
+    not verified, and a wrong assertion there refuses a correct gate.
     """
     if not template:
-        argv = [
-            "agent-fleet",
-            GATE_SUBCOMMAND,
-            "--lane",
-            lane,
-            "--repo",
-            slug or repo,
-            "--pr",
-            str(pr),
-            "--head-ref",
-            f"fb/{lane}",
-        ]
+        argv = ["agent-fleet", GATE_SUBCOMMAND, "--pr", str(pr), GATE_LANE_FLAG, lane]
         for flag, value in (
             (GATE_REPO_FLAG, repo_path or worktree or repo),
             (GATE_TASK_FLAG, task_file),
             (GATE_STATUS_FLAG, status_file),
-            ("--judge-engine", judge_engine),
+            (GATE_JUDGE_FLAG, judge_engine),
         ):
             if value:
                 argv += [flag, value]
@@ -1081,8 +1088,17 @@ def run_dispatch(
     summary = DispatchSummary(operator=operator, lanes=len(current.lanes))
     start = _real_spawn() if spawn is None else spawn
     read_psi = psi_reader or (lambda: pressure.read_throttle())
-    out_root = Path(run_dir).expanduser() if run_dir else dispatch_dir() / operator
+    out_root = (
+        Path(run_dir).expanduser()
+        if run_dir
+        # Confined for the same reason as the state file above: --operator is
+        # untyped input, and joined in verbatim a `..` or an absolute path puts
+        # every task file, status file and log outside AGENT_FLEET_HOME while
+        # the state file lands correctly in dispatch/<operator>/state.json.
+        else dispatch_dir() / confined_name(operator)
+    )
     throttled_ticks = 0
+    idle_ticks = 0
 
     while True:
         psi = read_psi()
@@ -1100,36 +1116,83 @@ def run_dispatch(
             # out of that are: the queue is genuinely done, the lanes that can
             # never run are finished as such, or the machine is too contended to
             # start anything — which is a delay, so it waits.
+            throttled = _throttled(psi, psi_avg10_max=psi_avg10_max)
             stuck = blocked_lanes(current, cluster_order=cluster_order)
             if stuck and _complete(current):
                 for name in stuck:
                     current = _finish(current, name, "dependency_deadlock", summary=summary)
                 save_state(current)
                 break
-            if _complete(current) and not _throttled(psi, psi_avg10_max=psi_avg10_max):
+            if _complete(current) and not throttled:
                 break
-            if _throttled(psi, psi_avg10_max=psi_avg10_max) and not _has_queued_work(
-                current, cluster_order=cluster_order
-            ):
+            # Only a *saturated* box is being held back. A tick that produced no
+            # action on an idle box is the run waiting on its own children, which
+            # is a delay and not a throttle: the machine is idle and the only
+            # thing outstanding is a child that has not exited. It still has to
+            # be bounded, because a child that never exits would otherwise hang
+            # the run forever — but the bound is a wait, never a verdict: no lane
+            # is finished here, so the next run re-attaches and collects whatever
+            # verdict that child owes.
+            if not throttled:
                 throttled_ticks = 0
+                if _dispatchable_lanes(current, cluster_order=cluster_order):
+                    if not _can_launch_now(current, max_lanes=max_lanes):
+                        # Lanes are ready and every slot is held by a child that
+                        # is still running. Nothing but one of those children
+                        # exiting frees a slot, so waiting cannot help.
+                        break
+                elif not current.lanes_in(LANE_SLOT_STATES):
+                    # Nothing queued and nothing running: the plan had nothing to
+                    # do for a reason the checks above do not cover.
+                    break
+                else:
+                    idle_ticks += 1
+                    if idle_ticks > throttle_max_ticks:
+                        logger.warning(
+                            "dispatch %s: no lane progress for %d ticks; %d lane(s) "
+                            "still in flight, left for the next run",
+                            current.operator,
+                            idle_ticks,
+                            len(current.lanes_in(LANE_SLOT_STATES)),
+                        )
+                        break
+                    sleep(tick_seconds)
+                    continue
             else:
                 throttled_ticks += 1
             if throttled_ticks > throttle_max_ticks:
                 # The box never freed up. Say so instead of reporting a run
-                # that launched nothing as a success.
+                # that launched nothing as a success. A lane that holds a slot
+                # is in flight, not held back: abandoning it would drop a
+                # running child, and any gate it still owes a verdict for.
+                if not _complete(current):
+                    logger.warning(
+                        "dispatch %s: still throttled after %d ticks; waiting on %d "
+                        "in-flight lane(s) rather than abandoning them",
+                        current.operator,
+                        throttled_ticks,
+                        len(state.lanes_in(LANE_SLOT_STATES)),
+                    )
+                    throttled_ticks = 0
+                    sleep(tick_seconds)
+                    continue
+                # The abandoned lanes stay QUEUED, not terminal: the throttle is
+                # a delay, so the next run of this queue must still be able to
+                # dispatch them. Marking them DISPATCH_DONE is how a re-run came
+                # to report a dropped queue as a clean success.
                 logger.warning(
                     "dispatch %s: still throttled after %d ticks; %d lane(s) never dispatched",
                     current.operator,
                     throttled_ticks,
                     len(_dispatchable_lanes(current, cluster_order=cluster_order)),
                 )
-                for lane in _dispatchable_lanes(current, cluster_order=cluster_order):
-                    current = _finish(current, lane.lane, THROTTLE_ABANDONED, summary=summary)
+                summary.errors += len(_dispatchable_lanes(current, cluster_order=cluster_order))
                 save_state(current)
                 break
             sleep(tick_seconds)
             continue
 
+        idle_ticks = 0
         for action in actions:
             try:
                 current = _apply(
@@ -1192,6 +1255,18 @@ def _complete(state: DispatchState) -> bool:
     return not any(lane.state in LANE_SLOT_STATES for lane in state.lanes.values())
 
 
+def _can_launch_now(state: DispatchState, *, max_lanes: int) -> bool:
+    """Whether a free lane slot exists for work that is ready to run.
+
+    The plan emitted no launch because the pool is full, not because the queue
+    is empty: the lanes still waiting are ready, and the only thing standing
+    between them and a child is a slot held by a lane that is already running.
+    Nothing but one of those children exiting frees a slot, so a run that only
+    ever sees this state is waiting on itself, not on the machine.
+    """
+    return len(state.lanes_in(LANE_SLOT_STATES)) < max_lanes
+
+
 def _throttled(psi: pressure.Throttle, *, psi_avg10_max: float) -> bool:
     return pressure.throttled(psi, avg10_max=psi_avg10_max)
 
@@ -1212,10 +1287,6 @@ def _dispatchable_lanes(
         for lane in order_lanes(state, cluster_order=cluster_order)
         if dependency_satisfied(lane, released, known)
     ]
-
-
-def _has_queued_work(state: DispatchState, *, cluster_order: Sequence[str] = ()) -> bool:
-    return bool(_dispatchable_lanes(state, cluster_order=cluster_order))
 
 
 def _record_error(state: DispatchState, lane_name: str, exc: Exception) -> DispatchState:

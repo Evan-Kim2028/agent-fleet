@@ -961,23 +961,42 @@ def cmd_summon(args: argparse.Namespace) -> int:
 def cmd_gate(args: argparse.Namespace) -> int:
     """Run the evidence-based pre-merge gate against an existing PR head.
 
-    Exit code 0 only on APPROVED: NEEDS_ESCALATION, an unusable PR, or a
+    Exit code 0 only on APPROVED: NEEDS-ESCALATION, an unusable PR, or a
     deterministic step that could not run all exit 1, so an automerge wrapper
     can gate on the exit code alone as well as on the status line.
+
+    ``--repo``/``--head-ref`` are cross-checks, not inputs: the gate resolves
+    the PR itself, and a caller that names a different repo or head than the PR
+    actually has is pointing a pre-merge review at the wrong code. A mismatch
+    is an error, not a warning, because the cost of getting it wrong is a whole
+    review pipeline reviewing something other than the PR it was asked about.
     """
+    from agent_fleet.gate.gitops import GateTargetMismatch, cross_check_gate_target
     from agent_fleet.gate.pipeline import run_gate
     from agent_fleet.model_policy import ModelPolicyError
 
     if getattr(args, "pr", None) is None:
         print("error: gate requires --pr <n> (or 'fleet gate metrics')", file=sys.stderr)
         return 2
+    repo_path = Path(getattr(args, "repo_path", None) or Path.cwd())
+    try:
+        cross_check_gate_target(
+            repo_path,
+            int(args.pr),
+            repo=getattr(args, "repo", None),
+            head_ref=getattr(args, "head_ref", None),
+        )
+    except GateTargetMismatch as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     try:
         result = run_gate(
-            repo_path=Path(getattr(args, "repo_path", None) or Path.cwd()),
+            repo_path=repo_path,
             pr_number=int(args.pr),
             task_file=getattr(args, "task_file", None),
             status_file=getattr(args, "status_file", None),
             config_path=getattr(args, "config", None),
+            judge_engine=getattr(args, "judge_engine", None),
         )
     except ModelPolicyError as exc:
         print(f"error: {exc}", file=sys.stderr)

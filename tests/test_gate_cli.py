@@ -164,3 +164,86 @@ def test_gate_is_registered_as_a_subcommand() -> None:
     with pytest.raises(SystemExit) as exc:
         main(["gat", "--pr", "1"])
     assert exc.value.code != 0
+
+
+def test_the_judge_engine_flag_reaches_the_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--judge-engine`` is a documented override, so it has to arrive.
+
+    The dispatcher emits this flag whenever a judge engine is configured, so
+    dropping it at the consumer made the flag and the ``judge_engine`` config key
+    inert for every gate the queue spawns.
+    """
+    seen: dict[str, Any] = {}
+
+    def _fake_run_gate(**kwargs: Any) -> GateResult:  # noqa: ANN401
+        seen.update(kwargs)
+        return _result(GateOutcome.APPROVED)
+
+    monkeypatch.setattr("agent_fleet.gate.pipeline.run_gate", _fake_run_gate)
+    main(["gate", "--repo-path", str(tmp_path), "--pr", "1", "--judge-engine", "grok"])
+    assert seen["judge_engine"] == "grok"
+
+
+def test_no_judge_engine_flag_means_no_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Absent means absent, so the configured judge backend is what runs."""
+    seen: dict[str, Any] = {}
+
+    def _fake_run_gate(**kwargs: Any) -> GateResult:  # noqa: ANN401
+        seen.update(kwargs)
+        return _result(GateOutcome.APPROVED)
+
+    monkeypatch.setattr("agent_fleet.gate.pipeline.run_gate", _fake_run_gate)
+    main(["gate", "--repo-path", str(tmp_path), "--pr", "1"])
+    assert seen["judge_engine"] is None
+
+
+def test_a_gate_pointed_at_the_wrong_repo_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--repo`` is a cross-check, so naming another team's repo must fail.
+
+    A gate that silently reviewed a different repository is the failure this
+    flag exists to prevent, so the run is refused rather than warned about.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr("agent_fleet.gate.gitops.origin_slug", lambda _p: "Evan-Kim2028/real-repo")
+    called = _patch_gate(monkeypatch, _result(GateOutcome.APPROVED))
+    assert (
+        main(["gate", "--repo-path", str(repo), "--pr", "1", "--repo", "someone-else/other"]) == 1
+    )
+    assert called == [], "the gate must not run when its target is wrong"
+
+
+def test_a_gate_naming_its_own_repo_is_allowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cross-check must not refuse a correct gate, or it disables the gate."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr("agent_fleet.gate.gitops.origin_slug", lambda _p: "Evan-Kim2028/acme")
+    _patch_gate(monkeypatch, _result(GateOutcome.APPROVED))
+    assert main(["gate", "--repo-path", str(repo), "--pr", "1", "--repo", "Evan-Kim2028/acme"]) == 0
+
+
+def test_a_gate_pointed_at_a_stale_head_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--head-ref`` must match the PR's real head, not the caller's belief."""
+    from agent_fleet.gate.gitops import PullRequestRef
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(
+        "agent_fleet.gate.gitops.resolve_pull_request",
+        lambda _r, n: PullRequestRef(
+            number=n, head_ref="fb/actual", head_sha="a" * 40, state="OPEN"
+        ),
+    )
+    called = _patch_gate(monkeypatch, _result(GateOutcome.APPROVED))
+    assert main(["gate", "--repo-path", str(repo), "--pr", "1", "--head-ref", "fb/stale"]) == 1
+    assert called == []
