@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from agent_fleet.fleet_ops.worktree_lock import repo_worktree_lock
 from agent_fleet.integrations.github_cli import gh as _gh
 from agent_fleet.phases import run_scoped_lint_command
 
@@ -613,12 +614,16 @@ def checkout_branch(branch: str, worktree: Path, *, repo_root: Path) -> Path:
         check=True,
         timeout=120,
     )
-    add = subprocess.run(
-        ["git", "worktree", "add", "-B", branch, str(worktree), f"origin/{branch}"],
-        cwd=repo_root,
-        check=False,
-        timeout=120,
-    )
+    # Same per-repository lock every other worktree creator takes: this add
+    # registers an entry in the shared .git/worktrees, and a concurrent
+    # `worktree prune` from another subsystem would delete it mid-creation.
+    with repo_worktree_lock(repo_root):
+        add = subprocess.run(
+            ["git", "worktree", "add", "-B", branch, str(worktree), f"origin/{branch}"],
+            cwd=repo_root,
+            check=False,
+            timeout=120,
+        )
     if add.returncode != 0:
         existing = subprocess.run(
             ["git", "worktree", "list"],

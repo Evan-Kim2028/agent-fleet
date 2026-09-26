@@ -10,20 +10,27 @@ Reuse matters more than creation: a lane that was interrupted (killed mid-run,
 or escalated) usually has real work in its worktree. Creating a fresh worktree
 would silently abandon it. ``git worktree add`` would also fail outright on a
 branch already checked out somewhere, so reuse is the only correct behaviour.
+
+Creation is serialized per repository by
+:func:`~agent_fleet.fleet_ops.worktree_lock.repo_worktree_lock` — **the same
+lock the gate takes**, because both mutate one ``.git/worktrees`` registry. A
+lane add is not allowed to proceed unlocked: unlike a gate review it has no
+unlocked fallback, and an unlocked lane add racing another subsystem's
+``worktree prune`` loses the sibling's worktree outright.
 """
 
 from __future__ import annotations
 
-import contextlib
-import fcntl
 import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from agent_fleet.fleet_ops.worktree_lock import repo_worktree_lock, require_worktree_lock
+
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Callable, Sequence
 
     Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 
@@ -145,28 +152,6 @@ def branch_exists(root: Path, branch: str, *, runner: Runner | None = None) -> b
     return result.returncode == 0
 
 
-@contextlib.contextmanager
-def _repo_lock(root: Path) -> Iterator[None]:
-    """Serialize worktree creation per repository across processes and operators.
-
-    Dozens of lanes launched in the same second otherwise race on git's shared
-    metadata (.git/config.lock, worktrees/, index writes).
-    """
-    common = _git(
-        ["git", "rev-parse", "--git-common-dir"], cwd=root, runner=None, timeout=60
-    ).stdout.strip()
-    lock_dir = (
-        (root / common) if common and not Path(common).is_absolute() else Path(common or root)
-    )
-    lock_path = lock_dir / "agent-fleet-worktree.lock"
-    with lock_path.open("a+") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
-
-
 def _fresh_base(root: Path, base: str, *, runner: Runner | None = None) -> str:
     """The start point for a new lane branch: ``origin/<base>`` after a fetch, when it exists.
 
@@ -208,6 +193,13 @@ def ensure_lane_worktree(
         raise FileNotFoundError(f"repo path does not exist: {repo_path}")
 
     root = worktree_root(repo_path, runner=runner)
+    try:
+        require_worktree_lock(root)
+    except OSError as exc:
+        raise RuntimeError(
+            f"no worktree lock available for {root}; refusing to create a lane worktree "
+            f"unlocked, because it would race any other subsystem's git worktree prune"
+        ) from exc
     branch = branch or f"fb/{lane}"
     path = target_path or default_worktree_path(repo_path, lane, parent=parent)
 
@@ -246,7 +238,7 @@ def ensure_lane_worktree(
         args = ["git", "worktree", "add", "--no-track", "-b", branch, str(path), start]
         reason = f"created from {start}"
 
-    with _repo_lock(root):
+    with repo_worktree_lock(root):
         result = _git(args, cwd=root, runner=runner, timeout=600)
     if result.returncode != 0:
         raise RuntimeError(
