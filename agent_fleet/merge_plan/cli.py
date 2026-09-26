@@ -228,9 +228,16 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
         collect_from_status_dir,
         dedupe_approvals,
     )
-    from agent_fleet.merge_plan.config import resolve_train_repo_name
+    from agent_fleet.merge_plan.config import (
+        resolve_train_base_branch,
+        resolve_train_repo_name,
+    )
     from agent_fleet.merge_plan.plan import normalize_repo
-    from agent_fleet.merge_plan.train import TrainPR, run_train
+    from agent_fleet.merge_plan.train import (
+        TrainPR,
+        resolve_base_branch,
+        run_train,
+    )
 
     repo_path = Path(args.repo_path).expanduser()
     repo = args.repo or resolve_train_repo_name(repo_path)
@@ -266,6 +273,7 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
                 head_branch=str(detail.get("headRefName") or ""),
                 current_head=str(detail.get("headRefOid") or ""),
                 files=tuple(f for f in files if f),
+                head_ref=f"refs/pull/{approval.pr_number}/head",
             )
         )
     if not prs:
@@ -284,14 +292,34 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
             print(f"  #{pr.number} SKIPPED-MOVED head moved to {pr.current_head[:9]}")
         return 0
 
-    result = run_train(
-        repo=repo,
-        repo_path=repo_path,
-        prs=prs,
-        command=args.test_command,
-        max_batch_size=args.max_batch_size,
-        report_path=Path(args.report).expanduser() if args.report else None,
-    )
+    config_path = getattr(args, "config", None)
+    try:
+        base_branch = resolve_base_branch(
+            repo_path,
+            configured=getattr(args, "base_branch", "")
+            or resolve_train_base_branch(repo, Path(config_path) if config_path else None),
+            prs=prs[: args.max_batch_size],
+        )
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        result = run_train(
+            repo=repo,
+            repo_path=repo_path,
+            prs=prs,
+            command=args.test_command,
+            max_batch_size=args.max_batch_size,
+            report_path=Path(args.report).expanduser() if args.report else None,
+            base_branch=base_branch,
+        )
+    except (OSError, RuntimeError) as exc:
+        print(
+            f"error: merge train could not fold onto origin/{base_branch}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
     print(
         json.dumps(result.to_dict(), indent=2, default=str) if args.json else result.render_text()
     )
@@ -398,6 +426,12 @@ def register_merge_commands(sub: argparse._SubParsersAction) -> None:
     train_p.add_argument(
         "--status-dir",
         help="Directory of gate status files containing PREMERGE-APPROVED <sha> lines",
+    )
+    train_p.add_argument(
+        "--base-branch",
+        default=None,
+        help="Branch the batch is folded onto (default: the base the PRs name, "
+        "else the remote's default branch)",
     )
     train_p.add_argument(
         "--test-command",
