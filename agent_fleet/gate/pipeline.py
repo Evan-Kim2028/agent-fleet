@@ -76,6 +76,7 @@ from agent_fleet.gate.gitops import (
     has_approval_line,
     is_docs_or_test,
     merge_base_into,
+    merge_conflict_check,
     patch_id,
     prepare_worktree,
     prodsensitive_paths,
@@ -132,6 +133,7 @@ from agent_fleet.gate.standard import (
 from agent_fleet.gate.standard import (
     select_tier as standard_select_tier,
 )
+from agent_fleet.gate.state import STAGE_FIND, STAGE_VERIFY, GateRunState, StageState
 from agent_fleet.gate.structured import TIMEOUT_EXIT, StructuredCallError, call_structured
 from agent_fleet.model_policy import ModelPolicy, ModelPolicyError, parse_model_policy
 from agent_fleet.slots import (
@@ -569,6 +571,34 @@ class _Evidence:
     def confirmed_test_files(self) -> list[str]:
         return sorted({str(c["test_file"]) for c in self.confirmed if c.get("test_file")})
 
+    def to_payload(self) -> dict[str, Any]:
+        """The JSON shape a stage marker stores.
+
+        Only the parts a reuse decision depends on: what was confirmed, what
+        could not be tested, and which gate-written test files the confirmed
+        blockers need re-running. The rejection trace stays out — it describes
+        the run that produced the evidence, not the evidence itself.
+        """
+        return {
+            "confirmed": self.confirmed,
+            "untestable": self.untestable,
+            "gate_tests": self.gate_tests,
+        }
+
+    @classmethod
+    def restore(cls, payload: dict[str, Any]) -> _Evidence:
+        """Rebuild from :meth:`to_payload`, tolerating a partial or odd marker.
+
+        Every field falls back to empty rather than raising: a marker that
+        restored half an evidence set would be worse than none, so the
+        malformed parts are dropped and the rest is used.
+        """
+        return cls(
+            confirmed=[d for d in payload.get("confirmed", []) or [] if isinstance(d, dict)],
+            untestable=[d for d in payload.get("untestable", []) or [] if isinstance(d, dict)],
+            gate_tests=[str(p) for p in payload.get("gate_tests", []) or []],
+        )
+
 
 class GatePipeline:
     """Runs the gate against one open PR. Owns worktrees, agents, and evidence."""
@@ -610,11 +640,20 @@ class GatePipeline:
         self.evidence = _Evidence()
         self.archive = GateTestArchive(gate_dir)
         self.recorder = GateCallRecorder(gate_dir)
+        self.state = GateRunState(gate_dir)
         self._candidates: list[dict[str, Any]] = []
         self._runner: GateTestRunner | None = None
         #: step0's result, kept for the tier-0 decision. ``None`` means no
         #: changed test was run at all, which is a green run of nothing.
         self._step0_run: TestRun | None = None
+        #: True when this run's evidence came from a marker rather than from
+        #: agents dispatched here. Reuse has to re-run every confirmed test at
+        #: the new head; a full run has already done that once this head.
+        self._reused: bool = False
+        #: The patch-id of the PR's own change at the head under review. Stored
+        #: with the verify marker so a later head with the same change can find
+        #: this run's evidence.
+        self._pr_patch: str = ""
 
     # -- helpers ---------------------------------------------------------
 
@@ -1212,7 +1251,14 @@ class GatePipeline:
         # let the recheck judge decide. One round, not a loop: with no test to go
         # green there is no measurable progress, only the judge's yes/no.
         untestable_only = run.count == 0 and bool(untestable_open)
-        push_branch = self.config.push_branch or ref.head_ref
+        # The push target is the PR's own ``headRefName`` and nothing else. A
+        # lane-derived branch here — ``fb/<lane>``, which is what a config
+        # override would supply — moves a head nobody re-gates, and the run
+        # then reports "no push" over a PR whose head did move. That is the
+        # whole of the documents-1d dq1d failure, and _standard_fixer below
+        # already refuses the same override. A fixer writes into the PR; the
+        # lane is how the work was routed, not where it lands.
+        push_branch = ref.head_ref
         model = self._model_for(
             backend_name=self.config.backend, model=self.config.model, role=ROLE_FIX
         )
@@ -1761,6 +1807,109 @@ class GatePipeline:
         pushed = current_pr_head(self.repo, self.pr_number) != ref.head_sha
         return FixerResult(committed=committed, pushed=pushed)
 
+    # -- rebase and restart reuse ----------------------------------------
+
+    def _pre_review_conflict(self, ref: PullRequestRef) -> str:
+        """Stop before review if *base* does not merge into the PR's head.
+
+        Returns a non-empty reason when the PR must go back to a rebase agent,
+        and ``""`` when there is nothing to stop for. A conflict is a fact
+        about the diff that costs milliseconds to establish, and discovering it
+        after a full find→verify→judge run is the single largest avoidable
+        expense in the gate — measured today at 3 of 10 merge-with-main
+        failures being plain conflicts.
+
+        Uses the PR's *own* base, not ``main``: a PR cut against a release
+        branch legitimately conflicts with main, and refusing it would send
+        every release PR to a rebase agent for ever.
+
+        A git failure is deliberately **not** a conflict. ``merge_conflict_check``
+        distinguishes them because a git too old for ``--write-tree`` would
+        otherwise make every run escalate, which is worse than the waste this
+        saves.
+        """
+        base = ref.base_ref or self.config.base_branch
+        check = merge_conflict_check(self.repo, ref.head_sha, resolve_diff_base(self.repo, base))
+        if check.conflict_files:
+            files = ", ".join(check.conflict_files[:5])
+            rest = len(check.conflict_files) - 5
+            more = f" (+{rest} more)" if rest > 0 else ""
+            self._log(
+                "gate.merge.conflict",
+                head=ref.short_sha,
+                base=base,
+                files=len(check.conflict_files),
+            )
+            return (
+                f"merged-tree regression check failed at {ref.short_sha} "
+                f"(pre-review: merge conflict with {base} in {files}{more})"
+            )
+        if check.git_error:
+            self._log("gate.merge.check_error", head=ref.short_sha, base=base)
+        return ""
+
+    def _reusable_evidence(self, ref: PullRequestRef) -> StageState | None:
+        """Verification evidence this head can stand on, or ``None``.
+
+        Two ways to have it, and they differ only in the key:
+
+        * a marker at *this* head — the gate was re-launched on the same
+          commit, so the stage that died is the one that finished;
+        * a marker at any head with the same ``patch-id`` — the PR was rebased
+          and its own change is byte-identical, which is the common case,
+          because what forces a rebase is usually the base moving under it.
+
+        In both cases the tests behind the evidence are re-run at this head by
+        :meth:`_reused_evidence_is_sound` before the evidence is used, so what
+        is reused is the *findings*, never the verdict.
+        """
+        same_head = self.state.read(STAGE_VERIFY, ref.head_sha)
+        if same_head is not None and same_head.reusable:
+            return same_head
+        if not self._pr_patch:
+            self._pr_patch = patch_id(
+                self.repo, ref.head_sha, resolve_diff_base(self.repo, self._pr_base(ref))
+            )
+        prior = self.state.reusable_verified(self._pr_patch)
+        if prior is not None:
+            self._log(
+                "gate.reuse",
+                pr_diff="unchanged",
+                prior_head=prior.head_sha[:9],
+                patch_id=self._pr_patch[:12],
+            )
+        return prior
+
+    def _pr_base(self, ref: PullRequestRef) -> str:
+        """The branch this PR's diff is read against: its own base if reported."""
+        return ref.base_ref or self.config.base_branch
+
+    def _reused_evidence_is_sound(self, worktree: Path, payload: dict[str, Any]) -> bool:
+        """Do the reused confirmed tests still fail at this head?
+
+        The safety condition on reuse, and the reason the verdict is never
+        carried: the findings are reused, but every test that established them
+        is run again here, on *this* head. A base merge can repair the bug a
+        blocker described, in which case the blocker is stale and the evidence
+        is dropped rather than acted on.
+
+        The PR's own tests are step 0 and always run before this; the
+        merged-with-base check runs before that.
+        """
+        gate_tests = [str(p) for p in payload.get("gate_tests", []) or []]
+        confirmed = payload.get("confirmed", []) or []
+        if not gate_tests or not confirmed:
+            return True
+        self.archive.materialise(worktree, gate_tests)
+        run = self._runner_for(worktree).run(gate_tests)
+        if run.infra_error:
+            self._log("gate.reuse.no_run", reason=run.infra_error[:160])
+            return False
+        if not run.tests_failed:
+            self._log("gate.reuse.stale", reason="no confirmed test fails at this head")
+            return False
+        return True
+
     # -- entry point -----------------------------------------------------
 
     def run(self) -> GateResult:
@@ -1771,6 +1920,7 @@ class GatePipeline:
         outcome = GateOutcome.NEEDS_ESCALATION
         sha = ""
         converged_metric: gate_metrics.GateMetrics | None = None
+        infra_failed = False
         try:
             fetch_base(self.repo, self.config.base_branch)
             ref = resolve_pull_request(self.repo, self.pr_number)
@@ -1778,6 +1928,14 @@ class GatePipeline:
                 reasons.append(f"PR #{ref.number} is {ref.state}, not OPEN")
                 return self._finish(outcome, "", reasons, ref)
             self._log("gate.start", pr=ref.number, head=ref.short_sha, branch=ref.head_ref)
+
+            # Before anything is dispatched: can the base even merge into this
+            # head? A conflict is the orchestrator's signal to send the PR to a
+            # rebase agent, and it is far cheaper to establish here than after a
+            # full review.
+            conflict = self._pre_review_conflict(ref)
+            if conflict:
+                return self._finish(GateOutcome.NEEDS_ESCALATION, "", [conflict], ref)
 
             prepare_worktree(self.repo, worktree, ref.head_sha)
             self._runner = self._runner_for(worktree)
@@ -1819,11 +1977,37 @@ class GatePipeline:
 
             tier = self.review_tier(worktree)
             self._log("gate.tier", **tier_fields(tier))
-            candidates = self.find(worktree, ref, tier.lenses)
-            self._candidates = [f.to_dict() for f in candidates]
-            self._log("gate.find", candidates=len(candidates), lenses=list(tier.lenses))
-            self.verify(worktree, candidates, source="lens")
-            self.judge(worktree, ref)
+
+            # Restart or rebase: stand on the last run's evidence instead of
+            # re-buying it. Only reached for a PR that already needs the full
+            # pipeline — tier 0 and STANDARD have their own shorter paths.
+            prior = self._reusable_evidence(ref)
+            if prior is not None and not self._reused_evidence_is_sound(
+                worktree, prior.payload.get("evidence", {})
+            ):
+                self._log("gate.reuse.abandoned", prior_head=prior.head_sha[:9])
+                prior = None
+            if prior is not None:
+                self.evidence = _Evidence.restore(prior.payload.get("evidence", {}))
+                self._candidates = list(prior.payload.get("candidates", []) or [])
+                self._reused = True
+                self._log("gate.reuse.applied", confirmed=len(self.evidence.confirmed))
+            else:
+                candidates = self.find(worktree, ref, tier.lenses)
+                self._candidates = [f.to_dict() for f in candidates]
+                self._log("gate.find", candidates=len(candidates), lenses=list(tier.lenses))
+                self.state.write(STAGE_FIND, ref.head_sha, {"candidates": self._candidates})
+                self.verify(worktree, candidates, source="lens")
+                self.judge(worktree, ref)
+                self.state.mark_verified(
+                    ref.head_sha,
+                    {
+                        "evidence": self.evidence.to_payload(),
+                        "candidates": self._candidates,
+                    },
+                    patch_id=self._pr_patch,
+                    outcome="",
+                )
 
             if not self.evidence.confirmed:
                 sha = ref.head_sha
@@ -1851,6 +2035,7 @@ class GatePipeline:
                         for c in self.evidence.confirmed[:3]
                     )
         except GateInfraError as exc:
+            infra_failed = True
             reasons.append(str(exc)[:300])
         except (GateError, ModelPolicyError) as exc:
             reasons.append(str(exc)[:300])
@@ -1858,8 +2043,34 @@ class GatePipeline:
             reasons.append(f"gate filesystem failure: {exc}"[:300])
         finally:
             remove_worktree(self.repo, worktree)
+            self._settle_state(ref, outcome=outcome, infra_failed=infra_failed)
 
         return self._finish(outcome, sha, reasons, ref, metric=converged_metric)
+
+    def _settle_state(
+        self,
+        ref: PullRequestRef | None,
+        *,
+        outcome: GateOutcome,
+        infra_failed: bool,
+    ) -> None:
+        """Stamp this run's verdict onto its markers, then bound the directory.
+
+        Runs on the way out of :meth:`run`, including its early returns. The
+        markers **stay**: they are the memory a later run reuses, and clearing
+        them here would make both reuse paths unreachable by construction.
+
+        What this does is finish them. A stage cannot know the run's verdict
+        when it completes, so it writes its marker with an empty outcome; that
+        is what makes an *in-flight* marker unreusable, since
+        :attr:`~agent_fleet.gate.state.StageState.reusable` requires a real
+        outcome. Stamping it here is what turns this run's evidence into
+        something the next head may stand on — and a run that died before here
+        leaves it unstamped, so the next run redoes the work.
+        """
+        if ref is not None:
+            self.state.stamp_outcome(ref.head_sha, outcome=outcome.value, infra_failed=infra_failed)
+        self.state.prune()
 
     def _finish(
         self,

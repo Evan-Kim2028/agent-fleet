@@ -150,6 +150,11 @@ class GateConfig:
     max_findings: int = 12
     max_candidates: int = 12
     base_branch: str = "main"
+    #: Ignored by the gate, and kept only so an existing config that sets it
+    #: still parses. The gate always pushes a fixer to the PR's own
+    #: ``headRefName``: a branch derived from the lane moves a head nobody
+    #: re-gates, and the run then reports "no push" over a PR whose head did
+    #: move. See ``GatePipeline.converge``.
     push_branch: str | None = None
     enable_fix: bool = True
     enable_judge: bool = True
