@@ -1,0 +1,13 @@
+Pushed to `fb/gate-test-batching` (`0162dc7`). 474 gate tests pass, ruff clean, 405 non-test lines.
+
+**Batched verification re-run** — `verify()` now splits into an agent phase (`_ask_verifier`, still parallel) and a re-run phase (`_rerun_verifications`). Once all verifiers have written their tests, every `CONFIRMED` file runs in **one** pytest invocation instead of one memory-capped process per claim. A claim is confirmed only via `TestRun.failed_tests_in(rel)` — per-file attribution, so one verifier's genuinely failing test can't confirm a different false claim sharing the invocation. On rc ≥ 2 it falls back to per-file runs at the identical fail-closed bar, logged as `gate.verify.batched_rerun_fallback`.
+
+**Result cache** — keyed on `git write-tree` against a **temporary index** (real index copied first, `add -A` on the copy), so committed state plus every uncommitted edit, deletion and untracked file are covered; plus the sorted test list and package root. Any file change misses. Only rc < 2 is stored — a replayed collection error would let a transient break masquerade as a settled verdict. TTL 24h, corrupt/wrong-version entries are a miss not an error, non-git worktrees run uncached.
+
+Three things worth flagging:
+
+- **I fixed a pre-existing `SyntaxError` on `main`.** `pytest_runner.py:66` ended in `except OSError, subprocess.SubprocessError:` (Python 2 syntax), so `agent_fleet.gate` could not be imported at all — every one of those 474 tests was red on main. It's in my target file and blocks the work, so I fixed it rather than reporting a blocker.
+- **Cache defaults to on** (`enable_test_cache: true`), matching "keep existing behaviour as the default where noted" — behaviour is unchanged, only the timing. Set the flag false to rule out replay entirely.
+- **`rc >= 2` is now caught earlier.** In the old flow a `CONFIRMED` test that failed to run exited the process, failing the whole gate closed. Batching absorbs it as a per-claim rejection, and only a raised `GateInfraError` stops the run. I judged that the stronger fail-closed property still holds (the claim is still rejected, never confirmed), but it is a deliberate behaviour change, not a pure refactor — say the word if you'd rather I restore the hard stop.
+
+Not done: the cache is not shared across the *fix-round* worktrees yet (each round uses a fresh worktree, so its tree hash differs and misses by design) — cross-round reuse would need content-addressed keying of the diff rather than the worktree, which is a larger change I left out of this PR.
