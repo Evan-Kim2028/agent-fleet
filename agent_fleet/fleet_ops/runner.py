@@ -372,6 +372,12 @@ def run_lane(
             event=lambda line: _event("status", line=line),
         )
         _event("lane.escalated", reason=reason, detail=detail[:500])
+        # The lane is over the moment its verdict is recorded, so the process
+        # identity it wrote before the engine spawn goes with it. The two
+        # no-change escalations below return before the mid-run teardown, and a
+        # record left naming a live-looking process group is what a later
+        # `lanes stop` signals: on a host running many agents that group can
+        # belong to an unrelated tree.
         update_record(
             result.operator,
             result.lane,
@@ -380,6 +386,9 @@ def run_lane(
             reason=reason,
             last_event="lane.escalated",
             status_line=result.status_line,
+            pid=None,
+            pgid=None,
+            starttime=None,
         )
         # documents-1d's monitor keys off `exit=` lines in this hook, so a stall
         # or a lazy exit has to reach it exactly like a gate rejection does.

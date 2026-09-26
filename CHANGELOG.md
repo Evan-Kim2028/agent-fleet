@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+### Fixed
+
+- **A deliberate stop is no longer retried as a lazy exit.**
+  `INTENTION_PATTERNS` matched first-person *future* phrasing anywhere in the
+  closing words of the final text, so an implementer that explained a decision it
+  had already taken — "I'll hold off until the owner decides", "I am going to wait
+  for the owner", "and then I would be guessing" — read as a run that ran out of
+  steam. The lane spent a second engine run on a nudge, produced nothing again,
+  and escalated `lazy_exit` instead of the promised `no_changes_stopped`. The
+  announcing phrase is now only evidence when the text also *ends* on a fragment
+  (`:` or an ellipsis), which is the shape a cut-off mid-thought actually has; a
+  sentence that ends in a full stop has run out of sentence, not of steam.
+- **A `GATE-SKIPPED` line is visible to a consumer that predates it.** The
+  terminal line carried a token the two legacy filters could not match, so
+  `last_status_line(path, tokens=("PREMERGE-APPROVED", "NEEDS-ESCALATION"))`
+  fell through to the lane's *previous* verdict: a monitor driving `lanes status`
+  through that filter showed a finished, guaranteed lane as still owing a human.
+  A filter naming exactly the two legacy tokens is now read as the pre-`GATE-SKIPPED`
+  contract and widened to the whole verdict vocabulary, matching each line's
+  verdict field rather than the whole line — so model-authored text on an
+  escalation line cannot forge a verdict either. The unfiltered read is unchanged.
+- **Work under a tracked `.agent-fleet/` is committed again.** The blanket
+  `.agent-fleet/` line in `info/exclude` hid the whole directory from git, so in
+  a repository that tracks it the files a lane created there never appeared in
+  `git status`, were never staged, and were silently dropped from the commit; a
+  lane whose only work was there read as a clean worktree and escalated
+  `no_commits_ahead`. The exclude line is now `.agent-fleet/runs/` — the manager's
+  own transcript subtree and the only part that is ever scratch output.
+- **A finished lane no longer leaves a signallable process identity in the
+  registry.** The `lazy_exit` and `no_changes_stopped` escalations returned before
+  the `update_record(..., pid=None, pgid=None, starttime=None)` teardown, so a lane
+  that had already exited kept its manager's live process group on the record.
+  `stop_lane_by_name` does not filter on state, so a later `lanes stop` signalled
+  that group — on a host running many agents, possibly another operator's tree.
+  Every escalation now clears the identity as part of recording its verdict.
+  `verify_process_identity` also refuses a record with no start-time fingerprint
+  instead of skipping the recycled-pid check: there is nothing to match it
+  against, and the downside of a wrong guess is a stranger's process group.
+
 ## 0.16.2 — 2026-09-25
 
 ### Fixed
@@ -96,9 +135,9 @@
   repo's hooks, reported as `commit_failed`. The default run dir now lives outside
   the worktree, under `~/.agent-fleet/runs/<operator>/<lane>/<run-id>/`, which
   also stops a second run of the same lane overwriting the first run's
-  transcript. `ensure_lane_worktree` additionally adds `.agent-fleet/` to the
+  transcript. `ensure_lane_worktree` additionally adds `.agent-fleet/runs/` to the
   repo's `info/exclude` (idempotently, on every path including worktree reuse),
-  and the guarantee passes `:(exclude).agent-fleet` to `git add` itself so it is
+  and the guarantee takes that subtree back out of the index itself so it is
   correct even when the exclude file could not be written.
 - **A lane that produces no changes says which of the two things happened.**
   `no_commits_ahead` conflated an implementer that *decided* to stop (a fence, an

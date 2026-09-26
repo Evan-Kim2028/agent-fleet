@@ -33,13 +33,20 @@ DEFAULT_WORKTREE_PARENT = "~/Documents"
 #: Directory the engine writes its run logs into, relative to a worktree root.
 RUN_DIR_NAME = ".agent-fleet"
 
+#: The transcript subtree *inside* that directory, which is the only part that is
+#: ever the manager's scratch output. The exclude line names this, not the
+#: directory: ``.agent-fleet/`` as a whole also hides work a lane legitimately
+#: produces in a repository that tracks that directory, and a file git cannot see
+#: is a file the guarantee never stages.
+RUN_LOGS_DIR_NAME = "runs"
+
 #: The ``info/exclude`` entry that keeps run logs out of git. Written by
 #: :func:`ensure_run_dir_excluded` on every lane worktree: an untracked log file
 #: in a worktree is not "work", it is the manager's own scratch output, and the
 #: PR guarantee stages with ``git add -A`` — so without this a lane commits its
 #: own run log, and a lane that changed nothing commits *only* the log and then
 #: fails on the repo's hooks.
-RUN_DIR_EXCLUDE_LINE = f"{RUN_DIR_NAME}/"
+RUN_DIR_EXCLUDE_LINE = f"{RUN_DIR_NAME}/{RUN_LOGS_DIR_NAME}/"
 
 _SAFE_COMPONENT = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -200,12 +207,18 @@ def _fresh_base(root: Path, base: str, *, runner: Runner | None = None) -> str:
 
 
 def ensure_run_dir_excluded(worktree: Path, *, runner: Runner | None = None) -> bool:
-    """Add ``.agent-fleet/`` to the repo's ``info/exclude``. Idempotent.
+    """Add the run-log subtree to the repo's ``info/exclude``. Idempotent.
 
     The exclude file is per-*repository* and shared by every worktree, which is
     why this is written once per repo rather than per lane: one line serves all
     lanes, and a second call is a no-op rather than a duplicate. Returns whether
     the file was changed.
+
+    The line names ``.agent-fleet/runs/`` and not ``.agent-fleet/``: a repository
+    in this fleet tracks the latter as real config, and a blanket ignore hides
+    files a lane creates there from ``git status`` entirely. An invisible file is
+    never staged and never committed, and a lane whose only work was there read as
+    a clean worktree and escalated ``no_commits_ahead`` on real work.
 
     ``info/exclude`` is used rather than a committed ``.gitignore`` on purpose —
     this is the manager's own scratch output, and adding it to the project's

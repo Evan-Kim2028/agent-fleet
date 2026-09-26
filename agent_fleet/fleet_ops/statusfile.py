@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +44,33 @@ ESCALATION_TOKEN = "NEEDS-ESCALATION"
 #: writing it as an escalation made operators read a working lane as a broken
 #: one, and made the merge planner's approval sweep treat it as needing a human.
 GATE_SKIPPED_TOKEN = "GATE-SKIPPED"
+
+#: Line *shape* (not substring): ``HH:MM:SS <TOKEN> ...``.
+_TOKEN_FIELD_RE = re.compile(r"^\d{2}:\d{2}:\d{2}\s+(\S+)")
+
+#: A :func:`last_status_line` filter that names neither legacy token means "the
+#: pre-``GATE-SKIPPED`` contract", not "no filter at all". A consumer that could
+#: not have been updated to know about the third token must still see this run's
+#: terminal verdict: without that, a lane that has moved past an earlier
+#: escalation is reported as still owing a human, and one with nothing before it
+#: reports no verdict at all. So a third line type is added *alongside* the two
+#: legacy tokens rather than replacing what their filter can see.
+_LEGACY_TOKENS = frozenset({APPROVED_TOKEN, ESCALATION_TOKEN})
+_TERMINAL_TOKENS = _LEGACY_TOKENS | {GATE_SKIPPED_TOKEN}
+
+
+def _is_terminal_line(line: str) -> bool:
+    """Whether *line* carries a terminal verdict token as its verdict field.
+
+    Anchored deliberately. The escalation line appends the tail of the
+    implementer's own final message, which is model-authored text: an unanchored
+    search for a token in the whole line lets a model quote ``NEEDS-ESCALATION``
+    into its own summary and have the line classified as an escalation. The
+    verdict is the first field after the clock, so that is where it is read.
+    """
+    match = _TOKEN_FIELD_RE.match((line or "").strip())
+    return match is not None and match.group(1) in _TERMINAL_TOKENS
+
 
 #: Default cap for a hook command. A hook that hangs must not wedge the lane.
 DEFAULT_HOOK_TIMEOUT_S = 300
@@ -116,19 +144,30 @@ def read_status_lines(path: Path | str) -> list[str]:
 
 
 def last_status_line(path: Path | str, *, tokens: tuple[str, ...] = ()) -> str:
-    """The most recent line, optionally restricted to lines containing a token.
+    """The most recent line, optionally restricted to lines carrying a token.
 
     The token filter is what makes this useful for ``lanes status``: a lane's file
     ends with noise (commit counts, gate chatter) but its *verdict* is the last
     line carrying a terminal token.
+
+    A filter that names neither :data:`APPROVED_TOKEN` nor :data:`ESCALATION_TOKEN`
+    is the pre-:data:`GATE_SKIPPED` consumer: it predates the third token and
+    could not name it. Such a filter is widened to the whole verdict vocabulary
+    so it keeps reading *this* run's terminal line instead of falling through to
+    a verdict an earlier run already superseded.
     """
     lines = read_status_lines(path)
-    if tokens:
+    if not tokens:
+        return lines[-1] if lines else ""
+    if set(tokens) <= _LEGACY_TOKENS:
         for line in reversed(lines):
-            if any(token in line for token in tokens):
+            if _is_terminal_line(line):
                 return line
         return ""
-    return lines[-1] if lines else ""
+    for line in reversed(lines):
+        if any(token in line for token in tokens):
+            return line
+    return ""
 
 
 # --------------------------------------------------------------------- hooks

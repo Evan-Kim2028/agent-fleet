@@ -53,11 +53,18 @@ worktree. Two things depend on that:
   first run's transcript — the artifact an operator needs when a lane has to be
   explained afterwards.
 
-Belt and braces: `ensure_lane_worktree` also adds `.agent-fleet/` to the repo's
-`info/exclude` (idempotently, on every path including worktree reuse), and the
-guarantee passes `:(exclude).agent-fleet` to `git add` itself. The two overlap
-on purpose — the exclude file covers a caller who passed an explicit run dir,
-and the pathspec covers a repo whose exclude file could not be written.
+Belt and braces: `ensure_lane_worktree` also adds `.agent-fleet/runs/` to the
+repo's `info/exclude` (idempotently, on every path including worktree reuse),
+and the guarantee takes that subtree back out of the index after its
+unconditional `git add -A`. The two overlap on purpose — the exclude file
+covers a caller who passed an explicit run dir, and the unstage covers a repo
+whose exclude file could not be written.
+
+The exclude line names the *logs subtree*, not `.agent-fleet/`. A repository in
+this fleet tracks `.agent-fleet/` as real config, and a blanket ignore hides
+files a lane creates there from `git status` entirely — an invisible file is
+never staged, never committed, and a lane whose only work was there read as a
+clean worktree.
 
 This is what stopped a lane that changed *nothing* from being reported as
 `commit_failed`: the run log used to be the only untracked file in the
@@ -85,6 +92,14 @@ The lazy heuristic is deliberately biased against retrying: a final text that
 ambiguous mix resolves to not-retrying. An engine narrates a completion it did
 not achieve far more often than it stops mid-sentence, and a needless retry
 costs a full engine run.
+
+The phrase alone is not enough either. An implementer that decided to stop says
+so in the first person all the time — "I'll hold off until the owner decides",
+"I am going to wait for the owner" — and those announce the decision it already
+took, not work it failed to do. The announcing phrase only counts when the text
+also *ends* on a fragment (a colon or an ellipsis), which is what a cut-off
+mid-thought looks like; a sentence that ends in a full stop has run out of
+sentence, not of steam.
 
 
 ### The PR guarantee
@@ -128,6 +143,14 @@ and an external gate owns review from there. Writing it as `NEEDS-ESCALATION`
 made a healthy lane read as a broken one. `gate.is_approval_line` is the single
 definition of what counts as an approval, and a `GATE-SKIPPED` line does not
 satisfy it.
+
+`statusfile.last_status_line(path, tokens=...)` treats a filter naming exactly
+the two legacy tokens as the pre-`GATE-SKIPPED` contract and widens it to the
+whole vocabulary, so such a consumer keeps reading *this* run's terminal line
+rather than falling through to a verdict an earlier run already superseded. The
+widened match reads each line's verdict *field* rather than the whole line: the
+escalation line carries the tail of the implementer's own final message, and an
+unanchored search would let model-authored text forge a verdict.
 
 
 ### The binding (why a lane cannot judge the wrong PR)
@@ -294,16 +317,24 @@ are wrong here: `pkill -f` matches any process whose command line merely
 *contains* the pattern, so a sibling operator's lane — same binary, same worktree
 layout, different lane — dies with the intended one.
 
-The manager instead refuses, rather than guessing, in four cases:
+The manager instead refuses, rather than guessing, in these cases:
 
 | Refusal | Why |
 | --- | --- |
 | `refused_own_pgid` | the recorded pgid is the caller's own group — never signal it |
-| `refused_pid_reused` | the pid's start-time fingerprint changed; the number was recycled |
+| `refused_pid_reused` | the pid's start-time fingerprint changed, or the record carries none |
 | `refused_ambiguous_lane` | two operators own this lane name — pass `--operator` |
 | `refused_lane_not_found` | no such lane |
+| `refused_no_process_identity` | the record names no process at all — the lane is already over |
 
 A lane that is already gone reports `already_gone` as success, not failure.
+
+A fingerprint the machine cannot supply is a refusal, not a gap in the check:
+there is nothing to match the recorded pid against, so "this number is the same
+process that wrote this record" cannot be established, and the only outcome of
+getting it wrong is `killpg` on someone else's tree. Every writer of the record
+sets `pid`, `pgid` and `starttime` together, and every escalation clears all
+three, so a missing fingerprint means a torn or hand-edited record.
 
 ---
 
@@ -324,7 +355,9 @@ A lane that is already gone reports `already_gone` as success, not failure.
 byte-compatible, so `automerge.sh` and both operators' monitors keep working
 against a lane that is now managed. `GATE-SKIPPED` is a third, *additional*
 line type: a consumer that only looks for the first two sees exactly what it saw
-before.
+before — and, because `last_status_line` widens that two-token filter to the
+whole vocabulary, it still sees *this* run's terminal line rather than the one an
+earlier run left behind.
 
 A sha that is not a real short sha is never written as an approval: the old
 automerge took the last field of the line and would otherwise try to merge a PR
