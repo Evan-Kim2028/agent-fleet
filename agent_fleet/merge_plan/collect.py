@@ -98,6 +98,11 @@ def lanes_dir() -> Path:
     return agent_fleet_home() / "lanes"
 
 
+def _bare_repo(repo: str) -> str:
+    """*repo*'s name without its owner — the spelling a checkout carries."""
+    return repo.rsplit("/", 1)[-1]
+
+
 def collect_from_lanes(
     *,
     operator: str | None = None,
@@ -316,10 +321,19 @@ def dedupe_approvals(entries: Sequence[ApprovedPR]) -> list[ApprovedPR]:
 
     A PR approved in both the lane registry and a status dir keeps the first
     entry after a stable sort, so the source recorded is reproducible.
+
+    The repo key is the bare name, so the two spellings one PR arrives under
+    reconcile here rather than downstream: sources record ``owner/name`` while a
+    ``--repo-path`` names the bare ``name``, and keying on the raw string lets
+    one PR through twice.  Every caller only ever selects a repo afterwards, and
+    a driver selects exactly one — so a bare key merges a spelling with the
+    repository of the same name that was never the operator's target, while a
+    driver pointed at the *other* repository still gets an empty selection
+    rather than someone else's approvals.
     """
     by_key: dict[tuple[str, int], ApprovedPR] = {}
     for pr in sorted(entries, key=lambda p: (p.repo, p.pr_number, p.source)):
-        by_key.setdefault((pr.repo, pr.pr_number), pr)
+        by_key.setdefault((_bare_repo(pr.repo), pr.pr_number), pr)
     return [by_key[k] for k in sorted(by_key)]
 
 

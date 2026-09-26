@@ -654,7 +654,13 @@ def resolve_base_branch(
 
     An operator's ``--base-branch`` is an instruction and fleet.yaml's
     ``base_branch`` is a declaration, so both outrank anything read off the
-    repository.  Past those, the base the batch itself declares wins: a PR the
+    repository — including the batch's own base refs, which say where each PR
+    was *opened* against rather than what this run should fold onto.  A
+    configured branch the remote does not have is caught by the fold itself and
+    reported as a missing branch, which is the honest answer: the operator named
+    a branch that is not there.
+
+    Past the explicit answer, the base the batch itself declares wins: a PR the
     gate approved is a PR whose base ref is the branch it was opened against.
     Only the batch's *roots* are asked (:func:`stack_roots`), because a stacked
     PR's base names its parent in the same batch and is folded onto the candidate
@@ -855,17 +861,22 @@ class GitFold:
             raise RuntimeError(msg)
         root = scratch_root(self.repo_path.name) / f"wt-{id(self):x}"
         root.mkdir(parents=True, exist_ok=True)
+        # Recorded before the add, not after: a ``worktree add`` that hangs part
+        # way through has already registered the path in the shared ``.git``, and
+        # ``__exit__`` only prunes what it recorded as its own.  Leaving the
+        # registration behind makes the next run's ``worktree add`` refuse the
+        # path, so a single hang bricks every train for that repository until an
+        # operator hand-prunes it.
+        self._worktree = root
         add = self._git(
             ["git", "worktree", "add", "--detach", str(root), self.base_ref],
             cwd=self.repo_path,
         )
         if add.returncode != 0:
-            shutil.rmtree(root, ignore_errors=True)
             msg = (
                 f"could not create a candidate worktree from {self.base_ref}: {add.stderr.strip()}"
             )
             raise RuntimeError(msg)
-        self._worktree = root
         return self
 
     def ensure_heads_local(self, prs: Sequence[TrainPR]) -> list[TrainPR]:
@@ -889,10 +900,19 @@ class GitFold:
         return foldable
 
     def __exit__(self, *exc: object) -> None:
-        if self._worktree is not None:
-            self._git(["git", "worktree", "remove", "--force", str(self._worktree)])
-            shutil.rmtree(self._worktree, ignore_errors=True)
-            self._worktree = None
+        worktree = self._worktree
+        if worktree is None:
+            return
+        self._worktree = None
+        # Cleanup must not raise: a hang or a half-registered worktree here would
+        # mask the failure that got us to ``__exit__`` with a second, less useful
+        # one.  ``worktree prune`` is the belt to ``remove``'s braces — it drops
+        # the registration for a path that was never fully created.
+        try:
+            self._git(["git", "worktree", "remove", "--force", str(worktree)])
+        except OSError, subprocess.SubprocessError:
+            self._git(["git", "worktree", "prune"])
+        shutil.rmtree(worktree, ignore_errors=True)
 
     @property
     def worktree(self) -> Path:
@@ -995,6 +1015,11 @@ class GitTrainer:
         self.timeout = timeout
         self.base_branch = base_branch or DEFAULT_BASE_BRANCH
         self.candidate_sha = ""
+        #: The argv of the most recent test invocation, exactly as it was run.
+        #: The report has to name what was tested, and the command is only knowable
+        #: once the batch and the tree it was folded into are: the default is
+        #: ``pytest`` narrowed to the tests covering the batch's changed files.
+        self.argv: list[str] = []
 
     def evaluate(self, prs: Sequence[TrainPR]) -> TestResult:
         """Fold *prs* onto the base branch and run the test command over the result."""
@@ -1016,6 +1041,7 @@ class GitTrainer:
             if incomplete is not None:
                 return incomplete
             argv = self._argv(foldable, fold)
+            self.argv = list(argv)
             try:
                 result = _run(argv, cwd=fold.worktree, timeout=self.timeout)
             except subprocess.TimeoutExpired:
@@ -1098,23 +1124,58 @@ def _failing_tests(output: str) -> tuple[str, ...]:
     return tuple(found)
 
 
+def _repo_slug(repo_path: Path) -> str:
+    """The ``owner/name`` the checkout's ``origin`` points at, or its directory name.
+
+    ``gh pr merge --repo`` needs a slug, not a local path.  A checkout cloned
+    over SSH or HTTPS carries the repository in its remote URL, so that is read
+    first; a directory name is the fallback, and it is always non-empty so the
+    flag is always present on the merge rather than sometimes silently dropped.
+    """
+    from agent_fleet.merge_plan.config import resolve_train_repo_name
+
+    return resolve_train_repo_name(repo_path)
+
+
 class GitMerger:
     """Lands PRs with ``gh pr merge --merge``, re-verifying each head first.
 
     The head is re-read immediately before the merge: the batch was tested
     against these commits, so a PR that has moved since the fold is not merged.
     Hooks keep running — no ``--no-verify`` and no force.
+
+    The merge is then pinned twice more, because a re-check and a merge are two
+    separate round trips and the head can move between them.  ``--match-head-commit``
+    makes GitHub itself refuse a merge whose head is no longer the approved SHA,
+    so the window the re-check cannot cover is closed by the server rather than
+    by a check that ran too early.  ``--repo`` names the repository the PR lives
+    in, so ``gh`` resolves the number against it instead of against whatever
+    remote the checkout happens to point at — without it, a number that also
+    exists in the checkout's own repository merges the wrong PR.
     """
 
-    def __init__(self, repo_path: Path) -> None:
+    def __init__(self, repo_path: Path, repo: str = "") -> None:
         self.repo_path = Path(repo_path)
+        self.repo = repo or _repo_slug(self.repo_path)
 
     def land(self, prs: Sequence[TrainPR]) -> list[int]:
         landed: list[int] = []
         for pr in prs:
             if not self._head_unchanged(pr):
                 continue
-            merged = _run(["gh", "pr", "merge", str(pr.number), "--merge"], cwd=self.repo_path)
+            merged = _run(
+                [
+                    "gh",
+                    "pr",
+                    "merge",
+                    str(pr.number),
+                    "--merge",
+                    "--match-head-commit",
+                    pr.head_sha,
+                ]
+                + (["--repo", self.repo] if self.repo else []),
+                cwd=self.repo_path,
+            )
             if merged.returncode == 0:
                 landed.append(pr.number)
             else:
@@ -1123,7 +1184,8 @@ class GitMerger:
 
     def _head_unchanged(self, pr: TrainPR) -> bool:
         view = _run(
-            ["gh", "pr", "view", str(pr.number), "--json", "headRefOid,state"],
+            ["gh", "pr", "view", str(pr.number), "--json", "headRefOid,state"]
+            + (["--repo", self.repo] if self.repo else []),
             cwd=self.repo_path,
         )
         if view.returncode != 0:
@@ -1171,12 +1233,18 @@ def run_train(
     base = resolve_base_branch(repo_path, configured=base_branch, prs=batch)
     trainer = GitTrainer(repo_path, command=command, base_branch=base)
     result = MergeTrain(tester=trainer.evaluate, repo=repo, base_branch=base).run(
-        batch, merger=GitMerger(repo_path)
+        batch, merger=GitMerger(repo_path, repo=repo)
     )
     result.candidate_sha = trainer.candidate_sha
     path = Path(report_path) if report_path else scratch_root(repo) / "train-report.json"
     payload = result.to_dict()
-    payload["command"] = command or test_command_for(())
+    # The command the trainer built, not the empty-set default it falls back to.
+    # ``GitTrainer._argv`` narrows a bare ``pytest`` to the tests covering the
+    # batch's changed files, so recording ``test_command_for(())`` understated
+    # what ran on the default path and left a REGRESSION verdict's failing ids
+    # unattributable.  A run that never reached a test command falls back to the
+    # configured command, then to the default, which is all the run can claim.
+    payload["command"] = " ".join(trainer.argv) if trainer.argv else command or test_command_for(())
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")

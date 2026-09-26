@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import json
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -26,7 +27,7 @@ if TYPE_CHECKING:
 
     from agent_fleet.merge_plan.execute import EventSink, TickResult
     from agent_fleet.merge_plan.train import TrainPR
-    from agent_fleet.merge_plan.types import ExecutorSpec
+    from agent_fleet.merge_plan.types import ExecutorSpec, RepoSpec
 
 
 def _spec(args: argparse.Namespace) -> ExecutorSpec:
@@ -262,10 +263,12 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
         approvals += collect_from_status_dir(Path(args.status_dir).expanduser(), default_repo=repo)
     # Gate and lane sources record ``owner/name``; the checkout names the bare
     # ``name``.  Without the reconciliation every real approval reads as another
-    # repo's and the batch is empty.
-    approvals = [
-        a for a in dedupe_approvals(approvals) if normalize_repo(a, {repo: repo}).repo == repo
-    ]
+    # repo's and the batch is empty.  Normalising before de-duplicating, as
+    # ``build_plan`` does, is what makes one PR one batch entry: de-duplicating
+    # first keys on the raw spelling, so the two records of the same PR both
+    # survive and it is folded, tested and merged twice.
+    approvals = dedupe_approvals([normalize_repo(a, {repo: repo}) for a in approvals])
+    approvals = [a for a in approvals if normalize_repo(a, {repo: repo}).repo == repo]
     if not approvals:
         print(f"no approved PRs found for {repo}")
         return 0
@@ -335,12 +338,32 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
             report_path=Path(args.report).expanduser() if args.report else None,
             base_branch=base_branch,
         )
+    except subprocess.TimeoutExpired as exc:
+        # Every git call the fold makes carries a timeout, and only the test
+        # command used to handle one.  A hang in the fetch or the worktree add
+        # therefore escaped as a raw traceback past a command that turns every
+        # other fold failure into an ``error: ...`` sentence, and the candidate
+        # directory it had already made stayed behind.
+        command = " ".join(str(a) for a in (exc.cmd or ()))
+        print(
+            f"error: merge train could not fold onto origin/{base_branch}: "
+            f"{command} timed out after {exc.timeout}s",
+            file=sys.stderr,
+        )
+        return 2
     except (OSError, RuntimeError) as exc:
         print(
             f"error: merge train could not fold onto origin/{base_branch}: {exc}",
             file=sys.stderr,
         )
         return 2
+    # The batch the run was given is the CLI's own, decided above; the trainer
+    # narrows it as it folds.  A result that came back without naming its batch
+    # would report ``batch_size: 0`` for a train that ran, so the batch is
+    # stamped onto a result that carries none.  Never overwritten: a trainer
+    # that did fold legitimately drops conflicts and moved heads from ``ordered``.
+    if not result.ordered:
+        result.ordered = tuple(batch)
     print(
         json.dumps(result.to_dict(), indent=2, default=str) if args.json else result.render_text()
     )
@@ -360,11 +383,19 @@ def _held_batch(
 
     Matching is ``merge run``'s own: the same active holds, the same per-PR
     ``ClusterHold.matches``, so the set of merges a hold stops is the same set
-    whichever command the operator reaches for.  A train has no deploy unit —
-    one landed batch is one deploy, chosen after the merges — so the hold is
-    matched on lane alone, and a batch none of the PRs match is unaffected.
+    whichever command the operator reaches for.  Both halves of that matcher are
+    supplied, because a hold is configured on either: the lane the PR is
+    recorded under, and the deploy unit its changed files resolve to.  A train
+    picks the deploy unit *after* the merges, but each PR already carries the
+    files ``gh pr view`` reported and the unit is per-PR
+    (``deploy_unit_for``), exactly as ``build_profile`` derives it — so a freeze
+    declared over ``deploy_units`` applies here too.  Matching on lane alone made
+    ``ClusterHold.matches`` short-circuit on the empty unit and let a
+    ``deploy_units``-only freeze be bypassed outright.
     """
+    from agent_fleet.merge_plan.config import load_merge_plan_config
     from agent_fleet.merge_plan.execute import load_ledger
+    from agent_fleet.merge_plan.profile import deploy_unit_for
     from agent_fleet.merge_plan.train import names_of
 
     if not batch:
@@ -373,11 +404,19 @@ def _held_batch(
         spec = _spec(args)
     except ValueError as exc:
         return f"error: {exc}"
+    repo = getattr(args, "repo", "") or ""
+    config_path = getattr(args, "config", None)
+    repo_specs = load_merge_plan_config(Path(config_path) if config_path else None)
+    units = _deploy_units(repo, repo_specs)
+    active = load_ledger(spec).active_holds(spec)
     held_by_lane = [
         (hold.name, pr.number)
         for pr in batch
-        for hold in load_ledger(spec).active_holds(spec)
-        if hold.matches(lane=lanes.get(pr.number, ""), deploy_unit="")
+        for hold in active
+        if hold.matches(
+            lane=lanes.get(pr.number, ""),
+            deploy_unit=deploy_unit_for(pr.files, units),
+        )
     ]
     if not held_by_lane:
         return None
@@ -387,6 +426,30 @@ def _held_batch(
         f"{names_of(tuple(sorted(n for held, n in held_by_lane if held == name)))} "
         f"(release: fleet merge release {name})"
     )
+
+
+def _deploy_units(repo: str, repo_specs: Mapping[str, RepoSpec]) -> Mapping[str, str]:
+    """The ``path prefix -> unit`` table this train's PRs are resolved against.
+
+    A train is over exactly one repository, so the table is that repository's:
+    the one named on the command line when the config declares it under a
+    different spelling, the config's sole declaration when the command line
+    names nothing, and the built-in table for the well-known fleet repos
+    otherwise.  Falling back to an empty table is what let a ``deploy_units``
+    freeze read as "no unit" and slip past the hold, so every path here resolves
+    the real table or the built-in one — never none.
+    """
+    from agent_fleet.merge_plan.config import builtin_spec
+
+    if repo in repo_specs:
+        return repo_specs[repo].deploy_units
+    bare = repo.rsplit("/", 1)[-1]
+    for name, repo_spec in repo_specs.items():
+        if name.rsplit("/", 1)[-1] == bare:
+            return repo_spec.deploy_units
+    if not repo and len(repo_specs) == 1:
+        return next(iter(repo_specs.values())).deploy_units
+    return builtin_spec(repo).deploy_units
 
 
 def register_merge_commands(sub: argparse._SubParsersAction) -> None:
