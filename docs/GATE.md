@@ -282,6 +282,44 @@ Tier selection, the state machine, and the pass counter are all pure functions
 model. Every STANDARD row records its `tier` and `passes`, visible in
 `agent-fleet gate metrics`.
 
+#### The reviewer brief: the change, inline
+
+A reviewer pointed at `git diff` goes and gets it — measured at ~44 model calls
+per reviewer, each re-uploading a context that had already grown. On a shared
+uplink that is the gate's binding cost, not the review's.
+
+So the gate diffs the change **once** per run and embeds it in every reviewer
+prompt, with 25 lines of context and tests and markdown excluded (tests are the
+verifier's evidence, and prose cannot be a blocker). The prompt tells the
+reviewer to read *that* and not re-run the diff, and gives it the one reason to
+open a file: confirming or rejecting a specific suspected blocker — a caller, a
+contract — never browsing. If the change is correct, an empty list is a fast,
+good answer.
+
+The diff is capped at `gate.diff_chars` (150000). **A cap that cuts the diff
+says so in the prompt**, because the alternative is worse than useless: a
+silently clipped diff reads as the complete change, and the dropped half is
+never reviewed. A truncated prompt marks itself and tells the reviewer to run
+`git diff` for the remainder.
+
+#### The PR's own base branch, not always main
+
+The gate diffs against the base branch the **PR itself targets**, taken from the
+forge, with `gate.base_branch` only as the fallback.
+
+A stacked PR bases itself on another feature branch, and `main` is the wrong
+yardstick for it in both directions. Every commit the base branch took since the
+fork shows up in the diff as if this PR had made it, and the base branch's own
+unmerged work makes the PR look far bigger than it is — which is precisely what
+inflates a diff until a reviewer never reaches the end of it.
+
+That one answer is resolved once and used everywhere the gate diffs: sizing the
+PR, the reviewer prompts, the verifiers, the judge, and the **merged-tree
+regression check**, which merges `origin/<base>` so the deterministic half runs
+against the tree the PR will actually produce. A pinned `origin/<branch>`,
+`refs/...`, or a sha in `gate.base_branch` is the operator speaking directly and
+is never overridden.
+
 ### verify — one failing test per claim
 
 One verifier per testable claim. It must create **exactly one new test file**,
@@ -392,6 +430,30 @@ Set them with `gate.lens_timeout_s` / `verify` / `judge` / `fix`. The older
 three stages it used to drive, with a warning naming the replacement, and an
 explicit per-stage key always wins — so an existing `fleet.yaml` loses nothing
 and the deprecation can be resolved one stage at a time.
+
+### Turn caps
+
+A wall-clock budget cannot stop an agent from working *badly* for its whole
+budget. A reviewer told to review a 400-line diff, pointed at the repository,
+will spend forty turns exploring it — each one re-uploading the whole context it
+has grown, which is the expensive part on a shared uplink.
+
+So the reviewing and fixing stages also carry a turn cap: `gate.review_turns`
+(60) for the lens and verifier stages, `gate.fix_turns` (120) for the fixer,
+which gets more because it still has to run tests, commit and push after it
+stops looking. The cap is passed to backends that support one (`cmd`, `grok` as
+`--max-turns`); the rest accept and ignore it, so setting it can never turn into
+a `TypeError` that kills a stage.
+
+The reviewer's budget is stated in the prompt too — "aim for at most ~30 tool
+calls" — because a target the agent can see stops it, where a cap it can only
+hit does not. That instruction is paired with the one legitimate reason to open
+a file: confirming or rejecting a specific suspected blocker. The two belong
+together; a budget with no rule about what to skip is just a deadline.
+
+A reviewer that hits the cap without a verdict is **dead evidence**, exactly
+like a crash or a timeout: the gate fails closed rather than reading the
+silence as a clean review.
 
 ### A stage timeout is a dead agent
 
@@ -549,7 +611,10 @@ Machine-wide (`~/.agent-fleet/fleet.yaml`):
 | `gate.max_fix_rounds` | `4` | **safety net only**, not the stopping rule |
 | `gate.enable_fix` | `true` | run fix rounds at all |
 | `gate.enable_judge` | `true` | run the judge call |
-| `gate.base_branch` | `main` | base for the diff reviewers read |
+| `gate.base_branch` | `main` | default base; overridden by the PR's own base branch |
+| `gate.diff_chars` | `150000` | cap on the change embedded in a reviewer prompt |
+| `gate.review_turns` | `60` | turn cap for lens/verifier stages |
+| `gate.fix_turns` | `120` | turn cap for the fix stage |
 | `gate.push_branch` | PR head | branch the fixer pushes to |
 | `gate.lane_slug` | PR head ref | slug in gate test file names (per-PR uniqueness) |
 | `gate.lens_timeout_s` | `2400` | lens stage budget |

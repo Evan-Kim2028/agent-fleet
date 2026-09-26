@@ -225,6 +225,7 @@ def call_structured(
     slot_timeout_s: float | None = None,
     max_attempts: int = 2,
     list_key: str | None = None,
+    max_turns: int | None = None,
 ) -> StructuredAnswer:
     """Prompt *backend* for JSON, extract it, and validate it.
 
@@ -232,6 +233,9 @@ def call_structured(
     call is retried once; a second failure raises :class:`StructuredCallError`.
     *slot* is the machine-wide concurrency pool the call holds while running.
     *list_key* also accepts a bare top-level array as ``{list_key: [...]}``.
+    *max_turns* caps the agent's tool turns where the backend supports a turn
+    cap, so a reviewer that has not concluded by then stops instead of spending
+    the whole stage budget re-uploading a context it never used.
     """
     from contextlib import nullcontext
 
@@ -258,6 +262,7 @@ def call_structured(
                 cwd=cwd,
                 model=model,
                 mode=mode,
+                max_turns=max_turns,
             )
         if result.exit_code != 0 or not (result.stdout or "").strip():
             # Exit 8 is the backend's turn cap: the run stopped mid-review

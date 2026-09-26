@@ -276,6 +276,28 @@ def fetch_base(repo: Path, base_branch: str) -> None:
     _run_git(repo, "fetch", "--quiet", "origin", check=False)
 
 
+def resolve_base_branch(pull_request: PullRequestRef | None, configured: str) -> str:
+    """The base the gate diffs: the PR's own base, or *configured* as the default.
+
+    A stacked PR bases itself on another feature branch, and ``main`` is the
+    wrong yardstick for it in both directions: every commit the base branch took
+    since the fork lands in the diff as if this PR had made it, and the base
+    branch's own new work makes this PR look far bigger than it is — which is
+    exactly what inflates a diff until the reviewer never reaches the end of it.
+    The forge already knows which branch this PR targets, so the gate asks it
+    rather than assuming.
+
+    *configured* is only the fallback, taken whenever the PR is unknown or
+    reports no base (a ``gh`` failure, a local-only ref): a missing base must
+    never become a diff against nothing. An explicit ``origin/...``, ``refs/...``
+    or sha in the config is the operator speaking directly and is passed through
+    untouched.
+    """
+    if configured.startswith(("origin/", "refs/")) or re.fullmatch(r"[0-9a-f]{7,40}", configured):
+        return configured
+    return ((pull_request.base_ref if pull_request else "") or "").strip() or configured
+
+
 def worktree_head_sha(worktree: Path) -> str:
     """The commit a gate worktree currently sits on (empty string on failure)."""
     return _run_git(worktree, "rev-parse", "HEAD", check=False).strip()
@@ -424,6 +446,93 @@ def diff_line_stats(worktree: Path, base_branch: str) -> int:
 def prodsensitive_paths(worktree: Path, base_branch: str, config: GateConfig) -> list[str]:
     """Changed paths *config* considers production-sensitive, in diff order."""
     return [path for path in changed_paths(worktree, base_branch) if config.is_prodsensitive(path)]
+
+
+# ---------------------------------------------------------------------------
+# The change, inline
+# ---------------------------------------------------------------------------
+
+#: Context lines around each hunk. Wide enough that a reviewer can see the
+#: guard it is about to reason about breaking, narrow enough that a whole-file
+#: rewrite of a small file does not triple the prompt.
+DIFF_CONTEXT_LINES = 25
+
+#: What the reviewer prompt never needs to see. Tests are the verifier's
+#: evidence and the deterministic half's business — a reviewer reporting a
+#: failing test is just describing step0 — and markdown cannot be a blocker, so
+#: both only inflate the prompt with text carrying no review signal.
+#:
+#: The wildcards are chosen against git's two different matching rules, because
+#: the obvious spelling of each is the one that silently does nothing:
+#:
+#: - without ``glob``, ``*`` **does** cross a ``/``, so ``:(exclude)*.md`` alone
+#:   matches ``docs/CHANGELOG.md`` as well as ``README.md``. Adding ``glob`` to
+#:   that same pattern *stops* it matching at depth, and ``:(exclude,glob)*.md``
+#:   then leaves every nested markdown in the diff.
+#: - a directory needs a trailing ``/**``, and a bare ``:(exclude)tests/`` only
+#:   ever matches the repository's root ``tests`` — never ``api/tests``. The
+#:   ``**/`` prefix is what makes the sub-package case work, and it is what the
+#:   equivalent gate test directory rules elsewhere in this module already use.
+_DIFF_EXCLUDES: tuple[str, ...] = (
+    ":(exclude)**/test_*.py",
+    ":(exclude)**/*_test.py",
+    ":(exclude)**/tests/**",
+    ":(exclude)*.md",
+)
+
+
+@dataclass(frozen=True)
+class InlineDiff:
+    """The change a reviewer is handed, and whether all of it is here."""
+
+    text: str
+    truncated: bool
+
+    @property
+    def note(self) -> str:
+        """The line the prompt shows instead of leaving a cut diff unremarked.
+
+        A silently clipped diff is the worst outcome available to a reviewer: it
+        reads as the complete change and the half that was dropped is never
+        reviewed. The prompt therefore always says which of the two it got, so a
+        reviewer can spend a tool call on the remainder when the cap bit.
+        """
+        if not self.truncated:
+            return "(complete)"
+        return f"(TRUNCATED at {len(self.text)} chars: run git diff for the rest)"
+
+
+def inline_change(worktree: Path, base_branch: str, *, max_chars: int) -> InlineDiff:
+    """The PR's change, diffed against *base_branch* and capped at *max_chars*.
+
+    The diff is computed with the *merge base* semantics of ``git diff A...B``,
+    so a stacked PR shows only its own commits and never the base branch's
+    movement underneath them.
+
+    The cap is applied to the text handed to the model, not to git: cutting
+    inside a hunk is acceptable, and it is recorded in :attr:`InlineDiff.note`
+    so the reviewer knows the change is partial rather than quietly reviewing
+    half a PR.
+    """
+    base = resolve_diff_base(worktree, base_branch)
+    diff = _run_git(
+        worktree,
+        "diff",
+        f"-U{DIFF_CONTEXT_LINES}",
+        f"{base}...HEAD",
+        "--",
+        ".",
+        *_DIFF_EXCLUDES,
+        check=False,
+    )
+    if not diff:
+        # An empty diff and a failed one are not the same thing: the second means
+        # the reviewer would be handed no change and told it is the whole one.
+        return InlineDiff(text="", truncated=False)
+    cap = max(int(max_chars), 0)
+    if cap and len(diff) > cap:
+        return InlineDiff(text=diff[:cap], truncated=True)
+    return InlineDiff(text=diff, truncated=False)
 
 
 # ---------------------------------------------------------------------------

@@ -897,10 +897,11 @@ class DevinBackend:
         cwd: Path | None = None,
         model: str | None = None,
         mode: str | None = None,
+        max_turns: int | None = None,
         runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
         env: dict[str, str] | None = None,
     ) -> DevinLLMResult:
-        del max_tokens, memory_limit
+        del max_tokens, memory_limit, max_turns
         ok, detail, fix = check_devin_auth()
         if not ok:
             # Both halves matter: `detail` says what is wrong and `fix` says what

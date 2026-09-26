@@ -769,8 +769,9 @@ class CursorBackend:
         cwd: Path | None = None,
         model: str | None = None,
         mode: AgentMode | None = None,
+        max_turns: int | None = None,
     ) -> CursorLLMResult:
-        del max_tokens, memory_limit
+        del max_tokens, memory_limit, max_turns
 
         if not self.api_key:
             return CursorLLMResult(

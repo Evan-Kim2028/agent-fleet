@@ -74,12 +74,14 @@ from agent_fleet.gate.gitops import (
     diff_line_stats,
     fetch_base,
     has_approval_line,
+    inline_change,
     is_docs_or_test,
     merge_base_into,
     patch_id,
     prepare_worktree,
     prodsensitive_paths,
     remove_worktree,
+    resolve_base_branch,
     resolve_diff_base,
     resolve_pull_request,
     worktree_head_sha,
@@ -607,6 +609,10 @@ class GatePipeline:
         # An explicit slug wins; otherwise the config's; otherwise the PR's own
         # head ref, which is what makes the name unique per PR.
         self.lane_slug = lane_slug or config.lane_slug
+        #: The branch the gate diffs against. ``run`` sets it from the PR's own
+        #: base once that is known; until then the configured default stands, so
+        #: every diff site has one answer whether or not the PR resolved.
+        self.base_ref: str = config.base_branch
         self.evidence = _Evidence()
         self.archive = GateTestArchive(gate_dir)
         self.recorder = GateCallRecorder(gate_dir)
@@ -617,6 +623,17 @@ class GatePipeline:
         self._step0_run: TestRun | None = None
 
     # -- helpers ---------------------------------------------------------
+
+    def _diff_ref(self, worktree: Path) -> str:
+        """The ref every diff the gate takes is taken against, as ``origin/<base>``.
+
+        One answer for the whole run, resolved once. A stacked PR diffed against
+        the wrong base shows its reviewers the base branch's commits as its own
+        and sizes the PR by work it never did, and the merged-tree check would
+        merge the wrong base — so tier sizing, the reviewers, the verifiers, the
+        judge and the recheck all go through here rather than each deciding.
+        """
+        return resolve_diff_base(worktree, self.base_ref)
 
     def _log(self, event: str, **data: object) -> None:
         logger.info("gate %s %s", event, data if data else "")
@@ -658,6 +675,7 @@ class GatePipeline:
         validate: Any,  # noqa: ANN401
         mode: AgentMode = "agent",
         list_key: str | None = None,
+        max_turns: int | None = None,
         **_: Any,  # noqa: ANN401 - `lens` is only used by _call_required's recorder
     ) -> Any:  # noqa: ANN401 - StructuredAnswer
         """One structured agent call. Defaults to AGENT mode (tools on).
@@ -667,7 +685,11 @@ class GatePipeline:
         review shallowly and every claim is "rejected" — a false-negative gate
         (A/B on lake #3541: plan-mode fleet gate approved a PR the tool-enabled
         bash gate proved had 3 real blockers). Prompts keep them read-only and
-        forbid pattern kills; gate worktrees are disposable."""
+        forbid pattern kills; gate worktrees are disposable.
+
+        *max_turns* is the stage's turn cap. Every backend that accepts the
+        keyword now takes it; the ones that do not still accept and ignore it, so
+        a turn cap cannot become a TypeError that kills a stage."""
         return call_structured(
             backend,
             prompt,
@@ -678,6 +700,7 @@ class GatePipeline:
             mode=mode,
             slot=self.agent_pool,
             list_key=list_key,
+            max_turns=max_turns,
         )
 
     def _call_required(
@@ -757,7 +780,7 @@ class GatePipeline:
         exactly this evidence: the PR's own changed tests green at head, with no
         model involved.
         """
-        pr_tests = changed_test_files(worktree, self.config.base_branch)
+        pr_tests = changed_test_files(worktree, self.base_ref)
         if not pr_tests:
             return []
         runner = self._runner_for(worktree)
@@ -926,16 +949,29 @@ class GatePipeline:
         chosen = (self.config.lenses if lenses is None else lenses)[
             : self.config.max_parallel_lenses
         ]
+        diff_ref = self._diff_ref(worktree)
+        # The change is diffed once, not once per lens: N reviewers asking git
+        # for the same diff is N times the work, and they would all get the same
+        # bytes anyway.
+        change = inline_change(worktree, self.base_ref, max_chars=self.config.diff_chars)
+        self._log(
+            "gate.find.change",
+            base=diff_ref,
+            chars=len(change.text),
+            truncated=change.truncated,
+        )
 
         def _one(lens: str) -> list[Finding]:
             prompt = find_prompt(
                 lens=lens,
                 focus=self._lens_focus(lens),
                 worktree=str(worktree),
-                base_branch=resolve_diff_base(worktree, self.config.base_branch),
+                base_branch=diff_ref,
                 head_sha=ref.short_sha,
                 pr_number=self.pr_number,
                 task_text=task_text,
+                change=change.text,
+                change_note=change.note,
             )
             answer = self._call_required(
                 role="lens",
@@ -948,6 +984,7 @@ class GatePipeline:
                 timeout_s=self.config.stage_timeout(ROLE_LENS),
                 validate=validate_findings,
                 list_key="findings",
+                max_turns=self.config.review_turns,
             )
             return _tag_lens(FindingsReport.from_dict(answer.data).findings, lens)
 
@@ -995,7 +1032,7 @@ class GatePipeline:
         prompt = verify_prompt(
             finding=finding,
             worktree=str(worktree),
-            base_branch=resolve_diff_base(worktree, self.config.base_branch),
+            base_branch=self._diff_ref(worktree),
             head_sha=(self._head_sha(worktree) or "")[:9],
             pr_number=self.pr_number,
             test_dir_hint=runner.test_dir_hint(finding.file or "x"),
@@ -1013,6 +1050,7 @@ class GatePipeline:
             cwd=worktree,
             timeout_s=self.config.stage_timeout(ROLE_VERIFIER),
             validate=validate_verify,
+            max_turns=self.config.review_turns,
         )
         if answer is None:
             self.evidence.reject(finding, "verifier answer invalid (no proof)")
@@ -1067,7 +1105,7 @@ class GatePipeline:
         )
         prompt = judge_prompt(
             worktree=str(worktree),
-            base_branch=resolve_diff_base(worktree, self.config.base_branch),
+            base_branch=self._diff_ref(worktree),
             head_sha=ref.short_sha,
             pr_number=self.pr_number,
             confirmed=_json_blob(self.evidence.confirmed, 6000),
@@ -1243,7 +1281,7 @@ class GatePipeline:
             finally:
                 remove_worktree(self.repo, fix_wt)
 
-            fetch_base(self.repo, self.config.base_branch)
+            fetch_base(self.repo, self.base_ref)
             new_head = current_pr_head(self.repo, self.pr_number)
             if new_head == current:
                 outcome = (
@@ -1378,6 +1416,7 @@ class GatePipeline:
                 cwd=cwd,
                 model=model,
                 mode="agent",
+                max_turns=self.config.fix_turns,
             )
         timed_out = result.exit_code == TIMEOUT_EXIT
         self.recorder.record(
@@ -1446,7 +1485,7 @@ class GatePipeline:
                 head_sha, f"no premerge-approved status line for {approved[:9]}"
             )
 
-        base = resolve_diff_base(self.repo, self.config.base_branch)
+        base = self._diff_ref(self.repo)
         old_patch = patch_id(self.repo, approved, base)
         new_patch = patch_id(self.repo, head_sha, base)
         if not new_patch:
@@ -1772,12 +1811,23 @@ class GatePipeline:
         sha = ""
         converged_metric: gate_metrics.GateMetrics | None = None
         try:
-            fetch_base(self.repo, self.config.base_branch)
             ref = resolve_pull_request(self.repo, self.pr_number)
+            # The PR's own base, before anything is diffed: a stacked PR needs
+            # the branch it will actually merge into fetched and resolved here,
+            # and every later stage reads ``base_ref`` rather than deciding for
+            # itself.
+            self.base_ref = resolve_base_branch(ref, self.config.base_branch)
+            fetch_base(self.repo, self.base_ref)
             if not ref.is_open:
                 reasons.append(f"PR #{ref.number} is {ref.state}, not OPEN")
                 return self._finish(outcome, "", reasons, ref)
-            self._log("gate.start", pr=ref.number, head=ref.short_sha, branch=ref.head_ref)
+            self._log(
+                "gate.start",
+                pr=ref.number,
+                head=ref.short_sha,
+                branch=ref.head_ref,
+                base=self.base_ref,
+            )
 
             prepare_worktree(self.repo, worktree, ref.head_sha)
             self._runner = self._runner_for(worktree)
@@ -2265,14 +2315,25 @@ def run_gate_recheck(
 
     reasons: list[str] = []
     try:
-        fetch_base(repo, gate_cfg.base_branch)
+        # A recheck carries an approval across a rebase, so it has to judge the
+        # PR against the branch it will really merge into: for a stacked PR that
+        # is the PR's own base, not main. Asking the forge for the base is a
+        # network call the recheck would otherwise not need, so a supplied
+        # head_sha with an unreadable PR still falls back to the configured
+        # branch rather than failing the check.
+        try:
+            ref = resolve_pull_request(repo, pr_number)
+        except GateError, OSError:
+            ref = None
+        pipeline.base_ref = resolve_base_branch(ref, gate_cfg.base_branch)
+        fetch_base(repo, pipeline.base_ref)
         head = head_sha.strip() if head_sha else current_pr_head(repo, pr_number)
         worktree = resolved_gate_dir / "recheck-wt"
         prepare_worktree(repo, worktree, head)
         try:
             # Merge the base so the tests see what the PR will actually merge
             # into, not just the PR's own tree.
-            merge_base_into(worktree, resolve_diff_base(repo, gate_cfg.base_branch))
+            merge_base_into(worktree, pipeline._diff_ref(worktree))
             # The archive, not this run's evidence, is where the gate's own
             # tests live: a recheck is a fresh process, so evidence.gate_tests
             # is always empty and the one test that ever blocked the PR would
