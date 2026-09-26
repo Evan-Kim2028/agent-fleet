@@ -14,6 +14,8 @@ branch already checked out somewhere, so reuse is the only correct behaviour.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import re
 import subprocess
 from dataclasses import dataclass
@@ -21,7 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterator, Sequence
 
     Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 
@@ -143,6 +145,28 @@ def branch_exists(root: Path, branch: str, *, runner: Runner | None = None) -> b
     return result.returncode == 0
 
 
+@contextlib.contextmanager
+def _repo_lock(root: Path) -> Iterator[None]:
+    """Serialize worktree creation per repository across processes and operators.
+
+    Dozens of lanes launched in the same second otherwise race on git's shared
+    metadata (.git/config.lock, worktrees/, index writes).
+    """
+    common = _git(
+        ["git", "rev-parse", "--git-common-dir"], cwd=root, runner=None, timeout=60
+    ).stdout.strip()
+    lock_dir = (
+        (root / common) if common and not Path(common).is_absolute() else Path(common or root)
+    )
+    lock_path = lock_dir / "agent-fleet-worktree.lock"
+    with open(lock_path, "a+") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
 def _fresh_base(root: Path, base: str, *, runner: Runner | None = None) -> str:
     """The start point for a new lane branch: ``origin/<base>`` after a fetch, when it exists.
 
@@ -217,10 +241,13 @@ def ensure_lane_worktree(
         reason = "attached to existing branch"
     else:
         start = _fresh_base(root, base, runner=runner)
-        args = ["git", "worktree", "add", "-b", branch, str(path), start]
+        # --no-track: with a remote start point git would write branch.<name>.merge into the shared
+        # .git/config, and concurrent lane launches then fail on .git/config.lock.
+        args = ["git", "worktree", "add", "--no-track", "-b", branch, str(path), start]
         reason = f"created from {start}"
 
-    result = _git(args, cwd=root, runner=runner, timeout=600)
+    with _repo_lock(root):
+        result = _git(args, cwd=root, runner=runner, timeout=600)
     if result.returncode != 0:
         raise RuntimeError(
             f"git worktree add failed for {branch} at {path}: "

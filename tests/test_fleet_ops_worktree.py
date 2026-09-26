@@ -91,6 +91,25 @@ def test_a_new_lane_starts_from_origin_not_a_stale_local_main(repo: Path, tmp_pa
     assert result.reason == "created from origin/main"
 
 
+def test_concurrent_lane_launches_do_not_race_on_git_metadata(repo: Path, tmp_path: Path) -> None:
+    import concurrent.futures
+
+    origin = tmp_path / "origin.git"
+    _git(tmp_path, "clone", "-q", "--bare", str(repo), str(origin))
+    _git(repo, "remote", "add", "origin", str(origin))
+    _git(repo, "fetch", "-q", "origin")
+
+    def launch(i: int) -> str:
+        return ensure_lane_worktree(repo, lane=f"lane{i}", parent=tmp_path / "wt").reason
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=12) as pool:
+        reasons = list(pool.map(launch, range(12)))
+
+    assert reasons == ["created from origin/main"] * 12
+    config = (repo / ".git" / "config").read_text(encoding="utf-8")
+    assert "merge = refs/heads/main" not in config
+
+
 def test_an_existing_worktree_is_reused_not_recreated(repo: Path, tmp_path: Path) -> None:
     """A lane that was interrupted usually has real work; it must be adopted."""
     first = ensure_lane_worktree(repo, lane="movers", parent=tmp_path / "wt")
