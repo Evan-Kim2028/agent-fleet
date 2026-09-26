@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 from agent_fleet.fleet_ops import pressure
 from agent_fleet.fleet_ops.config import FleetOpsConfig, load_fleet_ops_config_from_repo
 from agent_fleet.fleet_ops.dispatch import (
+    DEFAULT_MAX_THROTTLE_TICKS,
     DispatchItem,
     load_queue,
     render_summary,
@@ -180,6 +181,7 @@ def cmd_dispatch_queue(args: argparse.Namespace) -> int:
                 args.psi_avg10_max if args.psi_avg10_max is not None else dcfg.psi_avg10_max
             ),
             psi_reader=((lambda: pressure.read_throttle(dcfg.psi_path)) if dcfg.psi_path else None),
+            throttle_max_ticks=_throttle_ticks(args),
         )
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -190,6 +192,12 @@ def cmd_dispatch_queue(args: argparse.Namespace) -> int:
     else:
         print(render_summary(summary))
     return summary.exit_code()
+
+
+def _throttle_ticks(args: argparse.Namespace) -> int:
+    """``--max-throttle-ticks`` when given, else the module default."""
+    value = getattr(args, "max_throttle_ticks", None)
+    return DEFAULT_MAX_THROTTLE_TICKS if value is None else int(value)
 
 
 def register_dispatch_command(sub: argparse._SubParsersAction) -> None:
@@ -256,6 +264,15 @@ def register_dispatch_command(sub: argparse._SubParsersAction) -> None:
         type=float,
         default=None,
         help="CPU PSI some-avg10 ceiling above which no new lane is launched",
+    )
+    dispatch_p.add_argument(
+        "--max-throttle-ticks",
+        type=int,
+        default=None,
+        help=(
+            "How many ticks a saturated machine may hold the queue back before the "
+            "dispatcher gives up and reports the lanes it never ran as errors"
+        ),
     )
     dispatch_p.add_argument("--json", action="store_true", help="Emit the dispatch summary as JSON")
     dispatch_p.set_defaults(func=None)

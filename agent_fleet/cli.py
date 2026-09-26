@@ -1390,6 +1390,35 @@ def main(argv: list[str] | None = None) -> int:
     )
     gate_p.add_argument("--pr", type=int, default=None, help="PR number to gate")
     gate_p.add_argument(
+        "--lane",
+        default=None,
+        help=(
+            "Queue lane this gate belongs to, as named on the dispatcher's command "
+            "line. Attribution only: a gate reads the PR head it is pointed at."
+        ),
+    )
+    gate_p.add_argument(
+        "--repo",
+        default=None,
+        help=(
+            "owner/name of the repo holding the PR, as verified by the caller. "
+            "Cross-checks the reviewed repo; the gate is driven by --repo-path."
+        ),
+    )
+    gate_p.add_argument(
+        "--head-ref",
+        default=None,
+        help=(
+            "Branch the PR head is on, as verified by the caller. Cross-checks the "
+            "reviewed head; the gate is driven by --pr."
+        ),
+    )
+    gate_p.add_argument(
+        "--judge-engine",
+        default=None,
+        help="Override the judge engine for this gate run (config key: judge_engine)",
+    )
+    gate_p.add_argument(
         "--task-file",
         default=None,
         help="Task specification file, used as the yardstick by the spec lens and the judge",
@@ -1402,7 +1431,10 @@ def main(argv: list[str] | None = None) -> int:
             "'HH:MM:SS PREMERGE-APPROVED <sha9>' or 'HH:MM:SS NEEDS-ESCALATION <reason>'"
         ),
     )
-    gate_p.set_defaults(func=cmd_gate, pr=None)
+    # Resolved through the module namespace at call time, not bound here, so the
+    # subcommand's handler can be replaced (in tests, and by a plugin) without
+    # re-registering the parser.
+    gate_p.set_defaults(func=lambda args: cmd_gate(args), pr=None)
 
     gate_sub = gate_p.add_subparsers(dest="gate_command")
     gate_metrics_p = gate_sub.add_parser(

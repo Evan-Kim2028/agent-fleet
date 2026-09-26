@@ -360,6 +360,20 @@ Placeholders are `{lane}`, `{pr}`, `{repo}`, `{slug}` and `{operator}`. The
 expanded string is split with `shlex` and executed **without a shell**, so a `;`
 or `&&` in a template stays inert data rather than becoming a second command.
 
+The default gate is invoked with `--repo-path` (the lane's own checkout), the
+lane's rendered `--task-file` (the spec the gate judges against) and the lane's
+`--status-file` — the file the gate appends its `PREMERGE-APPROVED` /
+`NEEDS-ESCALATION` verdict to, and the one the dispatcher reads back. Without
+the status file the gate has nowhere to record a verdict, and a green gate is
+then indistinguishable from a real rejection.
+
+A throttle is a **delay**: a saturated box defers launches and keeps
+re-evaluating every `--tick-seconds`. If the queue has still not run after
+`--max-throttle-ticks` the dispatcher stops, records the lanes it never ran as
+`throttle_abandoned` (counted as errors, so `exit_code()` is 1) and exits. It
+never reports success for a queue it dropped; re-running the command resumes
+from the durable state.
+
 ### What this makes impossible
 
 Each of these was a real failure of the shell dispatcher, and each has a test

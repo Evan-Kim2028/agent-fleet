@@ -19,12 +19,16 @@ and a synchronous ``sleep`` that ticks the simulated clock.
 
 from __future__ import annotations
 
+import argparse
+import contextlib
+import io
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from agent_fleet import cli
 from agent_fleet.fleet_ops import dispatch as dispatch_mod
 from agent_fleet.fleet_ops import pressure
 from agent_fleet.fleet_ops.dispatch import (
@@ -585,19 +589,84 @@ def test_the_gate_template_expands_every_documented_placeholder() -> None:
 
 
 def test_the_default_gate_command_is_the_built_in_fleet_gate() -> None:
+    """The no-template default, and every flag in it, is one ``gate`` accepts.
+
+    The argv used to carry ``--lane``/``--repo``/``--head-ref`` against a
+    ``gate`` subparser that defined none of them, so every default gate died in
+    argparse with exit 2. ``tests/test_gate_dispatch_d_queue_contract_1.py`` asks
+    the real parser directly; this pins the shape.
+    """
     argv = gate_argv(None, lane="alpha", pr=7, repo="acme", slug="Evan-Kim2028/acme")
-    assert argv == [
-        "agent-fleet",
-        "gate",
-        "--lane",
-        "alpha",
-        "--repo",
-        "Evan-Kim2028/acme",
-        "--pr",
-        "7",
-        "--head-ref",
-        "fb/alpha",
-    ]
+    assert argv[:2] == ["agent-fleet", "gate"]
+    assert "--pr" in argv and argv[argv.index("--pr") + 1] == "7"
+    # Where the gate is told to write its verdict, and which repo/spec to judge.
+    assert "--status-file" not in argv, "a bare argv has no status file to name"
+    with_paths = gate_argv(
+        None,
+        lane="alpha",
+        pr=7,
+        repo="acme",
+        slug="Evan-Kim2028/acme",
+        repo_path="/src/acme",
+        task_file="/out/alpha.task.md",
+        status_file="/out/alpha.status",
+    )
+    for flag, value in (
+        ("--repo-path", "/src/acme"),
+        ("--task-file", "/out/alpha.task.md"),
+        ("--status-file", "/out/alpha.status"),
+    ):
+        assert with_paths[with_paths.index(flag) + 1] == value
+
+
+def test_every_flag_the_default_gate_emits_is_one_the_gate_parser_defines() -> None:
+    """Nothing may be emitted that ``agent-fleet gate`` would reject.
+
+    An unknown flag is an argparse exit 2, i.e. a gate that never reviews the
+    PR, which is then read back as an escalation.
+    """
+    parser_flags = {
+        opt for action in _gate_subparser()._actions for opt in action.option_strings
+    } | {"-h", "--help"}
+    argv = gate_argv(
+        None,
+        lane="alpha",
+        pr=7,
+        repo="acme",
+        slug="Evan-Kim2028/acme",
+        repo_path="/src/acme",
+        task_file="/out/alpha.task.md",
+        status_file="/out/alpha.status",
+        judge_engine="cmd",
+    )
+    assert not {tok for tok in argv if tok.startswith("--")} - parser_flags
+
+
+def _gate_subparser() -> argparse.ArgumentParser:
+    """The live ``gate`` subparser, as the CLI registers it."""
+    captured: dict[str, argparse.ArgumentParser] = {}
+    original = argparse.ArgumentParser.parse_args
+
+    def _spy(self: argparse.ArgumentParser, *_args: object, **_kwargs: object) -> None:
+        captured["parser"] = self
+        raise SystemExit(0)
+
+    argparse.ArgumentParser.parse_args = _spy  # type: ignore[method-assign]
+    try:
+        with (
+            contextlib.redirect_stderr(io.StringIO()),
+            contextlib.suppress(SystemExit),
+        ):
+            cli.main(["gate", "--help"])
+    finally:
+        argparse.ArgumentParser.parse_args = original  # type: ignore[method-assign]
+    assert "parser" in captured
+    for action in captured["parser"]._actions:
+        choices = getattr(action, "choices", None)
+        if isinstance(choices, dict) and "gate" in choices:
+            return choices["gate"]
+    msg = "the CLI has no `gate` subcommand"
+    raise AssertionError(msg)
 
 
 def test_the_gate_template_survives_a_stray_brace() -> None:

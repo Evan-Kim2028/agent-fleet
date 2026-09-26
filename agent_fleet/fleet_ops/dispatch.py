@@ -127,9 +127,23 @@ DEFAULT_MAX_GATES = 4
 #: How often the dispatch loop re-evaluates.
 DEFAULT_TICK_SECONDS = 20.0
 
+#: Ticks a saturated box may hold the whole queue back before the dispatcher
+#: gives up on it and reports the queue it never ran. Throttling is a *delay*,
+#: so the loop waits — but not forever: a run that returns success having
+#: launched nothing is the silent-drop failure this module exists to prevent,
+#: and giving up early costs nothing because the state is durable. Re-running
+#: the dispatcher resumes the queue from where it stopped.
+DEFAULT_MAX_THROTTLE_TICKS = 3
+
 #: Status of a lane whose queue item could not be found. The shell driver's
 #: ``StopIteration``.
 UNKNOWN_ITEM = "unknown_item"
+
+#: Status of a lane the dispatcher gave up on after waiting out a throttle that
+#: never lifted. A dispatcher problem, not a lane outcome: the lane is
+#: untouched, and the run reports it as an error so a dropped queue can never be
+#: mistaken for a clean one.
+THROTTLE_ABANDONED = "throttle_abandoned"
 
 DEFAULT_OWNER = "Evan-Kim2028"
 
@@ -271,6 +285,33 @@ def render_task_file(item: DispatchItem, *, fences: str = "") -> str:
 
 def _slugify(value: str) -> str:
     return "".join(c if c.isalnum() or c in "._-" else "-" for c in value)
+
+
+def confined_name(value: str) -> str:
+    """A *value* from a queue file that is safe to join onto a directory.
+
+    ``DispatchItem.from_dict`` accepts any non-empty ``lane``, and an
+    ``--operator`` is whatever the operator typed, so both are untrusted: used
+    verbatim in a path, ``../../ESCAPED`` redirects writes out of the namespace
+    they belong to — including, for an absolute operator, out of
+    ``AGENT_FLEET_HOME`` entirely. Every separator becomes ``-``, so the result
+    is always exactly one path component under the intended root.
+    """
+    return _slugify(value).strip("-.") or "unnamed"
+
+
+def task_file_for(out_root: Path, lane: str) -> Path:
+    """The rendered task file for *lane* — the gate's spec yardstick too.
+
+    ``_launch_lane`` writes it and ``_launch_gate`` hands the gate the same
+    path, so the two stages read one spec rather than two copies of one queue.
+    """
+    return out_root / "prompts" / f"{confined_name(lane)}.task.md"
+
+
+def status_file_for(out_root: Path, lane: str) -> Path:
+    """The file the gate appends its verdict to and ``_reap_gate`` reads back."""
+    return out_root / "lanes" / f"{confined_name(lane)}.status"
 
 
 @dataclass(frozen=True)
@@ -421,9 +462,11 @@ def dispatch_state_path(operator: str) -> Path:
 
     The operator is the first path component for the same reason it is in
     ``registry.lane_state_path``: two operators dispatch the same queues against
-    the same repos, and neither may clobber the other's record.
+    the same repos, and neither may clobber the other's record. It is passed
+    through :func:`confined_name` because it is untyped operator input — joined
+    in verbatim, a ``..`` or an absolute path writes outside this namespace.
     """
-    return dispatch_dir() / operator / "state.json"
+    return dispatch_dir() / confined_name(operator) / "state.json"
 
 
 def load_state(operator: str, *, queue_path: str = "") -> DispatchState:
@@ -800,6 +843,17 @@ def plan_tick(
 # ---------------------------------------------------------------- gate commands
 
 
+#: Flags the real ``agent-fleet gate`` subparser defines, and nothing else.
+#: Emitting any other flag makes argparse abort with exit 2, so a gate that
+#: never starts reviews nothing and every lane is then read as an escalation.
+#: ``{lane}``/``{repo}``/``{slug}``/``{operator}``/``{pr}`` remain available to a
+#: ``--gate-cmd`` template, which is free to take them as positionals.
+GATE_SUBCOMMAND = "gate"
+GATE_REPO_FLAG = "--repo-path"
+GATE_TASK_FLAG = "--task-file"
+GATE_STATUS_FLAG = "--status-file"
+
+
 def gate_argv(
     template: str | None,
     *,
@@ -808,6 +862,9 @@ def gate_argv(
     repo: str,
     operator: str = "",
     slug: str = "",
+    status_file: str | None = None,
+    repo_path: str | None = None,
+    task_file: str | None = None,
     judge_engine: str | None = None,
     worktree: str | None = None,
 ) -> list[str]:
@@ -820,12 +877,20 @@ def gate_argv(
 
     With no template the built-in ``agent-fleet gate`` is used, which is the same
     seam ``lane run`` uses — so a repo that needs no external gate script needs
-    no configuration at all.
+    no configuration at all. That argv names only flags the gate subparser
+    actually defines: *judge_engine* has no home there and is a template-only
+    placeholder.
+
+    *repo_path*, *task_file* and *status_file* are handed on as
+    ``--repo-path``/``--task-file``/``--status-file``. Without them the gate
+    reviews the dispatcher's cwd against no spec, and has nowhere to record its
+    verdict — so the verdict the dispatcher reads back is whatever the previous
+    stage happened to leave behind.
     """
     if not template:
         argv = [
             "agent-fleet",
-            "gate",
+            GATE_SUBCOMMAND,
             "--lane",
             lane,
             "--repo",
@@ -835,8 +900,14 @@ def gate_argv(
             "--head-ref",
             f"fb/{lane}",
         ]
-        if judge_engine:
-            argv += ["--judge-engine", judge_engine]
+        for flag, value in (
+            (GATE_REPO_FLAG, repo_path or worktree or repo),
+            (GATE_TASK_FLAG, task_file),
+            (GATE_STATUS_FLAG, status_file),
+            ("--judge-engine", judge_engine),
+        ):
+            if value:
+                argv += [flag, value]
         return argv
 
     expanded = expand_template(template, lane=lane, operator=operator)
@@ -848,6 +919,8 @@ def gate_argv(
         raise ValueError(f"gate command template is not parseable: {exc}") from exc
     if not argv:
         raise ValueError("gate command template expanded to an empty command")
+    # A template is a command the operator wrote, so nothing is injected into
+    # it: the placeholders already carry the lane, repo and PR.
     if worktree:
         argv += ["--worktree", worktree]
     return argv
@@ -978,6 +1051,7 @@ def run_dispatch(
     psi_reader: Callable[[], pressure.Throttle] | None = None,
     sleep: Callable[[float], None] = time.sleep,
     psi_avg10_max: float = pressure.DEFAULT_PSI_AVG10_MAX,
+    throttle_max_ticks: int = DEFAULT_MAX_THROTTLE_TICKS,
 ) -> DispatchSummary:
     """Dispatch *queue_path* to completion.
 
@@ -1008,6 +1082,7 @@ def run_dispatch(
     start = _real_spawn() if spawn is None else spawn
     read_psi = psi_reader or (lambda: pressure.read_throttle())
     out_root = Path(run_dir).expanduser() if run_dir else dispatch_dir() / operator
+    throttled_ticks = 0
 
     while True:
         psi = read_psi()
@@ -1021,17 +1096,36 @@ def run_dispatch(
             exited=_poll_exited(current),
         )
         if not actions:
-            # Nothing launched, nothing reaped, and no slot freed: the only way
-            # out is to finish the lanes that can never run. A dependency cycle
-            # would otherwise leave the dispatcher waiting on a queue that can
-            # never drain.
+            # Nothing launched, nothing reaped, and no slot freed. The only ways
+            # out of that are: the queue is genuinely done, the lanes that can
+            # never run are finished as such, or the machine is too contended to
+            # start anything — which is a delay, so it waits.
             stuck = blocked_lanes(current, cluster_order=cluster_order)
             if stuck and _complete(current):
                 for name in stuck:
                     current = _finish(current, name, "dependency_deadlock", summary=summary)
                 save_state(current)
                 break
-            if _complete(current):
+            if _complete(current) and not _throttled(psi, psi_avg10_max=psi_avg10_max):
+                break
+            if _throttled(psi, psi_avg10_max=psi_avg10_max) and not _has_queued_work(
+                current, cluster_order=cluster_order
+            ):
+                throttled_ticks = 0
+            else:
+                throttled_ticks += 1
+            if throttled_ticks > throttle_max_ticks:
+                # The box never freed up. Say so instead of reporting a run
+                # that launched nothing as a success.
+                logger.warning(
+                    "dispatch %s: still throttled after %d ticks; %d lane(s) never dispatched",
+                    current.operator,
+                    throttled_ticks,
+                    len(_dispatchable_lanes(current, cluster_order=cluster_order)),
+                )
+                for lane in _dispatchable_lanes(current, cluster_order=cluster_order):
+                    current = _finish(current, lane.lane, THROTTLE_ABANDONED, summary=summary)
+                save_state(current)
                 break
             sleep(tick_seconds)
             continue
@@ -1096,6 +1190,32 @@ def _poll_exited(state: DispatchState) -> dict[str, int]:
 def _complete(state: DispatchState) -> bool:
     """True when no lane can make further progress."""
     return not any(lane.state in LANE_SLOT_STATES for lane in state.lanes.values())
+
+
+def _throttled(psi: pressure.Throttle, *, psi_avg10_max: float) -> bool:
+    return pressure.throttled(psi, avg10_max=psi_avg10_max)
+
+
+def _dispatchable_lanes(
+    state: DispatchState, *, cluster_order: Sequence[str] = ()
+) -> list[DispatchLane]:
+    """Queued lanes whose dependencies are already released.
+
+    A lane stuck on an unresolved dependency is not "work the throttle is
+    holding back" — nothing about the machine's pressure unblocks it, and
+    :func:`blocked_lanes` reports it separately.
+    """
+    released = terminal_refs(state)
+    known = known_dependency_keys(state)
+    return [
+        lane
+        for lane in order_lanes(state, cluster_order=cluster_order)
+        if dependency_satisfied(lane, released, known)
+    ]
+
+
+def _has_queued_work(state: DispatchState, *, cluster_order: Sequence[str] = ()) -> bool:
+    return bool(_dispatchable_lanes(state, cluster_order=cluster_order))
 
 
 def _record_error(state: DispatchState, lane_name: str, exc: Exception) -> DispatchState:
@@ -1172,13 +1292,13 @@ def _launch_lane(
         raise FileNotFoundError(f"repo path does not exist: {repo_path}")
 
     out_root.mkdir(parents=True, exist_ok=True)
-    task_file = out_root / "prompts" / f"{item.lane}.task.md"
+    task_file = task_file_for(out_root, item.lane)
     task_file.parent.mkdir(parents=True, exist_ok=True)
     task_file.write_text(render_task_file(item, fences=fences), encoding="utf-8")
 
     log = out_root / "runs" / f"lane-{item.lane}.log"
     log.parent.mkdir(parents=True, exist_ok=True)
-    status_file = out_root / "lanes" / f"{item.lane}.status"
+    status_file = status_file_for(out_root, item.lane)
     status_file.parent.mkdir(parents=True, exist_ok=True)
 
     argv = [
@@ -1316,6 +1436,9 @@ def _launch_gate(
         repo=item.repo,
         operator=state.operator,
         slug=f"{DEFAULT_OWNER}/{item.repo}",
+        status_file=record.status_file,
+        repo_path=record.repo_path,
+        task_file=str(task_file_for(out_root, item.lane)),
         judge_engine=judge_engine,
         worktree=record.worktree,
     )
@@ -1412,6 +1535,7 @@ def _apply(
             summary=summary,
         )
     if isinstance(action, LaunchGate):
+        summary.gated += 1
         return _launch_gate(
             state,
             action,
@@ -1437,7 +1561,7 @@ def _apply(
 
 #: Terminal reasons that are a dispatcher problem rather than a lane outcome.
 #: They all count as errors: the operator has to look at the queue.
-ERROR_REASONS = (UNKNOWN_ITEM, "error", "dependency_deadlock")
+ERROR_REASONS = (UNKNOWN_ITEM, "error", "dependency_deadlock", THROTTLE_ABANDONED)
 
 
 def _tally(summary: DispatchSummary, reason: str) -> None:
@@ -1472,6 +1596,7 @@ def render_summary(summary: DispatchSummary) -> str:
 __all__ = [
     "DEFAULT_MAX_GATES",
     "DEFAULT_MAX_LANES",
+    "DEFAULT_MAX_THROTTLE_TICKS",
     "DEFAULT_OWNER",
     "DEFAULT_TICK_SECONDS",
     "DISPATCH_DONE",
@@ -1479,6 +1604,7 @@ __all__ = [
     "DISPATCH_PR",
     "DISPATCH_QUEUED",
     "DISPATCH_RUNNING",
+    "THROTTLE_ABANDONED",
     "UNKNOWN_ITEM",
     "Action",
     "DispatchItem",
@@ -1494,6 +1620,7 @@ __all__ = [
     "blocked_lanes",
     "classify_status",
     "cluster_rank",
+    "confined_name",
     "dependency_satisfied",
     "dispatch_dir",
     "dispatch_state_path",
@@ -1511,5 +1638,7 @@ __all__ = [
     "render_task_file",
     "run_dispatch",
     "save_state",
+    "status_file_for",
+    "task_file_for",
     "terminal_refs",
 ]
