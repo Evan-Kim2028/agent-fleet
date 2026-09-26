@@ -104,6 +104,34 @@ from agent_fleet.gate.pytest_runner import (
     to_package_path,
     to_repo_node_id,
 )
+from agent_fleet.gate.standard import (
+    OUTCOME_APPROVED as STD_OUTCOME_APPROVED,
+)
+from agent_fleet.gate.standard import (
+    OUTCOME_FALLBACK as STD_OUTCOME_FALLBACK,
+)
+from agent_fleet.gate.standard import (
+    OUTCOME_FIX_AND_REGATE as STD_OUTCOME_FIX_AND_REGATE,
+)
+from agent_fleet.gate.standard import (
+    STANDARD_HISTORY_ROWS,
+    STANDARD_TIER,
+    FallbackReason,
+    StandardAction,
+    StandardState,
+)
+from agent_fleet.gate.standard import (
+    approval_reason as standard_approval_reason,
+)
+from agent_fleet.gate.standard import (
+    next_action as standard_next_action,
+)
+from agent_fleet.gate.standard import (
+    prior_passes as standard_prior_passes,
+)
+from agent_fleet.gate.standard import (
+    select_tier as standard_select_tier,
+)
 from agent_fleet.gate.structured import TIMEOUT_EXIT, StructuredCallError, call_structured
 from agent_fleet.model_policy import ModelPolicy, ModelPolicyError, parse_model_policy
 from agent_fleet.slots import (
@@ -493,6 +521,27 @@ class GateTestArchive:
 # ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class FixerResult:
+    """What one fixer round actually did, measured rather than believed.
+
+    Two facts, both read from the state the fixer left behind: whether its
+    worktree holds a commit that was not the PR's head, and whether the PR's head
+    moved. Neither is the fixer's say-so, because a fixer that disputes every
+    finding will say it fixed something.
+    """
+
+    #: A commit exists in the fixer worktree that was not in the PR's head.
+    committed: bool
+    #: The forge reports a head for the PR that is not the one the gate read.
+    pushed: bool
+
+    @property
+    def changed_nothing(self) -> bool:
+        """No commit, or a commit that never reached the PR's head."""
+        return not self.committed or not self.pushed
 
 
 @dataclass
@@ -1509,6 +1558,209 @@ class GatePipeline:
             calls=self.recorder.rows(),
         )
 
+    # -- the STANDARD bar -------------------------------------------------
+
+    def run_standard(
+        self,
+        ref: PullRequestRef,
+        worktree: Path,
+        pr_tests: list[str],
+    ) -> GateResult:
+        """Review a non-sensitive diff under the risk-matched bar.
+
+        One reviewer covering all four focuses — no parallel lenses, no
+        per-claim verifier, no judge. That is the only difference in *who looks*;
+        the difference that matters is what happens next, and that is
+        :mod:`agent_fleet.gate.standard`'s state machine, given here the two
+        facts it reads: what the reviewer and step0 found, and how many passes
+        this PR has already spent on earlier heads.
+
+        Every terminal state except approval ends the run as NEEDS_ESCALATION,
+        which is the automerge's "not approved" and exits non-zero. The label
+        in the reason line is what distinguishes them after the fact — a cheap-bar
+        approval, a re-gate, and a fall-back to the full gate are three
+        different claims about a PR and must not read the same in the log.
+        """
+        reasons: list[str] = []
+        # A bounded tail, not the whole file: metrics.jsonl is shared by every run
+        # on the host and is never rotated, and this counter needs one PR's rows.
+        passes = standard_prior_passes(
+            gate_metrics.read_metrics(limit=STANDARD_HISTORY_ROWS),
+            repo=self.repo.name,
+            pr=self.pr_number,
+            max_passes=self.config.standard_max_passes,
+        )
+        findings = self.find(worktree, ref, (ALL_FOCUS_LENS,))
+        self._candidates = [f.to_dict() for f in findings]
+        self._log(
+            "gate.find",
+            candidates=len(findings),
+            lenses=[ALL_FOCUS_LENS],
+            tier=STANDARD_TIER,
+        )
+
+        # Without a verifier or a judge there is nothing between the reviewer and
+        # the verdict, so its findings are the blockers: promoting them is what
+        # makes "reported blockers" mean the same thing here as in the full gate.
+        for finding in findings:
+            self.evidence.confirmed.append(
+                {
+                    **finding.to_dict(),
+                    "source": "all-focus",
+                    "test_file": None,
+                }
+            )
+        pr_tests_failed = any(c.get("source") == "pr-tests" for c in self.evidence.confirmed)
+        state = StandardState(
+            tier=STANDARD_TIER,
+            findings=len(self.evidence.confirmed),
+            pr_tests_failed=pr_tests_failed,
+            passes=passes,
+            max_passes=self.config.standard_max_passes,
+            head=ref.head_sha,
+        )
+        decision = standard_next_action(state)
+        self._log("gate.standard", **decision.to_dict(), findings=state.findings)
+
+        if decision.action is StandardAction.APPROVE:
+            reasons.append(standard_approval_reason(state))
+            return self._finish(
+                GateOutcome.APPROVED,
+                ref.head_sha,
+                reasons,
+                ref,
+                tier=STANDARD_TIER,
+                metric_outcome=STD_OUTCOME_APPROVED,
+                passes=decision.passes,
+            )
+
+        if decision.action is StandardAction.FIX_AND_REGATE:
+            result = self._standard_fixer(ref, pr_tests, passes)
+            # What the fixer did is a fact only it can report, and the bar's rules
+            # are written in terms of that fact — so the same state machine is
+            # asked again with the answer in hand rather than the fallback being
+            # hand-built here, which is what left a no-op run with no reason
+            # recorded against it and its pass count claiming progress. The
+            # action can only move to FALLBACK: nothing between here and the
+            # re-gate changes what is blocked.
+            after = standard_next_action(
+                replace(state, fixer_changed_nothing=result.changed_nothing)
+            )
+            if after.action is StandardAction.FALLBACK:
+                reason = (
+                    after.fallback_reason.value
+                    if after.fallback_reason
+                    else FallbackReason.DISPUTED.value
+                )
+                reasons.append(
+                    f"full evidence gate required: the standard bar gave up on this head "
+                    f"({reason}) at pass {after.passes}; this head goes to the full review pipeline"
+                )
+                return self._finish(
+                    GateOutcome.NEEDS_ESCALATION,
+                    ref.head_sha,
+                    reasons,
+                    ref,
+                    tier=STANDARD_TIER,
+                    metric_outcome=STD_OUTCOME_FALLBACK,
+                    passes=after.passes,
+                )
+            reasons.append(
+                f"re-gate new head: one standard-bar fixer pass ({decision.passes} of "
+                f"{state.max_passes}) dispatched; the pushed head is not trusted and is "
+                "re-gated from scratch"
+            )
+            return self._finish(
+                GateOutcome.NEEDS_ESCALATION,
+                ref.head_sha,
+                reasons,
+                ref,
+                tier=STANDARD_TIER,
+                metric_outcome=STD_OUTCOME_FIX_AND_REGATE,
+                passes=decision.passes,
+            )
+
+        reason = decision.fallback_reason.value if decision.fallback_reason else "unknown"
+        reasons.append(
+            f"full evidence gate required: the standard bar gave up on this head "
+            f"({reason}) after {decision.passes} pass(es); this PR now gets the full "
+            "review pipeline"
+        )
+        return self._finish(
+            GateOutcome.NEEDS_ESCALATION,
+            ref.head_sha,
+            reasons,
+            ref,
+            tier=STANDARD_TIER,
+            metric_outcome=STD_OUTCOME_FALLBACK,
+            passes=decision.passes,
+        )
+
+    def _standard_fixer(
+        self,
+        ref: PullRequestRef,
+        pr_tests: list[str],
+        passes: int,
+    ) -> FixerResult:
+        """Dispatch the single fixer the STANDARD bar allows, and push its work.
+
+        The fixer is told the reviewer's findings and the PR's failing tests and
+        is asked for a focused test per real finding, then it commits and pushes
+        to the PR's own head ref. The push target is ``ref.head_ref`` — the
+        ``headRefName`` the forge reports — and never a name derived from the
+        lane: a fixer that pushes to a lane-derived branch moves a head nobody is
+        re-gating, and the run then reports "no push" over a PR that did move.
+
+        What it did is measured, not believed: the worktree the fixer ran in is
+        the one place its commits can be seen, so the head that existed before
+        the run and the head after it are compared there. The forge is asked
+        afterwards as a cross-check, and a push the worktree cannot confirm is
+        treated as no push — the disputed case has to be the safe answer, since
+        the alternative is paying for a re-gate of a head that never moved.
+        """
+        fix_wt = self.gate_dir / "standard-fix"
+        prepare_worktree(self.repo, fix_wt, ref.head_sha)
+        try:
+            model = self._model_for(
+                backend_name=self.config.backend, model=self.config.model, role=ROLE_FIX
+            )
+            failing = self._step0_run.failing if self._step0_run else []
+            prompt = fix_prompt(
+                pr_number=self.pr_number,
+                worktree=str(fix_wt),
+                head_sha=ref.head_sha[:9],
+                push_branch=ref.head_ref,
+                round_number=passes + 1,
+                failing="\n".join(sorted(failing)),
+                confirmed=_json_blob(self.evidence.confirmed, 8000),
+                untestable="",
+                all_tests=" ".join(pr_tests),
+                pytest_cmd_hint=self._runner_for(fix_wt).pytest_hint(
+                    gate_test_name(self.lane_slug, "x")
+                ),
+                task_text=self._task_text()[:6000],
+            )
+            self._run_fixer(prompt, model=model, cwd=fix_wt)
+            return self._standard_fixer_result(fix_wt, ref)
+        finally:
+            remove_worktree(self.repo, fix_wt)
+
+    def _standard_fixer_result(self, fix_wt: Path, ref: PullRequestRef) -> FixerResult:
+        """Whether the fixer round left the PR's head with a new commit on it.
+
+        Two independent witnesses have to agree before this bar treats a fixer as
+        having fixed anything: the worktree it was given has to hold a commit
+        that was not the head, and the forge has to report a head that moved. A
+        commit the fixer never pushed fixes nothing anybody will re-gate, and a
+        head that moved without one is not the fixer's work, so either witness
+        missing reads as changed-nothing.
+        """
+        fixer_head = worktree_head_sha(fix_wt)
+        committed = bool(fixer_head) and fixer_head != ref.head_sha
+        fetch_base(self.repo, self.config.base_branch)
+        pushed = current_pr_head(self.repo, self.pr_number) != ref.head_sha
+        return FixerResult(committed=committed, pushed=pushed)
+
     # -- entry point -----------------------------------------------------
 
     def run(self) -> GateResult:
@@ -1555,6 +1807,15 @@ class GatePipeline:
             if evidence_gap:
                 self._log("gate.tier0.gap", reasons=evidence_gap)
                 return self._finish(GateOutcome.NEEDS_ESCALATION, "", evidence_gap, ref)
+
+            # Risk-matched bar. A diff that touches nothing sensitive is reviewed
+            # once by an all-focus reviewer under the STANDARD rules (one fixer
+            # pass, then re-gate); anything sensitive keeps today's full evidence
+            # pipeline below, unchanged. Decided after step0 so a red PR test is
+            # already a confirmed blocker the STANDARD state machine can act on.
+            changed = changed_paths(worktree, self.config.base_branch)
+            if standard_select_tier(self.config, changed) == STANDARD_TIER:
+                return self.run_standard(ref, worktree, pr_tests)
 
             tier = self.review_tier(worktree)
             self._log("gate.tier", **tier_fields(tier))
@@ -1608,24 +1869,41 @@ class GatePipeline:
         ref: PullRequestRef | None,
         *,
         metric: gate_metrics.GateMetrics | None = None,
+        tier: str = "",
+        metric_outcome: str = "",
+        passes: int = 0,
     ) -> GateResult:
-        """Record the outcome. Keeps converge()'s per-round trace when one exists."""
+        """Record the outcome. Keeps converge()'s per-round trace when one exists.
+
+        ``tier``, ``passes`` and ``metric_outcome`` are the STANDARD bar's: they
+        are stamped onto the metrics row *before* it is appended, because that row
+        is what the next run reads back to recover the pass counter. Appending
+        first and stamping after would make every STANDARD run look like a fresh
+        one to the next head, and the bar would never exhaust its budget.
+        """
         if metric is not None:
-            if outcome is GateOutcome.APPROVED:
+            if outcome is GateOutcome.APPROVED and not metric_outcome:
                 metric.outcome = gate_metrics.OUTCOME_CONVERGED
+            if metric_outcome:
+                metric.outcome = metric_outcome
+            metric.tier = tier or metric.tier
+            metric.passes = passes or metric.passes
             metric.reasons = list(reasons)
             metric.append_metrics()
             return self._finish_result(outcome, sha, reasons, metric)
         metric = self._metrics(
             gate_metrics.RoundMetric(round=0, head=(sha or "")[:9], failing=0),
             ref or PullRequestRef(number=self.pr_number, head_ref="", head_sha=sha, state=""),
-            outcome=(
+            outcome=metric_outcome
+            or (
                 gate_metrics.OUTCOME_CONVERGED
                 if outcome is GateOutcome.APPROVED
                 else gate_metrics.OUTCOME_STALLED
             ),
             head=sha,
         )
+        metric.tier = tier
+        metric.passes = passes
         metric.reasons = list(reasons)
         metric.append_metrics()
         return self._finish_result(outcome, sha, reasons, metric)
