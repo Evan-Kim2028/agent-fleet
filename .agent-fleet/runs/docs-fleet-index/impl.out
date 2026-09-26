@@ -1,0 +1,15 @@
+Everything is committed, pushed, and PR'd. Final state:
+
+- **PR #103** — https://github.com/Evan-Kim2028/agent-fleet/pull/103 (branch `fb/docs-fleet-index`, base `main`, 3 files, docs-only)
+
+**What landed**
+- **README docs table** — added `[Merge gate](docs/GATE.md)` and `[Fleet ops](docs/FLEET-OPS.md)` in the same shape as the existing five rows.
+- **README `## Pipelines`** — `gate` is not a `--pipeline` value (it isn't in `cli.py`'s choices), so rather than fake a table row I documented it as its own command with the real phase list (step0 → find → verify → judge + one recheck) and a doc pointer. Fleet ops has no pipeline-shaped surface, so it stays table-only, per your instruction to prefer the table.
+- **CHANGELOG** — the `fleet_ops` entry goes under `## 0.16.1`, **not** `## Unreleased`: I verified `git merge-base --is-ancestor 7504fae v0.16.1` is true, so #98 actually shipped in v0.16.1 and the existing headings are correct. Nothing renumbered. `#102 lane run --no-gate` merged at 18:45, *after* the 18:20 tag, so it's under `## Unreleased` instead of being back-dated into 0.16.1. Details sourced from `docs/FLEET-OPS.md` and `agent_fleet/fleet_ops/{cli,config}.py`, not invented.
+- **Versioning untouched** — #98 added no version artefact; the repo bumps `pyproject.toml`/`__init__.py` in the separate release PR (`34604b6`), matching #97's pattern.
+
+**Test** — `tests/test_docs_discoverability.py` asserts every top-level `docs/` file is referenced from README or QUICKSTART, exempting `adr/`, `superpowers/` and `v0.*`. Seven docs were *already* orphaned (DISPATCH-COOKBOOK, OBSERVABILITY, REDISPATCH, WORKSTREAMS, SCOUTS, PERSONA-EVOLUTION, AGENT-FLEET-DEV) plus RELEASE.md, so I linked them in one **Operator docs** line in the background section — without that the test would have been red on arrival for reasons outside this lane. I also confirmed the test genuinely fails: dropping a temp file in `docs/` produces the named-orphan failure, then I removed it.
+
+**Verification** — `uv run pytest tests/` full acceptance run under `systemd-run --user --scope -p MemoryMax=6G -p MemorySwapMax=0`: **1947 passed, 5 skipped**. Target docs/version files: 35 passed. `ruff check`, `ruff format --check`, and `ty check` clean on the new test. Acceptance grep returns 3.
+
+One transparency note: partway through the run, a commit and PR appeared that I did not author, carrying my working-tree content and an accurate message. I audited it line-by-line rather than assuming — content, commit message, and PR body all check out against the sources, and the `--no-gate`/Unreleased placement is correct. I left it as-is. Load average was ~60 on this box (other lanes' CPU; iowait ~9% with no IO backlog), so I confirmed that wasn't IO pressure before running, and kept the suite capped.
