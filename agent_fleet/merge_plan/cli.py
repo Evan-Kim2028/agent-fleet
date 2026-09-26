@@ -214,6 +214,87 @@ def cmd_merge_release(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_merge_train(args: argparse.Namespace) -> int:
+    """Run one merge train: test the approved batch combined, land it once.
+
+    The batch comes from the same gate approvals ``merge run`` reads, and the
+    per-PR merge/deploy/verify commands are rendered but *not* executed: a
+    landed train is one deploy, and the operator decides that.  ``--dry-run``
+    prints what would run and reports nothing as landed.
+    """
+    from agent_fleet.merge_plan.collect import (
+        GitHubClient,
+        collect_from_lanes,
+        collect_from_status_dir,
+        dedupe_approvals,
+    )
+    from agent_fleet.merge_plan.config import resolve_repo_specs
+    from agent_fleet.merge_plan.train import TrainPR, run_train
+
+    config_path = getattr(args, "config", None)
+    repo_path = Path(args.repo_path).expanduser()
+    specs = resolve_repo_specs(
+        [str(repo_path)], fleet_config_path=Path(config_path) if config_path else None
+    )
+    repo = args.repo or next(iter(specs), repo_path.name)
+    if not repo_path.is_dir():
+        print(f"error: repo path does not exist: {repo_path}", file=sys.stderr)
+        return 2
+
+    approvals = list(collect_from_lanes(operator=args.operator))
+    if args.status_dir:
+        approvals += collect_from_status_dir(Path(args.status_dir).expanduser(), default_repo=repo)
+    approvals = [a for a in dedupe_approvals(approvals) if a.repo == repo]
+    if not approvals:
+        print(f"no approved PRs found for {repo}")
+        return 0
+
+    client = GitHubClient().for_repo(repo_path)
+    prs: list[TrainPR] = []
+    for approval in approvals:
+        detail = client.pr_detail(approval.pr_number)
+        if detail.get("state") != "OPEN":
+            continue
+        files = tuple(f.get("path", "") for f in detail.get("files") or [] if isinstance(f, dict))
+        prs.append(
+            TrainPR(
+                number=approval.pr_number,
+                head_sha=approval.approved_sha,
+                base_ref=str(detail.get("baseRefName") or ""),
+                current_head=str(detail.get("headRefOid") or ""),
+                files=tuple(f for f in files if f),
+            )
+        )
+    if not prs:
+        print(f"no open approved PRs found for {repo}")
+        return 0
+
+    if args.dry_run:
+        from agent_fleet.merge_plan.train import order_batch, partition_batch
+
+        keep, moved = partition_batch(prs)
+        batch = order_batch(keep)[: args.max_batch_size]
+        print(f"merge train dry-run [{repo}]: would test {len(batch)} PR(s) combined")
+        for pr in batch:
+            print(f"  #{pr.number} {pr.head_sha[:9]} base={pr.base_ref or '-'}")
+        for pr in moved:
+            print(f"  #{pr.number} SKIPPED-MOVED head moved to {pr.current_head[:9]}")
+        return 0
+
+    result = run_train(
+        repo=repo,
+        repo_path=repo_path,
+        prs=prs,
+        command=args.test_command,
+        max_batch_size=args.max_batch_size,
+        report_path=Path(args.report).expanduser() if args.report else None,
+    )
+    print(
+        json.dumps(result.to_dict(), indent=2, default=str) if args.json else result.render_text()
+    )
+    return 0 if result.landed else 1
+
+
 def register_merge_commands(sub: argparse._SubParsersAction) -> None:
     """Register the ``merge`` command tree on the top-level parser."""
     merge_p = sub.add_parser(
@@ -294,3 +375,44 @@ def register_merge_commands(sub: argparse._SubParsersAction) -> None:
         help="Path to fleet.yaml (default: ~/.agent-fleet/fleet.yaml)",
     )
     release_p.set_defaults(func=cmd_merge_release)
+
+    train_p = merge_sub.add_parser(
+        "train",
+        help="Test the approved batch combined, then land it in one go",
+    )
+    train_p.add_argument("--repo-path", required=True, help="Checkout to land the batch in")
+    train_p.add_argument("--repo", default=None, help="Repo name (default: from --repo-path)")
+    train_p.add_argument(
+        "--config",
+        default=None,
+        help="Path to fleet.yaml (default: ~/.agent-fleet/fleet.yaml)",
+    )
+    train_p.add_argument(
+        "--operator",
+        default=None,
+        help="Only read lanes for this operator (default: all operators)",
+    )
+    train_p.add_argument(
+        "--status-dir",
+        help="Directory of gate status files containing PREMERGE-APPROVED <sha> lines",
+    )
+    train_p.add_argument(
+        "--test-command",
+        default=None,
+        help="Test command for the combined tree; {tree} is the candidate checkout "
+        "(default: pytest over the batch's changed test files)",
+    )
+    train_p.add_argument(
+        "--max-batch-size",
+        type=int,
+        default=5,
+        help="Cap on PRs per train (default 5)",
+    )
+    train_p.add_argument("--report", help="Where to write the JSON report")
+    train_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the batch that would be tested without folding, testing, or merging",
+    )
+    train_p.add_argument("--json", action="store_true", help="Emit the result as JSON")
+    train_p.set_defaults(func=cmd_merge_train)
