@@ -70,9 +70,7 @@ def test_queue_depth_ignores_terminal_stages(tmp_path: Path) -> None:
     board = _board(tmp_path, clock)
     sup = Supervisor("op", ServeConfig(operator="op"), clock=clock)
 
-    snapshot = status_snapshot(
-        "op", sup, board, capacity_file=tmp_path / "absent-capacity.json"
-    )
+    snapshot = status_snapshot("op", sup, board, capacity_file=tmp_path / "absent-capacity.json")
     depth = snapshot["depth"]
     assert depth[STAGE_ESCALATED] == 7
     assert depth[STAGE_MERGED] == 5
@@ -94,9 +92,7 @@ def test_queue_depth_still_counts_real_work(tmp_path: Path) -> None:
         board.record(f"escalated-{i}", STAGE_ESCALATED, reason_class="fence")
     sup = Supervisor("op", ServeConfig(operator="op"), clock=clock)
 
-    snapshot = status_snapshot(
-        "op", sup, board, capacity_file=tmp_path / "absent-capacity.json"
-    )
+    snapshot = status_snapshot("op", sup, board, capacity_file=tmp_path / "absent-capacity.json")
     assert snapshot["queue_depth"] == 4, (
         f"queue_depth={snapshot['queue_depth']}: the 4 queued items must be counted, "
         f"the 3 escalated ones must not"

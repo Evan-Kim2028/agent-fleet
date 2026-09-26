@@ -237,14 +237,20 @@ class Watchdog:
         The condition that selects an escalate branch — a spent retry or restart
         budget — is stable, so without a latch the branch re-notifies the
         operator about an unchanged condition on every tick. The latch is
-        cleared when the subject is next seen healthy, so a recovered-then-
-        re-wedged subject alerts again for the genuinely new episode.
+        released when the subject is next seen healthy (see
+        :meth:`_end_stage_episode` and :meth:`_note_output_progress`), so a
+        recovered-then-rewedged subject alerts again for the genuinely new
+        episode.
         """
         key = (rule, subject)
         if key in self._escalated:
             return False
         self._escalated.add(key)
         return True
+
+    def _clear_escalation(self, rule: str, subject: str) -> None:
+        """Release the escalate latch for a subject seen healthy again."""
+        self._escalated.discard((rule, subject))
 
     def _defer(self, report: WatchdogReport, remediation: Remediation) -> None:
         report.deferred.append(remediation)
@@ -526,7 +532,7 @@ class Watchdog:
     def _end_stage_episode(self, component: str) -> None:
         """Forget a component's spent retries once it is healthy again."""
         self._stage_retry_epochs.pop(component, None)
-        self._escalated.discard((RULE_STUCK_STAGE, component))
+        self._clear_escalation(RULE_STUCK_STAGE, component)
 
     def _tracked_output(self, component: str) -> Path | None:
         """The file whose growth proves this component is doing work.
@@ -559,15 +565,15 @@ class Watchdog:
         that needs a human, so the third finding escalates instead of looping.
 
         The restart budget is spent per **stuck episode** rather than over a
-        rolling window. Measured backwards from the newest restart — or over a
-        window that is by default exactly as long as the interval the rule fires
-        at — the count is pinned at one however long the fleet has been churning
-        the component, so a wedge never reaches its budget and the escalation
-        that is supposed to stop the loop is unreachable, with whether it ever
-        fires decided by sub-minute tick alignment. Restarts already spent are
+        rolling window. Counted over a window that is by default exactly as long
+        as the interval the rule itself fires at — each restart re-arms the
+        component's event clock, so restarts land one window apart — the count
+        is decided by sub-minute tick alignment: at some tick lengths a wedged
+        component is restarted forever and at others it is escalated, so whether
+        the escalation that is supposed to stop the loop is ever reached is an
+        accident of how long the tick happens to be. Restarts already spent are
         forgotten when the component is next seen making progress, so a
-        recovered component starts its next episode with a full budget and a
-        component that never recovers is escalated rather than restarted forever.
+        recovered component starts its next episode with a full budget.
         """
         if queued_depth <= 0:
             return
@@ -583,8 +589,7 @@ class Watchdog:
             if idle_s < window_s:
                 continue
             recent = state.no_progress_restarts
-            mark = self._episode_restart_mark.get(spec.name, 0)
-            restarts = max(0, len(recent) - mark)
+            restarts = self._episode_restarts(spec.name, recent)
             if restarts >= spec.no_progress_restarts:
                 remediation = Remediation(
                     rule=RULE_NO_PROGRESS,
@@ -634,6 +639,22 @@ class Watchdog:
                 component=spec.name,
             )
 
+    def _episode_restarts(self, component: str, recent: list[float]) -> int:
+        """How many times this rule has restarted *component* since it last worked.
+
+        The budget belongs to a stuck episode, so it is counted as the
+        restarts recorded since the component was last seen making progress —
+        not over a rolling window of wall-clock time. A window makes the
+        verdict depend on the tick length instead of on the component: each
+        restart re-arms the component's event clock, so consecutive restarts
+        land about one no-progress window apart, and a window sized at the
+        no-progress interval (the shipped default) counts that pair as zero or
+        one according to a sub-minute tick alignment. Counting the episode means
+        a component that never recovers always reaches its budget and escalates.
+        """
+        mark = self._episode_restart_mark.get(component, 0)
+        return max(0, len(recent) - mark)
+
     def _note_output_progress(self, component: str, state: ChildState, *, now: float) -> bool:
         """Refresh the event clock when the component's output has grown.
 
@@ -672,6 +693,9 @@ class Watchdog:
             return False
         state.last_event_epoch = now
         self._episode_restart_mark[component] = len(state.no_progress_restarts)
+        # The component is working, so whatever it was escalated for is over.
+        # A later wedge is a new episode and must be able to alert again.
+        self._clear_escalation(RULE_NO_PROGRESS, component)
         return True
 
     # ---------------------------------------------------------- grace escalation
