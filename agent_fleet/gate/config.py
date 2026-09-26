@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from agent_fleet.gate.prompts import lane_slug_token
+from agent_fleet.gate.pytest_runner import DEFAULT_CACHE_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,7 @@ _SCALARS: tuple[str, ...] = (
     "max_fix_rounds",
     "agent_slots",
     "test_slots",
+    "test_cache_ttl_s",
 )
 
 #: Stages the legacy ``agent_timeout_s`` used to drive, in the order the fixer
@@ -66,6 +68,7 @@ _STRINGS: tuple[str, ...] = (
     "judge_backend",
     "base_branch",
     "test_memory",
+    "test_cache_dir",
 )
 
 _OPTIONAL_STRINGS: tuple[str, ...] = ("model", "judge_model", "push_branch", "package_dir")
@@ -74,7 +77,7 @@ _OPTIONAL_STRINGS: tuple[str, ...] = ("model", "judge_model", "push_branch", "pa
 #: by default so the PR's head ref can supply it at run time.
 _OPTIONAL_SLUGS: tuple[str, ...] = ("lane_slug",)
 
-_BOOLS: tuple[str, ...] = ("enable_fix", "enable_judge")
+_BOOLS: tuple[str, ...] = ("enable_fix", "enable_judge", "enable_test_cache")
 
 #: Pipeline role -> the budget field that governs it. Spelled out rather than
 #: derived as ``f"{role}_timeout_s"`` because the two vocabularies differ: the
@@ -126,6 +129,15 @@ class GateConfig:
     max_fix_rounds: int = 4
     agent_slots: int = 24
     test_slots: int = 4
+    #: Replay a pytest result when the worktree's full git tree (including
+    #: uncommitted and untracked files) and the test list are unchanged, instead
+    #: of paying for the run again. The gate re-runs the same set many times per
+    #: merge: once per verified claim, then every fix round. Set
+    #: ``enable_test_cache: false`` to rule out any replay. The key covers the
+    #: whole worktree, so a real change always misses. See docs/GATE.md.
+    enable_test_cache: bool = True
+    test_cache_dir: str = str(DEFAULT_CACHE_DIR)
+    test_cache_ttl_s: int = 24 * 3600
 
     def focus_for(self, lens: str) -> str:
         """Reviewer focus text for *lens* (custom or default)."""

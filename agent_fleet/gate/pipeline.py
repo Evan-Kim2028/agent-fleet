@@ -323,6 +323,37 @@ class TestRun:
     def count(self) -> int:
         return len(self.failing)
 
+    def failed_tests_in(self, test_file: str) -> list[str]:
+        """Failing node ids belonging to *test_file* itself.
+
+        The batched verify re-run executes every confirmed claim's test in ONE
+        pytest invocation, so a global ``tests_failed`` says only that *someone*
+        failed. Attribution has to be per file: a claim is confirmed only if one
+        of its OWN tests failed, which is what keeps one verifier's genuinely
+        failing test from confirming a different, false claim that happened to
+        share the run. The ``::`` boundary matters — ``a/test_x.py`` must not
+        match ``a/test_x.py.bak::test``.
+        """
+        prefix = f"{test_file}::"
+        return [i for i in self.failing if i.startswith(prefix)]
+
+
+@dataclass
+class _PendingVerify:
+    """A CONFIRMED verdict whose test still has to be re-run by the pipeline.
+
+    Splitting the verifier's agent call from the pipeline's re-run is what makes
+    batching possible: once every verifier has written its test, the whole set
+    is known and can be run in one pytest invocation. The worktree path travels
+    with the record so the verdict can be settled — or the file deleted — without
+    re-deriving anything.
+    """
+
+    finding: Finding
+    report: Any  # VerifyReport
+    rel: str
+    test_path: Path
+
 
 class GateTestRunner:
     """Runs the gate's test set at a worktree, memory-capped and slot-bounded.
@@ -342,6 +373,8 @@ class GateTestRunner:
         package_dir: str | None = None,
         pool: SlotPool | None = None,
         use_systemd: bool | None = None,
+        cache_dir: Path | None = None,
+        cache_ttl_s: int = 24 * 3600,
     ) -> None:
         self.root = root
         self.memory = memory
@@ -349,6 +382,12 @@ class GateTestRunner:
         self.package_dir = package_dir
         self.pool = pool
         self.use_systemd = systemd_run_available() if use_systemd is None else use_systemd
+        self.cache_dir = cache_dir
+        self.cache_ttl_s = cache_ttl_s
+        #: How many pytest invocations this runner actually launched. The batched
+        #: verify path asserts on it, and the run log reports it, so "we ran every
+        #: confirmed test once" is a measured claim rather than an assumption.
+        self.runs_launched = 0
 
     def packages_for(self, test_files: list[str]) -> list[TestPackage]:
         return find_test_packages(self.root, test_files, package_dir=self.package_dir)
@@ -395,12 +434,15 @@ class GateTestRunner:
             self.pool.slot(timeout_s=None) if self.pool is not None else contextlib.nullcontext()
         )
         with guard:
+            self.runs_launched += 1
             return run_pytest(
                 package.dir,
                 package.local_tests,
                 memory=self.memory,
                 timeout_s=self.timeout_s,
                 use_systemd=self.use_systemd,
+                cache_dir=self.cache_dir,
+                cache_ttl_s=self.cache_ttl_s,
             )
 
 
@@ -534,6 +576,9 @@ class GatePipeline:
             run_log.emit(event, data=data)
 
     def _runner_for(self, root: Path) -> GateTestRunner:
+        cache_dir = None
+        if self.config.enable_test_cache:
+            cache_dir = Path(self.config.test_cache_dir).expanduser()
         return GateTestRunner(
             root=root,
             memory=self.config.test_memory,
@@ -541,6 +586,8 @@ class GatePipeline:
             package_dir=self.config.package_dir,
             pool=self.test_pool,
             use_systemd=self.use_systemd,
+            cache_dir=cache_dir,
+            cache_ttl_s=self.config.test_cache_ttl_s,
         )
 
     def _task_text(self) -> str:
@@ -732,7 +779,16 @@ class GatePipeline:
     # -- step 2 ----------------------------------------------------------
 
     def verify(self, worktree: Path, findings: list[Finding], *, source: str) -> None:
-        """Verify each testable claim with one failing test, run by the pipeline."""
+        """Verify each testable claim with one failing test, run by the pipeline.
+
+        The verifiers run in parallel, but their tests are re-run in ONE pytest
+        invocation: a claim's verdict is only believable if its own test fails,
+        and N sequential memory-capped pytest processes is the slowest part of a
+        gate run. The batched run is fallible in exactly one way that matters —
+        a collection or infra error (rc >= 2) poisons every claim at once — so
+        that case falls back to re-running each file on its own, keeping the
+        per-claim bar identical to the unbatched one.
+        """
         for finding in findings:
             if not finding.testable:
                 # Never drop a claim the lens could not frame as a test: the judge rules on it.
@@ -746,22 +802,30 @@ class GatePipeline:
         )
         runner = self._runner_for(worktree)
 
-        def _one(finding: Finding) -> None:
-            self._verify_one(finding, worktree=worktree, runner=runner, model=model, source=source)
+        def _one(finding: Finding) -> _PendingVerify | None:
+            return self._ask_verifier(finding, worktree=worktree, runner=runner, model=model)
 
         workers = max(1, self.config.max_parallel_verifiers)
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-            list(pool.map(_one, testable))
+            pending = [p for p in pool.map(_one, testable) if p is not None]
 
-    def _verify_one(
+        self._rerun_verifications(pending, runner=runner, source=source)
+
+    def _ask_verifier(
         self,
         finding: Finding,
         *,
         worktree: Path,
         runner: GateTestRunner,
         model: str,
-        source: str,
-    ) -> None:
+    ) -> _PendingVerify | None:
+        """Run the verifier for one claim; return its pending re-run, or ``None``.
+
+        Everything decided here is decided without touching pytest: an invalid
+        answer, a REJECTED/UNTESTABLE verdict, or a test file that was never
+        written all reject the claim outright. Only a CONFIRMED verdict that
+        names a file that exists survives to :meth:`_rerun_verifications`.
+        """
         test_name = gate_test_name(self.lane_slug, finding.id)
         prompt = verify_prompt(
             finding=finding,
@@ -787,45 +851,101 @@ class GatePipeline:
         )
         if answer is None:
             self.evidence.reject(finding, "verifier answer invalid (no proof)")
-            return
+            return None
         report = VerifyReport.from_dict(answer.data)
         if report.verdict is VerifyVerdict.UNTESTABLE:
             self.evidence.untestable.append(finding.to_dict())
             self._log("gate.verify.untestable", finding=finding.id)
-            return
+            return None
         if report.verdict is not VerifyVerdict.CONFIRMED or not report.test_file:
             self.evidence.reject(finding, f"verifier: {report.verdict.value}: {report.reason}")
             self._log("gate.verify.rejected", finding=finding.id, reason=report.reason[:160])
-            return
+            return None
         rel = _normalise_repo_path(report.test_file)
         test_path = worktree / rel
         if not test_path.is_file():
             self.evidence.reject(finding, "verifier named a test file that does not exist")
             self._log("gate.verify.discarded", finding=finding.id, reason="no test file")
+            return None
+        return _PendingVerify(finding=finding, report=report, rel=rel, test_path=test_path)
+
+    def _rerun_verifications(
+        self,
+        pending: list[_PendingVerify],
+        *,
+        runner: GateTestRunner,
+        source: str,
+    ) -> None:
+        """Re-run every CONFIRMED claim's test, batching them into one invocation.
+
+        The bar is unchanged: a claim is confirmed only when a test in its OWN
+        file fails on an assertion. Batching only changes how many processes pay
+        for it, and it can only ever be a *weakening* if the run is not usable
+        (rc >= 2, a collection error that reports nothing per file), which is
+        why that case drops back to one invocation per file.
+        """
+        if not pending:
             return
-        run = runner.run([rel])
+        files = sorted({p.rel for p in pending})
+        run = runner.run(files)
+        self._log(
+            "gate.verify.batched_rerun",
+            files=len(files),
+            failing=run.count,
+            infra_error=bool(run.infra_error),
+        )
         if run.infra_error:
-            self.evidence.reject(finding, f"verifier test could not run: {run.infra_error}")
-            self._log("gate.verify.discarded", finding=finding.id, reason=run.infra_error[:160])
-            _unlink(test_path)
+            # The batched run told us nothing about any individual file, so it
+            # cannot confirm anything. Re-run each on its own — the same
+            # fail-closed bar, just without the batching.
+            self._log(
+                "gate.verify.batched_rerun_fallback",
+                reason=run.infra_error[:160],
+                files=len(files),
+            )
+            for item in pending:
+                single = runner.run([item.rel])
+                self._settle(item, single, source=source)
             return
-        if not run.tests_failed:
+        for item in pending:
+            self._settle(item, run, source=source)
+
+    def _settle(self, item: _PendingVerify, run: TestRun, *, source: str) -> None:
+        """Confirm or discard one claim against *run*, and record which.
+
+        Only this claim's own failing tests count. That is true for both run
+        shapes: in a single-file run the file's tests are the whole run, and in
+        a batched run the attribution is what stops one verifier's genuinely
+        failing test from confirming a different, false claim that shared the
+        invocation.
+        """
+        if run.infra_error:
+            self.evidence.reject(item.finding, f"verifier test could not run: {run.infra_error}")
+            self._log(
+                "gate.verify.discarded", finding=item.finding.id, reason=run.infra_error[:160]
+            )
+            _unlink(item.test_path)
+            return
+        own = run.failed_tests_in(item.rel)
+        if not own:
             # The verifier claimed CONFIRMED but its test does not fail on a test
             # assertion. The pipeline believes the test, not the verdict.
-            self.evidence.reject(finding, f"verifier test did not fail (failing={run.count})")
-            self._log(
-                "gate.verify.discarded",
-                finding=finding.id,
-                reason=f"verifier test did not fail (failing={run.count})",
-            )
-            _unlink(test_path)
+            reason = f"verifier test did not fail (failing={run.count})"
+            self.evidence.reject(item.finding, reason)
+            self._log("gate.verify.discarded", finding=item.finding.id, reason=reason)
+            _unlink(item.test_path)
             return
-        self.archive.store(test_path)
+        self.archive.store(item.test_path)
         self.evidence.confirmed.append(
-            {**finding.to_dict(), "source": source, "test_file": rel, "reason": report.reason}
+            {
+                **item.finding.to_dict(),
+                "source": source,
+                "test_file": item.rel,
+                "reason": item.report.reason,
+            }
         )
-        self.evidence.gate_tests.append(rel)
-        self._log("gate.verify.confirmed", finding=finding.id, test_file=rel)
+        self.evidence.gate_tests.append(item.rel)
+        self._log("gate.verify.confirmed", finding=item.finding.id, test_file=item.rel)
 
     # -- step 3 ----------------------------------------------------------
 

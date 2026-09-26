@@ -12,7 +12,25 @@
   `FLEET_VPS_HOST`, `FLEET_GH_OWNER`) with the previous paths as defaults. `ops/vps/README.md`
   documents each piece, the data flow, the knobs and the VPS memory model;
   `tests/test_ops_vps_scripts.py` keeps every script parsing and free of machine paths and secrets.
+- **gate: batched verification re-run, and a pytest result cache keyed on the whole worktree.** The
+  gate re-ran one memory-capped pytest process per verified claim; the verifiers' tests are now
+  executed in a single invocation and each claim is confirmed only if a test in its *own* file
+  failed, so batching cannot let one verifier's genuinely failing test confirm a different, false
+  claim. A pytest exit `>= 2` (collection/infra error) tells us nothing per file, so that case falls
+  back to re-running each file individually at the same fail-closed bar. Separately, a result is
+  now replayed from `test_cache_dir` when the git tree of the whole worktree — uncommitted edits
+  and untracked files included, via a temporary index and `git write-tree` — and the sorted test
+  list are both unchanged, so any file change misses. Only real results are cached: an exit `>= 2`
+  is never stored or replayed. New keys `gate.enable_test_cache` (default `true`),
+  `gate.test_cache_dir`, `gate.test_cache_ttl_s`.
+
 ### Fixed
+
+- **gate: `agent_fleet/gate/pytest_runner.py` did not parse, so the gate package could not be
+  imported at all.** `systemd_run_available()` ended in `except OSError, subprocess.SubprocessError:`
+  (Python 2 syntax, an unparenthesized except tuple), raising `SyntaxError` on import. Every
+  consumer of the module — `pipeline.py`, and the 474 `tests/test_gate_*.py` tests that import it —
+  was affected. The tuple is now parenthesized.
 
 - **The admission pressure signal measured the wrong cgroup, and `Throttle.saturated` measured nothing at all.**
   - `read_throttle()` built its candidate list as `[explicit path] + fallbacks`, and
