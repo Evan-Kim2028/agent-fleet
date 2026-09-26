@@ -75,7 +75,7 @@ def collect_from_lanes(
             continue
         try:
             data = json.loads(lane_file.read_text(encoding="utf-8"))
-        except OSError, json.JSONDecodeError:
+        except (OSError, json.JSONDecodeError):
             logger.debug("unreadable lane file, skipping: %s", lane_file)
             continue
         if not isinstance(data, dict):
@@ -87,7 +87,7 @@ def collect_from_lanes(
             continue
         try:
             pr_number = int(pr_raw)
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             continue
         found.append(
             ApprovedPR(
@@ -204,7 +204,7 @@ class GitHubClient:
             return {}
         try:
             data = json.loads(result.stdout)
-        except json.JSONDecodeError, TypeError:
+        except (json.JSONDecodeError, TypeError):
             return {}
         return data if isinstance(data, dict) else {}
 
@@ -224,7 +224,7 @@ class GitHubClient:
             return []
         try:
             data = json.loads(result.stdout)
-        except json.JSONDecodeError, TypeError:
+        except (json.JSONDecodeError, TypeError):
             return []
         return [d for d in data if isinstance(d, dict)] if isinstance(data, list) else []
 

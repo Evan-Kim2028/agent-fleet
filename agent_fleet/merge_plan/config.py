@@ -84,7 +84,7 @@ def load_merge_plan_config(fleet_config_path: Path | None = None) -> dict[str, R
         return {}
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except OSError, yaml.YAMLError:
+    except (OSError, yaml.YAMLError):
         return {}
     if not isinstance(data, dict):
         return {}
@@ -143,6 +143,6 @@ def _repo_name_from_path(path: Path) -> str:
         if result.returncode == 0 and result.stdout.strip():
             url = result.stdout.strip().removesuffix(".git")
             return url.rsplit("/", 1)[-1]
-    except OSError, subprocess.SubprocessError:
+    except (OSError, subprocess.SubprocessError):
         pass
     return path.name

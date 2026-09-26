@@ -116,7 +116,7 @@ def _git_version(repo_path: Path) -> tuple[int, ...]:
             timeout=30,
             cwd=str(repo_path),
         ).stdout
-    except OSError, subprocess.SubprocessError:
+    except (OSError, subprocess.SubprocessError):
         return ()
     for token in out.split():
         if token.replace(".", "").isdigit():
@@ -135,7 +135,7 @@ def _commit_exists(repo_path: Path, sha: str) -> bool:
             timeout=60,
             cwd=str(repo_path),
         )
-    except OSError, subprocess.SubprocessError:
+    except (OSError, subprocess.SubprocessError):
         return False
     return result.returncode == 0
 
