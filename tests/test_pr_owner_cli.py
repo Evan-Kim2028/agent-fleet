@@ -1,10 +1,14 @@
 """Tests for `fleet pr own`'s exit code.
 
-A round that ends with a dead engine, a rejected push, or red tests is a failed
-round. `emit` derives the exit code from the status/verdict/outcome tables, and
-a round dict carries none of those keys, so it would return 0 for every one of
-them — a gate or lane driver gating on the exit code would read a broken round
-as progress and keep escalating.
+A round that ends with a dead engine, a push that was rejected, a push that was
+never made, or red tests is a failed round. `emit` derives the exit code from
+the status/verdict/outcome tables, and a round dict carries none of those keys,
+so it would return 0 for every one of them — a gate or lane driver gating on the
+exit code would read a broken round as progress and keep escalating.
+
+So the exit code is the branch: 0 means this round's work reached the branch.
+That has to be read off `pushed` rather than off the `detail` prose, because
+`_push_head` has more failure messages than a prefix list stays ahead of.
 """
 
 from __future__ import annotations
@@ -44,6 +48,44 @@ def test_a_failed_push_is_not_a_successful_round() -> None:
     assert round_succeeded(result) is False
 
 
+def test_a_rejected_push_whose_refetch_failed_is_not_a_successful_round() -> None:
+    """`_push_head` reports this one without a "push failed" prefix, so a
+    prefix-only check reads a round whose fixes never landed as a success."""
+    result = _round(
+        pushed=False,
+        detail="push rejected as non-fast-forward, and the refetch failed: no such ref",
+    )
+    assert round_succeeded(result) is False
+
+
+def test_a_rejected_push_whose_rebase_failed_is_not_a_successful_round() -> None:
+    result = _round(
+        pushed=False,
+        new_head="deadbee",
+        detail="push rejected as non-fast-forward, and the rebase failed: CONFLICT",
+    )
+    assert round_succeeded(result) is False
+
+
+def test_a_push_rejected_after_rebasing_is_not_a_successful_round() -> None:
+    result = _round(pushed=False, detail="push failed after rebasing onto origin/fb/pr-owner: !")
+    assert round_succeeded(result) is False
+
+
+def test_a_round_that_never_reached_the_branch_is_not_a_successful_round() -> None:
+    """The head never moved, so nothing was pushed and there is no detail to
+    read. Green tests, or none configured, do not make that a landed round:
+    the exit code is what tells a driver the branch did not advance."""
+    result = _round(
+        pushed=False,
+        new_head="abc123",
+        fixed=[],
+        tests={"ran": False, "ok": True},
+        detail="",
+    )
+    assert round_succeeded(result) is False
+
+
 def test_red_tests_are_not_a_successful_round() -> None:
     result = _round(tests={"ran": True, "ok": False, "failing": ["tests/t.py::t1"]})
     assert round_succeeded(result) is False
@@ -67,6 +109,42 @@ def test_main_exits_non_zero_for_a_failed_round(
     code = main(["pr", "own", "--pr", "1", "--repo-path", "/tmp"])
     assert code == 1
     assert "engine failed: boom" in capsys.readouterr().out
+
+
+def test_main_exits_one_when_a_rejected_push_left_the_round_where_it_stood(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The end-to-end shape of the reported failure: the round committed and
+    went green locally, but the push was rejected, so the driver must see a
+    non-zero exit instead of a clean 0 that reads as a landed fix."""
+    monkeypatch.setattr(
+        "agent_fleet.pr_owner.run_own",
+        lambda **kwargs: _round(  # noqa: ARG005
+            pushed=False,
+            detail="push rejected as non-fast-forward, and the rebase failed: CONFLICT",
+        ),
+    )
+    assert main(["pr", "own", "--pr", "1", "--repo-path", "/tmp"]) == 1
+    assert "non-fast-forward" in capsys.readouterr().out
+
+
+def test_main_exits_one_when_the_round_made_no_push_at_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No commits, no tests configured, no detail: the branch did not move, so
+    exit 0 would tell the driver to keep escalating a branch that never
+    advanced."""
+    monkeypatch.setattr(
+        "agent_fleet.pr_owner.run_own",
+        lambda **kwargs: _round(  # noqa: ARG005
+            pushed=False,
+            new_head="abc123",
+            fixed=[],
+            tests={"ran": False, "ok": True},
+            detail="",
+        ),
+    )
+    assert main(["pr", "own", "--pr", "1", "--repo-path", "/tmp"]) == 1
 
 
 def test_main_exits_zero_for_a_successful_round(
@@ -108,6 +186,12 @@ def test_cmd_pr_own_reads_the_repo_path_and_pr_number(
 
 def test_round_succeeded_tolerates_a_missing_tests_key() -> None:
     assert round_succeeded({"pushed": True, "new_head": "a"}) is True
+
+
+def test_a_push_failure_without_a_pushed_flag_is_still_a_failed_round() -> None:
+    """A shape that reports the push failure only in `detail` carries no
+    `pushed` flag to read, so the prefixes are what catch it."""
+    assert round_succeeded({"detail": "push rejected as non-fast-forward: CONFLICT"}) is False
 
 
 def test_round_succeeded_ignores_a_non_dict_tests_value() -> None:

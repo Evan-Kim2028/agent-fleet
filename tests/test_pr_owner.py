@@ -17,7 +17,9 @@ fake, and git/gh are either scratch repos or not reached at all.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -229,6 +231,90 @@ def test_write_then_read_round_trips(repo: Path) -> None:
 def test_write_notes_ends_with_a_newline(repo: Path) -> None:
     write_notes(repo, 7, "no trailing newline")
     assert read_notes(repo, 7) == "no trailing newline\n"
+
+
+def test_a_write_killed_partway_through_leaves_the_earlier_rounds_intact(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The notes are the whole multi-round memory, and an in-place rewrite
+    truncates them to nothing the moment the process dies between the open and
+    the last write. A rewrite that is killed partway through must leave the
+    rounds that came before it exactly as they were."""
+    from agent_fleet import pr_owner
+
+    write_notes(repo, 7, "round one established this")
+    pr_owner._append(repo, 7, "### Round two\n\n- fixed: 1")
+
+    boom = RuntimeError("killed while swapping the new notes in")
+
+    def _die_during_the_swap(*_args: object, **_kwargs: object) -> Path:
+        raise boom
+
+    monkeypatch.setattr(Path, "replace", _die_during_the_swap)
+    with pytest.raises(RuntimeError):
+        write_notes(repo, 7, "round three, which must not be written at all")
+
+    notes = read_notes(repo, 7)
+    assert "round one established this" in notes
+    assert "### Round two" in notes
+    assert "round three" not in notes
+    assert list(pr_notes_path(repo, 7).parent.glob("*.tmp")) == []
+
+
+def test_a_reader_never_sees_a_half_written_notes_file(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rename is what makes the swap atomic: the old file is readable until
+    the new one is complete, so a concurrent round cannot splice a partial read
+    into a full rewrite."""
+
+    write_notes(repo, 7, "old body")
+    real_replace = Path.replace
+
+    def _read_before_the_swap(*args: object, **kwargs: object) -> Path:
+        assert read_notes(repo, 7) == "old body\n"
+        return real_replace(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "replace", _read_before_the_swap)
+    write_notes(repo, 7, "new body")
+    assert read_notes(repo, 7) == "new body\n"
+
+
+def test_two_concurrent_appends_both_survive(repo: Path) -> None:
+    """The read and the write are one critical section. Both rounds here read
+    the notes before either writes — the window in which a round that read,
+    then had the other round's write land, then wrote its own copy would erase
+    the first round's block. The lock makes the second round read what the first
+    one wrote."""
+    from agent_fleet import pr_owner
+
+    write_notes(repo, 7, "the seed")
+    for pr_number in (7, 8):
+        path = pr_notes_path(repo, pr_number)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+
+    results: dict[int, str] = {}
+    lock = threading.Lock()
+    ready = threading.Barrier(3, timeout=60)
+
+    def _append(pr_number: int) -> None:
+        ready.wait()
+        pr_owner._append(repo, pr_number, f"### Round for PR {pr_number}\n\n- fixed: 1")
+        with lock:
+            results[pr_number] = read_notes(repo, pr_number)
+
+    threads = [threading.Thread(target=_append, args=(n,)) for n in (7, 8)]
+    for thread in threads:
+        thread.start()
+    ready.wait()
+    for thread in threads:
+        thread.join(timeout=60)
+    assert not any(thread.is_alive() for thread in threads)
+
+    assert "### Round for PR 7" in results[7]
+    assert "### Round for PR 8" in results[8]
+    assert "### Round for PR 8" not in results[7]
 
 
 def test_render_round_records_what_was_fixed_and_what_was_disputed() -> None:
@@ -997,3 +1083,102 @@ def test_round_refuses_a_worktree_locked_by_another_live_process(
     finally:
         other.kill()
         other.wait(timeout=10)
+
+
+def _lane_with_a_dead_lock(tmp_path: Path) -> Path:
+    """A real lane worktree on a branch whose last round was killed.
+
+    The round committed, the push never happened, and the sidecar lock names a
+    PID that has since exited — which is exactly the state a SIGKILLed round
+    leaves behind, and exactly the state a lock check reads as free. The
+    recorded start time is pinned to a value no live process has, so the lock is
+    stale whether or not that PID number is in use.
+    """
+    from agent_fleet.pr_loop.worktree import _worktree_lock_path
+
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    _git(worktree, "init", "-b", "fb/pr-owner")
+    _git(worktree, "config", "user.email", "t@example.com")
+    _git(worktree, "config", "user.name", "T")
+    (worktree / "README.md").write_text("x\n", encoding="utf-8")
+    _git(worktree, "add", "README.md")
+    _git(worktree, "commit", "-m", "init")
+    (worktree / "ours.txt").write_text("the fix round one never pushed\n", encoding="utf-8")
+    _git(worktree, "add", "ours.txt")
+    _git(worktree, "commit", "-m", "fix")
+    _worktree_lock_path(worktree).write_text(f"{os.getpid() + 1} 1\n")
+    return worktree
+
+
+def test_round_refuses_to_reset_a_worktree_holding_a_dead_rounds_commit(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dead PID reads as a free lock, so the sidecar check alone lets round
+    two `git reset --hard origin/<branch>` over round one's commit — a fix that
+    exists nowhere else. The work itself has to be checked, not just the lock."""
+    from agent_fleet.pr_owner import WorktreeBusyError
+    from agent_fleet.repo import load_repo_config
+
+    _fake_head(monkeypatch, repo)
+    worktree = _lane_with_a_dead_lock(tmp_path)
+    stranded = _git(worktree, "rev-parse", "HEAD")
+    monkeypatch.setattr(
+        "agent_fleet.pr_owner._lane_worktree",
+        lambda *a, **k: worktree,  # noqa: ARG005
+    )
+
+    config = repo / ".agent-fleet.yaml"
+    config.write_text("test_command: true\n", encoding="utf-8")
+    with pytest.raises(WorktreeBusyError, match="never reached the branch"):
+        own_round(repo_path=repo, pr_number=7, repo=load_repo_config(config))
+    assert _git(worktree, "rev-parse", "HEAD") == stranded
+    assert (worktree / "ours.txt").exists()
+
+
+def test_round_refuses_to_reset_a_worktree_with_uncommitted_work(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the same loss: a round killed between editing and
+    committing leaves edits that no reset to `origin/<branch>` can bring back."""
+    from agent_fleet.pr_owner import WorktreeBusyError
+    from agent_fleet.repo import load_repo_config
+
+    _fake_head(monkeypatch, repo)
+    worktree = _lane_with_a_dead_lock(tmp_path)
+    _git(worktree, "reset", "--hard", "HEAD~1")
+    (worktree / "half-done.txt").write_text("edited but never committed\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "agent_fleet.pr_owner._lane_worktree",
+        lambda *a, **k: worktree,  # noqa: ARG005
+    )
+
+    config = repo / ".agent-fleet.yaml"
+    config.write_text("test_command: true\n", encoding="utf-8")
+    with pytest.raises(WorktreeBusyError, match="uncommitted change"):
+        own_round(repo_path=repo, pr_number=7, repo=load_repo_config(config))
+    assert (worktree / "half-done.txt").exists()
+
+
+def test_a_clean_lane_worktree_is_still_reset_onto_the_branch(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard is about work a dead round left behind, not about worktrees in
+    general: a lane worktree that is clean and fully pushed is reset onto the
+    branch as before, so the next round starts from the remote head."""
+    from agent_fleet.pr_loop.worktree import _worktree_lock_path
+    from agent_fleet.pr_owner import _checkout_own_worktree
+
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True, check=True)
+    worktree = _lane_with_a_dead_lock(tmp_path)
+    _git(worktree, "remote", "add", "origin", str(remote))
+    _git(worktree, "push", "-u", "origin", "fb/pr-owner")
+    _worktree_lock_path(worktree).write_text(f"{os.getpid() + 1} 1\n")
+    monkeypatch.setattr(
+        "agent_fleet.pr_owner._lane_worktree",
+        lambda *a, **k: worktree,  # noqa: ARG005
+    )
+
+    assert _checkout_own_worktree("fb/pr-owner", repo) == worktree
+    assert _git(worktree, "status", "--porcelain") == ""

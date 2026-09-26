@@ -126,15 +126,25 @@ def cmd_pr_own(args: argparse.Namespace) -> int:
 
 
 def round_succeeded(result: dict[str, object]) -> bool:
-    """True when a round reached the branch with its tests green.
+    """True when a round's work reached the branch with its tests green.
 
     ``emit`` only knows the status/verdict/outcome tables, and a round carries
     none of those keys, so it would report success for an engine that died, a
     push that was rejected, or tests that are still red. A driver gating on the
     exit code has to stop escalating on exactly those rounds, so they are not 0.
+
+    The verdict is read off ``pushed``, not off the ``detail`` prose. ``_push_head``
+    fails a round in more ways than a prefix list stays ahead of — a rejected
+    non-fast-forward whose refetch or its rebase failed, a retry that failed
+    after rebasing — and every message this function has not learned to
+    recognise reports a round whose fixes never reached the branch as a
+    success. The prefixes are the backstop for a shape that reports a push
+    failure without carrying a ``pushed`` flag of its own.
     """
     detail = str(result.get("detail") or "")
-    if detail.startswith(("engine failed", "push failed")):
+    if detail.startswith(("engine failed", "push failed", "push rejected")):
+        return False
+    if "pushed" in result and not result.get("pushed"):
         return False
     tests = result.get("tests")
     if not isinstance(tests, dict):

@@ -19,6 +19,7 @@ bad claim by citing the earlier round instead of re-deriving it.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
 import logging
 import os
@@ -96,11 +97,58 @@ def read_notes(repo_path: Path, pr_number: int) -> str:
 
 
 def write_notes(repo_path: Path, pr_number: int, text: str) -> Path:
-    """Persist *text* as the PR's notes, creating the directory."""
+    """Persist *text* as the PR's notes, creating the directory.
+
+    Written to a sibling temp file and renamed into place: the notes are the
+    whole multi-round memory of this PR, and an in-place rewrite truncates them
+    to nothing the instant the process is killed between the open and the last
+    write. A reader therefore sees either the previous notes or the new ones,
+    never a half-written file.
+    """
     path = pr_notes_path(repo_path, pr_number)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text if text.endswith("\n") else f"{text}\n", encoding="utf-8")
+    payload = text if text.endswith("\n") else f"{text}\n"
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        with tmp.open("w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        tmp.replace(path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
     return path
+
+
+def _append(repo_path: Path, pr_number: int, block: str) -> None:
+    """Add one round's outcome to the notes without losing the earlier ones.
+
+    The read and the write are one critical section: a round that reads a
+    half-finished notes file, or reads the file and then has another round's
+    append land before its own write, would splice a stale copy over the
+    history. The lock is taken on the notes file's own inode, so a caller that
+    replaced the file between rounds is not split from the file it will write.
+    """
+    path = pr_notes_path(repo_path, pr_number)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):
+        handle = os.open(path, os.O_RDONLY | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+        finally:
+            os.close(handle)
+    try:
+        base = read_notes(repo_path, pr_number) or _seed(pr_number, "", "", "(none recorded)")
+        write_notes(repo_path, pr_number, f"{base.rstrip()}\n\n{block.rstrip()}\n")
+    finally:
+        with contextlib.suppress(OSError):
+            handle = os.open(path, os.O_RDONLY)
+            try:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+            finally:
+                os.close(handle)
 
 
 def _seed(pr_number: int, head: str, task_spec: str, test_command: str) -> str:
@@ -708,16 +756,66 @@ def _lane_worktree(repo_path: Path, branch: str) -> Path:
 
 
 class WorktreeBusyError(RuntimeError):
-    """The worktree this round would use is owned by a live process."""
+    """The worktree this round would use is owned by a live process, or still
+    holds a previous round's work that never reached the branch."""
+
+
+def _worktree_is_git(path: Path) -> bool:
+    git_dir = path / ".git"
+    return git_dir.is_dir() or git_dir.is_file()
+
+
+def _unpushed_work(worktree: Path) -> str:
+    """Why this worktree must not be reset, or ``""`` when it is safe to reset.
+
+    A live lock only proves that some process is in the worktree *right now*. A
+    round that was killed after committing and before pushing leaves a lock
+    behind whose PID is gone, so the next round reads the worktree as free and
+    ``checkout_branch`` resets it onto ``origin/<branch>`` — discarding a
+    commit that exists nowhere else. Uncommitted changes and commits ahead of
+    the branch are what that round leaves behind, so both are checked before the
+    reset, not just the lock.
+    """
+    result = subprocess.run(
+        ["git", "status", "--porcelain", "-uall"],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        changed = len([line for line in result.stdout.splitlines() if line.strip()])
+        return f"{changed} uncommitted change(s)"
+    result = subprocess.run(
+        ["git", "log", "--oneline", "HEAD", "--not", "--remotes"],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        return ""
+    ahead = [line for line in result.stdout.splitlines() if line.strip()]
+    if ahead:
+        shas = ", ".join(line.split()[0][:9] for line in ahead[:5])
+        more = f" (+{len(ahead) - 5} more)" if len(ahead) > 5 else ""
+        return f"{len(ahead)} commit(s) that never reached the branch: {shas}{more}"
+    return ""
 
 
 def _checkout_own_worktree(branch: str, repo_path: Path) -> Path:
-    """Check out *branch* for this round, refusing a worktree another lane owns.
+    """Check out *branch* for this round, refusing a worktree that still owes work.
 
     ``checkout_branch`` resets an existing directory to ``origin/<branch>``.
     Another lane already working this branch in that directory would lose its
-    uncommitted and unpushed work, so the sidecar lock the rest of the fleet
-    maintains is checked first — the same guard ``remove_worktree`` uses.
+    uncommitted and unpushed work, so two things are checked first: the sidecar
+    lock the rest of the fleet maintains — the same guard ``remove_worktree``
+    uses — and whether the directory still holds work a dead round left behind,
+    which no lock can report. A reset that destroys a commit nobody else has is
+    not this round's call to make, so that case raises and the round is
+    reported as a failure rather than run against a silently emptied branch.
     """
     from agent_fleet.pr_loop.github_ops import checkout_branch
     from agent_fleet.pr_loop.worktree import (
@@ -730,6 +828,13 @@ def _checkout_own_worktree(branch: str, repo_path: Path) -> Path:
         raise WorktreeBusyError(
             f"worktree {worktree} is locked by another live process; refusing to reset it"
         )
+    if worktree.is_dir() and _worktree_is_git(worktree):
+        stranded = _unpushed_work(worktree)
+        if stranded:
+            raise WorktreeBusyError(
+                f"worktree {worktree} still holds {stranded}; refusing to reset it onto "
+                f"origin/{branch} — recover or move that work first"
+            )
     checked_out = checkout_branch(branch, worktree, repo_root=repo_path)
     claim_worktree_lock(checked_out)
     return checked_out
@@ -809,8 +914,3 @@ def _worktree_base(repo_path: Path) -> Path:
 
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
-
-
-def _append(repo_path: Path, pr_number: int, block: str) -> None:
-    base = read_notes(repo_path, pr_number) or _seed(pr_number, "", "", "(none recorded)")
-    write_notes(repo_path, pr_number, f"{base.rstrip()}\n\n{block.rstrip()}\n")
