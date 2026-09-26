@@ -15,6 +15,13 @@ than fix the code. An empty findings list is a normal, good outcome.
 wrong outcome cannot be turned into a test by anyone, including a strong
 verifier. The gate's evidence is a failing test, so a claim that cannot become
 one is routed to the judge rather than counted as a blocker.
+
+A third rule is machine-facing rather than task-facing, and is prepended to every
+prompt as :data:`AGENT_RULES`: :data:`NO_BLOCKING_COMMANDS` (a command that
+never returns makes the stage a dead agent) and :data:`PROCESS_SAFETY` (this box
+runs many agents; a pattern kill hits all of them). Both are preconditions for
+running here at all, so they live in one shared prefix rather than being restated
+in each role.
 """
 
 from __future__ import annotations
@@ -70,6 +77,24 @@ PROCESS_SAFETY = (
     "leave it running.\n\n"
 )
 
+#: A gate agent that never returns is a dead stage: its slot is held, its answer
+#: never arrives, and the run spends a whole budget to escalate. Two failure
+#: modes, both seen in production — a blocking command that never exits, and a
+#: tool invocation that waits forever. The gate worktrees are disposable, so
+#: anything slow can be bounded and re-run rather than watched.
+NO_BLOCKING_COMMANDS = (
+    "NO BLOCKING COMMANDS (hard rule): never run a command that waits forever — "
+    "`tail -f`, `journalctl -f`, `watch`, an interactive editor or pager (`less`, "
+    "`vim`), a sleep loop with no exit condition, or a server in the foreground. "
+    "To watch something, poll with a bounded loop that has a timeout and an exit "
+    "condition. Every command you run needs its own timeout.\n\n"
+)
+
+#: Preamble shared by every role prompt. Both rules are preconditions for
+#: working on this machine at all, so they precede the task rather than being
+#: restated inside it.
+AGENT_RULES = NO_BLOCKING_COMMANDS + PROCESS_SAFETY
+
 
 def _example_block(spec: dict[str, object]) -> str:
     """Fence the *spec* as a literal ```json block the model must copy the shape of."""
@@ -107,7 +132,7 @@ def find_prompt(
             f"the current code):\n----- PRIOR CLAIMS -----\n{prior_claims}\n"
             "----- END PRIOR -----\n"
         )
-    return PROCESS_SAFETY + (
+    return AGENT_RULES + (
         f"You are a pre-merge reviewer with ONE focus: **{lens}** — {focus}\n"
         f"Repository worktree (read-only for you; do NOT edit, commit or push): "
         f"{worktree}, detached at PR #{pr_number} head {head_sha}. Review ONLY the "
@@ -191,7 +216,7 @@ def verify_prompt(
     the answer example cannot disagree about the file's name.
     """
     claim_json = json.dumps(finding.to_dict(), indent=2)
-    return PROCESS_SAFETY + (
+    return AGENT_RULES + (
         f"You verify ONE claimed defect in worktree {worktree} (detached at PR "
         f"#{pr_number} head {head_sha}; the change is `git diff "
         f"{base_branch}...HEAD`).\n"
@@ -225,7 +250,7 @@ def judge_prompt(
     task_text: str,
 ) -> str:
     """Prompt for the single judge call: rule on untestable claims + own blocker pass."""
-    return PROCESS_SAFETY + (
+    return AGENT_RULES + (
         f"You are the final pre-merge judge for PR #{pr_number} in worktree "
         f"{worktree} (detached at {head_sha}). Read-only: do not edit, commit or "
         f"push. The change is `git diff {base_branch}...HEAD`.\n"
@@ -250,7 +275,7 @@ def recheck_prompt(
     untestable: str,
 ) -> str:
     """Prompt for the single judge recheck: which untestable blockers remain."""
-    return PROCESS_SAFETY + (
+    return AGENT_RULES + (
         f"Recheck for PR #{pr_number} in worktree {worktree} at {head_sha} "
         f"(read-only; use a fresh `git fetch` and inspect `git diff {start_sha} "
         f"{head_sha}`). These blockers were ruled real earlier and had no test:\n"
@@ -281,7 +306,7 @@ def fix_prompt(
         if untestable.strip()
         else ""
     )
-    return PROCESS_SAFETY + (
+    return AGENT_RULES + (
         f"Fix PR #{pr_number} in worktree {worktree} (detached at {head_sha}; push "
         f"with `git push origin HEAD:{push_branch}`). Fix round {round_number}.\n"
         "These tests FAIL right now and must pass (each proves a confirmed defect; "
