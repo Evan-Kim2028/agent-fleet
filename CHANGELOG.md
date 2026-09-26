@@ -2,6 +2,69 @@
 
 ## Unreleased
 
+### Added
+
+- **`fleet serve` — one supervisor for the whole pipeline, so the operator never
+  babysits the fleet.** `fleet serve run --operator NAME` is a single
+  long-running, restart-safe process that keeps dispatch → lane → gate →
+  fix/rebase → merge running at maximum throughput inside its resource limits.
+  It supervises rather than reimplements: the dispatcher, merge executor and
+  janitor are separate programs spawned from configurable command templates, so
+  it composes with whatever those components are (the in-repo `fleet dispatch`
+  and `fleet merge run`, or the bash drivers they replace).
+  - **Supervision.** Children run with restart-on-exit and exponential backoff
+    computed from the restart count, so a supervisor that restarts mid-schedule
+    resumes it instead of hammering a failing component. Crash-loop detection
+    counts only *crash* exits against an N-in-M budget, and the budget is
+    persisted — otherwise a restart hands a crash-looping component a fresh one,
+    and a watchdog-driven restart eventually gets a healthy component declared
+    crash-looping for a fault it never had. A crash-looping component is stopped
+    with an error event and the rest of the fleet keeps running.
+  - **Re-attach on restart.** Adoption requires the recorded
+    `/proc/<pid>/stat` start-time fingerprint to still match, and `start()`
+    checks adoption first, so a serve restart can never double-start a
+    component. The supervisor holds an flock for its lifetime, taken before
+    anything is spawned: a second `fleet serve` exits 3 rather than racing into
+    a double dispatch.
+  - **Adaptive capacity.** Every tick reads PSI and the memory ratio from the
+    agents cgroup and publishes targets (max lanes, max concurrent gates,
+    admission-pool sizes) to a documented `capacity.json`. AIMD with
+    hysteresis between watermarks and hard floors/ceilings applied after every
+    adjustment. **Never the load average** — under a cgroup quota the run queue
+    counts throttled tasks, not work waiting for a CPU, so a 4-way quota on a
+    16-core box reports load 64 with every core idle and admitting more work
+    makes it worse. An unreadable pressure source drives targets to the floor
+    and says so, rather than ramping up: a missing file is not an idle machine.
+    A starvation guard (saturated, nothing completing) collapses lanes to the
+    floor and prioritises gates.
+  - **Self-healing watchdog.** Five detectors with bounded remediations: stuck
+    stage (no output growth past a per-stage timeout → terminate, one retry,
+    then escalate), blocking-command orphan, stale lock, deadlock, and
+    zero-progress component. Remediations act only on processes the fleet
+    recorded, by exact pid and matching fingerprint — never by name or pattern,
+    which matters on a machine where many other agents run the same engines.
+    Findings beyond the per-tick budget are reported as deferred, so silence is
+    never mistaken for "nothing was wrong".
+  - **Observability.** `fleet serve status` prints one screen: components
+    (up/restarts/adopted), capacity targets against pressure, queue depth by
+    stage, per-hour throughput, and the oldest item per stage with why it waits.
+    `--json` is the same dict the text renders from. A failed pressure reading
+    renders as a failure, never as `0.0`.
+  - **Escalation routing.** `NEEDS-ESCALATION` reasons are classified into
+    `infra` (retry once), `untestable` (fix round) and `fence` / `owner_decision`
+    (an append-only decisions file a human reviews in batches, not a per-item
+    ping). An unrecognised reason routes to a human and never to an automatic
+    retry — guessing `infra` for a reason string this code has never seen would
+    mean automatically re-running something a human deliberately fenced.
+  - **Process safety.** Every pid is paired with a start-time fingerprint, and a
+    pid with no fingerprint is never signalled. Liveness reads the process state
+    field, so an unreaped zombie is never reported as a running component. TERM
+    and the KILL escalation are separate calls and the grace is spent once per
+    watchdog tick, so a tick cannot block long enough to trip its own
+    no-progress rule.
+  - `fleet serve watchdog` is a **dry run by default**: this process kills
+    things, so it can show every pid it would signal and why before acting.
+
 ## 0.16.2 — 2026-09-25
 
 ### Fixed
