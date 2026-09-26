@@ -1,0 +1,356 @@
+#!/usr/bin/env bash
+# fbgate LANE REPO PR — evidence-based merge gate (replaces the fbpremerge/fbpmfix loop).
+#   0 deterministic: PR's own changed test files at head (failures = confirmed blockers)
+#   1 find: 4 parallel space-bunny lens reviewers (blockers only, each with a repro plan)
+#   2 verify: one space-bunny verifier per claim writes a failing test; the script re-runs it (rc must be a test failure)
+#   3 judge: ONE step-5-preview call (grok) rules on untestable claims + its own blocker pass; its new claims go through verify
+#   4 fix: ONE space-bunny fix round against the confirmed failing tests
+#   5 recheck: re-run every confirmed test at the new head (+ ONE step-5-preview call only if untestable blockers were confirmed)
+#   -> PREMERGE-APPROVED <sha9> (automerge picks it up) or NEEDS-ESCALATION (orchestrator)
+# Models: cmd = stealth/space-bunny-alpha only; grok = step-5-preview only.
+set -uo pipefail
+LANE=$1; REPO=$2; PR=$3; DROPNOTE=""
+F=${FLEET_OPS_HOME:-$HOME/fleet/ops}; P=$F/prompts; R=$F/runs
+OWNER=${FLEET_GH_OWNER:-Evan-Kim2028}; SLUG=$OWNER/$REPO; S=$F/lanes/$LANE.status; G=$F/gate/$LANE; AGENT_SLOTS=${GATE_AGENT_SLOTS:-124}
+mkdir -p $G $F/sem; : > $G/log; rm -f $G/dead
+st(){ echo "$(date +%H:%M:%S) $*" >> $S; echo "$(date +%H:%M:%S) [$LANE] gate: $*" >> $F/events.log; echo "$(date +%H:%M:%S) $*" >> $G/log; }
+unset FB_MODEL
+agent(){ # agent NAME CWD PROMPTFILE TURNS — space-bunny via fbrun under a global slot
+  ( while :; do for i in $(seq 1 $AGENT_SLOTS); do exec 7>$F/sem/agent.$i; if flock -n 7; then $F/fbrun "$@"; exit $?; fi; done; sleep 5; done ) ; }
+judge(){ # judge NAME CWD PROMPTFILE — final judge. Default: space-bunny via cmd (owner 2026-09-25). GATE_JUDGE=grok opts into step-5-preview.
+  local n=$1 cwd=$2 pf=$3
+  # Owner 2026-09-26 (latest): minimise grok step-5 use; judge = space-bunny. GATE_JUDGE=grok opts in (high effort, the CLI max).
+  # model backs the leaner single-reviewer gate. GATE_JUDGE=cmd falls back to space-bunny.
+  local eff=${GATE_JUDGE_EFFORT:-high}  # grok CLI accepts low|medium|high (no max)
+  if [ "${GATE_JUDGE:-cmd}" = grok ]; then
+    ( cd $cwd && systemd-run --user --scope -q -p MemoryMax=8G -p MemorySwapMax=0 timeout 2h grok -p "$(cat $pf)" -m step-5-preview --reasoning-effort $eff --always-approve --cwd $cwd --max-turns 200 --output-format json > $R/$n.json 2> $R/$n.err )
+    python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('text',''))" $R/$n.json > $R/$n.out 2>/dev/null || echo "NO RESULT" > $R/$n.out
+  else agent rev-$n $cwd $pf 200 >/dev/null 2>&1; cp $R/rev-$n.out $R/$n.out 2>/dev/null || echo "NO RESULT" > $R/$n.out; fi
+  echo "$(date +%H:%M:%S) $n judge(${GATE_JUDGE:-cmd}) done" >> $F/events.log; }
+alive(){ # alive RUNNAME -> 0 if the agent exited 0 and produced a parsable ```json block
+  local n=$1; [ "$(cat $R/$n.exit 2>/dev/null)" = 0 ] || return 1
+  python3 - "$R/$n.out" <<'PY' || return 1
+import json,re,sys
+t=open(sys.argv[1],errors="replace").read()
+for b in re.findall(r"```json\s*(.*?)```",t,re.S):
+    try: json.loads(b); sys.exit(0)
+    except Exception: pass
+sys.exit(1)
+PY
+}
+repair(){ # repair RUNNAME -> if the agent exited 0 but gave no parsable json, ask it to reformat its own answer (cheap)
+  local n=$1; [ "$(cat $R/$n.exit 2>/dev/null)" = 0 ] && [ -s $R/$n.out ] || return 1
+  { echo "Your previous answer below contains the right analysis but not in the required format. Rewrite it as exactly one \`\`\`json fenced block in the schema your instructions required (shown at the end of those instructions). Keep every finding/verdict; add nothing new; no prose outside the block; do not run any tools."; echo; echo "===== YOUR PREVIOUS ANSWER ====="; tail -c 12000 $R/$n.out; } > $G/repair-$n.md
+  agent $n-repair /tmp $G/repair-$n.md 5 >/dev/null 2>&1
+  [ "$(cat $R/$n-repair.exit 2>/dev/null)" = 0 ] || [ "$(cat $R/$n-repair.exit 2>/dev/null)" = 86 ] || return 1
+  cp $R/$n-repair.out $R/$n.out; echo 0 > $R/$n.exit; alive $n && echo "$(date +%H:%M:%S) repaired $n (format only)" >> $G/log; }
+dead(){ echo "$(date +%H:%M:%S) DEAD $*" >> $G/log; touch $G/dead; }
+fail_closed(){ [ -f $G/dead ] && { st "NEEDS-ESCALATION fail-closed: agent(s) died or returned no result after 1 retry: $(grep '^.*DEAD' $G/log | sed 's/.*DEAD //' | tr '\n' ';' | cut -c1-200)"; exit 5; }; }
+extract(){ # extract OUTFILE -> JSON object from the last ```json block (or last {...})
+  python3 - "$1" <<'PY'
+import json,re,sys
+t=open(sys.argv[1],errors="replace").read()
+blocks=re.findall(r"```json\s*(.*?)```",t,re.S) or re.findall(r"(\{.*\})",t,re.S)
+for b in reversed(blocks):
+    try: print(json.dumps(json.loads(b))); break
+    except Exception: continue
+else: print("{}")
+PY
+}
+BASE=${FLEET_WT_ROOT:-$HOME/fleet/wt}/$REPO-wt-fleetbase; [ -d $BASE ] || BASE=$(ls -d ${FLEET_WT_ROOT:-$HOME/fleet/wt}/$REPO-wt-fb-* | head -1)
+git -C $BASE fetch -q origin
+# An empty gh answer is a network failure (DNS outage 2026-09-26), not a wrong PR: retry after the link recovers.
+for _try in 1 2 3 4 5; do
+  read -r HREF HEAD0 PSTATE < <(gh pr view $PR -R $SLUG --json headRefName,headRefOid,state --jq '"\(.headRefName) \(.headRefOid) \(.state)"')
+  [ -n "$HREF" ] && break; $F/wait_net.sh; sleep $((_try*10))
+done
+[ -n "$HREF" ] || { st "NEEDS-ESCALATION infra: github unreachable (empty gh answer after 5 tries); retryable"; exit 10; }
+[ "$HREF" = "fb/$LANE" ] && [ "$PSTATE" = OPEN ] || { st "NEEDS-ESCALATION gate refused: $SLUG#$PR is '$HREF' ($PSTATE), expected open fb/$LANE (wrong repo/PR?)"; exit 9; }
+H9=${HEAD0:0:9}
+LSLUG=$(echo "$LANE" | tr -c 'a-zA-Z0-9\n' '_')  # lane in gate test names: fixed names collided add/add across PRs
+# Worktree setup is serialized per repo: concurrent gates each ran `worktree prune`, which deleted a
+# sibling gate's half-created worktree entry ("fatal: Could not write new index file").
+wtadd(){ ( flock 200; git -C $BASE worktree remove --force $1 2>/dev/null; rm -rf $1; git -C $BASE worktree prune; git -C $BASE worktree add -q --detach $1 $2 ) 200>$F/locks/wt-$REPO.lock; }
+WT=$G/wt; wtadd $WT $HEAD0 || { st "NEEDS-ESCALATION cannot create gate worktree"; exit 2; }
+PKG=$( [ $REPO = silphcoanalytics ] && echo api || echo . )
+st "start @$H9 (PR #$PR)"
+( cd $WT/$PKG && timeout 900 uv run python -c 1 >/dev/null 2>&1 )
+TASK=$( [ -f $P/$LANE.task.md ] && cat $P/$LANE.task.md | head -c 20000 || echo "(no task file; judge against the PR description)" )
+PRIOR=$(ls -t $R/rev-pm*-$LANE.out $R/rev-pm*-$LANE-adv.out 2>/dev/null | head -2 | xargs -r cat | head -c 12000)
+: > $G/confirmed.jsonl; : > $G/untestable.jsonl
+
+# ---- 0 deterministic: the PR's own changed tests at head
+ptests=$(git -C $WT diff --name-only origin/main...HEAD | grep -E '(^|/)test_[^/]*\.py$' | while read t; do [ -f $WT/$t ] && echo $t; done | head -40)
+if [ -n "$ptests" ]; then
+  out=$($F/fm_pytest.sh $WT $ptests); prc=$?; echo "$out" > $G/step0.txt
+  if [ $prc -ge 2 ]; then st "step0 PR tests could not run: $(echo "$out" | grep -E '^(INFRA|SUMMARY)' | tr '\n' ' ' | cut -c1-200)"
+  else MB=$F/gate/_main-$REPO; git -C $MB fetch -q origin 2>/dev/null; git -C $MB checkout -q --detach origin/main 2>/dev/null
+    f0=$(echo "$out" | awk '/^FAILED /{print $2}' | sort -u); bf=""
+    [ -n "$f0" ] && [ -d $MB ] && bf=$($F/fm_pytest.sh $MB $(echo "$f0" | sed 's/::.*//' | sort -u | while read t; do [ -f $MB/$t ] && echo $t; done) | awk '/^FAILED /{print $2}' | sort -u)
+    [ -n "$bf" ] && st "step0: $(echo "$bf" | wc -l) failure(s) also fail on main (baseline, ignored)"
+    comm -23 <(echo "$f0") <(echo "$bf") | grep -v '^$' | while read id; do python3 -c "import json,sys; print(json.dumps({'id':'T-'+sys.argv[1].split('::')[-1][:40],'source':'pr-tests','claim':'PR test fails at head: '+sys.argv[1],'test_id':sys.argv[1],'run_cmd':None}))" "$id"; done >> $G/confirmed.jsonl; fi
+  st "step0 PR tests: $(echo "$out" | grep '^SUMMARY' | tr '\n' ' ' | cut -c1-160)"
+fi
+
+mergedcheck(){ local full; full=$(gh pr view $PR -R $SLUG --json headRefOid --jq .headRefOid)
+  case "$REPO" in
+    lake-of-rage|silphcoanalytics) TEST_ONLY=1 $F/fastmerge_ext.sh $REPO $PR $full > $G/mergedcheck.log 2>&1 ;;
+    agent-fleet) local M=$G/merged; wtadd $M $full >/dev/null 2>&1 || return 2
+      ( cd $M && git -c user.name=gate -c user.email=gate@local merge -q --no-ff --no-commit origin/main >/dev/null 2>&1 || exit 3
+        uv sync -q --frozen --group dev >/dev/null 2>&1; systemd-run --user --scope -q --slice=agents.slice -p MemoryMax=6G -p MemorySwapMax=0 timeout 1500 uv run pytest -q -p no:randomly ) > $G/mergedcheck.log 2>&1; local rc=$?
+      ( flock 200; git -C $BASE worktree remove --force $M 2>/dev/null ) 200>$F/locks/wt-$REPO.lock; return $rc ;;
+    *) return 0 ;;
+  esac; }
+approve(){ local sha; sha=$(gh pr view $PR -R $SLUG --json headRefOid --jq '.headRefOid[:9]')
+  if ! mergedcheck; then st "NEEDS-ESCALATION merged-tree regression check failed at $sha (see $G/mergedcheck.log: $(grep -E 'STOP|FAILED|failed' $G/mergedcheck.log | tail -2 | tr '\n' ' ' | cut -c1-200))"; exit 6; fi
+  st "PREMERGE-APPROVED $sha"; ( flock 200; git -C $BASE worktree remove --force $WT 2>/dev/null ) 200>$F/locks/wt-$REPO.lock; exit 0; }
+# ---- tier 0 (owner 2026-09-26: skip model review where tests settle it): a PR that changes ONLY docs/tests
+# (*.md, docs/, tests/, test_*.py, *_test.py, fixtures/) is approved on evidence alone: its own changed tests passed at
+# head (step 0, no confirmed failures) and the merged-tree check (mergedcheck, run inside approve) passes.
+# Anything touching other files goes to model review. GATE_TIER0=0 disables.
+_nonmech=$(git -C $WT diff --name-only origin/main...HEAD | grep -vE '(\.md$|(^|/)docs?/|(^|/)tests?/|(^|/)test_[^/]*\.py$|_test\.py$|(^|/)fixtures?/)' | head -1)
+if [ "${GATE_TIER0:-1}" = 1 ] && [ -z "$_nonmech" ] && [ ! -s $G/confirmed.jsonl ] && ! grep -q 'step0 PR tests could not run' $G/log 2>/dev/null; then
+  st "review tier: 0 (docs/tests only; approving on step-0 tests + merged-tree check, no model review)"
+  approve
+fi
+
+# ---- 1 find: 4 lenses in parallel
+LENSES="correctness:Logic errors, wrong results, broken edge cases, error handling, concurrency/race bugs, regressions of existing behaviour.
+contract:Public API/MCP/schema contract breaks, response shape, params, docs/OpenAPI drift vs behaviour, backwards compatibility, missing tests for promised behaviour.
+prodsafety:Production data safety and ops: data loss, destructive writes, unbounded memory/CPU on the VPS, missing locks/atomicity, unsafe migrations, performance regressions on hot paths, secrets exposure.
+spec:Conformance to the task specification below: required items missing or implemented differently from what was asked."
+# Lean gate (default, 2026-09-26): the shared ~7 Mbit/s uplink is the fleet's binding resource and every agent turn
+# uploads its whole context, so 4 lens agents + one verifier per claim (~14 agents/gate) starved every gate.
+# One reviewer covers all four focuses; GATE_LENSES=4 restores the parallel lenses for a high-risk PR.
+# Risk tiering (owner: balance review depth against bandwidth): big or production-sensitive diffs keep the 4 parallel
+# lenses; everything else gets the single all-focus reviewer. Verification is batched for both tiers.
+if [ -z "${GATE_LENSES:-}" ]; then
+  # size = non-test code lines only (tests/fixtures/docs inflate diffs without adding review risk; 6 of 7 gates hit the
+  # 4-lens tier at 10:17 on 2026-09-26 because test files counted)
+  _lines=$(git -C $WT diff --numstat origin/main...HEAD | awk '$3 !~ /(^|\/)(tests?|fixtures?|docs?)\/|(^|\/)test_[^\/]*\.py$|_test\.py$|\.md$|\.snap$|\.json$/ {a+=$1+$2} END{print a+0}')
+  _risky=$(git -C $WT diff --name-only origin/main...HEAD | grep -cE '^(infra/vps/|\.github/workflows/|scripts/(deploy|lor-api-ship|platform-deploy)|.*migrations?/|.*(gold|sales).*(write|publish|restat|backfill|apply)|.*run_prod)' )
+  if [ "${_lines:-0}" -gt ${GATE_BIG_LINES:-600} ] || [ "${_risky:-0}" -gt 0 ]; then GATE_LENSES=4; else GATE_LENSES=1; fi
+  st "review tier: $GATE_LENSES lens(es) (non-test diff ${_lines} lines, ${_risky} production-sensitive files)"
+fi
+if [ "$GATE_LENSES" = 1 ]; then
+  LENSES="all:Four focuses, check every one: (1) CORRECTNESS: logic errors, wrong results, broken edge cases, error handling, races, regressions. (2) CONTRACT: public API/MCP/schema breaks, response shape, docs/OpenAPI drift, backwards compatibility, missing tests for promised behaviour. (3) PRODSAFETY: data loss, destructive writes, unbounded memory/CPU on the VPS, missing locks/atomicity, unsafe migrations, hot-path performance, secrets. (4) SPEC: required items from the task specification below missing or implemented differently."
+fi
+LENS_NAMES=$(echo "$LENSES" | cut -d: -f1 | tr '\n' ' ')
+i=0; while IFS=: read -r lens focus; do i=$((i+1)); pf=$G/find-$lens.md
+cat > $pf <<EOF
+You are a pre-merge reviewer with ONE focus: **$lens** — $focus
+Repository worktree (read-only for you; do NOT edit, commit or push): $WT, detached at PR #$PR head $H9. Review ONLY the change: \`git diff origin/main...HEAD\` (run it). Read surrounding code as needed.
+
+Report ONLY BLOCKERS: defects that would make merging wrong — incorrect results, data loss, contract breaks, crashes, security, or production risk — within your focus. Style, naming, docs polish, refactors, "could be cleaner", missing nice-to-haves and speculative risks are NOT blockers: omit them entirely. If you find no blockers, return an empty list; that is a normal, good outcome.
+Each blocker MUST name the exact file/line and a concrete repro: the input/state and the observable wrong outcome, precise enough that someone can write a failing test for it.
+
+A previous reviewer loop made these claims (some may be stale, fixed, or wrong — include one only if you independently confirm it in the current code):
+----- PRIOR CLAIMS -----
+$PRIOR
+----- END PRIOR -----
+
+Task specification (for context; for the spec lens it is the yardstick):
+----- TASK -----
+$TASK
+----- END TASK -----
+
+Final answer: exactly one fenced json block:
+\`\`\`json
+{"findings":[{"id":"$lens-1","file":"path","line":123,"claim":"one sentence defect","repro":"input/state -> wrong observable outcome","testable":true}]}
+\`\`\`
+Set "testable": false only when the defect cannot be shown by a unit/integration test run locally (e.g. needs production data volume).
+EOF
+agent rev-gate-$LANE-$lens $WT $pf 150 & done <<< "$LENSES"
+wait
+for lens in $LENS_NAMES; do alive rev-gate-$LANE-$lens && continue; repair rev-gate-$LANE-$lens && continue
+  echo "$(date +%H:%M:%S) lens $lens dead (exit $(cat $R/rev-gate-$LANE-$lens.exit 2>/dev/null || echo none)); retrying once" >> $G/log
+  agent rev-gate-$LANE-$lens $WT $G/find-$lens.md 150 >/dev/null 2>&1; alive rev-gate-$LANE-$lens || dead "lens $lens"; done
+fail_closed
+python3 - $G "$(ls $R/rev-gate-$LANE-*.out 2>/dev/null | tr '\n' ' ')" > $G/candidates.jsonl <<'PY'
+import json,re,sys,subprocess
+G=sys.argv[1]; seen=set(); out=[]
+for f in sys.argv[2].split():
+    t=open(f,errors="replace").read()
+    blocks=re.findall(r"```json\s*(.*?)```",t,re.S)
+    for b in reversed(blocks):
+        try: d=json.loads(b); break
+        except Exception: d=None
+    else: d=None
+    for x in (d or {}).get("findings",[]):
+        key=(str(x.get("file","")).split("/")[-1], re.sub(r"\W+"," ",str(x.get("claim","")).lower())[:50])
+        if key in seen: continue
+        seen.add(key); out.append(x)
+for x in out[:12]: print(json.dumps(x))
+PY
+nc=$(wc -l < $G/candidates.jsonl); st "find: $nc candidate blockers from $(echo $LENS_NAMES | wc -w) lens(es)"
+
+# ---- 2 verify (parallel): failing test per testable claim; script re-runs it
+verify(){ # verify CANDIDATE_JSON TAG
+  local c=$1 tag=$2 id; id=$(echo "$c" | python3 -c "import json,sys,re; print(re.sub(r'\W','_',json.load(sys.stdin).get('id','x'))[:30])")
+  local pf=$G/verify-$tag-$id.md
+  cat > $pf <<EOF
+You verify ONE claimed defect in worktree $WT (detached at PR #$PR head $H9; the change is \`git diff origin/main...HEAD\`).
+Claim (JSON): $c
+
+Your job: PROVE or DISPROVE it with a test. Create exactly ONE new test file named test_gate_${LSLUG}_${id}.py in the existing test directory that fits (e.g. api/tests/ for silphcoanalytics, the owning package's tests/ for lake-of-rage). Do not modify ANY other file. The test must exercise the real code path and FAIL at the current head because of the claimed defect (an assertion failure on the wrong behaviour) — not because of import errors, missing fixtures, network or environment. Run it (memory-capped): \`systemd-run --user --scope -q -p MemoryMax=6G -p MemorySwapMax=0 uv run pytest -q <file>\` from the package directory that owns pyproject.toml.
+If after honest effort the claim is false (the code behaves correctly), delete your test file and answer REJECTED with the evidence. If it truly cannot be shown by a local test, delete the file and answer UNTESTABLE.
+Final answer: exactly one fenced json block:
+\`\`\`json
+{"verdict":"CONFIRMED|REJECTED|UNTESTABLE","test_file":"repo-relative path or null","reason":"one or two sentences of evidence"}
+\`\`\`
+EOF
+  agent rev-gate-$LANE-v$tag-$id $WT $pf 120 >/dev/null 2>&1
+  alive rev-gate-$LANE-v$tag-$id || repair rev-gate-$LANE-v$tag-$id || { agent rev-gate-$LANE-v$tag-$id $WT $pf 120 >/dev/null 2>&1; alive rev-gate-$LANE-v$tag-$id || { dead "verifier $id"; return; }; }
+  apply_verdict "$c" "$tag" "$id" "$(extract $R/rev-gate-$LANE-v$tag-$id.out)"
+}
+apply_verdict(){ # apply_verdict CLAIM TAG ID VERDICT_JSON — re-run the test; only a real assertion failure confirms
+  local c=$1 tag=$2 id=$3 v=$4
+  local verdict tf; verdict=$(echo "$v" | python3 -c "import json,sys; print(json.load(sys.stdin).get('verdict','REJECTED'))" 2>/dev/null); tf=$(echo "$v" | python3 -c "import json,sys; print(json.load(sys.stdin).get('test_file') or '')" 2>/dev/null)
+  if [ "$verdict" = CONFIRMED ] && [ -n "$tf" ] && [ -f $WT/$tf ]; then
+    local o prc; o=$($F/fm_pytest.sh $WT $tf); prc=$?
+    if [ $prc = 1 ]; then mkdir -p $G/tests; cp $WT/$tf $G/tests/; echo "$c" | python3 -c "import json,sys; d=json.load(sys.stdin); d['test_file']=sys.argv[1]; d['source']=sys.argv[2]; print(json.dumps(d))" "$tf" "$tag" >> $G/confirmed.jsonl; echo "CONFIRMED $id ($tf)" >> $G/log
+    else echo "DISCARDED $id: verifier said CONFIRMED but re-run rc=$prc" >> $G/log; rm -f $WT/$tf; fi
+  elif [ "$verdict" = UNTESTABLE ]; then echo "$c" >> $G/untestable.jsonl; echo "UNTESTABLE $id" >> $G/log
+  else echo "REJECTED $id: $(echo "$v" | cut -c1-200)" >> $G/log; [ -n "$tf" ] && rm -f $WT/$tf; fi
+}
+verify_batch(){ # verify_batch CANDIDATES_FILE TAG — one agent writes one test per claim; each is re-run by apply_verdict
+  local cf=$1 tag=$2; [ -s $cf ] || return 0
+  if [ "${GATE_VERIFY_BATCH:-1}" != 1 ]; then while read -r c; do [ -n "$c" ] && verify "$c" $tag & done < $cf; wait; return; fi
+  local pf=$G/verify-$tag-batch.md n=rev-gate-$LANE-v$tag-batch claims
+  claims=$(python3 $F/lean_gate_claims.py $cf "$LSLUG")
+  { echo "You verify SEVERAL claimed defects in worktree $WT (detached at PR #$PR head $H9; the change is \`git diff origin/main...HEAD\`)."
+    echo "Claims (one per line):"; echo "$claims"; echo
+    cat $F/prompts/lean_verify_batch.md; } > $pf
+  agent $n $WT $pf 250 >/dev/null 2>&1
+  alive $n || repair $n || { agent $n $WT $pf 250 >/dev/null 2>&1; alive $n || { dead "batch verifier $tag"; return; }; }
+  local out c id v; out=$(extract $R/$n.out)
+  while read -r c; do [ -n "$c" ] || continue
+    id=$(echo "$c" | python3 -c "import json,sys,re; print(re.sub(r'\W','_',json.load(sys.stdin).get('id','x'))[:30])")
+    v=$(echo "$out" | python3 -c "import json,sys; r=[x for x in json.load(sys.stdin).get('results',[]) if x.get('id')==sys.argv[1]]; print(json.dumps(r[0]) if r else '')" "$id" 2>/dev/null)
+    [ -n "$v" ] || { dead "batch verifier $tag returned no verdict for $id"; continue; }
+    apply_verdict "$c" "$tag" "$id" "$v"
+  done < $cf
+}
+verify_batch $G/candidates.jsonl f
+fail_closed
+st "verify: confirmed=$(wc -l < $G/confirmed.jsonl) untestable=$(wc -l < $G/untestable.jsonl) rejected=$(grep -c '^REJECTED\|^DISCARDED' $G/log)"
+
+# ---- 3 judge: ONE step-5-preview call
+jpf=$G/judge1.md
+cat > $jpf <<EOF
+You are the final pre-merge judge for PR #$PR ($SLUG) in worktree $WT (detached at $H9). Read-only: do not edit, commit or push. The change is \`git diff origin/main...HEAD\`.
+Evidence so far — confirmed blockers (each has a failing test): $(cat $G/confirmed.jsonl | head -c 6000)
+Claims a test could not show (rule on each: is it a real merge blocker in the current code?): $(cat $G/untestable.jsonl | head -c 6000)
+Also do ONE pass of your own for BLOCKERS ONLY (wrong results, data loss, contract breaks, crashes, security, production risk). No style/nits. Each new blocker needs file/line and a concrete repro.
+Task spec (context): $(echo "$TASK" | head -c 8000)
+Final answer: exactly one fenced json block:
+\`\`\`json
+{"untestable_rulings":[{"id":"...","real":true,"reason":"..."}],"new_blockers":[{"id":"j-1","file":"...","line":1,"claim":"...","repro":"...","testable":true}]}
+\`\`\`
+EOF
+judge gate-j1-$LANE $WT $jpf
+if [ "${GATE_JUDGE:-cmd}" != grok ] && ! alive rev-gate-j1-$LANE; then judge gate-j1-$LANE $WT $jpf; alive rev-gate-j1-$LANE || { dead "judge1"; fail_closed; }; fi
+J=$(extract $R/gate-j1-$LANE.out); echo "$J" > $G/judge1.json
+echo "$J" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+for r in d.get('untestable_rulings',[]):
+    if r.get('real'): print(json.dumps({'id':r.get('id'),'source':'judge-untestable','claim':r.get('reason'),'test_file':None}))
+" >> $G/confirmed_untestable.jsonl 2>/dev/null
+echo "$J" | python3 -c "
+import json,sys
+for x in json.load(sys.stdin).get('new_blockers',[]): print(json.dumps(x))
+" > $G/judge_new.jsonl 2>/dev/null
+verify_batch $G/judge_new.jsonl j
+fail_closed
+NU=$( [ -f $G/confirmed_untestable.jsonl ] && wc -l < $G/confirmed_untestable.jsonl || echo 0 ); NC=$(wc -l < $G/confirmed.jsonl)
+st "judge: new=$(wc -l < $G/judge_new.jsonl) confirmed_total=$NC untestable_real=$NU"
+
+# Merged-tree regression check before any approval: the gate itself only runs the PR's own and gate tests, so a PR
+# that breaks an untouched existing test (agent-fleet #106 vs the merge-plan suite) could be approved.
+if [ $NC = 0 ] && [ $NU = 0 ]; then approve; fi
+
+# ---- 4+5 converge: fix rounds continue ONLY while measurable progress is made.
+#   Each round = one space-bunny fix against the tests failing NOW, then a deterministic re-run of ALL gate tests + the PR's own tests.
+#   Progress = the failing set strictly shrinks AND no new failures appear. 0 failing -> approve; no progress -> escalate (with metrics).
+#   GATE_MAX_FIX_ROUNDS (default 4) is only a safety net; the stopping rule is convergence.
+MAXR=${GATE_MAX_FIX_ROUNDS:-4}
+ALLT=$( { python3 -c "import json; [print(json.loads(l)['test_file']) for l in open('$G/confirmed.jsonl') if json.loads(l).get('test_file')]" 2>/dev/null; echo "$ptests"; } | grep -v '^$' | sort -u | tr '\n' ' ')
+runall(){ # runall WORKTREE -> writes failing ids to $2, returns fm rc
+  local w=$1 out rc; for t in $ALLT; do [ -f $w/$t ] || { [ -f $G/tests/$(basename $t) ] && { mkdir -p $w/$(dirname $t); cp $G/tests/$(basename $t) $w/$t; }; }; done
+  out=$($F/fm_pytest.sh $w $ALLT); rc=$?; echo "$out" > $2.raw; echo "$out" | awk '/^FAILED /{print $2}' | sort -u > $2; return $rc; }
+metric(){ python3 -c "import json,sys; print(json.dumps(dict(zip(sys.argv[1::2],sys.argv[2::2]))))" "$@" >> $F/gate/metrics.jsonl; }
+runall $WT $G/fail.0; rc0=$?
+[ $rc0 -ge 2 ] && { st "NEEDS-ESCALATION gate tests could not run at head ($(grep -E '^(INFRA|SUMMARY)' $G/fail.0.raw | tr '\n' ' ' | cut -c1-160))"; exit 5; }
+n0=$(wc -l < $G/fail.0); [ $n0 = 0 ] && [ $NU = 0 ] && approve
+printf "round\thead\tfailing\tfixed\tnew_failures\n0\t%s\t%s\t-\t-\n" $H9 $n0 > $G/rounds.tsv
+cur=$HEAD0; prev=$G/fail.0; round=0; outcome=""
+while [ $round -lt $MAXR ]; do
+  round=$((round+1)); FW=$G/fix$round
+  git -C $BASE fetch -q origin; wtadd $FW $cur || { st "NEEDS-ESCALATION cannot create fix worktree (base $BASE)"; exit 2; }
+  for t in $ALLT; do [ -f $FW/$t ] || { [ -f $G/tests/$(basename $t) ] && { mkdir -p $FW/$(dirname $t); cp $G/tests/$(basename $t) $FW/$t; }; }; done
+  cat > $G/fix$round.md <<EOP
+Fix PR #$PR ($SLUG) in worktree $FW (detached at ${cur:0:9}; push with \`git push origin HEAD:fb/$LANE\`). Fix round $round.
+These tests FAIL right now and must pass (each proves a confirmed defect; gate tests named test_gate_*.py are already in the worktree — keep them, never weaken their assertions):
+$(cat $prev)
+Defect descriptions: $(cat $G/confirmed.jsonl | head -c 8000)
+$( [ -f $G/confirmed_untestable.jsonl ] && echo "Also resolve these confirmed (untestable) defects: $(cat $G/confirmed_untestable.jsonl)" )
+Every other listed test currently passes and must keep passing: $ALLT
+$( [ -n "$DROPNOTE" ] && echo "$DROPNOTE" )
+LINT: before committing, run `uv run ruff format` and `uv run ruff check --fix` on every file you added or changed, INCLUDING the gate test files, and keep them free of inline comments; merged gate tests that failed lint turned lake main red. NEVER stop to ask a question and never end without pushing if any listed defect is fixable: fix everything satisfiable, commit, push. If a listed gate test is self-contradictory or asserts behaviour the task never asked for, do NOT weaken or delete it yourself; instead end your final message with one line per such test file: \`UNSATISFIABLE: <path/to/test_file.py> - <one-line reason>\`. An independent judge decides; only judge-rejected tests are removed.
+Rules: change product code until all of the above pass; run them (memory-capped: systemd-run --user --scope -q -p MemoryMax=6G -p MemorySwapMax=0 uv run pytest -q <files>, from the package dir). Touch nothing unrelated. Commit (never --no-verify; SKIP only a named hook that fails on baseline debt outside your diff) and push. Final message: new head sha and test results.
+Task spec (context): $(echo "$TASK" | head -c 6000)
+EOP
+  agent gatefix$round-$LANE $FW $G/fix$round.md 250 >/dev/null 2>&1
+  new=$(gh pr view $PR -R $SLUG --json headRefOid --jq .headRefOid)
+  DROPNOTE=""; unsat=$(grep -oE 'UNSATISFIABLE: [^ ]+\.py' $R/gatefix$round-$LANE.out 2>/dev/null | awk '{print $2}' | sort -u)
+  if [ -n "$unsat" ]; then
+    { echo "Adjudicate gate tests a fixer called unsatisfiable, for PR #$PR ($SLUG) at ${new:0:9} (read-only; worktree $WT, run git fetch). Task spec: $(echo "$TASK" | head -c 4000)"
+      echo "Fixer's reasons: $(grep -E 'UNSATISFIABLE:' $R/gatefix$round-$LANE.out | head -c 4000)"
+      for u in $unsat; do echo "===== $u"; cat $FW/$u 2>/dev/null | head -c 6000; done
+      echo 'For each file decide DROP only if the test contradicts the task spec or another confirmed test, or asserts behaviour nobody asked for (overfit); otherwise KEEP (a real defect the fixer must still fix). Final answer: exactly one fenced json block: ```json {"drop":["path"],"keep":["path"],"why":{"path":"..."}} ```'; } > $G/adj$round.md
+    agent gate-adj$round-$LANE $WT $G/adj$round.md 120 >/dev/null 2>&1
+    drop=$(extract $R/gate-adj$round-$LANE.out | python3 -c "import json,sys; print(' '.join(json.load(sys.stdin).get('drop',[])))" 2>/dev/null)
+    if [ -n "$drop" ]; then
+      for d in $drop; do ALLT=$(echo " $ALLT " | sed "s# $d # #g"); grep -v "^$d" $prev > $prev.k; mv $prev.k $prev; done
+      DROPNOTE="Delete these gate test files (an independent judge rejected them as overfit/contradictory): $drop"
+      st "round $round: judge dropped overfit gate tests: $drop"
+    else st "round $round: judge kept all tests the fixer called unsatisfiable"; fi
+  fi
+  if [ "$new" = "$cur" ]; then
+    if [ -n "$DROPNOTE" ] && [ $round -lt $MAXR ]; then st "round $round: no push, but tests were adjudicated; another round"; continue; fi
+    outcome="no-push"; st "round $round: fixer pushed nothing"; break
+  fi
+  RW=$G/re$round; git -C $BASE fetch -q origin; wtadd $RW $new || { st "NEEDS-ESCALATION cannot create recheck worktree (base $BASE)"; exit 2; }
+  runall $RW $G/fail.$round; rrc=$?
+  if [ $rrc -ge 2 ]; then outcome="tests-broken"; st "round $round: tests could not run at ${new:0:9}"; break; fi
+  nf=$(wc -l < $G/fail.$round); fixed=$(comm -23 $prev $G/fail.$round | wc -l); newf=$(comm -13 $prev $G/fail.$round | wc -l); np=$(wc -l < $prev)
+  printf "%s\t%s\t%s\t%s\t%s\n" $round ${new:0:9} $nf $fixed $newf >> $G/rounds.tsv
+  st "round $round @${new:0:9}: failing $np -> $nf (fixed $fixed, new $newf)"
+  ( flock 200; git -C $BASE worktree remove --force $FW 2>/dev/null ) 200>$F/locks/wt-$REPO.lock; ( flock 200; git -C $BASE worktree remove --force $RW 2>/dev/null ) 200>$F/locks/wt-$REPO.lock
+  cur=$new
+  if [ $nf = 0 ]; then
+    # judge-rejected gate test files still sit in the branch: one more round deletes them before approval
+    if [ -n "$DROPNOTE" ] && [ $round -lt $MAXR ]; then prev=$G/fail.$round; continue; fi
+    outcome="converged"; break
+  fi
+  # Net progress continues (new failures go into the next round's list); stalled = the failing set did not shrink.
+  # 19 -> 8 with one new failure was escalated as "stalled" under the old any-new-failure rule.
+  if [ $nf -ge $np ]; then outcome="stalled"; break; fi
+  prev=$G/fail.$round
+done
+[ -z "$outcome" ] && outcome="cap"
+if [ "$outcome" = converged ] && [ $NU -gt 0 ]; then
+  cat > $G/judge2.md <<EOP
+Recheck for PR #$PR in $SLUG at ${cur:0:9} (read-only; use a fresh \`git fetch\` and inspect \`git diff $HEAD0 $cur\`). These blockers were ruled real earlier and had no test: $(cat $G/confirmed_untestable.jsonl)
+For each: is it resolved now? Report only unresolved ones.
+Final answer: exactly one fenced json block: \`\`\`json {"unresolved":[{"id":"...","reason":"..."}]} \`\`\`
+EOP
+  judge gate-j2-$LANE $WT $G/judge2.md
+  if [ "${GATE_JUDGE:-cmd}" != grok ] && ! alive rev-gate-j2-$LANE; then judge gate-j2-$LANE $WT $G/judge2.md; alive rev-gate-j2-$LANE || { dead "judge2"; fail_closed; }; fi
+  u=$(extract $R/gate-j2-$LANE.out | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('unresolved',[])))" 2>/dev/null || echo 1)
+  [ "$u" = 0 ] || outcome="untestable-unresolved"; st "recheck judge: unresolved=$u"
+fi
+metric lane $LANE pr $PR candidates $nc confirmed $NC untestable_real $NU rejected "$(grep -c '^REJECTED\|^DISCARDED' $G/log)" rounds $round outcome $outcome failing_by_round "$(cut -f3 $G/rounds.tsv | tail -n +2 | tr '\n' ',')"
+[ "$outcome" = converged ] && approve
+st "NEEDS-ESCALATION ($outcome after $round round(s); failing by round: $(cut -f3 $G/rounds.tsv | tail -n +2 | tr '\n' ' '); see $G/rounds.tsv)"; exit 4
