@@ -36,6 +36,21 @@ def _spec(args: argparse.Namespace) -> ExecutorSpec:
     return load_executor_spec(Path(path) if path else None)
 
 
+def _spec_or_error(args: argparse.Namespace) -> ExecutorSpec | int:
+    """The executor settings, or the exit code to report a malformed block.
+
+    Every ``fleet merge`` subcommand reads the same strictly-validated block, so
+    the conversion from ``ValueError`` to ``error: ...`` + exit 2 belongs here
+    rather than in each command: a subcommand that forgets it prints a Python
+    traceback at an operator who only mistyped a key.
+    """
+    try:
+        return _spec(args)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+
 def _make_run_log(run_id: str) -> EventSink | None:
     """A RunLog for this tick, or ``None`` when observability is unavailable.
 
@@ -55,11 +70,9 @@ def cmd_merge_run(args: argparse.Namespace) -> int:
     from agent_fleet.merge_plan.execute import run_tick
 
     config_path = getattr(args, "config", None)
-    try:
-        spec = _spec(args)
-    except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
+    spec = _spec_or_error(args)
+    if isinstance(spec, int):
+        return spec
 
     repo_specs = list(args.repo_path or [])
     if not repo_specs and not _has_configured_repos(config_path):
@@ -153,7 +166,9 @@ def cmd_merge_holds(args: argparse.Namespace) -> int:
     """Show which cluster holds are active and which have been released."""
     from agent_fleet.merge_plan.execute import load_ledger
 
-    spec = _spec(args)
+    spec = _spec_or_error(args)
+    if isinstance(spec, int):
+        return spec
     ledger = load_ledger(spec)
     active = ledger.active_holds(spec)
     released = sorted(ledger.released_holds())
@@ -184,7 +199,9 @@ def cmd_merge_release(args: argparse.Namespace) -> int:
     """Clear a named cluster hold so its lanes merge again."""
     from agent_fleet.merge_plan.execute import release_hold
 
-    spec = _spec(args)
+    spec = _spec_or_error(args)
+    if isinstance(spec, int):
+        return spec
     known = {h.name for h in spec.holds}
     if args.hold not in known:
         known_list = ", ".join(sorted(known)) or "(none configured)"

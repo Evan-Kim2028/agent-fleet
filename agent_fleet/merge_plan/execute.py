@@ -32,7 +32,9 @@ import fcntl
 import json
 import os
 import shlex
+import signal
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,6 +56,7 @@ from agent_fleet.merge_plan.types import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+    from typing import IO
 
 
 class PRReader(Protocol):
@@ -138,6 +141,11 @@ class BatchOutcome:
     merged_sha: str = ""
     commands: tuple[str, ...] = ()
     lane: str = ""
+
+    @property
+    def pr_numbers(self) -> tuple[int, ...]:
+        """Alias for :attr:`prs`, so an outcome reads naturally either way."""
+        return self.prs
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -469,6 +477,34 @@ class HoldLedger:
         data["groups"] = groups
         self._write(data)
 
+    def pending_deploy(self, batch_key: str) -> dict[str, Any]:
+        """The recorded half-shipped batch for *batch_key*, or ``{}``."""
+        pending = self._read().get("pending_deploys")
+        if not isinstance(pending, dict):
+            return {}
+        entry = pending.get(batch_key)
+        return entry if isinstance(entry, dict) else {}
+
+    def record_pending_deploy(self, *, batch_key: str, repo: str, merge_sha: str) -> None:
+        """Record that a batch merged but its deploy did not succeed."""
+        data = self._read()
+        pending = data.get("pending_deploys")
+        if not isinstance(pending, dict):
+            pending = {}
+        pending[batch_key] = {"repo": repo, "merge_sha": merge_sha, "at": time.time()}
+        data["pending_deploys"] = pending
+        self._write(data)
+
+    def clear_pending_deploy(self, batch_key: str) -> None:
+        """Drop the record once the deploy and verify commands have succeeded."""
+        data = self._read()
+        pending = data.get("pending_deploys")
+        if not isinstance(pending, dict) or batch_key not in pending:
+            return
+        del pending[batch_key]
+        data["pending_deploys"] = pending
+        self._write(data)
+
 
 def load_ledger(spec: ExecutorSpec) -> HoldLedger:
     return HoldLedger(Path(spec.state_dir).expanduser() / "ledger.json")
@@ -514,6 +550,40 @@ def command_argv(template: str, **fields: str) -> list[str]:
     return shlex.split(render_command(template, **fields))
 
 
+#: How long a command's output is still collected after it exits.  A command
+#: that backgrounds work leaves a grandchild holding the inherited pipe write
+#: ends, so waiting for EOF on them is not bounded by the command's lifetime.
+#: The wait is therefore capped, and the ceiling stays the ceiling.
+_PIPE_DRAIN_GRACE_SECONDS = 1.0
+
+
+def _drain_streams(streams: Sequence[IO[str] | None]) -> list[str]:
+    """Read every stream to EOF, on a worker thread the caller can abandon."""
+    out: list[str] = []
+    for stream in streams:
+        if stream is None:
+            out.append("")
+            continue
+        try:
+            out.append(stream.read())
+        except OSError, ValueError:
+            out.append("")
+    return out
+
+
+def _kill_process_group(proc: subprocess.Popen[str]) -> None:
+    """Kill the command we started, and nothing else.
+
+    ``start_new_session=True`` gave it its own process group, so this reaches
+    the children a merge script backgrounds without ever touching a pid this
+    executor did not create.
+    """
+    with contextlib.suppress(OSError, ProcessLookupError):
+        os.killpg(proc.pid, signal.SIGKILL)
+    with contextlib.suppress(OSError, ProcessLookupError):
+        proc.kill()
+
+
 def _run_command(
     argv: Sequence[str],
     *,
@@ -521,7 +591,17 @@ def _run_command(
     timeout: int,
     dry_run: bool,
 ) -> CommandResult:
-    """Run one command, killing only the pid we create if it overruns."""
+    """Run one command, killing only the pid we create if it overruns.
+
+    *cwd* is expanded first, because the documented config form is
+    ``path: ~/Documents/<repo>`` and ``Popen`` performs no tilde expansion: the
+    raw string fails the spawn and every command returns rc=127.
+
+    The timeout is a real ceiling.  Waiting for the pipe to close would let a
+    backgrounded grandchild hold the executor for its whole remaining
+    lifetime, so output is collected on a thread that is given a bounded grace
+    period and then dropped, while the process itself is reaped immediately.
+    """
     args = tuple(argv)
     if dry_run:
         return CommandResult(argv=args, returncode=0, dry_run=True)
@@ -530,28 +610,34 @@ def _run_command(
     try:
         proc = subprocess.Popen(
             list(args),
-            cwd=cwd,
+            cwd=str(Path(cwd).expanduser()) if cwd else None,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            start_new_session=True,
         )
     except (OSError, ValueError) as exc:
         return CommandResult(argv=args, returncode=127, stderr=str(exc))
-    try:
-        stdout, stderr = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.kill()  # only the pid started on the line above
-        stdout, stderr = proc.communicate()
-        return CommandResult(
-            argv=args,
-            returncode=TIMEOUT_EXIT_CODE,
-            stdout=stdout or "",
-            stderr=stderr or "",
-            timed_out=True,
-        )
-    return CommandResult(
-        argv=args, returncode=proc.returncode, stdout=stdout or "", stderr=stderr or ""
+
+    collected: list[str] = []
+    reader = threading.Thread(
+        target=lambda: collected.extend(_drain_streams([proc.stdout, proc.stderr])),
+        daemon=True,
+        name="merge-command-output",
     )
+    reader.start()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_process_group(proc)
+        with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+            proc.wait(timeout=_PIPE_DRAIN_GRACE_SECONDS)
+        reader.join(_PIPE_DRAIN_GRACE_SECONDS)
+        return CommandResult(argv=args, returncode=TIMEOUT_EXIT_CODE, timed_out=True)
+
+    reader.join(_PIPE_DRAIN_GRACE_SECONDS)
+    stdout, stderr = ([*collected, "", ""])[:2]
+    return CommandResult(argv=args, returncode=proc.returncode, stdout=stdout, stderr=stderr)
 
 
 class _Emitter:
@@ -744,15 +830,16 @@ class _ServedState:
 
     Two different questions, deliberately kept apart:
 
-    * *Who went last* (persisted across ticks) drives **turn taking** -- the repo
-      that just deployed yields to its peer, so a repo with constant work can
-      never starve one with a single batch ready.
+    * *Who went last* (persisted across ticks) is the group's history: it names
+      the repo that most recently deployed, and it is what tells an operator
+      why a group is where it is.
     * *Who ran in this tick* (in memory only) drives **exclusion** -- two repos
       in one group must never deploy inside the same tick, whatever order the
       plan produced.
 
     Conflating them deadlocks the group: reading a peer's previous turn as
-    "it ran this tick" would hold every repo forever after the first merge.
+    "it ran this tick" would hold every repo forever after the first merge,
+    which is why the second question is never answered from the first.
     """
 
     def __init__(self, ledger: HoldLedger) -> None:
@@ -760,6 +847,19 @@ class _ServedState:
         self._last: dict[str, str] = {}
         self._hold_until: dict[str, float] = {}
         self._served_this_tick: dict[str, str] = {}
+        self._planned: dict[str, set[str]] = {}
+
+    def note_planned(self, groups: Sequence[Sequence[str]], repos: Sequence[str]) -> None:
+        """Record which of *repos* each group expects to serve this tick.
+
+        Called once for the whole plan, before the first batch runs, so the
+        group is judged on the peers it is *about* to serve and not on the ones
+        the plan happened to order first.  A repo that is present but gets held
+        by policy still counts as having work waiting, which is what makes the
+        turn it is owed worth handing over.
+        """
+        for group in groups:
+            self._planned.setdefault(self._key(group), set()).update(repos)
 
     def prime(self, groups: Sequence[Sequence[str]]) -> None:
         """Load the persisted state for every group this tick might touch."""
@@ -779,16 +879,142 @@ class _ServedState:
         key = self._key(group)
         return self._hold_until.get(key, 0.0), self._last.get(key, "")
 
-    def peer_served_this_tick(self, group: Sequence[str], repo: str) -> str:
-        """The peer of *repo* that already ran in this tick, or ``""``."""
-        served = self._served_this_tick.get(self._key(group), "")
-        return served if served and served != repo else ""
+    def planned_repos(self, group: Sequence[str]) -> set[str]:
+        """The group members this tick's plan is ready to serve."""
+        return self._planned.get(self._key(group), set())
+
+    def served_this_tick(self, group: Sequence[str]) -> str:
+        """The group member that already deployed in this tick, or ``""``."""
+        return self._served_this_tick.get(self._key(group), "")
 
     def record(self, *, group: Sequence[str], repo: str, hold_until: float) -> None:
         key = self._key(group)
         self._last[key] = repo
         self._hold_until[key] = hold_until
         self._served_this_tick[key] = repo
+
+
+def _group_block(
+    batch: Batch,
+    *,
+    spec: ExecutorSpec,
+    served: _ServedState,
+    now: Callable[[], float],
+) -> BatchOutcome | None:
+    """Why *batch* may not deploy right now, or ``None`` when it may.
+
+    The decision is about the **group**, not about the repo asking, so a repo
+    can never spend another repo's turn and a group's schedule never depends on
+    the order the plan happened to put batches in.  Three rules, all of them
+    group-wide:
+
+    * the post-merge quiet period is the group's, and gates every member;
+    * two repos of one group never deploy inside the same tick.  A repo is not
+      excluded by its own earlier batch: exclusivity is about *peers* sharing a
+      deploy surface, and a repo draining its own queue touches nothing else;
+    * turn taking -- whoever went last yields.
+
+    The one that took the most care is the third.  A turn can only be handed to
+    a peer that is *here*, so the group looks at the plan rather than at the
+    order the batches happen to arrive in: a peer listed after the batch asking
+    the question still counts as waiting, which is what stops a busy repo from
+    spending the whole tick draining its queue ahead of it.  And a peer that is
+    absent has no turn to take, so waiting for one is not fairness, it is a
+    permanent self-inflicted deadlock -- a repo with a steady approved queue
+    would be held on every future tick with nothing ever merging.  Nobody holds
+    out for a peer that is not there.
+
+    A batch that breaks more than one rule says so in one line, so a repo held
+    by the quiet period and by its peer's turn reads as both rather than as
+    whichever rule happened to be checked first.
+    """
+    repo = batch.repo
+    group = spec.group_for(repo)
+    if not group:
+        return None
+    pr_numbers = tuple(p.pr_number for p in batch.prs)
+    lane = batch.prs[0].lane if batch.prs else ""
+    name = "+".join(group)
+
+    reasons: list[str] = []
+    hold_until, last = served.snapshot(group)
+    if hold_until > now():
+        reasons.append(f"post-merge hold for {name} until {int(hold_until - now())}s")
+
+    served_now = served.served_this_tick(group)
+    if served_now and served_now != repo:
+        # Whose turn it is, in the group's own terms: when the repo that just
+        # deployed is also the one that went last, the turn it used came from
+        # the group and the group owes it to this repo next time.
+        if last == served_now:
+            reasons.append(f"exclusive group {name}: {served_now} went last, {repo} has the turn")
+        else:
+            reasons.append(f"exclusive group {name}: {served_now} already deployed this tick")
+
+    if last == repo and served.planned_repos(group) - {repo}:
+        # The group owes a turn and a peer in this plan can take it.  This is
+        # what keeps an idle peer from holding a busy repo forever: with no
+        # peer here, the group takes the turn back and the queue ships.
+        waiting = sorted(served.planned_repos(group) - {repo})
+        reasons.append(f"exclusive group {name}: {repo} went last, {waiting[0]} has the turn")
+
+    if not reasons:
+        return None
+    return BatchOutcome(batch.index, repo, "held", "; ".join(reasons), pr_numbers, lane=lane)
+
+
+def _batch_key(repo: str, deploy_unit: str, prs: Sequence[ApprovedPR]) -> str:
+    """A stable identity for one batch, so a retry recognises its own work."""
+    numbers = ",".join(str(p.pr_number) for p in prs)
+    return f"{repo}|{deploy_unit}|{numbers}"
+
+
+def _retry_half_shipped(
+    batch: Batch,
+    *,
+    spec: ExecutorSpec,
+    repo_spec: RepoSpec,
+    ledger: HoldLedger,
+    emit: _Emitter,
+    dry_run: bool,
+) -> BatchOutcome | None:
+    """Finish a batch whose merge landed but whose deploy did not, or ``None``.
+
+    GitHub says a merged PR is ``MERGED`` forever, so a batch that merged and
+    then failed to deploy is never eligible again.  Every later tick reported
+    it ``skipped (already merged)`` with exit code 0: the work was on main,
+    production never saw it, and the queue looked perfectly healthy.  A queue
+    that stops moving has to say why, so the executor remembers the one fact
+    GitHub does not -- that this batch's deploy is still owed -- and retries it.
+    """
+    repo = batch.repo
+    pr_numbers = tuple(p.pr_number for p in batch.prs)
+    lane = batch.prs[0].lane if batch.prs else ""
+    key = _batch_key(repo, batch.deploy_unit, batch.prs)
+
+    if dry_run:
+        return None
+
+    outstanding = ledger.pending_deploy(key)
+    if not outstanding:
+        return None
+    merge_sha = str(outstanding.get("merge_sha") or "")
+    emit("merge.deploy_retry", repo=repo, batch=batch.index, merge_sha=merge_sha)
+    return _deploy_and_verify(
+        batch,
+        repo=repo,
+        pr_numbers=pr_numbers,
+        lane=lane,
+        conflicting=(),
+        spec=spec,
+        repo_spec=repo_spec,
+        emit=emit,
+        dry_run=dry_run,
+        merged_sha=merge_sha,
+        runnable=[],
+        ledger=ledger,
+        pending_key=key,
+    )
 
 
 def _process_batch(
@@ -835,42 +1061,10 @@ def _process_batch(
                 lane=lane,
             )
 
-    group = spec.group_for(repo)
-    if group:
-        hold_until, last = served.snapshot(group)
-        if hold_until > now():
-            return BatchOutcome(
-                batch.index,
-                repo,
-                "held",
-                f"post-merge hold for {group[0]}+ until {int(hold_until - now())}s",
-                pr_numbers,
-                lane=lane,
-            )
-        if last == repo:
-            # Strict alternation: whoever went last yields, so a repo with
-            # constant work cannot starve a peer that has one batch ready.
-            return BatchOutcome(
-                batch.index,
-                repo,
-                "held",
-                f"exclusive group {'+'.join(group)}: {repo} went last",
-                pr_numbers,
-                lane=lane,
-            )
-        peer = served.peer_served_this_tick(group, repo)
-        if peer:
-            # A peer of this group already deployed in this tick. Two repos in
-            # one exclusive group must never overlap, whatever order the plan
-            # produced, so the loser yields to the next tick.
-            return BatchOutcome(
-                batch.index,
-                repo,
-                "held",
-                f"exclusive group {'+'.join(group)}: {peer} already deployed this tick",
-                pr_numbers,
-                lane=lane,
-            )
+    block = _group_block(batch, spec=spec, served=served, now=now)
+    if block is not None:
+        emit("merge.held", repo=repo, batch=batch.index, reason=block.detail, prs=list(pr_numbers))
+        return block
 
     lock = deploy_lock_for(Path(spec.state_dir).expanduser(), repo)
     if dry_run:
@@ -929,6 +1123,18 @@ def _run_batch(
     pr_numbers = tuple(p.pr_number for p in batch.prs)
     lane = batch.prs[0].lane if batch.prs else ""
     repo_path = Path(repo_spec.path).expanduser() if repo_spec.path else None
+
+    half_shipped = _retry_half_shipped(
+        batch,
+        spec=spec,
+        repo_spec=repo_spec,
+        ledger=ledger,
+        emit=emit,
+        dry_run=dry_run,
+    )
+    if half_shipped is not None:
+        return half_shipped
+
     mergeable, conflicting, skipped = _partition_prs(batch.prs, client=client, repo_path=repo_path)
 
     rebase_commands: list[str] = []
@@ -1020,6 +1226,74 @@ def _run_batch(
         merge_sha=merged_sha,
     )
 
+    # The key names the batch as planned, not the subset that merged, so a
+    # later tick recognises the same work even when a conflicting PR was
+    # dropped from it.
+    pending_key = _batch_key(repo, batch.deploy_unit, batch.prs)
+    if not dry_run:
+        # The merge is on main from this moment on, and GitHub will report
+        # these PRs MERGED for good.  Remember that their deploy is still owed
+        # *before* running it, so a deploy that dies cannot take the record of
+        # the failure with it.
+        ledger.record_pending_deploy(batch_key=pending_key, repo=repo, merge_sha=merged_sha)
+
+    # The group advances when the merge lands, not when the deploy finishes:
+    # a peer must not start deploying the same surface while this deploy is
+    # still in flight, and the merge is the event that put the group at risk.
+    group = spec.group_for(repo)
+    if group:
+        hold_until = now() + spec.post_merge_hold_seconds
+        served.record(group=group, repo=repo, hold_until=hold_until)
+        if not dry_run:
+            # A dry run merges nothing, so nothing durable may move: writing the
+            # ledger would hand the group a turn for a merge that never
+            # happened and hold the peer for a window that protects nothing.
+            # The in-memory turn still advances, because reporting what the real
+            # run would do means reporting which repo it would hold back.
+            ledger.record_served(group=group, repo=repo, hold_until=hold_until)
+
+    return _deploy_and_verify(
+        batch,
+        repo=repo,
+        pr_numbers=tuple(p.pr_number for p in mergeable),
+        lane=lane,
+        conflicting=conflicting,
+        spec=spec,
+        repo_spec=repo_spec,
+        emit=emit,
+        dry_run=dry_run,
+        merged_sha=merged_sha,
+        runnable=runnable,
+        rebase_commands=rebase_commands,
+        ledger=ledger,
+        pending_key=pending_key,
+    )
+
+
+def _deploy_and_verify(
+    batch: Batch,
+    *,
+    repo: str,
+    pr_numbers: tuple[int, ...],
+    lane: str,
+    conflicting: Sequence[ApprovedPR],
+    spec: ExecutorSpec,
+    repo_spec: RepoSpec,
+    emit: _Emitter,
+    dry_run: bool,
+    merged_sha: str,
+    runnable: list[str],
+    ledger: HoldLedger,
+    pending_key: str,
+    rebase_commands: Sequence[str] = (),
+) -> BatchOutcome:
+    """Run the repo's deploy then verify commands for a merged batch.
+
+    Shared by the merge path and the retry path, because a half-shipped batch
+    is finished by exactly the commands a whole batch would have run.  Returns
+    a ``failed`` outcome, keeping the pending record, as soon as one of them
+    fails; on success it clears the record so the batch is not retried forever.
+    """
     for template, event in (
         (repo_spec.deploy_template, "merge.deployed"),
         (repo_spec.verify_template, "merge.verified"),
@@ -1030,7 +1304,7 @@ def _run_batch(
             template,
             merge_sha=merged_sha,
             repo=repo,
-            pr_args=" ".join(f"{p.pr_number}:{p.sha9}" for p in mergeable),
+            pr_args=" ".join(f"{p.pr_number}:{p.sha9}" for p in batch.prs),
         )
         result = _run_command(
             argv,
@@ -1054,7 +1328,7 @@ def _run_batch(
                 repo,
                 "failed",
                 f"{event} command rc={result.returncode}",
-                tuple(p.pr_number for p in mergeable),
+                pr_numbers,
                 needs_rebase=tuple(p.pr_number for p in conflicting),
                 merged_sha=merged_sha,
                 commands=(*rebase_commands, *runnable),
@@ -1062,18 +1336,14 @@ def _run_batch(
             )
         emit(event, repo=repo, batch=batch.index, merge_sha=merged_sha)
 
-    group = spec.group_for(repo)
-    if group:
-        hold_until = now() + spec.post_merge_hold_seconds
-        served.record(group=group, repo=repo, hold_until=hold_until)
-        ledger.record_served(group=group, repo=repo, hold_until=hold_until)
-
+    if not dry_run:
+        ledger.clear_pending_deploy(pending_key)
     return BatchOutcome(
         batch.index,
         repo,
         "merged",
-        f"{len(mergeable)} PR(s) merged at {merged_sha[:9]}" if merged_sha else "merged",
-        tuple(p.pr_number for p in mergeable),
+        f"{len(batch.prs)} PR(s) merged at {merged_sha[:9]}" if merged_sha else "merged",
+        pr_numbers,
         needs_rebase=tuple(p.pr_number for p in conflicting),
         merged_sha=merged_sha,
         commands=(*rebase_commands, *runnable),
@@ -1156,6 +1426,7 @@ def run_tick(
     ledger = load_ledger(resolved_specs)
     served = _ServedState(ledger)
     served.prime(resolved_specs.exclusive_groups)
+    served.note_planned(resolved_specs.exclusive_groups, [b.repo for b in plan.batches])
     outcomes: list[BatchOutcome] = []
     for batch in plan.batches:
         outcomes.append(

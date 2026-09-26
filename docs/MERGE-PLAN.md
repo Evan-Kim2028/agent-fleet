@@ -268,7 +268,10 @@ after the merge. A repo with no merge template at all is reported as
 
 Commands are `shlex`-split and executed **without a shell**, so a template can
 quote its arguments but can never be re-interpreted. A command that overruns
-`command_timeout_seconds` is killed by the pid the executor started.
+`command_timeout_seconds` is killed, along with the children it backgrounded, by
+the process group the executor started for it — never by any other pid. Output
+collection is bounded separately, so a command that leaves a grandchild holding
+the pipe cannot hold the executor open past the ceiling.
 
 ### Why the deploy lock is not a marker file
 
@@ -332,9 +335,37 @@ merge_plan:
 Two different rules, deliberately kept apart:
 
 * **Exclusion** — at most one repo per group deploys in a single tick, whatever
-  order the plan produced. The loser is reported `held` and goes next tick.
+  order the plan produced. The loser is reported `held` and goes next tick. A
+  repo is not excluded by its *own* earlier batch: it is sharing the deploy
+  surface with a peer, not with itself, so a repo drains its own queue in one
+  tick.
 * **Turn taking** — the repo that deployed last yields to its peer, so a repo
-  with constant work cannot starve one with a single batch ready.
+  with constant work cannot starve one with a single batch ready. A turn is
+  only ever owed to a peer that is *in the plan*: a peer with no batch has no
+  turn to take, and holding the busy repo for one that never comes is a
+  self-inflicted deadlock, not fairness. The group looks at the whole plan
+  rather than at batch order, so a peer listed after the batch asking still
+  counts as waiting.
+
+A batch that breaks more than one rule says so in one line, e.g.:
+
+```
+[HELD] silphcoanalytics #2 (batch 1)  post-merge hold for lake-of-rage+silphcoanalytics until 300s; exclusive group lake-of-rage+silphcoanalytics: lake-of-rage went last, silphcoanalytics has the turn
+```
+
+A `--dry-run` reports those same outcomes without moving any of them: it runs
+no command, takes no lock, and writes nothing to the ledger, so previewing a
+config change cannot consume a group's turn or hold its peer.
+
+### A merge that landed but never deployed
+
+GitHub reports a merged PR as `MERGED` forever, so a batch whose merge landed
+and whose deploy then failed is never eligible again — every later tick saw
+"already merged", reported `skipped`, and exited 0 while production had never
+seen the work. The executor therefore records, before running the deploy, that
+this batch's deploy is still owed, and retries it on the next tick. The record
+is the one fact GitHub does not keep; it is dropped as soon as the deploy and
+verify commands both succeed, so nothing is retried forever.
 
 ### Cluster holds
 
