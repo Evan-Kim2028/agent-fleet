@@ -224,14 +224,18 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
     landed train is one deploy, and the operator decides that.  ``--dry-run``
     prints what would run and reports nothing as landed.
 
-    Two things are decided *before* the base branch is, and both of them decide
-    whether there is a batch at all.  The batch is the first eligible PRs in
-    fold order, and the active cluster holds are consulted against it — the same
-    ledger and the same matcher ``merge run`` uses, so a freeze declared for
-    ``merge run`` is a freeze for the train too.  Resolving the branch over a
-    different set than the one that runs would mean asking the batch a question
-    it is not the one being asked, which is how a folded-onto and a landed-onto
-    branch drift apart.
+    Three things are decided *before* the base branch is, and each of them
+    decides whether there is a batch at all.  The batch is the first eligible
+    PRs in fold order, and the active cluster holds are consulted against it —
+    the same ledger and the same matcher ``merge run`` uses, so a freeze
+    declared for ``merge run`` is a freeze for the train too.  Resolving the
+    branch over a different set than the one that runs would mean asking the
+    batch a question it is not the one being asked, which is how a folded-onto
+    and a landed-onto branch drift apart.  Last of the three, a branch the
+    operator or fleet.yaml declared that the batch contradicts is refused: a
+    declared branch outranks the repository, so a stale one is folded onto as
+    typed while ``gh pr merge`` lands into the base each PR actually targets —
+    a green verdict for a tree no PR will ever merge as.
     """
     from agent_fleet.merge_plan.collect import (
         GitHubClient,
@@ -240,7 +244,6 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
         dedupe_approvals,
     )
     from agent_fleet.merge_plan.config import (
-        resolve_train_base_branch,
         resolve_train_repo_name,
     )
     from agent_fleet.merge_plan.plan import normalize_repo
@@ -317,11 +320,15 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
         print(held, file=sys.stderr)
         return 1
 
+    drift = _base_branch_drift(batch, configured=_configured_base(args, repo, config_path))
+    if drift is not None:
+        print(drift, file=sys.stderr)
+        return 2
+
     try:
         base_branch = resolve_base_branch(
             repo_path,
-            configured=getattr(args, "base_branch", "")
-            or resolve_train_base_branch(repo, Path(config_path) if config_path else None),
+            configured=_configured_base(args, repo, config_path),
             prs=batch,
         )
     except (OSError, ValueError) as exc:
@@ -368,6 +375,56 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
         json.dumps(result.to_dict(), indent=2, default=str) if args.json else result.render_text()
     )
     return 0 if result.landed else 1
+
+
+def _configured_base(args: argparse.Namespace, repo: str, config_path: str | None) -> str:
+    """The branch the operator or fleet.yaml declares this train folds onto.
+
+    An operator's ``--base-branch`` is an instruction and fleet.yaml's
+    ``base_branch`` is a declaration, so the flag wins; the config answers for
+    every run that did not pass one.  Read through the same resolution the run
+    itself uses, so the drift check and the fold are looking at one branch and
+    not two answers to the same question.
+    """
+    from agent_fleet.merge_plan.config import resolve_train_base_branch
+
+    return getattr(args, "base_branch", "") or resolve_train_base_branch(
+        repo, Path(config_path) if config_path else None
+    )
+
+
+def _base_branch_drift(batch: Sequence[TrainPR], *, configured: str) -> str | None:
+    """Why the configured base is not a branch this batch merges into, or ``None``.
+
+    A configured branch outranks anything read off the repository, so a stale
+    ``merge_plan.repos[].base_branch`` is folded onto exactly as typed.  But
+    ``gh pr merge`` merges each PR into the base GitHub says it targets, so the
+    two only agree while they are the same branch: fold onto ``develop`` a batch
+    that targets ``main`` and the whole run is tested against a tree that will
+    never be the tree that lands, then every PR lands anyway.  A green verdict
+    over a combination no PR will ever merge as is worse than a refusal, because
+    it looks like the work was checked.
+
+    Only the batch's roots are asked (:func:`stack_roots`), for the same reason
+    the base resolution asks them: a stacked PR's base names a sibling in the
+    same batch, not a branch this run merges into.  A batch with no declared
+    bases at all is not contradicted by anything, so it is left to the fold to
+    answer, and so is a run that configured no branch of its own.
+    """
+    from agent_fleet.merge_plan.train import names_of, stack_roots
+
+    declared = {pr.base_ref for pr in stack_roots(batch) if pr.base_ref.strip()}
+    if not configured.strip() or len(declared) != 1:
+        return None
+    (base,) = declared
+    if base == configured.strip():
+        return None
+    return (
+        f"error: configured base branch {configured.strip()!r} is not the branch this batch "
+        f"merges into ({base!r}): the train would fold and test onto "
+        f"origin/{configured.strip()} and land into {base}. Fix the base branch for "
+        f"{names_of(tuple(sorted(pr.number for pr in batch)))} or rebase the PRs"
+    )
 
 
 def _held_batch(

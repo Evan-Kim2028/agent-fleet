@@ -932,6 +932,65 @@ def test_the_train_lands_a_batch_on_a_repository_whose_branch_is_develop(
     assert result.base_branch == "develop"
 
 
+def test_a_configured_base_the_batch_contradicts_is_refused_not_folded() -> None:
+    """A stale ``base_branch`` must not test a tree no PR will ever merge as.
+
+    ``gh pr merge`` lands each PR into the base GitHub says it targets, so a
+    fold onto any other branch tests one tree and merges another, and the
+    verdict reads green for a combination that never exists.
+    """
+    from agent_fleet.merge_plan.cli import _base_branch_drift
+
+    prs = [
+        TrainPR(number=1, head_sha="a", base_ref="main", head_branch="feat/one"),
+        TrainPR(number=2, head_sha="b", base_ref="main", head_branch="feat/two"),
+    ]
+
+    drift = _base_branch_drift(prs, configured="develop")
+
+    assert drift is not None, "a batch that all targets main was folded onto develop"
+    assert "develop" in drift and "main" in drift
+
+
+def test_a_configured_base_the_batch_agrees_with_is_left_alone() -> None:
+    """The guard is about disagreement; a matching base is the normal run."""
+    from agent_fleet.merge_plan.cli import _base_branch_drift
+
+    prs = [TrainPR(number=1, head_sha="a", base_ref="main", head_branch="feat/one")]
+
+    assert _base_branch_drift(prs, configured="main") is None
+
+
+def test_a_base_nothing_declares_is_not_drift() -> None:
+    """A PR with no reported base ref is not contradicted; the fold decides.
+
+    Refusing here would stop a train on a repository whose ``gh pr view`` answer
+    carries no ``baseRefName``, which is a missing field, not a conflict.
+    """
+    from agent_fleet.merge_plan.cli import _base_branch_drift
+
+    prs = [TrainPR(number=1, head_sha="a", base_ref="", head_branch="feat/one")]
+
+    assert _base_branch_drift(prs, configured="develop") is None
+
+
+def test_a_stack_is_asked_about_its_roots_not_its_siblings() -> None:
+    """A stacked PR's base names a PR in the batch, not a branch it merges into.
+
+    Asking the whole stack would read ``feat/one`` as a second base branch and
+    refuse a batch that has one perfectly good base.
+    """
+    from agent_fleet.merge_plan.cli import _base_branch_drift
+
+    stack = [
+        TrainPR(number=1, head_sha="a", base_ref="main", head_branch="feat/one"),
+        TrainPR(number=2, head_sha="b", base_ref="feat/one", head_branch="feat/two"),
+    ]
+
+    assert _base_branch_drift(stack, configured="main") is None
+    assert _base_branch_drift(stack, configured="develop") is not None
+
+
 def _repo_on_branch(root: Path, branch: str, *, with_pr: bool = False) -> tuple[Path, str]:
     """A clone of a local ``origin`` on *branch*; with one PR head if *with_pr*.
 
@@ -1534,6 +1593,45 @@ def _status_file(tmp_path: Path, entries: Sequence[tuple[str, str]]) -> Path:
         encoding="utf-8",
     )
     return status
+
+
+def test_a_stale_declared_base_branch_refuses_the_train_before_it_folds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """fleet.yaml saying ``develop`` over a batch that targets ``main`` stops the run.
+
+    This is the drift the claim describes, end to end: the batch is real, the
+    PRs really target ``main``, and a run that folded onto ``develop`` would
+    report a verdict for a tree that merges nowhere.
+    """
+    from agent_fleet.merge_plan import cli as merge_cli
+
+    checkout, head = _repo_on_branch(tmp_path, "main", with_pr=True)
+    config = tmp_path / "fleet.yaml"
+    config.write_text(
+        "merge_plan:\n"
+        "  repos:\n"
+        "    - name: demo\n"
+        "      path: " + str(checkout) + "\n"
+        "      base_branch: develop\n",
+        encoding="utf-8",
+    )
+    status = _status_file(tmp_path, [(1, head)])
+    _real_approvals_in_lanes(monkeypatch, tmp_path / "home", {"demo-lane": (1, head)})
+    monkeypatch.setattr(GitHubClient, "for_repo", _client_reporting({"demo-lane": 1}))
+    run_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "agent_fleet.merge_plan.train.run_train", lambda **kwargs: run_calls.append(kwargs)
+    )
+
+    code = merge_cli.cmd_merge_train(
+        _train_args(checkout, config=config, over={"status_dir": str(status)})
+    )
+
+    assert run_calls == [], "the train folded onto a branch the batch does not merge into"
+    err = capsys.readouterr().err
+    assert "develop" in err and "main" in err
+    assert code == 2
 
 
 def test_an_active_cluster_hold_stops_the_train(
