@@ -50,6 +50,7 @@ from agent_fleet.fleet_ops.dispatch import (
     blocked_lanes,
     classify_status,
     dependency_satisfied,
+    dispatch_dir,
     dispatch_state_path,
     gate_argv,
     lane_process_alive,
@@ -63,6 +64,8 @@ from agent_fleet.fleet_ops.dispatch import (
     render_task_file,
     run_dispatch,
     save_state,
+    status_file_for,
+    task_file_for,
     terminal_refs,
 )
 
@@ -857,7 +860,7 @@ def test_run_dispatch_launches_gates_and_reports_a_summary(tmp_path: Path) -> No
             # A gate writes its verdict to the lane's status file, which is what
             # the dispatcher reads back to classify the run.
             lane = argv[argv.index("--lane") + 1]
-            status = out / "lanes" / f"{lane}.status"
+            status = status_file_for(out, lane)
             status.parent.mkdir(parents=True, exist_ok=True)
             status.write_text("12:00:00 PREMERGE-APPROVED abc1234def\n", encoding="utf-8")
         # The lane works for a poll cycle before exiting; the gate writes its
@@ -952,7 +955,7 @@ def test_run_dispatch_writes_events_namespaced_by_operator(tmp_path: Path) -> No
                 log.write('{"state": "pr_guaranteed", "pr": 9}')
         else:
             lane = argv[argv.index("--lane") + 1] if "--lane" in argv else "x"
-            status = Path(str(out / "lanes" / f"{lane}.status"))
+            status = status_file_for(out, lane)
             status.parent.mkdir(parents=True, exist_ok=True)
             status.write_text("12:00:00 PREMERGE-APPROVED abc1234def\n", encoding="utf-8")
         return _FakeProc(2000, 0)
@@ -1208,7 +1211,7 @@ def test_launching_a_lane_writes_a_task_file_and_a_status_file(tmp_path: Path) -
         sleep=lambda _s: None,
         run_dir=out,
     )
-    assert "do the thing" in (out / "prompts" / "alpha.task.md").read_text(encoding="utf-8")
+    assert "do the thing" in task_file_for(out, "alpha").read_text(encoding="utf-8")
     state = load_state("op")
     assert state.lanes["alpha"].status_file is not None
     assert Path(str(state.lanes["alpha"].status_file)).parent.is_dir()
@@ -1532,4 +1535,4 @@ def test_pure_functions_do_not_touch_the_filesystem() -> None:
     first = plan_tick(state, max_lanes=1, max_gates=1)
     second = plan_tick(state, max_lanes=1, max_gates=1)
     assert first == second
-    assert dispatch_state_path("documents-0e").parent.name == "documents-0e"
+    assert dispatch_state_path("documents-0e").parent.parent == dispatch_dir()

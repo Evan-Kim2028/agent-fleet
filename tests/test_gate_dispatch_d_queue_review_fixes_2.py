@@ -52,6 +52,7 @@ from agent_fleet.fleet_ops.dispatch import (
     load_state,
     read_lane_result,
     run_dispatch,
+    status_file_for,
 )
 from agent_fleet.fleet_ops.runner import LaneRunResult
 
@@ -166,7 +167,7 @@ def test_a_guaranteed_pr_reaches_the_gate_end_to_end(tmp_path: Path) -> None:
             return _Proc(4242, 0, polls=1)
         lane = argv[argv.index("--lane") + 1]
         gated.append(lane)
-        status = out / "lanes" / f"{lane}.status"
+        status = status_file_for(out, lane)
         status.parent.mkdir(parents=True, exist_ok=True)
         status.write_text("12:00:00 PREMERGE-APPROVED abc1234def\n", encoding="utf-8")
         return _Proc(4343, 0)

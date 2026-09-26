@@ -47,6 +47,7 @@ without spawning anything: every test drives ``plan_tick`` with injected state.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -283,6 +284,13 @@ def render_task_file(item: DispatchItem, *, fences: str = "") -> str:
 # ---------------------------------------------------------------- lane records
 
 
+#: Length budget for a :func:`confined_name` component, and the share of it
+#: spent on a digest of the whole untrusted value. Mirrors
+#: :data:`agent_fleet.gate.prompts.SLUG_MAX` / ``SLUG_DIGEST_CHARS``.
+CONFINED_MAX = 48
+CONFINED_DIGEST_CHARS = 12
+
+
 def _slugify(value: str) -> str:
     return "".join(c if c.isalnum() or c in "._-" else "-" for c in value)
 
@@ -296,8 +304,25 @@ def confined_name(value: str) -> str:
     they belong to — including, for an absolute operator, out of
     ``AGENT_FLEET_HOME`` entirely. Every separator becomes ``-``, so the result
     is always exactly one path component under the intended root.
+
+    Folding is not enough on its own, because it is lossy: ``docs/alpha`` and
+    ``docs-alpha`` both fold to ``docs-alpha``, so two lanes in one queue shared
+    a single ``lanes/<name>.status``. Both gates wrote the same file, and the
+    one reaped last stamped *its* verdict over the other's, so an escalated PR
+    was reported ``approved`` and auto-merged. The same collision let one
+    operator read another's ``dispatch/<operator>/state.json``.
+
+    The name therefore carries a digest of the whole *value*, not of the folded
+    form — the same fix :func:`agent_fleet.gate.prompts.lane_slug_token` makes
+    for branch names that pass its length cap. Two values can now only share a
+    path if they are equal, or if they collide in the truncated digest, which is
+    a 48-bit space rather than a certainty.
     """
-    return _slugify(value).strip("-.") or "unnamed"
+    folded = _slugify(value).strip("-.")
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:CONFINED_DIGEST_CHARS]
+    if not folded:
+        return digest
+    return f"{folded[: CONFINED_MAX - CONFINED_DIGEST_CHARS - 1]}-{digest}"
 
 
 def task_file_for(out_root: Path, lane: str) -> Path:

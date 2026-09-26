@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from agent_fleet.fleet_ops import pressure
-from agent_fleet.fleet_ops.dispatch import run_dispatch
+from agent_fleet.fleet_ops.dispatch import run_dispatch, status_file_for
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -107,7 +107,7 @@ def _run_one_gated_lane(
     queue = tmp_path / "q.jsonl"
     queue.write_text(json.dumps({"lane": lane, "repo": "acme", "task": "t"}), encoding="utf-8")
     out = tmp_path / "out"
-    status = out / "lanes" / f"{lane}.status"
+    status = status_file_for(out, lane)
     if stale_status is not None:
         status.parent.mkdir(parents=True, exist_ok=True)
         status.write_text(stale_status, encoding="utf-8")
@@ -279,7 +279,7 @@ def _run_two_gated_lanes(tmp_path: Path) -> tuple[list[str], Any]:
 
         gates_launched.append(argv[argv.index("--lane") + 1])
         # A gate that records its verdict where the dispatcher reads it back.
-        status = out / "lanes" / f"{gates_launched[-1]}.status"
+        status = status_file_for(out, gates_launched[-1])
         status.parent.mkdir(parents=True, exist_ok=True)
         status.write_text("12:00:00 PREMERGE-APPROVED abc1234def\n", encoding="utf-8")
         return _FakeProc(_pid, 0)
