@@ -26,6 +26,8 @@ import os
 import shlex
 import signal
 import subprocess
+import threading
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -104,11 +106,18 @@ def write_notes(repo_path: Path, pr_number: int, text: str) -> Path:
     to nothing the instant the process is killed between the open and the last
     write. A reader therefore sees either the previous notes or the new ones,
     never a half-written file.
+
+    The temp name carries this writer's own identity, not just the pid: a pid is
+    one path per *process*, so two threads of one round-append would share it,
+    and the loser's ``replace`` would fail on a file the winner had already
+    moved away.
     """
     path = pr_notes_path(repo_path, pr_number)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = text if text.endswith("\n") else f"{text}\n"
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp = path.with_name(
+        f"{path.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}.tmp"
+    )
     try:
         with tmp.open("w", encoding="utf-8") as handle:
             handle.write(payload)
@@ -128,27 +137,24 @@ def _append(repo_path: Path, pr_number: int, block: str) -> None:
     The read and the write are one critical section: a round that reads a
     half-finished notes file, or reads the file and then has another round's
     append land before its own write, would splice a stale copy over the
-    history. The lock is taken on the notes file's own inode, so a caller that
+    history. The lock is taken on the notes file's own inode and held on that
+    descriptor until the write has been renamed into place, so a caller that
     replaced the file between rounds is not split from the file it will write.
     """
     path = pr_notes_path(repo_path, pr_number)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with contextlib.suppress(OSError):
-        handle = os.open(path, os.O_RDONLY | os.O_CREAT, 0o644)
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX)
-        finally:
-            os.close(handle)
     try:
+        handle = os.open(path, os.O_RDONLY | os.O_CREAT, 0o644)
+    except OSError:
+        base = read_notes(repo_path, pr_number) or _seed(pr_number, "", "", "(none recorded)")
+        write_notes(repo_path, pr_number, f"{base.rstrip()}\n\n{block.rstrip()}\n")
+        return
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX)
         base = read_notes(repo_path, pr_number) or _seed(pr_number, "", "", "(none recorded)")
         write_notes(repo_path, pr_number, f"{base.rstrip()}\n\n{block.rstrip()}\n")
     finally:
-        with contextlib.suppress(OSError):
-            handle = os.open(path, os.O_RDONLY)
-            try:
-                fcntl.flock(handle, fcntl.LOCK_UN)
-            finally:
-                os.close(handle)
+        os.close(handle)
 
 
 def _seed(pr_number: int, head: str, task_spec: str, test_command: str) -> str:
