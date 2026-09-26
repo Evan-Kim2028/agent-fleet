@@ -182,6 +182,9 @@ class RepoSpec:
     rebase_template: str = ""
     dbt_manifest_path: str = "transform/target/manifest.json"
     risk_globs: tuple[str, ...] = ()
+    #: Branch ``merge train`` folds onto, e.g. ``"develop"``.  Empty means the
+    #: train resolves it from the batch and the remote rather than being told.
+    base_branch: str = ""
 
 
 @dataclass(frozen=True)

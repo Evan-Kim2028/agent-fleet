@@ -95,6 +95,8 @@ def parse_repo_spec(raw: Mapping[str, Any]) -> RepoSpec:
         spec.rebase_template = str(raw["rebase_template"])
     if raw.get("dbt_manifest_path"):
         spec.dbt_manifest_path = str(raw["dbt_manifest_path"])
+    if raw.get("base_branch"):
+        spec.base_branch = str(raw["base_branch"])
     globs = raw.get("risk_globs")
     if isinstance(globs, list):
         spec.risk_globs = tuple(str(g) for g in globs)
@@ -260,6 +262,30 @@ def resolve_repo_specs(
         else:
             specs[name] = builtin_spec(name, str(path))
     return specs
+
+
+def resolve_train_base_branch(repo_name: str, fleet_config_path: Path | None = None) -> str:
+    """The base branch ``merge train`` folds onto, from fleet.yaml or ``""``.
+
+    Read for the same repository the train is about, and only for that one: a
+    ``base_branch`` declared for some other repo says nothing about this one.
+    An empty answer means the train resolves the branch from the batch and the
+    remote instead of being told one here.
+    """
+    spec = load_merge_plan_config(fleet_config_path).get(repo_name)
+    return spec.base_branch if spec is not None else ""
+
+
+def resolve_train_repo_name(repo_path: Path) -> str:
+    """The repository name a train over *repo_path* is about.
+
+    Name comes from the checkout itself — the ``origin`` remote when it is
+    readable, the directory name otherwise — and never from the shape of
+    ``merge_plan.repos``.  That map is the whole fleet's inventory, so taking
+    its first key would name a different repository than the operator passed and
+    silently drop every approval belonging to the checkout they asked for.
+    """
+    return _repo_name_from_path(Path(repo_path).expanduser())
 
 
 def _repo_name_from_path(path: Path) -> str:
