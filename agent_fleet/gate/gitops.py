@@ -218,12 +218,23 @@ def merge_base_into(worktree: Path, base: str) -> None:
     A rebase means the PR has the base as an ancestor, so this is usually a
     no-op; it matters when the operator rebases by merging instead, or when the
     PR was approved before a commit landed on main. "Already merged" is not an
-    error, so the exit code is not checked for that. A *conflict* is: the merge
-    leaves conflict markers in the tree, and the deterministic half would then
-    run against a tree no real merge produces — a file pytest cannot even
-    import, or one that passes on a spliced result. So a conflicting merge
-    aborts itself and raises, which is the recheck refusing rather than
-    reporting a verdict it never established.
+    error, so the exit code is not checked for that. Everything *else* is.
+
+    A merge that did not happen is never a silent no-op. The three ways this
+    bites, all of which used to return success:
+
+    1. a *conflict*: the merge leaves conflict markers in the tree, and the
+       deterministic half would then run against a tree no real merge produces
+       — a file pytest cannot even import, or one that passes on a spliced
+       result;
+    2. an *unrelated history* (or any other ref git refuses to merge): the PR
+       and the base share no ancestor, so nothing was merged at all;
+    3. a *ref git cannot resolve* — a base branch that was never fetched, a
+       deleted remote branch. The tests then run against the PR's own tree while
+       the carry-over reports a verdict for a merge it never made.
+
+    All three abort any half-finished merge and raise, which is the recheck
+    refusing rather than reporting a verdict it never established.
     """
     try:
         completed = subprocess.run(
@@ -238,12 +249,17 @@ def merge_base_into(worktree: Path, base: str) -> None:
     if completed.returncode == 0:
         return
     output = (completed.stdout or "") + (completed.stderr or "")
-    if "CONFLICT" not in output and "Automatic merge failed" not in output:
-        # Already up to date, or nothing to merge: not a failure.
+    if "Already up to date" in output or "Already up-to-date" in output:
+        # The base is already an ancestor: the merge is genuinely a no-op.
         return
     _run_git(worktree, "merge", "--abort", check=False)
+    if "CONFLICT" in output or "Automatic merge failed" in output:
+        raise GateError(
+            f"git merge {base} conflicted: the PR and the base both change the same lines. "
+            f"{(completed.stderr or completed.stdout).strip()[:300]}"
+        )
     raise GateError(
-        f"git merge {base} conflicted: the PR and the base both change the same lines. "
+        f"git merge {base} did not merge the base: exit {completed.returncode}. "
         f"{(completed.stderr or completed.stdout).strip()[:300]}"
     )
 

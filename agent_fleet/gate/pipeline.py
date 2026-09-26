@@ -879,10 +879,15 @@ class GatePipeline:
     def recheck_untestable(self, worktree: Path, start_sha: str, head_sha: str) -> bool:
         """One judge recheck: are the untestable blockers resolved at the new head?
 
-        Returns True when nothing is left unresolved.
+        Returns True only when a judge actually ruled that nothing is left
+        unresolved. A missing judge returns False, not True: this function is
+        the only thing that can clear an untestable blocker, and "nobody was
+        available to look" is not "the blocker is gone". Returning True there
+        let a repo running with the judge disabled approve a defect the gate
+        itself had ruled real, on a green suite that never demonstrated it.
         """
         if not self.config.enable_judge or self.judge_backend is None:
-            return True
+            return False
         untestable = [c for c in self.evidence.confirmed if c.get("source") == "judge-untestable"]
         if not untestable:
             return True
