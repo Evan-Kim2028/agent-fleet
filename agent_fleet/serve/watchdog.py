@@ -461,7 +461,13 @@ class Watchdog:
             if idle_s < window_s:
                 continue
             budget_window_s = max(1.0, float(spec.no_progress_window_minutes) * 60.0)
-            restarts = sum(1 for e in state.no_progress_restarts if now - e <= budget_window_s)
+            # The budget counts a *burst* of restarts: the ones clustered around
+            # the most recent one, measured backwards from it. Measuring
+            # forwards from now would let restarts age out one at a time, so a
+            # component that genuinely needs restarting forever would never
+            # reach its budget and the rule would just churn it forever.
+            recent = state.no_progress_restarts
+            restarts = sum(1 for e in recent if recent[-1] - e <= budget_window_s) if recent else 0
             if restarts >= spec.no_progress_restarts:
                 remediation = Remediation(
                     rule=RULE_NO_PROGRESS,

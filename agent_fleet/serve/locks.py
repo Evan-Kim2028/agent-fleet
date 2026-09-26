@@ -205,8 +205,15 @@ class LockRegistry:
         holder: str,
         pid: int | None,
         starttime: int | None,
+        wanting: str = "",
         now: float | None = None,
     ) -> LockRecord:
+        """Record *holder* as owning *name*.
+
+        ``wanting`` is carried over from the acquisition so a held record still
+        says what its holder is in there doing — the first thing an operator
+        reads when a merge lock has been held for two hours.
+        """
         record = LockRecord(
             name=name,
             state=STATE_HELD,
@@ -214,6 +221,7 @@ class LockRegistry:
             pid=pid,
             starttime=starttime,
             acquired_epoch=now if now is not None else time.time(),
+            wanting=wanting,
         )
         self.write(record)
         return record
@@ -282,7 +290,9 @@ class LockRegistry:
                 )
                 yield False
                 return
-            self.mark_held(name, holder=holder, pid=pid, starttime=starttime, now=now)
+            self.mark_held(
+                name, holder=holder, pid=pid, starttime=starttime, wanting=wanting, now=now
+            )
             try:
                 yield True
             finally:
