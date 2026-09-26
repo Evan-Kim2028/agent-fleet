@@ -1363,6 +1363,10 @@ def main(argv: list[str] | None = None) -> int:
 
     register_serve_commands(sub)
 
+    from agent_fleet.merge_plan.cli import register_merge_commands
+
+    register_merge_commands(sub)
+
     summon_p = sub.add_parser(
         "summon",
         help="First-run setup: init config (if absent) + doctor + ready banner (idempotent)",

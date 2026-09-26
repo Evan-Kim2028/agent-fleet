@@ -8,6 +8,7 @@ the caller knowing the internal shape.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from fnmatch import fnmatch
 from typing import Any
 
 #: Risk flags that force a PR into its own batch. Any one of these is enough.
@@ -173,5 +174,83 @@ class RepoSpec:
     merge_template: str = ""
     #: One command per PR, e.g. ``"scripts/merge_verify.sh {pr} {sha9}"``.
     merge_per_pr_template: str = ""
+    #: Runs after the batch merges, e.g. ``"scripts/deploy.sh {merge_sha}"``.
+    deploy_template: str = ""
+    #: Runs after the deploy, e.g. ``"scripts/verify.sh {merge_sha}"``.
+    verify_template: str = ""
+    #: Handed a PR that conflicts with main, e.g. ``"scripts/rebase.sh {pr}"``.
+    rebase_template: str = ""
     dbt_manifest_path: str = "transform/target/manifest.json"
     risk_globs: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ClusterHold:
+    """A named gate that holds a set of lanes' merges until it is released.
+
+    Matches on the lane name and the batch's deploy unit; a batch whose PRs
+    match neither pattern is unaffected.  ``name`` is what the operator types
+    to ``fleet merge release``.
+    """
+
+    name: str
+    #: fnmatch patterns against the lane name, e.g. ``("sales-pass2-*",)``.
+    lanes: tuple[str, ...] = ()
+    #: Exact deploy unit names, e.g. ``("dbt",)``.
+    deploy_units: tuple[str, ...] = ()
+
+    def matches(self, *, lane: str, deploy_unit: str) -> bool:
+        """True when *lane* or *deploy_unit* falls under this hold."""
+        if lane and any(fnmatch(lane, pattern) for pattern in self.lanes):
+            return True
+        return bool(deploy_unit) and deploy_unit in self.deploy_units
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "lanes": list(self.lanes),
+            "deploy_units": list(self.deploy_units),
+        }
+
+
+@dataclass(frozen=True)
+class ExecutorSpec:
+    """Settings for ``fleet merge run``, loaded from ``merge_plan.executor``.
+
+    Defaults are inert: with no holds and no exclusive groups the executor
+    simply runs every batch it is given.  Cross-process safety never depends on
+    configuration -- the deploy lock is always taken.
+    """
+
+    #: Named cluster holds, in declaration order.
+    holds: tuple[ClusterHold, ...] = ()
+    #: Repos that must never deploy concurrently, e.g. ``(("lake", "silph"),)``.
+    exclusive_groups: tuple[tuple[str, ...], ...] = ()
+    #: Quiet period after a batch ships, before its exclusive group reopens.
+    post_merge_hold_seconds: int = 0
+    #: Fallback rebase command when a repo does not declare its own.
+    rebase_command: str = ""
+    #: Ceiling on one merge/deploy/verify command, in seconds.
+    command_timeout_seconds: int = 1800
+    #: Exit code that means "conflicting, needs rebase" rather than failure.
+    conflict_exit_code: int = 3
+    #: Where the deploy locks and the hold ledger live.
+    state_dir: str = "~/.agent-fleet/merge"
+
+    def group_for(self, repo: str) -> tuple[str, ...]:
+        """The exclusive group *repo* belongs to, or ``()`` if it belongs to none."""
+        for group in self.exclusive_groups:
+            if repo in group:
+                return group
+        return ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "holds": [h.to_dict() for h in self.holds],
+            "exclusive_groups": [list(g) for g in self.exclusive_groups],
+            "post_merge_hold_seconds": self.post_merge_hold_seconds,
+            "rebase_command": self.rebase_command,
+            "command_timeout_seconds": self.command_timeout_seconds,
+            "conflict_exit_code": self.conflict_exit_code,
+            "state_dir": self.state_dir,
+        }
