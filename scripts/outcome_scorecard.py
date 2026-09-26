@@ -16,8 +16,13 @@ from collections import Counter
 from pathlib import Path
 
 _ORCHESTRATION_PHASES = {
-    "RESEARCH", "PLAN", "IMPLEMENT", "VERIFY", "SYNTHESIZE",
-    "TECH_LEAD", "OPEN_PR",
+    "RESEARCH",
+    "PLAN",
+    "IMPLEMENT",
+    "VERIFY",
+    "SYNTHESIZE",
+    "TECH_LEAD",
+    "OPEN_PR",
 }
 
 
@@ -307,8 +312,7 @@ def _build_summary(rows: list[dict]) -> dict:
 
     status_counts: Counter[str] = Counter(r["status"] for r in rows)
     status_histogram = {
-        s: {"count": c, "pct": round(c / total, 4)}
-        for s, c in status_counts.most_common()
+        s: {"count": c, "pct": round(c / total, 4)} for s, c in status_counts.most_common()
     }
 
     tokens_by_status: dict[str, int] = {}
@@ -405,7 +409,7 @@ def _print_human(rows: list[dict], top_n: int, runs_dir: Path) -> None:
     print("Status histogram:")
     for status, info in s["status_histogram"].items():
         bar = "#" * int(info["pct"] * 40)
-        print(f"  {status:<30}  {info['count']:>5}  {100*info['pct']:>5.1f}%  {bar}")
+        print(f"  {status:<30}  {info['count']:>5}  {100 * info['pct']:>5.1f}%  {bar}")
 
     print("\nTokens by status:")
     for st, tok in sorted(s["tokens_by_status"].items(), key=lambda x: -x[1]):
@@ -437,7 +441,7 @@ def _print_human(rows: list[dict], top_n: int, runs_dir: Path) -> None:
             print(
                 f"  {k:<30}  count={info['count']:>5}  "
                 f"success={info['success_count']:>5}  "
-                f"rate={100*info['success_rate']:>5.1f}%"
+                f"rate={100 * info['success_rate']:>5.1f}%"
             )
 
     print("\nBy fleet version:")
@@ -445,7 +449,7 @@ def _print_human(rows: list[dict], top_n: int, runs_dir: Path) -> None:
         print(
             f"  {k:<30}  count={info['count']:>5}  "
             f"success={info['success_count']:>5}  "
-            f"rate={100*info['success_rate']:>5.1f}%"
+            f"rate={100 * info['success_rate']:>5.1f}%"
         )
 
     failures = sorted(
@@ -482,10 +486,7 @@ def _print_human(rows: list[dict], top_n: int, runs_dir: Path) -> None:
     for month in sorted(buckets):
         hits = buckets[month]
         rate = sum(hits) / len(hits)
-        print(
-            f"  {month}  count={len(hits):>4}  "
-            f"success={sum(hits):>4}  rate={100*rate:>5.1f}%"
-        )
+        print(f"  {month}  count={len(hits):>4}  success={sum(hits):>4}  rate={100 * rate:>5.1f}%")
 
 
 def main(argv: list[str] | None = None) -> int:

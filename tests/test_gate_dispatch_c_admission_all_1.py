@@ -160,12 +160,17 @@ def test_run_lane_returns_a_result_when_config_has_no_admission_field(
 
     assert isinstance(result, LaneRunResult)
     # The lane actually ran: the engine started and finished. The fake engine
-    # commits nothing, so ``no_commits_ahead`` is the correct downstream verdict —
+    # commits nothing, so a no-work verdict is correct downstream behaviour —
     # what matters is that the lane got that far instead of dying on the
     # admission lookup, which happens before any of these events are emitted.
     assert "lane.engine.start" in result.events
     assert "lane.engine.done" in result.events
-    assert result.reason == "no_commits_ahead"
+    # The specific no-work reason is main's lazy-exit taxonomy, not this test's
+    # subject: the fake engine leaves an account and no commits, so the lane ends
+    # in ``no_changes_stopped`` (main) rather than the older ``no_commits_ahead``.
+    # Either reason proves the lane survived the admission lookup, which is the
+    # behaviour under test here.
+    assert result.reason in {"no_changes_stopped", "no_commits_ahead"}
 
 
 def test_run_lane_does_not_raise_for_any_operator_on_a_default_config(

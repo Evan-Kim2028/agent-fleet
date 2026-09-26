@@ -956,9 +956,13 @@ def cmd_gate(args: argparse.Namespace) -> int:
     deterministic step that could not run all exit 1, so an automerge wrapper
     can gate on the exit code alone as well as on the status line.
     """
-    from agent_fleet.gate.pipeline import run_gate
+    from agent_fleet.contracts.gate import GateOutcome
+    from agent_fleet.gate.gitops import GateError
+    from agent_fleet.gate.pipeline import run_gate, status_line_for
     from agent_fleet.model_policy import ModelPolicyError
 
+    if getattr(args, "gate_command", None) == "recheck":
+        return cmd_gate_recheck(args)
     if getattr(args, "pr", None) is None:
         print("error: gate requires --pr <n> (or 'fleet gate metrics')", file=sys.stderr)
         return 2
@@ -969,6 +973,72 @@ def cmd_gate(args: argparse.Namespace) -> int:
             task_file=getattr(args, "task_file", None),
             status_file=getattr(args, "status_file", None),
             config_path=getattr(args, "config", None),
+            lane_slug=getattr(args, "lane_slug", None),
+        )
+    except ModelPolicyError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except GateError as exc:
+        # run_gate resolves the PR before it can build the pipeline (to derive
+        # the lane slug), so an unresolvable PR — no gh, no auth, no remote,
+        # no such PR — raises out here instead of reaching pipeline.run()'s
+        # handler. A gate that cannot even find its PR is a NEEDS-ESCALATION
+        # like every other failure in this command, not a traceback for the
+        # automerge wrapper to choke on.
+        reason = f"full gate required: {exc}"[:300]
+        print(
+            status_line_for(GateOutcome.NEEDS_ESCALATION, "", [reason]),
+            file=sys.stderr,
+        )
+        print(
+            json.dumps(
+                {
+                    "outcome": GateOutcome.NEEDS_ESCALATION.value,
+                    "approved": False,
+                    "sha": "",
+                    "reasons": [reason],
+                },
+                indent=2,
+                default=str,
+            )
+        )
+        return 1
+    if result.status_line:
+        print(result.status_line, file=sys.stderr)
+    print(json.dumps(result.to_dict(), indent=2, default=str))
+    return 0 if result.approved else 1
+
+
+def cmd_gate_recheck(args: argparse.Namespace) -> int:
+    """Carry an approval across a patch-identical rebase.
+
+    Same contract as ``gate``: exit 0 only on APPROVED, the status line on
+    stderr, the JSON on stdout. Anything that is not an established
+    patch-identical, tested, previously-approved head exits 1 and says a full
+    gate is required — a recheck that cannot establish its verdict must not
+    produce one.
+    """
+    from agent_fleet.gate.pipeline import run_gate_recheck
+    from agent_fleet.model_policy import ModelPolicyError
+
+    if not getattr(args, "approved_sha", None):
+        print(
+            "error: gate recheck requires --approved-sha <sha> (the head the gate approved)",
+            file=sys.stderr,
+        )
+        return 2
+    if getattr(args, "pr", None) is None:
+        print("error: gate recheck requires --pr <n>", file=sys.stderr)
+        return 2
+    try:
+        result = run_gate_recheck(
+            repo_path=Path(getattr(args, "repo_path", None) or Path.cwd()),
+            pr_number=int(args.pr),
+            approved_sha=str(args.approved_sha),
+            head_sha=getattr(args, "head", None),
+            status_file=getattr(args, "status_file", None),
+            config_path=getattr(args, "config", None),
+            lane_slug=getattr(args, "lane_slug", None),
         )
     except ModelPolicyError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -1381,6 +1451,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     gate_p.add_argument("--pr", type=int, default=None, help="PR number to gate")
     gate_p.add_argument(
+        "--lane-slug",
+        default=None,
+        help=("Slug folded into verifier-created test file names (default: the PR's head ref)"),
+    )
+    gate_p.add_argument(
         "--task-file",
         default=None,
         help="Task specification file, used as the yardstick by the spec lens and the judge",
@@ -1407,6 +1482,52 @@ def main(argv: list[str] | None = None) -> int:
         "--format", choices=("json", "table"), default="json", help="Output format"
     )
     gate_metrics_p.set_defaults(func=cmd_gate_metrics)
+
+    gate_recheck_p = gate_sub.add_parser(
+        "recheck",
+        help=(
+            "Carry a PREMERGE-APPROVED verdict across a patch-identical rebase "
+            "instead of paying for a full gate again"
+        ),
+    )
+    gate_recheck_p.add_argument(
+        "--approved-sha",
+        default=None,
+        help="The head sha the gate approved; must have a PREMERGE-APPROVED status line",
+    )
+    gate_recheck_p.add_argument(
+        "--head",
+        default=None,
+        help="The rebased head to approve (default: the PR's current head)",
+    )
+    gate_recheck_p.add_argument(
+        "--status-file",
+        default=None,
+        help="Status file holding the original PREMERGE-APPROVED line",
+    )
+    gate_recheck_p.add_argument(
+        "--lane-slug",
+        default=None,
+        help="Slug for gate test file names (default: the PR's head ref)",
+    )
+    # The gate-level --pr/--repo-path are parent options, which argparse only
+    # accepts before the subcommand. Re-declaring them here (same names) means
+    # `gate recheck --pr 5 ...` works in the natural position too.
+    # Their defaults must be argparse.SUPPRESS. A subparser parses into its own
+    # namespace and then copies every value over the parent's, so a real default
+    # here overwrites what the parent already stored: `gate --repo-path /other
+    # recheck ...` silently lost /other and judged Path.cwd() instead. SUPPRESS
+    # keeps the attribute out of the subnamespace unless the flag is actually
+    # given after the subcommand, leaving the inherited value intact. `pr=None`
+    # therefore must not reappear in set_defaults below — that would reset the
+    # SUPPRESS default back to None and restore the clobber.
+    gate_recheck_p.add_argument("--pr", type=int, default=argparse.SUPPRESS, help="PR number")
+    gate_recheck_p.add_argument(
+        "--repo-path",
+        default=argparse.SUPPRESS,
+        help="Path to the git repo holding the PR",
+    )
+    gate_recheck_p.set_defaults(func=cmd_gate_recheck)
 
     self_p = sub.add_parser("self", help="Maintenance commands for agent-fleet itself")
     self_sub = self_p.add_subparsers(dest="self_command", required=True)

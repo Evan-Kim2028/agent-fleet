@@ -42,6 +42,11 @@ logger = logging.getLogger(__name__)
 APPROVAL_MARKER = "PREMERGE-APPROVED"
 _APPROVAL_LINE_RE = re.compile(r"^(?:\d{2}:\d{2}:\d{2}\s+)?PREMERGE-APPROVED\s+[0-9a-f]{7,40}\s*$")
 
+#: A lane whose PR was guaranteed but whose gate never ran. Carries no approval,
+#: so it must never satisfy this module's contract — named here so a reader
+#: checking the status-line vocabulary finds all three tokens together.
+GATE_SKIPPED_MARKER = "GATE-SKIPPED"
+
 #: Markers that also mean "approved", weaker than the exact token above.
 
 #: The escalation line the gate emits when it could not clear the PR.
@@ -118,6 +123,18 @@ def gate_available(
     return GATE_SUBCOMMAND in f"{result.stdout or ''}\n{result.stderr or ''}".lower()
 
 
+def is_approval_line(line: str) -> bool:
+    """Whether *line* is exactly the gate's approval contract, and nothing else.
+
+    The whole approval vocabulary of the status file is three tokens —
+    ``PREMERGE-APPROVED``, ``NEEDS-ESCALATION``, ``GATE-SKIPPED`` — and only the
+    first one may be read as an approval. Anchored on both ends for the reason
+    in :func:`_classify`: a partial run that printed an approval before failing
+    must not be approved.
+    """
+    return bool(_APPROVAL_LINE_RE.match((line or "").strip()))
+
+
 def _last_meaningful_line(output: str) -> str:
     for line in reversed((output or "").splitlines()):
         if line.strip():
@@ -142,9 +159,12 @@ def _classify(output: str) -> tuple[bool, str, str]:
 
     # Only the gate's exact status contract counts, and only as the LAST line:
     # "[HH:MM:SS ]PREMERGE-APPROVED <sha>". No substring/earlier-line fallbacks — a
-    # partial run that printed an approval before failing must not be approved.
-    if _APPROVAL_LINE_RE.match(last):
+    # partial run that printed an approval before failing must not be approved,
+    # and neither may a GATE-SKIPPED line, which is a lane waiting on *this* gate.
+    if is_approval_line(last):
         return True, "gate approved", last
+    if GATE_SKIPPED_MARKER in last:
+        return False, last, ""
     return False, last or "gate produced no approval line", ""
 
 
@@ -256,9 +276,11 @@ def run_gate(
 __all__ = [
     "APPROVAL_MARKER",
     "ESCALATION_MARKER",
+    "GATE_SKIPPED_MARKER",
     "GATE_SUBCOMMAND",
     "GateOutcome",
     "build_gate_args",
     "gate_available",
+    "is_approval_line",
     "run_gate",
 ]
