@@ -75,10 +75,15 @@ def test_everything_the_dispatcher_writes_stays_under_the_fleet_home(tmp_path: P
     written: list[Path] = []
 
     def _spawn(_argv: Sequence[str], **kwargs: Any) -> Any:  # noqa: ANN401
-        stdout = Path(str(kwargs["stdout"]))
+        # The dispatcher hands spawn an open log handle (subprocess.Popen takes
+        # only file objects for stdout), so the path under test is the handle's
+        # own name.
+        handle = kwargs["stdout"]
+        stdout = Path(handle.name)
         written.append(stdout)
         stdout.parent.mkdir(parents=True, exist_ok=True)
-        stdout.write_text('{"state": "no_pr"}', encoding="utf-8")
+        with handle as log:
+            log.write('{"state": "no_pr"}')
         return _Proc(6666, 0)
 
     run_dispatch(

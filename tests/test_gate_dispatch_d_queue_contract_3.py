@@ -85,7 +85,8 @@ class _Run:
         argv = list(argv)
         self.spawned.append(argv)
         self._pid += 1
-        Path(str(kwargs["stdout"])).write_text('{"state": "no_pr"}', encoding="utf-8")
+        with kwargs["stdout"] as log:
+            log.write('{"state": "no_pr"}')
         return _Proc(self._pid, 0)
 
     def _sleep(self, seconds: float) -> None:

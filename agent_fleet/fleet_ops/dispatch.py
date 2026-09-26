@@ -881,9 +881,9 @@ def gate_argv(
     """Build the gate argv for *lane*.
 
     A template is expanded with ``{lane}``/``{pr}``/``{repo}``/``{operator}``/
-    ``{slug}`` and split with :func:`shlex.split`, then executed **without a
-    shell**. A template containing ``;`` or ``&&`` therefore stays a single
-    argv entry instead of becoming a second command.
+    ``{slug}``/``{worktree}`` and split with :func:`shlex.split`, then executed
+    **without a shell**. A template containing ``;`` or ``&&`` therefore stays a
+    single argv entry instead of becoming a second command.
 
     With no template the built-in ``agent-fleet gate`` is used, which is the same
     seam ``lane run`` uses — so a repo that needs no external gate script needs
@@ -918,7 +918,12 @@ def gate_argv(
         return argv
 
     expanded = expand_template(template, lane=lane, operator=operator)
-    for key, value in (("pr", str(pr)), ("repo", repo), ("slug", slug or repo)):
+    for key, value in (
+        ("pr", str(pr)),
+        ("repo", repo),
+        ("slug", slug or repo),
+        ("worktree", worktree or repo_path or ""),
+    ):
         expanded = expanded.replace("{" + key + "}", value)
     try:
         argv = shlex.split(expanded)
@@ -927,9 +932,12 @@ def gate_argv(
     if not argv:
         raise ValueError("gate command template expanded to an empty command")
     # A template is a command the operator wrote, so nothing is injected into
-    # it: the placeholders already carry the lane, repo and PR.
-    if worktree:
-        argv += ["--worktree", worktree]
+    # it: the placeholders already carry the lane, repo and PR. Injecting a flag
+    # here used to append ``--worktree`` to every template, but the gate parser
+    # defines no such option, so argparse aborted the command with exit 2
+    # before the gate reviewed anything and ``_reap_gate`` reported the lane as
+    # escalated — a gate that never started, dressed as a rejected PR. The
+    # worktree is a placeholder for exactly that reason.
     return argv
 
 
@@ -1180,13 +1188,41 @@ def run_dispatch(
                     # run of this queue must still be able to dispatch them.
                     # Marking them DISPATCH_DONE is how a re-run came to report a
                     # dropped queue as a clean success.
-                    waiting = len(_dispatchable_lanes(current, cluster_order=cluster_order))
+                    #
+                    # The reason is recorded on each lane even though the state
+                    # is not: `throttle_abandoned` is the documented outcome for
+                    # a queue this run never dispatched, and it is in
+                    # ERROR_REASONS precisely so the tally counts it. Counting
+                    # the lanes with a bare `summary.errors += waiting` and
+                    # leaving every record as `queued` with no reason made the
+                    # constant dead code and `render_summary` reported the
+                    # abandonment as plain queued lanes. A reason is a label, not
+                    # a verdict: `_dispatchable_lanes` keys off state, so the
+                    # next run still dispatches them.
+                    waiting_lanes = _dispatchable_lanes(current, cluster_order=cluster_order)
+                    lanes = dict(current.lanes)
+                    for waiting_lane in waiting_lanes:
+                        record = lanes.get(waiting_lane.lane)
+                        if record is not None:
+                            lanes[waiting_lane.lane] = replace(
+                                record, reason=THROTTLE_ABANDONED, updated_ts=time.time()
+                            )
+                    current = replace(current, lanes=lanes)
+                    waiting = len(waiting_lanes)
                     logger.warning(
                         "dispatch %s: still throttled after %d ticks; %d lane(s) never dispatched",
                         current.operator,
                         idle_ticks,
                         waiting,
                     )
+                    for waiting_lane in waiting_lanes:
+                        _event(
+                            current,
+                            waiting_lane.lane,
+                            "dispatch.done",
+                            reason=THROTTLE_ABANDONED,
+                            exit_code=None,
+                        )
                     summary.errors += waiting
                     save_state(current)
                     break
@@ -1407,7 +1443,12 @@ def _launch_lane(
     ]
     # start_new_session: the child leads its own process group, which is what
     # `lanes stop` needs to reach exactly this lane and nothing else.
-    proc = spawn(argv, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    # Popen takes neither a Path nor a str for stdout -- it calls .fileno() on
+    # whatever it is handed and raises AttributeError for both -- so the log is
+    # opened here and the handle passed. The parent closes its copy at once;
+    # the child holds its own, which is what keeps the log written.
+    with log.open("w", encoding="utf-8") as log_handle:
+        proc = spawn(argv, stdout=log_handle, stderr=subprocess.STDOUT, start_new_session=True)
 
     lanes = dict(state.lanes)
     # The live handle MUST be recorded here. `os.kill(pid, 0)` answers for a
@@ -1532,7 +1573,10 @@ def _launch_gate(
     log.open("w", encoding="utf-8").close()
     _reset_status_file(record.status_file)
 
-    proc = spawn(argv, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    # An open handle, not a path: see _launch_lane -- Popen calls .fileno() on
+    # its stdout and rejects both a Path and a str.
+    with log.open("w", encoding="utf-8") as log_handle:
+        proc = spawn(argv, stdout=log_handle, stderr=subprocess.STDOUT, start_new_session=True)
 
     lanes = dict(state.lanes)
     procs = dict(state.procs)

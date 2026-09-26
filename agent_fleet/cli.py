@@ -958,6 +958,36 @@ def cmd_summon(args: argparse.Namespace) -> int:
     return doctor_rc
 
 
+def _gate_escalation(reason: str) -> int:
+    """Emit a NEEDS-ESCALATION for *reason* and return the gate's exit code 1.
+
+    Shared by every ``cmd_gate`` failure that is an escalation rather than a
+    caller error, so a wrapper gating on the status line or the exit code sees
+    the same shape whichever step failed. The caller-error case,
+    :class:`GateTargetMismatch`, stays a plain ``error:`` line.
+    """
+    from agent_fleet.contracts.gate import GateOutcome
+    from agent_fleet.gate.pipeline import status_line_for
+
+    print(
+        status_line_for(GateOutcome.NEEDS_ESCALATION, "", [reason]),
+        file=sys.stderr,
+    )
+    print(
+        json.dumps(
+            {
+                "outcome": GateOutcome.NEEDS_ESCALATION.value,
+                "approved": False,
+                "sha": "",
+                "reasons": [reason],
+            },
+            indent=2,
+            default=str,
+        )
+    )
+    return 1
+
+
 def cmd_gate(args: argparse.Namespace) -> int:
     """Run the evidence-based pre-merge gate against an existing PR head.
 
@@ -971,9 +1001,8 @@ def cmd_gate(args: argparse.Namespace) -> int:
     is an error, not a warning, because the cost of getting it wrong is a whole
     review pipeline reviewing something other than the PR it was asked about.
     """
-    from agent_fleet.contracts.gate import GateOutcome
     from agent_fleet.gate.gitops import GateError, GateTargetMismatch, cross_check_gate_target
-    from agent_fleet.gate.pipeline import run_gate, status_line_for
+    from agent_fleet.gate.pipeline import run_gate
     from agent_fleet.model_policy import ModelPolicyError
 
     if getattr(args, "gate_command", None) == "recheck":
@@ -992,6 +1021,13 @@ def cmd_gate(args: argparse.Namespace) -> int:
     except GateTargetMismatch as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    except GateError as exc:
+        # The cross-check resolves the PR to read its head ref, so an
+        # unresolvable PR — no gh, no auth, no remote, no such PR — raises a
+        # plain GateError here too, before run_gate is ever called. Same
+        # reasoning as the handler below: a gate that cannot find its PR is a
+        # NEEDS-ESCALATION, not a traceback for the automerge wrapper.
+        return _gate_escalation(f"full gate required: {exc}"[:300])
     try:
         result = run_gate(
             repo_path=repo_path,
@@ -1012,24 +1048,7 @@ def cmd_gate(args: argparse.Namespace) -> int:
         # handler. A gate that cannot even find its PR is a NEEDS-ESCALATION
         # like every other failure in this command, not a traceback for the
         # automerge wrapper to choke on.
-        reason = f"full gate required: {exc}"[:300]
-        print(
-            status_line_for(GateOutcome.NEEDS_ESCALATION, "", [reason]),
-            file=sys.stderr,
-        )
-        print(
-            json.dumps(
-                {
-                    "outcome": GateOutcome.NEEDS_ESCALATION.value,
-                    "approved": False,
-                    "sha": "",
-                    "reasons": [reason],
-                },
-                indent=2,
-                default=str,
-            )
-        )
-        return 1
+        return _gate_escalation(f"full gate required: {exc}"[:300])
     if result.status_line:
         print(result.status_line, file=sys.stderr)
     print(json.dumps(result.to_dict(), indent=2, default=str))

@@ -848,10 +848,11 @@ def test_run_dispatch_launches_gates_and_reports_a_summary(tmp_path: Path) -> No
         stage["n"] += 1
         is_lane = argv[0] == "fleet" and "lane" in argv
         if is_lane:
-            # A lane run reports a PR in its --json output.
-            Path(str(kwargs["stdout"])).write_text(
-                '{"state": "pr_guaranteed", "pr": 9, "worktree": "/w"}', encoding="utf-8"
-            )
+            # A lane run reports a PR in its --json output. The dispatcher hands
+            # spawn an open log handle, exactly as it hands subprocess.Popen one,
+            # so the fake writes through it the way a real child would.
+            with kwargs["stdout"] as log:
+                log.write('{"state": "pr_guaranteed", "pr": 9, "worktree": "/w"}')
         else:
             # A gate writes its verdict to the lane's status file, which is what
             # the dispatcher reads back to classify the run.
@@ -947,9 +948,8 @@ def test_run_dispatch_writes_events_namespaced_by_operator(tmp_path: Path) -> No
 
     def spawn(argv: list[str], **kwargs: Any) -> Any:  # noqa: ANN401
         if kwargs.get("stdout") is not None and argv[0] == "fleet":
-            Path(kwargs["stdout"]).write_text(
-                '{"state": "pr_guaranteed", "pr": 9}', encoding="utf-8"
-            )
+            with kwargs["stdout"] as log:
+                log.write('{"state": "pr_guaranteed", "pr": 9}')
         else:
             lane = argv[argv.index("--lane") + 1] if "--lane" in argv else "x"
             status = Path(str(out / "lanes" / f"{lane}.status"))
@@ -990,9 +990,8 @@ def test_a_gate_can_be_capped_by_a_command_template(tmp_path: Path) -> None:
     def spawn(argv: list[str], **kwargs: Any) -> Any:  # noqa: ANN401
         seen.append(list(argv))
         if argv[0] == "fleet":
-            Path(str(kwargs["stdout"])).write_text(
-                '{"state": "pr_guaranteed", "pr": 9}', encoding="utf-8"
-            )
+            with kwargs["stdout"] as log:
+                log.write('{"state": "pr_guaranteed", "pr": 9}')
         else:
             status = Path(str(out / "lanes" / "alpha.status"))
             status.parent.mkdir(parents=True, exist_ok=True)
@@ -1106,11 +1105,27 @@ def test_caller_supplied_state_is_used_verbatim(tmp_path: Path) -> None:
     assert summary.launched == 0
 
 
-def test_gate_argv_omits_worktree_when_unknown() -> None:
+def test_gate_argv_never_injects_a_flag_the_gate_parser_rejects() -> None:
+    """A template gets no injected flags, worktree or otherwise.
+
+    ``--worktree`` used to be appended to every custom ``--gate-cmd``, but no
+    gate subcommand defines it: argparse aborted the command with exit 2 before
+    the gate reviewed anything, and ``_reap_gate`` then recorded the lane as
+    ``escalated (gate exit 2)`` — a gate that never started, reported as a
+    reviewed-and-rejected PR. The worktree is a ``{worktree}`` placeholder the
+    operator writes into the template if their gate needs one.
+    """
     argv = gate_argv("/opt/g {lane}", lane="a", pr=1, repo="r")
     assert "--worktree" not in argv
+
     with_worktree = gate_argv("/opt/g {lane}", lane="a", pr=1, repo="r", worktree="/w")
-    assert with_worktree[-2:] == ["--worktree", "/w"]
+    assert with_worktree == ["/opt/g", "a"], (
+        f"gate template argv {with_worktree} gained flags the gate parser does not "
+        "define; argparse aborts it with exit 2 and the lane is reported escalated"
+    )
+
+    named = gate_argv("/opt/g {lane} {worktree}", lane="a", pr=1, repo="r", worktree="/w")
+    assert named == ["/opt/g", "a", "/w"]
 
 
 def test_slashified_keys_are_stable_for_the_same_origin() -> None:
@@ -1251,9 +1266,8 @@ def test_a_dispatch_run_is_idempotent_across_restarts(tmp_path: Path) -> None:
         is_lane = argv[0] == "fleet" and "lane" in argv
         if is_lane:
             lane_launches.append(1)
-            Path(str(kwargs["stdout"])).write_text(
-                '{"state": "pr_guaranteed", "pr": 9}', encoding="utf-8"
-            )
+            with kwargs["stdout"] as log:
+                log.write('{"state": "pr_guaranteed", "pr": 9}')
         else:
             status = out / "lanes" / "a.status"
             status.parent.mkdir(parents=True, exist_ok=True)

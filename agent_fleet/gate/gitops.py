@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path  # noqa: TC003 - used at runtime (path.exists/is_file)
 from typing import TYPE_CHECKING
 
+from agent_fleet.fleet_ops.binding import parse_remote_slug
 from agent_fleet.fleet_ops.worktree_lock import repo_key, repo_worktree_lock
 from agent_fleet.gate.pytest_runner import is_test_file
 
@@ -154,19 +155,20 @@ def origin_slug(repo: Path) -> str:
     Read from the checkout rather than from a caller-supplied name, so the
     cross-check below compares the repo under review against the repo that
     remote actually points at.
+
+    Parsing is delegated to
+    :func:`~agent_fleet.fleet_ops.binding.parse_remote_slug`, the single parser
+    the worktree lock already uses. Re-deriving it here mis-read the scp-style
+    form ``git@github.com:owner/repo.git``: the ``@`` sits before a ``:`` and not
+    before a ``/``, so the userinfo was never stripped and the result came back
+    as ``github.com:owner/repo``. The cross-check then refused every SSH
+    checkout's own origin as a mismatch. A host-only remote yields "" rather
+    than a slug naming the host as the owner, which the parser also declines.
     """
     url = _run_git(repo, "config", "--get", "remote.origin.url", check=False).strip()
     if not url:
         return ""
-    url = url.removesuffix(".git")
-    if "://" in url:
-        url = url.split("://", 1)[1]
-    if "@" in url.split("/", 1)[0]:
-        url = url.split("@", 1)[1]
-    parts = [p for p in url.split("/") if p]
-    if len(parts) < 2:
-        return ""
-    return f"{parts[-2]}/{parts[-1]}"
+    return parse_remote_slug(url) or ""
 
 
 def cross_check_gate_target(

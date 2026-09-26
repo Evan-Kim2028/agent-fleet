@@ -118,10 +118,8 @@ def _run_one_gated_lane(
         argv = list(argv)
         _pid += 1
         if argv[:3] == ["fleet", "lane", "run"]:
-            Path(str(kwargs["stdout"])).write_text(
-                json.dumps({"state": "pr_guaranteed", "pr": 7, "worktree": "/w"}),
-                encoding="utf-8",
-            )
+            with kwargs["stdout"] as log:
+                log.write(json.dumps({"state": "pr_guaranteed", "pr": 7, "worktree": "/w"}))
             return _FakeProc(_pid, 0, polls=1)
 
         if gate_exit == 0:
@@ -216,10 +214,8 @@ def test_the_status_file_is_empty_before_the_gate_is_spawned(tmp_path: Path) -> 
             lane_status = Path(argv[argv.index("--status-file") + 1])
             lane_status.parent.mkdir(parents=True, exist_ok=True)
             lane_status.write_text("12:00:00 NEEDS-ESCALATION gate disabled (--no-gate)\n")
-            Path(str(kwargs["stdout"])).write_text(
-                json.dumps({"state": "pr_guaranteed", "pr": 7, "worktree": "/w"}),
-                encoding="utf-8",
-            )
+            with kwargs["stdout"] as log:
+                log.write(json.dumps({"state": "pr_guaranteed", "pr": 7, "worktree": "/w"}))
             return _FakeProc(_pid, 0, polls=1)
 
         at_spawn.append(Path(argv[argv.index("--status-file") + 1]).read_text(encoding="utf-8"))
@@ -269,16 +265,16 @@ def _run_two_gated_lanes(tmp_path: Path) -> tuple[list[str], Any]:
         argv = list(argv)
         _pid += 1
         if argv[:3] == ["fleet", "lane", "run"]:
-            Path(str(kwargs["stdout"])).write_text(
-                json.dumps(
-                    {
-                        "state": "pr_guaranteed",
-                        "pr": 100 + len(gates_launched),
-                        "worktree": "/w",
-                    }
-                ),
-                encoding="utf-8",
-            )
+            with kwargs["stdout"] as log:
+                log.write(
+                    json.dumps(
+                        {
+                            "state": "pr_guaranteed",
+                            "pr": 100 + len(gates_launched),
+                            "worktree": "/w",
+                        }
+                    )
+                )
             return _FakeProc(_pid, 0, polls=1)
 
         gates_launched.append(argv[argv.index("--lane") + 1])

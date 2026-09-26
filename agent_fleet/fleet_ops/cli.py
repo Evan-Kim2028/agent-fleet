@@ -29,6 +29,7 @@ from agent_fleet.fleet_ops import pressure
 from agent_fleet.fleet_ops.config import FleetOpsConfig, load_fleet_ops_config_from_repo
 from agent_fleet.fleet_ops.dispatch import (
     DEFAULT_MAX_THROTTLE_TICKS,
+    DEFAULT_TICK_SECONDS,
     DispatchItem,
     load_queue,
     render_summary,
@@ -41,7 +42,7 @@ from agent_fleet.fleet_ops.stop import stop_lane_by_name
 
 if TYPE_CHECKING:
     import argparse
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
 
 def cmd_lane_run(args: argparse.Namespace) -> int:
@@ -157,14 +158,14 @@ def cmd_dispatch_queue(args: argparse.Namespace) -> int:
         )
         return 2
 
-    config = load_fleet_ops_config_from_repo(Path.cwd()) or FleetOpsConfig()
-    dcfg = config.dispatch
     try:
         repos = _resolve_repos(args, items)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    config = _dispatch_config(repos)
+    dcfg = config.dispatch
     fences = "\n".join(config.fences)
     try:
         summary = run_dispatch(
@@ -182,6 +183,7 @@ def cmd_dispatch_queue(args: argparse.Namespace) -> int:
             ),
             psi_reader=((lambda: pressure.read_throttle(dcfg.psi_path)) if dcfg.psi_path else None),
             throttle_max_ticks=_throttle_ticks(args),
+            tick_seconds=_tick_seconds(args),
         )
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -198,6 +200,47 @@ def _throttle_ticks(args: argparse.Namespace) -> int:
     """``--max-throttle-ticks`` when given, else the module default."""
     value = getattr(args, "max_throttle_ticks", None)
     return DEFAULT_MAX_THROTTLE_TICKS if value is None else int(value)
+
+
+def _dispatch_config(repos: Mapping[str, str]) -> FleetOpsConfig:
+    """The ``fleet_ops:`` config that governs this dispatch.
+
+    Read from the repos the queue actually names, not from ``Path.cwd()``. The
+    dispatcher is routinely run from somewhere else entirely — the operator's
+    shell, a scratch dir, a fleet worktree — so resolving against the cwd
+    silently returned ``None`` and every ``fleet_ops.dispatch:`` knob
+    (max_lanes, max_gates, cluster_order, psi_avg10_max, psi_path) was ignored
+    even though the repo being worked on declared it. ``runner.run_lane`` already
+    resolves the same file against the repo it is about to work on; this keeps
+    the two from disagreeing about what the repo asked for.
+
+    A queue may name several repos. The first, in sorted order, that declares a
+    ``fleet_ops:`` block wins — a queue is dispatched as one run under one set of
+    limits, and picking per lane would make ``max_lanes`` depend on iteration
+    order. Falling back to the cwd keeps a repo-less invocation working as it did
+    before.
+    """
+    for name in sorted(repos):
+        config = load_fleet_ops_config_from_repo(repos[name])
+        if config is not None:
+            return config
+    return load_fleet_ops_config_from_repo(Path.cwd()) or FleetOpsConfig()
+
+
+def _tick_seconds(args: argparse.Namespace) -> float:
+    """``--tick-seconds`` when given, else the module default.
+
+    A non-positive interval would turn the dispatcher's wait into a busy loop
+    against a saturated box, so it is rejected rather than clamped: the operator
+    who asked for it has a reason, and silently substituting a different number
+    is how a configured wait turns into the default hour.
+    """
+    value = getattr(args, "tick_seconds", None)
+    if value is None:
+        return DEFAULT_TICK_SECONDS
+    if value <= 0:
+        raise ValueError(f"--tick-seconds must be greater than 0, got {value:g}")
+    return float(value)
 
 
 def register_dispatch_command(sub: argparse._SubParsersAction) -> None:
@@ -264,6 +307,15 @@ def register_dispatch_command(sub: argparse._SubParsersAction) -> None:
         type=float,
         default=None,
         help="CPU PSI some-avg10 ceiling above which no new lane is launched",
+    )
+    dispatch_p.add_argument(
+        "--tick-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Seconds between dispatch-loop ticks while waiting on lanes and gates "
+            f"(default: {DEFAULT_TICK_SECONDS:g})"
+        ),
     )
     dispatch_p.add_argument(
         "--max-throttle-ticks",

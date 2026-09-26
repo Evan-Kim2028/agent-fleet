@@ -77,10 +77,10 @@ class _Dispatch:
         self._pid += 1
         is_lane = argv[:3] == ["fleet", "lane", "run"]
         if is_lane:
-            # The lane guarantees a PR and reports it on its --json output.
-            Path(str(kwargs["stdout"])).write_text(
-                '{"state": "pr_guaranteed", "pr": 9, "worktree": "/w"}', encoding="utf-8"
-            )
+            # The lane guarantees a PR and reports it on its --json output,
+            # written through the log handle the dispatcher handed spawn.
+            with kwargs["stdout"] as log:
+                log.write('{"state": "pr_guaranteed", "pr": 9, "worktree": "/w"}')
             return _FakeProc(self._pid, 0, polls=1)
 
         # A correct gate: it appends its verdict to the status file it was given,
