@@ -1,0 +1,31 @@
+#!/bin/bash
+# uv shim for fleet lanes: admission for expensive commands, shared across operators.
+#   uv run ... pytest            -> one of $AGENT_TEST_SLOTS (12) 'agenttest' slots
+#   uv run ... pyright            -> one of $AGENT_TYPECHECK_SLOTS (12) 'typecheck' slots
+#   uv run pre-commit ...         -> NOT gated (its hooks call pyright/pytest themselves; gating both nested
+#                                    deadlocked: 4 pre-commits each held a slot and waited for a 2nd for their
+#                                    pyright hook, stalling 57 commits for up to 3h on 2026-09-25)
+# Nested calls under an admitted command (FLEET_ADMITTED=1) are never gated again.
+REAL=$HOME/.local/bin/uv
+[ -n "$FLEET_ADMITTED" ] && exec $REAL "$@"
+case " $* " in
+  *" run "*pre-commit*) exec $REAL "$@";;
+  *" run "*pytest*) POOL=agenttest; N=${AGENT_TEST_SLOTS:-12};;
+  *" run "*pyright*) POOL=typecheck; N=${AGENT_TYPECHECK_SLOTS:-12};;
+  *) exec $REAL "$@";;
+esac
+export PYTEST_XDIST_AUTO_NUM_WORKERS=${PYTEST_XDIST_AUTO_NUM_WORKERS:-2}
+if [ "$POOL" = agenttest ] && [ -z "$ALLOW_FULL_SUITE" ]; then
+  targets=$(printf '%s\n' "$@" | grep -vE '^-|^run$|^uv$|pytest$|^python3?$|^-m$' | grep -E 'tests?/?$|/tests/?$|^tests?$' || true)
+  files=$(printf '%s\n' "$@" | grep -E '\.py(::|$)' || true)
+  if [ -n "$targets" ] && [ -z "$files" ]; then echo "uv shim: refusing whole-suite pytest ($targets). Run the targeted test files for your change (TEST SCOPE RULE), or set ALLOW_FULL_SUITE=1 if a full run is truly required." >&2; exit 2; fi
+fi
+S=${FLEET_OPS_HOME:-$HOME/fleet/ops}/sem; waited=0
+while :; do
+  for i in $(seq 1 $N); do
+    exec 207>$S/$POOL.$i
+    if flock -n 207; then export FLEET_ADMITTED=1; exec nice -n 5 $REAL "$@"; fi
+  done
+  waited=$((waited+3)); [ $waited = 600 ] && echo "uv shim: waiting >10 min for a $POOL slot" >&2
+  sleep 3
+done

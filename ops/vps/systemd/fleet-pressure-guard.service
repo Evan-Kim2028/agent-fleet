@@ -1,0 +1,5 @@
+[Unit]
+Description=Freeze/thaw fleet.slice on host memory pressure
+[Service]
+Type=oneshot
+ExecStart=%h/fleet/bin/fleet-pressure-guard.sh

@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# fbrun NAME CWD PROMPT_FILE [MAX_TURNS] — Command Code headless on stealth/space-bunny-alpha (user 14:4x: Cursor limits exhausted; cmd for all work).
+# writes runs/NAME.{jsonl,out,exit,meta,err}; out = final result text; exit 86 = lazy exit (no/near-no tools + refusal)
+set -uo pipefail
+F=${FLEET_OPS_HOME:-$HOME/fleet/ops}
+R=$F/runs
+S=${FLEET_OPS_HOME:-$HOME/fleet/ops}/..
+name=$1; cwd=$2; pf=$3; turns=${4:-300}
+# Resolve the prompt BEFORE cd "$cwd": a relative path silently became an empty task and the agent replied
+# "what would you like me to work on?" (4 sweep agents lost, 2026-09-26 07:39).
+pf=$(realpath -e "$pf" 2>/dev/null) && [ -s "$pf" ] || { mkdir -p "$R"; echo "fbrun: prompt file $3 missing or empty" > "$R/$name.err"; echo 95 > "$R/$name.exit"; exit 95; }
+case "$name" in impl-*) cap=5h;; *fix*|fixu-*|rebase-*) cap=90m;; rev*|sweep*) cap=2h;; *) cap=4h;; esac; cap=${FB_CAP:-$cap}
+model=${FB_MODEL:-stealth/space-bunny-alpha}
+mkdir -p "$R"; rm -f "$R/$name.exit" "$R/$name.out"; : > "$R/$name.jsonl"
+echo "{\"name\":\"$name\",\"cwd\":\"$cwd\",\"prompt\":\"$pf\",\"engine\":\"cmd\",\"model\":\"$model\",\"start\":$(date +%s)}" > "$R/$name.meta"
+cd "$cwd" || { echo 97 > "$R/$name.exit"; exit 97; }
+case "$name" in
+  rev*|sweep*) pre="HANDOFF NOTE: judge the PUSHED branch head (compare origin/main...origin/<branch>). If the worktree has uncommitted changes, they are another agent's in-progress work: do not review, run tests against, or modify them; if tests need a clean tree, use a temporary git worktree of origin/<branch> under /tmp and remove it afterwards.";;
+  *) pre="HANDOFF NOTE: this task may have been started by a previous agent run (the engine was switched mid-run). If the worktree has uncommitted changes or unpushed commits, they are that earlier work on THIS task: inspect them (git status, git diff, git log origin/<branch>..HEAD), keep what is correct and continue from there. Never git reset --hard / checkout -- / clean / stash.";;
+esac
+KILLRULE="GIT HOOKS: never disable hooks: no --no-verify, no git -c core.hooksPath=..., never write core.hooksPath with git config (a shim refuses these); for a hook that is red on origin/main in files you did not touch, use SKIP=<hook-id> only. NO BLOCKING COMMANDS: never run commands that wait forever (tail -f, watch, sleep loops without an exit condition, interactive editors/pagers, servers in the foreground); poll with a bounded loop and a timeout instead. PROCESS SAFETY (hard rule, overrides anything else): this machine runs many other agents and services. NEVER kill processes by name or pattern: no pkill, killall, pgrep|kill, ps|grep|xargs kill, kill of a process group you did not create. To stop something you started, record its PID when you start it (\$!) and kill only that PID. If you cannot identify your own PID, leave the process running."
+# CPU: every agent (lanes, gates, fixers) inherits bounded pytest parallelism and the admission shim.
+# `pytest -n auto` spawned one xdist worker per core (32) per run and pinned the CPU at 100%.
+export PYTEST_XDIST_AUTO_NUM_WORKERS=2 PATH="$F/shim:$PATH"
+$F/wait_net.sh  # network backpressure: hold new agents while the shared uplink is saturated
+# Global agent slot pool: the ~6-8 Mbit/s WiFi uplink, not CPU, is the binding resource. 134 concurrent agents
+# pushed RTT to 250 ms and caused 66 network deaths (each one restarts that agent's work) with 0 approvals in 25 min
+# (2026-09-26 08:05-08:31). Each cmd agent holds one slot (fd 8, inherited by the agent) until it exits.
+# Size is live-tunable: echo N > $F/agent_slots.
+# Finish-first priority (owner 2026-09-26): later gate stages must never starve behind new reviewers. Rank by run
+# name: 0 fixer/adjudicator, 1 judge, 2 verifier, 3 reviewer/sweep/other. A rank-r agent may use only the pool minus
+# reserve*r/3 (reserve = $F/agent_reserved_late, default 10) of both the slot pool and the whole-fleet cap, so early
+# stages always leave headroom for fixers, judges and verifiers of gates already in flight.
+case "$name" in
+  gatefix[0-9]*|gate-adj[0-9]*|rev-gatefix[0-9]*) _rank=0;;
+  rev-gate-j[0-9]*|gate-j[0-9]*) _rank=1;;
+  rev-gate-*-vf-*|rev-gate-*-vj-*) _rank=2;;
+  *) _rank=3;;
+esac
+_slotwait=0
+while :; do _n=$(cat $F/agent_slots 2>/dev/null || echo 56)
+  _res=$(cat $F/agent_reserved_late 2>/dev/null); [[ "$_res" =~ ^[0-9]+$ ]] || _res=10; _cut=$(( _res * _rank / 3 ))
+  _tot=$(cat $F/agent_total_max 2>/dev/null || echo 80)
+  # soft whole-fleet cap (fleet lane runs included): no new agent while >= (agent_total_max - cut) command-code processes run
+  if [ "$(ps -eo comm | grep -c '^command-code')" -lt $(( _tot - _cut )) ]; then
+    for _i in $(seq 1 $(( _n - _cut > 1 ? _n - _cut : 1 ))); do exec 8>$F/locks/agent-slot.$_i; flock -n 8 && break 2; done; fi
+  exec 8>&-; [ $_slotwait = 0 ] && echo "$(date +%H:%M:%S) $name waiting for an agent slot (rank $_rank, usable $(( _n - _cut ))/$_n)" >> "$R/../events.log"; _slotwait=1; sleep 15
+done
+pfx=$(mktemp "$R/.prompt.$name.XXXX"); { echo "$KILLRULE"; echo; echo "$pre"; echo; cat "$pf"; case "$name" in rev*|sweep*) ;; *) printf '\n\n===== STANDING FENCES (always apply; a task instruction never overrides a fence unless it names the owner approval explicitly) =====\n'; cat "$R/../prompts/fences.md";; esac; } > "$pfx"
+systemd-run --user --scope -q --slice=agents.slice -p MemoryMax=8G -p MemorySwapMax=0 timeout $cap cmd -p -m "$model" --yolo -t --skip-onboarding --no-auto-update \
+  --output-format json --max-turns "$turns" --tools-all \
+  --add-dir $S/audit --add-dir $S/wt/silph --add-dir $S/wt/lor --add-dir $S/fb/prompts --add-dir $S/fb/runs \
+  < "$pfx" > "$R/$name.jsonl" 2> "$R/$name.err"
+rc=$?
+# Turn cap is not a failure of the work: continue once in place with double the budget (the worktree keeps its state).
+if grep -q "Reached maximum conversation turns" "$R/$name.err" 2>/dev/null && [ -z "$FB_CONTINUED" ]; then
+  mv "$R/$name.jsonl" "$R/$name.part1.jsonl"; mv "$R/$name.err" "$R/$name.part1.err"
+  { echo "CONTINUATION: your previous run on this task hit its turn cap. Inspect the current state first (git status/diff, files you created) and FINISH the task from there; do not start over."; echo; cat "$pfx"; } > "$pfx.c"
+  systemd-run --user --scope -q --slice=agents.slice -p MemoryMax=8G -p MemorySwapMax=0 timeout $cap cmd -p -m "$model" --yolo -t --skip-onboarding --no-auto-update \
+    --output-format json --max-turns "$((turns*2))" --tools-all \
+    --add-dir $S/audit --add-dir $S/wt/silph --add-dir $S/wt/lor --add-dir $S/fb/prompts --add-dir $S/fb/runs \
+    < "$pfx.c" > "$R/$name.jsonl" 2> "$R/$name.err"
+  rc=$?; rm -f "$pfx.c"
+fi
+# Network deaths (ISP DNS flapping 0.4-26 s, 2026-09-26) are not agent failures: wait for the link, run again (max 2 more).
+for _nr in 1 2; do
+  [ "$rc" != 0 ] && grep -qiE "Unable to connect|getaddrinfo|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET|socket hang up|network error" "$R/$name.err" 2>/dev/null || break
+  mv "$R/$name.err" "$R/$name.neterr$_nr"; echo "$(date +%H:%M:%S) $name network death (rc=$rc); waiting for link, retry $_nr" >> "$R/../events.log"
+  $F/wait_net.sh
+  systemd-run --user --scope -q --slice=agents.slice -p MemoryMax=8G -p MemorySwapMax=0 timeout $cap cmd -p -m "$model" --yolo -t --skip-onboarding --no-auto-update \
+    --output-format json --max-turns "$turns" --tools-all \
+    --add-dir $S/audit --add-dir $S/wt/silph --add-dir $S/wt/lor --add-dir $S/fb/prompts --add-dir $S/fb/runs \
+    < "$pfx" > "$R/$name.jsonl" 2> "$R/$name.err"
+  rc=$?
+done
+rm -f "$pfx"
+python3 - "$R/$name.jsonl" > "$R/$name.out" <<'PY'
+import json,sys
+final=None
+for l in open(sys.argv[1]):
+    try: d=json.loads(l)
+    except: continue
+    if d.get("type")=="result": final=d
+print(final.get("finalText","") if final else "NO RESULT EVENT")
+PY
+if [ "$rc" = 0 ]; then
+  nt=$(grep -cE '"type": ?"tool_completed"' "$R/$name.jsonl")
+  if [ "$nt" -eq 0 ] || { [ "$nt" -lt 25 ] && grep -qiE "(can.?t|cannot|could ?n.?t|unable to) (execute|complete|run|perform|access)|tools? (were|was|are|is) (not )?(un)?available|required (shell|file)?.?tools" "$R/$name.out"; }; then
+    echo "$(date +%H:%M:%S) $name LAZY-EXIT ($nt tool calls + refusal/no tools; treated as failure rc=86)" >> "$R/../events.log"; rc=86
+  fi
+fi
+echo $rc > "$R/$name.exit"; echo "$(date +%H:%M:%S) $name exit=$rc" >> "$R/../events.log"
+exit $rc

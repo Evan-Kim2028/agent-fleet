@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# orun NAME CWD PROMPT_FILE [MAX_TURNS] — fbrun-compatible fleet agent on OpenRouter (stealth/space-bunny-alpha), no cmd CLI.
+# Writes $FB_RUNS/NAME.{jsonl,out,exit,meta,err} (default ~/fleet/runs). Exit: 0 ok, 6 network/API, 7 rate-limit cap,
+# 86 lazy exit, 1 other. The key comes from ~/fleet/secrets/openrouter.env via ~/fleet/env.sh and is never printed.
+set -uo pipefail
+[ $# -ge 3 ] || { echo "usage: orun NAME CWD PROMPT_FILE [MAX_TURNS]" >&2; exit 64; }
+source ~/fleet/env.sh
+pf=$(realpath -e "$3" 2>/dev/null) && [ -s "$pf" ] || { echo "orun: prompt file $3 missing or empty" >&2; exit 95; }
+[ -n "${OPENROUTER_API_KEY:-}" ] || { echo "orun: OPENROUTER_API_KEY not set (source ~/fleet/env.sh)" >&2; exit 96; }
+PY=$(head -1 "$(command -v fleet)" | sed 's/^#!//')
+exec "$PY" ~/fleet/bin/orun.py "$1" "$2" "$pf" "${4:-300}"
