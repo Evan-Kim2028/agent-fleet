@@ -120,7 +120,7 @@ def read_json(path: Path) -> dict[str, object] | None:
     """Parse *path* as a JSON object, or ``None`` if absent or unusable."""
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-    except OSError, json.JSONDecodeError:
+    except (OSError, json.JSONDecodeError):
         return None
     return raw if isinstance(raw, dict) else None
 

@@ -147,11 +147,11 @@ def boot_time(pid: int, *, proc_root: Path = Path("/proc")) -> float | None:
             continue
         try:
             boot = float(line.split()[1])
-        except IndexError, ValueError:
+        except (IndexError, ValueError):
             return None
         try:
             ticks = os.sysconf("SC_CLK_TCK")
-        except ValueError, OSError:
+        except (ValueError, OSError):
             return None
         return boot + (starttime / ticks)
     return None
@@ -330,7 +330,7 @@ def terminate_group(
 
     try:
         os.killpg(pgid, signal.SIGTERM)
-    except ProcessLookupError, PermissionError, OSError:
+    except (ProcessLookupError, PermissionError, OSError):
         return TerminationResult(signalled=False, skipped_reason=f"group {pgid} already gone")
     return TerminationResult(signalled=True)
 
@@ -359,7 +359,7 @@ def escalate_kill_group(
         )
     try:
         os.killpg(pgid, signal.SIGKILL)
-    except ProcessLookupError, PermissionError, OSError:
+    except (ProcessLookupError, PermissionError, OSError):
         return TerminationResult(signalled=False, skipped_reason=f"group {pgid} already gone")
     return TerminationResult(signalled=True, escalated=True)
 

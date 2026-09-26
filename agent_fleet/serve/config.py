@@ -168,7 +168,7 @@ def _int(value: Any, default: int) -> int:  # noqa: ANN401
         if isinstance(value, bool):
             return default
         return int(value)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return default
 
 
@@ -177,7 +177,7 @@ def _float(value: Any, default: float) -> float:  # noqa: ANN401
         if isinstance(value, bool):
             return default
         return float(value)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return default
 
 
@@ -334,7 +334,7 @@ def _read_yaml(path: Path) -> dict[str, Any] | None:
 
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except OSError, yaml.YAMLError:
+    except (OSError, yaml.YAMLError):
         return None
     return raw if isinstance(raw, dict) else None
 

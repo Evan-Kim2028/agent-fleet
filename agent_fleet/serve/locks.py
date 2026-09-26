@@ -175,7 +175,7 @@ class LockRegistry:
     def _read_path(self, path: Path) -> LockRecord | None:
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-        except OSError, json.JSONDecodeError:
+        except (OSError, json.JSONDecodeError):
             return None
         return LockRecord.from_dict(raw) if isinstance(raw, dict) else None
 
@@ -187,7 +187,7 @@ class LockRegistry:
         for path in sorted(self.directory.glob("*.json")):
             try:
                 raw = json.loads(path.read_text(encoding="utf-8"))
-            except OSError, json.JSONDecodeError:
+            except (OSError, json.JSONDecodeError):
                 continue
             if isinstance(raw, dict):
                 record = LockRecord.from_dict(raw)

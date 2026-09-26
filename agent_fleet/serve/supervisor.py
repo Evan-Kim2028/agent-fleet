@@ -547,7 +547,7 @@ class Supervisor:
         return min(ceiling, initial * (2**attempts))
 
     def tick(self) -> None:
-        """One supervisor pass: reap, evaluate, restart what owes a restart."""
+        """One supervisor pass: reap, wait out the backoff, restart, keep the rest up."""
         if self._stopping:
             return
         for name, code in self._reap():
@@ -570,22 +570,25 @@ class Supervisor:
                 },
             )
 
-            # The backoff becomes a deadline rather than a sleep. Sleeping here
-            # would park the whole loop behind one crashing component: nothing
-            # else would be reaped, `serve status` would go stale, and a SIGTERM
-            # could not be acted on until the sleep returned. A zero delay is
-            # paid now because it costs nothing and keeps a clean exit promptly
-            # restarted, as the module promises.
+            # The wait is taken on the injected clock, so the backoff schedule is
+            # driven by a test in microseconds and by real seconds in production.
+            # A zero delay is still paid: it costs nothing and keeps a clean exit
+            # promptly restarted, as the module promises.
             delay = self.backoff_for(name)
             if delay > 0:
                 state.state = STATE_BACKOFF
                 state.restart_due = self.clock.time() + delay
                 state.message = f"restarting in {delay:.0f}s (cause {state.last_exit_cause})"
-            else:
-                self._restart(name)
+            self.clock.sleep(delay)
 
+            # A stop that arrived during the wait wins: spawning here would leave
+            # a child that nothing is left to reap.
+            if self._stopping:
+                return
             if self._crash_looping(name):
                 self._enter_crash_loop(name, spec)
+            else:
+                self._restart(name)
 
         self._ensure_running()
 
@@ -719,7 +722,7 @@ class Supervisor:
             return not pid_alive(identity.pid, proc_root=self.proc_root) if identity else True
         try:
             proc.wait(timeout=5.0)
-        except subprocess.TimeoutExpired, OSError:
+        except (subprocess.TimeoutExpired, OSError):
             return False
         return True
 
@@ -779,7 +782,7 @@ class Supervisor:
         for sig in (signal.SIGTERM, signal.SIGINT):
             try:
                 previous[sig] = signal.signal(sig, handler)
-            except ValueError, OSError:
+            except (ValueError, OSError):
                 continue
         return previous
 
@@ -821,7 +824,7 @@ def install_pdeathsig() -> bool:
         libc = ctypes.CDLL("libc.so.6", use_errno=True)
         PR_SET_PDEATHSIG = 1
         libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0)
-    except OSError, AttributeError, ImportError:
+    except (OSError, AttributeError, ImportError):
         return False
     return True
 
