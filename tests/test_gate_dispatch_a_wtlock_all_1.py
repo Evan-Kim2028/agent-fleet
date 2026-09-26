@@ -18,6 +18,7 @@ subsystems — and therefore fail at this head.
 from __future__ import annotations
 
 import subprocess
+import sys
 import threading
 from typing import TYPE_CHECKING
 
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 from agent_fleet.fleet_ops.worktree import ensure_lane_worktree, worktree_root
+from agent_fleet.fleet_ops.worktree_lock import repo_lock_path, require_worktree_lock
 from agent_fleet.gate.gitops import _lock_dir, _repo_key, prepare_worktree, worktree_lock
 
 
@@ -156,3 +158,120 @@ def test_lane_add_blocks_while_the_gate_holds_the_repo_lock(repo: Path, tmp_path
         "worktree mutation are not mutually exclusive"
     )
     assert (tmp_path / "wt" / "lane-b").is_dir(), "the lane worktree was not created"
+
+
+def _run_lane_add(repo: Path, tmp_path: Path, lane: str) -> subprocess.CompletedProcess[str]:
+    """Run a *real* ``ensure_lane_worktree`` in a fresh interpreter."""
+    return subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import json,sys;"
+                "from pathlib import Path;"
+                "from agent_fleet.fleet_ops.worktree import ensure_lane_worktree;"
+                "print(json.dumps(ensure_lane_worktree("
+                f"Path({str(repo)!r}), lane={lane!r}, base='main',"
+                f" target_path=Path({str(tmp_path / 'wt' / lane)!r}),"
+                f" parent=Path({str(tmp_path / 'wt')!r})"
+                ").to_dict()))"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=300,
+    )
+
+
+def _unusable_lock_file(repo: Path) -> Path:
+    """A lock file that exists and cannot be opened, the real failure mode.
+
+    The repository is not made read-only, so git's own ``worktree add`` would
+    still succeed: the test proves the *lane refused*, not that git happened to
+    fail for an unrelated reason.
+    """
+    path = repo_lock_path(repo)
+    path.write_text("", encoding="utf-8")
+    path.chmod(0o400)
+    return path
+
+
+def test_unopenable_lock_file_must_stop_the_lane_add(repo: Path, tmp_path: Path) -> None:
+    """A lock that cannot be opened must stop the add, not degrade to unlocked.
+
+    The lock file exists and is not a directory, so the old ``is_dir`` check
+    passed it straight through. The create that followed then raised ``EACCES``,
+    ``_flock`` logged *proceeding without it*, and ``git worktree add`` ran with
+    no mutual exclusion at all — registering the worktree in the very registry
+    this lock exists to protect.
+    """
+    lock = _unusable_lock_file(repo)
+    result = _run_lane_add(repo, tmp_path, "lane-y")
+
+    assert result.returncode != 0, (
+        f"ensure_lane_worktree succeeded with an unopenable lock at {lock} "
+        f"(mode {lock.stat().st_mode & 0o777:o}): {result.stdout.strip()}"
+    )
+    assert not (tmp_path / "wt" / "lane-y").exists(), (
+        "the lane worktree was created even though no lock could be taken"
+    )
+
+
+def test_unusable_lock_must_not_register_a_worktree_entry(repo: Path, tmp_path: Path) -> None:
+    """The refusal has to be total: nothing may reach the shared registry.
+
+    A partially-created worktree is the damage the lock prevents — a directory
+    on disk and an entry under ``.git/worktrees`` that a concurrent prune can
+    then delete out from under its creator.
+    """
+    _unusable_lock_file(repo)
+    result = _run_lane_add(repo, tmp_path, "lane-y")
+
+    assert result.returncode != 0, f"the add should have been refused: {result.stdout.strip()}"
+    listing = _git(repo, "worktree", "list", "--porcelain")
+    assert "lane-y" not in listing, f"a refused add still registered a worktree:\n{listing}"
+    registry = repo / ".git" / "worktrees"
+    entries = sorted(p.name for p in registry.iterdir()) if registry.is_dir() else []
+    assert not entries, f"the refused add wrote entries into the shared registry: {entries}"
+
+
+def test_require_worktree_lock_rejects_an_unopenable_lock(repo: Path) -> None:
+    """The refusal must be reachable, not only the branch it advertises.
+
+    The documented contract is that a caller with no unlocked fallback is told
+    no. An unopenable lock file is the case that reaches it in production; a
+    check that only ever exercises the directory branch proves nothing.
+
+    A repository nobody has locked yet is *not* that case: the file is created on
+    first use, so refusing an absent lock would refuse every fresh clone.
+    """
+    assert require_worktree_lock(repo) == repo_lock_path(repo)
+
+    _unusable_lock_file(repo)
+    with pytest.raises(OSError, match="cannot be opened"):
+        require_worktree_lock(repo)
+
+
+def test_dangling_lock_symlink_must_stop_the_lane_add(repo: Path, tmp_path: Path) -> None:
+    """A symlink where the lock belongs is not a lock, whatever it points at.
+
+    A lock file is an ``flock`` target: every holder must reach *the same*
+    inode. A symlink makes that dependent on what it points at, and a dangling
+    one means the holder would ``O_CREAT`` a fresh file somewhere unrelated
+    every time — two processes would take two different locks and believe they
+    were serialized.
+    """
+    lock = repo_lock_path(repo)
+    lock.symlink_to(tmp_path / "nowhere" / "lock")
+
+    with pytest.raises(OSError, match="not a usable lock file"):
+        require_worktree_lock(repo)
+
+    result = _run_lane_add(repo, tmp_path, "lane-z")
+    assert result.returncode != 0, (
+        f"ensure_lane_worktree succeeded with a symlinked lock at {lock}: {result.stdout.strip()}"
+    )
+    assert not (tmp_path / "wt" / "lane-z").exists(), "the lane worktree was created unlocked"
+    listing = _git(repo, "worktree", "list", "--porcelain")
+    assert "lane-z" not in listing, f"a refused add still registered a worktree:\n{listing}"

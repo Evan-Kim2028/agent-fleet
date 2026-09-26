@@ -118,9 +118,16 @@ def repo_lock_path(root: Path) -> Path:
     return _git_common_dir(Path(root).expanduser()) / LOCK_FILENAME
 
 
-def _open_private(path: Path) -> int:
-    """Open *path* for append, creating it owner-only, and return the fd."""
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, LOCK_MODE)
+def _open_private(path: Path, flags: int = os.O_RDWR | os.O_CREAT) -> int:
+    """Open *path* and return the fd, creating it owner-only when *flags* says to.
+
+    ``os.O_CREAT`` is what makes the lock file itself, and it is why a *refusal*
+    has to be a separate open: creating the file succeeds even when a
+    deliberately hostile ``chmod 0400`` on the existing one says the holder is
+    not allowed in, which is precisely the shape of an unusable lock. Probing
+    without ``O_CREAT`` is what tells the two apart.
+    """
+    fd = os.open(path, flags, LOCK_MODE)
     try:
         os.fchmod(fd, LOCK_MODE)
     except OSError as exc:  # pragma: no cover - exotic filesystems only
@@ -225,15 +232,42 @@ def repo_worktree_lock(root: Path) -> Iterator[None]:
 
 
 def require_worktree_lock(root: Path) -> Path:
-    """Return the lock path for *root*, or refuse.
+    """Return the lock path for *root*, or raise.
 
     For a caller that must not proceed unlocked: a lane ``git worktree add``
     with no lock is the exact race that loses a sibling's worktree, and unlike
     a gate review it has no safe unlocked fallback.
+
+    The check is that the lock is **openable**, because a path that merely is
+    not a directory is not a lock anybody can take. The real failure mode is a
+    file that exists and cannot be opened — a stale ``chmod 0400``, a lock left
+    behind by another user, a symlink into a directory this process cannot
+    enter — and every one of those produces a file that is not a directory. If
+    the refusal only tested ``is_dir``, the create that follows would raise
+    ``EACCES``, :func:`_flock` would catch it, log *proceeding without it*, and
+    the lane's ``git worktree add`` would run completely unserialized — an
+    unlocked add with a warning attached, which is worse than either refusing or
+    failing, because the log reads as if the work were still guarded.
+
+    A symlink is refused too, and not only a dangling one: a link is something a
+    lock file must never be, because resolving it costs an ``O_CREAT`` in
+    whatever directory it points at.
+
+    An *absent* lock file is not an unusable one — it is a repository nobody has
+    locked yet, and the ``O_CREAT`` in :func:`_flock` creates it. Only a file
+    that exists and cannot be opened is refused.
     """
     path = repo_lock_path(root)
-    if path.is_dir():
-        raise OSError(f"worktree lock path {path} is a directory")
+    if path.is_dir() or path.is_symlink():
+        raise OSError(f"worktree lock path {path} is not a usable lock file")
+    try:
+        fd = _open_private(path, os.O_RDWR)
+    except FileNotFoundError:
+        return path
+    except OSError as exc:
+        raise OSError(f"worktree lock {path} cannot be opened: {exc}") from exc
+    with contextlib.suppress(OSError):
+        os.close(fd)
     return path
 
 

@@ -1,4 +1,15 @@
-"""Local git operations for in-repo or worktree-based runs."""
+"""Local git operations for in-repo or worktree-based runs.
+
+Every ``git worktree`` mutation here is taken under
+:func:`~agent_fleet.fleet_ops.worktree_lock.repo_worktree_lock` — the same
+per-repository lock the gate, the lane path, the merge-compatibility probe and
+the PR loop use. ``setup_workspace``, ``attach_worktree`` and
+``teardown_workspace`` all write to the one shared ``.git/worktrees`` registry,
+so an unlocked add here is still reachable by the exact failure the lock
+exists to prevent: a concurrent ``prune`` from another subsystem deletes this
+add's half-registered entry. Locking the gate alone would have left this path
+open.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +18,8 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from agent_fleet.fleet_ops.worktree_lock import repo_worktree_lock
 
 if TYPE_CHECKING:
     from agent_fleet.repo import RepoConfig
@@ -159,7 +172,8 @@ class LocalGitOps:
             return None
 
         target.parent.mkdir(parents=True, exist_ok=True)
-        result = self._run(["worktree", "add", str(target), branch_name], cwd=self.repo_root)
+        with repo_worktree_lock(self.repo_root):
+            result = self._run(["worktree", "add", str(target), branch_name], cwd=self.repo_root)
         if result.returncode != 0:
             raise RuntimeError(f"git worktree add failed: {result.stderr.strip()}")
         self._active_worktrees.append(target)
@@ -196,17 +210,21 @@ class LocalGitOps:
     ) -> Path:
         if not self.use_worktree:
             return repo_root.resolve()
-        self.worktree_base.mkdir(parents=True, exist_ok=True)
         target = self.worktree_base / run_id
-        if target.exists():
-            shutil.rmtree(target, ignore_errors=True)
         start_ref = _resolve_base_ref(repo_root, base_branch)
         args = ["worktree", "add"]
         if branch_name:
             args.extend(["-b", branch_name, str(target), start_ref])
         else:
             args.extend([str(target), start_ref])
-        result = self._run(args, cwd=repo_root)
+        # Clearing the way and adding under one held lock: releasing in between
+        # reopens the window the lock exists to close, and the rmtree is itself
+        # a mutation of the same shared registry when the path was a worktree.
+        with repo_worktree_lock(repo_root):
+            self.worktree_base.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                shutil.rmtree(target, ignore_errors=True)
+            result = self._run(args, cwd=repo_root)
         if result.returncode != 0:
             raise RuntimeError(f"git worktree add failed: {result.stderr.strip()}")
         self._active_worktrees.append(target)
@@ -238,9 +256,10 @@ class LocalGitOps:
         # land on the same worktree path never inherits a stale session id.
         clear_session_id(str(worktree))
         release_worktree_lock(worktree)
-        self._run(["worktree", "remove", "--force", str(worktree)], cwd=self.repo_root)
-        if worktree.exists():
-            shutil.rmtree(worktree, ignore_errors=True)
+        with repo_worktree_lock(self.repo_root):
+            self._run(["worktree", "remove", "--force", str(worktree)], cwd=self.repo_root)
+            if worktree.exists():
+                shutil.rmtree(worktree, ignore_errors=True)
 
     def create_branch(self, worktree: Path, branch_name: str) -> None:
         result = self._run(["checkout", "-b", branch_name], cwd=worktree)
