@@ -77,6 +77,7 @@ from agent_fleet.gate.gitops import (
 from agent_fleet.gate.prompts import (
     find_prompt,
     fix_prompt,
+    gate_test_name,
     judge_prompt,
     recheck_prompt,
     verify_prompt,
@@ -479,6 +480,7 @@ class GatePipeline:
         agent_pool: SlotPool | None = None,
         test_pool: SlotPool | None = None,
         use_systemd: bool | None = None,
+        lane_slug: str | None = None,
     ) -> None:
         self.repo = repo.resolve()
         self.pr_number = pr_number
@@ -493,6 +495,9 @@ class GatePipeline:
         self.agent_pool = agent_pool
         self.test_pool = test_pool
         self.use_systemd = systemd_run_available() if use_systemd is None else use_systemd
+        # An explicit slug wins; otherwise the config's; otherwise the PR's own
+        # head ref, which is what makes the name unique per PR.
+        self.lane_slug = lane_slug or config.lane_slug
         self.evidence = _Evidence()
         self.archive = GateTestArchive(gate_dir)
         self.recorder = GateCallRecorder(gate_dir)
@@ -726,6 +731,7 @@ class GatePipeline:
         model: str,
         source: str,
     ) -> None:
+        test_name = gate_test_name(self.lane_slug, finding.id)
         prompt = verify_prompt(
             finding=finding,
             worktree=str(worktree),
@@ -733,7 +739,8 @@ class GatePipeline:
             head_sha=(self._head_sha(worktree) or "")[:9],
             pr_number=self.pr_number,
             test_dir_hint=runner.test_dir_hint(finding.file or "x"),
-            pytest_cmd_hint=runner.pytest_hint("tests/test_gate_x.py"),
+            pytest_cmd_hint=runner.pytest_hint(test_name),
+            test_file_name=test_name,
         )
         answer = self._call_required(
             role="verify",
@@ -962,7 +969,9 @@ class GatePipeline:
                     confirmed=_json_blob(self.evidence.confirmed, 8000),
                     untestable=_json_blob(untestable_open, 4000),
                     all_tests=" ".join(all_tests),
-                    pytest_cmd_hint=self._runner_for(fix_wt).pytest_hint("tests/test_gate_x.py"),
+                    pytest_cmd_hint=self._runner_for(fix_wt).pytest_hint(
+                        gate_test_name(self.lane_slug, "x")
+                    ),
                     task_text=self._task_text()[:6000],
                 )
                 self._run_fixer(prompt, model=model, cwd=fix_wt)
@@ -1430,12 +1439,16 @@ def run_gate(
     gate_dir: Path | None = None,
     run_id: str | None = None,
     use_systemd: bool | None = None,
+    lane_slug: str | None = None,
 ) -> GateResult:
     """Run the ``gate`` pipeline for *pr_number* in *repo_path*.
 
     Backends and the model policy are resolved *before* any agent runs, so a
     misconfigured or policy-violating model fails in a second rather than after
     a fan-out has already spent the budget.
+
+    *lane_slug* makes gate test file names unique per PR; when it is omitted the
+    PR's own head ref supplies it, which is unique for any two distinct PRs.
     """
     repo = Path(repo_path).expanduser().resolve()
     raw = _load_raw_config(config_path)
@@ -1446,6 +1459,11 @@ def run_gate(
     policy.check(backend=gate_cfg.backend, model=gate_cfg.model, role=ROLE_LENS)
     if gate_cfg.enable_judge:
         policy.check(backend=gate_cfg.judge_backend, model=gate_cfg.judge_model, role=ROLE_JUDGE)
+
+    resolved_slug = lane_slug or gate_cfg.lane_slug
+    if not resolved_slug:
+        fetch_base(repo, gate_cfg.base_branch)
+        resolved_slug = resolve_pull_request(repo, pr_number).head_ref
 
     backend = build_gate_backend(gate_cfg.backend)
     judge_backend = (
@@ -1476,6 +1494,7 @@ def run_gate(
         agent_pool=agent_slot_pool(pool_cfg),
         test_pool=test_slot_pool(pool_cfg),
         use_systemd=use_systemd,
+        lane_slug=resolved_slug,
     )
     return pipeline.run()
 

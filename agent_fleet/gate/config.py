@@ -7,8 +7,13 @@ lane on the box shares one approved-model list.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any
+
+from agent_fleet.gate.prompts import SLUG_MAX, slugify
+
+logger = logging.getLogger(__name__)
 
 # Each lens is one reviewer focus. The four defaults mirror the lanes the
 # reference gate ran: correctness, contract, production safety, and spec
@@ -58,6 +63,10 @@ _STRINGS: tuple[str, ...] = (
 
 _OPTIONAL_STRINGS: tuple[str, ...] = ("model", "judge_model", "push_branch", "package_dir")
 
+#: Normalised lane slug, used to make gate test file names unique per PR. Empty
+#: by default so the PR's head ref can supply it at run time.
+_OPTIONAL_SLUGS: tuple[str, ...] = ("lane_slug",)
+
 _BOOLS: tuple[str, ...] = ("enable_fix", "enable_judge")
 
 
@@ -84,6 +93,9 @@ class GateConfig:
     max_parallel_verifiers: int = 6
     test_memory: str = "6G"
     package_dir: str | None = None
+    #: Lane slug folded into every verifier-created test file name. Empty means
+    #: "use the PR's head ref", which is what makes the name unique per PR.
+    lane_slug: str = ""
     # Safety net, not the stopping rule. The fix loop continues while the
     # failing set strictly shrinks; ``max_fix_rounds`` only bounds a run that
     # keeps making microscopic progress. See docs/GATE.md.
@@ -136,6 +148,11 @@ def load_gate_config(raw: dict[str, Any] | None) -> GateConfig | None:
     for key in _OPTIONAL_STRINGS:
         value = section.get(key)
         kwargs[key] = str(value) if value else getattr(defaults, key)
+    for key in _OPTIONAL_SLUGS:
+        value = section.get(key)
+        # A configured slug is folded on the way in so ``fb/lane`` and
+        # ``fb_lane`` cannot produce two different test file names.
+        kwargs[key] = slugify(str(value), limit=SLUG_MAX) if value else getattr(defaults, key)
     for key in _BOOLS:
         kwargs[key] = bool(section.get(key, getattr(defaults, key)))
     return GateConfig(**kwargs)

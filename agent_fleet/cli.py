@@ -969,6 +969,7 @@ def cmd_gate(args: argparse.Namespace) -> int:
             task_file=getattr(args, "task_file", None),
             status_file=getattr(args, "status_file", None),
             config_path=getattr(args, "config", None),
+            lane_slug=getattr(args, "lane_slug", None),
         )
     except ModelPolicyError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -1376,6 +1377,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Path to the git repo holding the PR (default: cwd)",
     )
     gate_p.add_argument("--pr", type=int, default=None, help="PR number to gate")
+    gate_p.add_argument(
+        "--lane-slug",
+        default=None,
+        help=("Slug folded into verifier-created test file names (default: the PR's head ref)"),
+    )
     gate_p.add_argument(
         "--task-file",
         default=None,

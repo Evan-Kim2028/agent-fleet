@@ -20,10 +20,44 @@ one is routed to the judge rather than counted as a blocker.
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from agent_fleet.contracts.gate import Finding
+
+#: Longest lane slug / finding id kept in a gate test file name. Both are capped
+#: so a long branch name cannot produce a path the OS or pytest chokes on.
+SLUG_MAX = 24
+ID_MAX = 30
+
+
+def slugify(text: str, *, limit: int) -> str:
+    """Fold *text* to a filename-safe token: alphanumerics and underscores only.
+
+    Gate test names are derived from a branch name, so every character a branch
+    may legally contain but a filename may not (``.``, ``/``, ``-``) has to be
+    folded. Folding to ``_`` rather than dropping keeps distinct branches
+    distinct, which is the whole point of putting the lane in the name. Returns
+    ``""`` for input that folds away to nothing, so callers choose their own
+    fallback.
+    """
+    folded = re.sub(r"[^A-Za-z0-9]+", "_", text).strip("_")
+    return folded[:limit].strip("_")
+
+
+def gate_test_name(lane_slug: str, finding_id: str) -> str:
+    """The one name a verifier's new test file must have: ``test_gate_<lane>_<id>.py``.
+
+    A verifier writes its test into the *PR's* repository, so two PRs gating
+    different branches both produced ``test_gate_contract_1.py`` — an add/add
+    conflict that forced a rebase and a full re-gate for every PR after it. The
+    lane slug makes the name unique per PR, which is what lets concurrent
+    branches each carry their own gate evidence.
+    """
+    slug = slugify(lane_slug, limit=SLUG_MAX) or "x"
+    identifier = slugify(finding_id, limit=ID_MAX) or "x"
+    return f"test_gate_{slug}_{identifier}.py"
 
 
 PROCESS_SAFETY = (
@@ -120,10 +154,10 @@ def _finding_spec() -> dict[str, object]:
     }
 
 
-def _verify_spec(test_dir: str, tag: str) -> dict[str, object]:
+def _verify_spec(test_dir: str, file_name: str) -> dict[str, object]:
     return {
         "verdict": "CONFIRMED|REJECTED|UNTESTABLE",
-        "test_file": f"repo-relative path or null ({test_dir}/test_gate_{tag}.py)",
+        "test_file": f"repo-relative path or null ({test_dir}/{file_name})",
         "reason": "one or two sentences of evidence",
     }
 
@@ -148,9 +182,14 @@ def verify_prompt(
     pr_number: int,
     test_dir_hint: str,
     pytest_cmd_hint: str,
+    test_file_name: str,
 ) -> str:
-    """Prompt for one verifier: write exactly one failing test, or refute the claim."""
-    tag = finding.id or "claim"
+    """Prompt for one verifier: write exactly one failing test, or refute the claim.
+
+    *test_file_name* is the exact, lane-unique name the test must have. It is
+    passed in rather than derived here so the instruction, the run command and
+    the answer example cannot disagree about the file's name.
+    """
     claim_json = json.dumps(finding.to_dict(), indent=2)
     return PROCESS_SAFETY + (
         f"You verify ONE claimed defect in worktree {worktree} (detached at PR "
@@ -158,18 +197,20 @@ def verify_prompt(
         f"{base_branch}...HEAD`).\n"
         f"Claim (JSON):\n{claim_json}\n\n"
         "Your job: PROVE or DISPROVE it with a test. Create exactly ONE new test "
-        f"file named test_gate_{tag}.py in the existing test directory that fits "
-        f"({test_dir_hint}). Do not modify ANY other file. The test must exercise "
+        f"file named {test_file_name} in the existing test directory that fits "
+        f"({test_dir_hint}). Do not modify ANY other file, and do not rename this "
+        "file: its name is how the gate finds and archives your evidence, and a "
+        "fixed name collides with another PR's gate tests. The test must exercise "
         "the real code path and FAIL at the current head because of the claimed "
         "defect (an assertion failure on the wrong behaviour) — not because of "
         "import errors, missing fixtures, network or environment. Run it "
-        f"(memory-capped): `{pytest_cmd_hint} test_gate_{tag}.py` from the package "
+        f"(memory-capped): `{pytest_cmd_hint} {test_file_name}` from the package "
         "directory that owns pyproject.toml.\n"
         "If after honest effort the claim is false (the code behaves correctly), "
         "delete your test file and answer REJECTED with the evidence. If it truly "
         "cannot be shown by a local test, delete the file and answer UNTESTABLE.\n\n"
         "Final answer: exactly one fenced json block:\n"
-        f"{_example_block(_verify_spec(test_dir_hint, tag))}"
+        f"{_example_block(_verify_spec(test_dir_hint, test_file_name))}"
     )
 
 
