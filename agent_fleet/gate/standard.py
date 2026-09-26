@@ -61,6 +61,13 @@ OUTCOME_FIX_AND_REGATE = "fix-and-regate"
 OUTCOME_APPROVED = "standard-approved"
 OUTCOME_FALLBACK = "standard-fallback"
 
+#: How many metrics rows the pass counter reads. The counter needs this PR's own
+#: rows and nothing else, but the metrics file is shared by every run on the host
+#: and is never rotated, so the read is a bounded tail: a window this wide cannot
+#: plausibly be filled by other PRs' runs between two passes of one PR, which is
+#: what keeps the cheap bar's bookkeeping from costing more than the bar does.
+STANDARD_HISTORY_ROWS = 500
+
 
 def select_tier(config: GateConfig, changed: list[str]) -> str:
     """Return the tier *changed* earns: ``standard`` unless it is sensitive.
@@ -182,8 +189,7 @@ def next_action(state: StandardState) -> StandardDecision:
             action=StandardAction.APPROVE,
             passes=state.passes,
             summary=(
-                f"standard bar: no findings and PR tests green{head_note} "
-                f"(pass {state.passes})"
+                f"standard bar: no findings and PR tests green{head_note} (pass {state.passes})"
             ),
         )
 
@@ -247,7 +253,7 @@ def _as_int(value: object) -> int:
     return 0
 
 
-def prior_passes(rows: list[dict[str, Any]], *, repo: str, pr: int) -> int:
+def prior_passes(rows: list[dict[str, Any]], *, repo: str, pr: int, max_passes: int = 3) -> int:
     """How many STANDARD fixer passes this PR has already spent, from metrics rows.
 
     The gate process exits after one run, so the pass counter has to survive it:
@@ -258,13 +264,24 @@ def prior_passes(rows: list[dict[str, Any]], *, repo: str, pr: int) -> int:
     this PR's STANDARD bar produced:
 
     - a ``fix-and-regate`` row is a spent pass: count it and keep walking;
-    - a ``fallback`` row means the cheap bar already gave up on this PR, so the
-      budget is spent and the walk stops (a later head must not reopen it);
+    - a ``fallback`` row closes the budget for good. Rows are walked newest-first,
+      so the fallback is seen *before* the passes it terminated, and returning
+      there — or breaking out having counted nothing — would report the passes as
+      zero and hand the next head a fresh budget, buying one more fixer pass per
+      new head on a PR the cheap bar already refused. The count is therefore
+      saturated to the budget rather than discarded: a fallback means the budget
+      is spent, whatever the arithmetic under it, which is what makes the refusal
+      durable instead of advisory;
     - an ``approved`` row is not a pass and does not stop the walk — the PR was
       approved, and if a new head arrives the budget reasoning starts from the
       passes that were actually spent;
     - a non-STANDARD tier closes the budget outright — the full pipeline read
       this PR, so the cheap bar is done with it.
+
+    Saturating to *max_passes* rather than counting the passes beneath the
+    fallback is what covers the disputed refusal too: a fixer that changed
+    nothing on pass one spent nothing, and only a spent budget stops the next
+    head from buying the same pass again.
     """
     spent = 0
     for row in reversed(rows):
@@ -274,8 +291,7 @@ def prior_passes(rows: list[dict[str, Any]], *, repo: str, pr: int) -> int:
             break
         outcome = str(row.get("outcome", ""))
         if outcome == OUTCOME_FALLBACK:
-            break
+            return max(spent, max_passes)
         if outcome == OUTCOME_FIX_AND_REGATE:
             spent += 1
     return spent
-

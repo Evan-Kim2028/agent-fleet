@@ -264,14 +264,18 @@ the full gate also runs and which STANDARD leans on harder:
 
 The cheap bar is **finite**, in two ways, so it can never become a treadmill:
 
-- **a disputed pass**: if the fixer changed nothing (pushed no new head, i.e. it
-  disputed every finding), the bar falls back to the full evidence gate for that
-  head instead of spending a pass;
+- **a disputed pass**: if the fixer changed nothing — it left no commit in its
+  worktree, or committed without pushing to the PR's head ref, i.e. it disputed
+  every finding — the bar falls back to the full evidence gate for that head
+  instead of spending a pass. Both are measured from the fixer's own worktree
+  and the forge's head, so the verdict does not rest on the agent's summary;
 - **a pass counter**: at most `standard_max_passes` (default 3) fixer passes are
   spent on a PR; the head is then read by the full evidence gate. The counter is
   durable — it is recovered from the gate's own metrics log per `(repo, pr)`,
   because the gate process exits after one run and the re-gate happens on the
-  next invocation. A fall-back or a full-gate run closes the budget for that PR.
+  next invocation. A fall-back or a full-gate run closes the budget for that PR,
+  and the closure is final: a later head escalates immediately rather than
+  restarting the budget.
 
 Tier selection, the state machine, and the pass counter are all pure functions
 (`agent_fleet.gate.standard`), unit-tested without a network, a repository, or a

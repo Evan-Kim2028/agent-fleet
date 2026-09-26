@@ -114,7 +114,9 @@ from agent_fleet.gate.standard import (
     OUTCOME_FIX_AND_REGATE as STD_OUTCOME_FIX_AND_REGATE,
 )
 from agent_fleet.gate.standard import (
+    STANDARD_HISTORY_ROWS,
     STANDARD_TIER,
+    FallbackReason,
     StandardAction,
     StandardState,
 )
@@ -519,6 +521,27 @@ class GateTestArchive:
 # ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class FixerResult:
+    """What one fixer round actually did, measured rather than believed.
+
+    Two facts, both read from the state the fixer left behind: whether its
+    worktree holds a commit that was not the PR's head, and whether the PR's head
+    moved. Neither is the fixer's say-so, because a fixer that disputes every
+    finding will say it fixed something.
+    """
+
+    #: A commit exists in the fixer worktree that was not in the PR's head.
+    committed: bool
+    #: The forge reports a head for the PR that is not the one the gate read.
+    pushed: bool
+
+    @property
+    def changed_nothing(self) -> bool:
+        """No commit, or a commit that never reached the PR's head."""
+        return not self.committed or not self.pushed
 
 
 @dataclass
@@ -1559,10 +1582,13 @@ class GatePipeline:
         different claims about a PR and must not read the same in the log.
         """
         reasons: list[str] = []
+        # A bounded tail, not the whole file: metrics.jsonl is shared by every run
+        # on the host and is never rotated, and this counter needs one PR's rows.
         passes = standard_prior_passes(
-            gate_metrics.read_metrics(),
+            gate_metrics.read_metrics(limit=STANDARD_HISTORY_ROWS),
             repo=self.repo.name,
             pr=self.pr_number,
+            max_passes=self.config.standard_max_passes,
         )
         findings = self.find(worktree, ref, (ALL_FOCUS_LENS,))
         self._candidates = [f.to_dict() for f in findings]
@@ -1584,9 +1610,7 @@ class GatePipeline:
                     "test_file": None,
                 }
             )
-        pr_tests_failed = any(
-            c.get("source") == "pr-tests" for c in self.evidence.confirmed
-        )
+        pr_tests_failed = any(c.get("source") == "pr-tests" for c in self.evidence.confirmed)
         state = StandardState(
             tier=STANDARD_TIER,
             findings=len(self.evidence.confirmed),
@@ -1611,20 +1635,26 @@ class GatePipeline:
             )
 
         if decision.action is StandardAction.FIX_AND_REGATE:
-            self._standard_fixer(ref, pr_tests, passes)
-            # Re-read the head the forge reports. A fixer that pushed nothing
-            # changed nothing: that is the disputed case the bar refuses to pay a
-            # pass for, and it is decided here, on this run, rather than being
-            # inferred on the next one. A moved head is not trusted either way —
-            # it is simply not this run's to approve, so the next run reads it
-            # from scratch.
-            fetch_base(self.repo, self.config.base_branch)
-            moved = current_pr_head(self.repo, self.pr_number) != ref.head_sha
-            if not moved:
+            result = self._standard_fixer(ref, pr_tests, passes)
+            # What the fixer did is a fact only it can report, and the bar's rules
+            # are written in terms of that fact — so the same state machine is
+            # asked again with the answer in hand rather than the fallback being
+            # hand-built here, which is what left a no-op run with no reason
+            # recorded against it and its pass count claiming progress. The
+            # action can only move to FALLBACK: nothing between here and the
+            # re-gate changes what is blocked.
+            after = standard_next_action(
+                replace(state, fixer_changed_nothing=result.changed_nothing)
+            )
+            if after.action is StandardAction.FALLBACK:
+                reason = (
+                    after.fallback_reason.value
+                    if after.fallback_reason
+                    else FallbackReason.DISPUTED.value
+                )
                 reasons.append(
-                    f"full evidence gate required: the standard-bar fixer changed nothing "
-                    f"(all {state.findings} finding(s) disputed) at pass {decision.passes}; "
-                    "this head goes to the full review pipeline"
+                    f"full evidence gate required: the standard bar gave up on this head "
+                    f"({reason}) at pass {after.passes}; this head goes to the full review pipeline"
                 )
                 return self._finish(
                     GateOutcome.NEEDS_ESCALATION,
@@ -1633,7 +1663,7 @@ class GatePipeline:
                     ref,
                     tier=STANDARD_TIER,
                     metric_outcome=STD_OUTCOME_FALLBACK,
-                    passes=decision.passes,
+                    passes=after.passes,
                 )
             reasons.append(
                 f"re-gate new head: one standard-bar fixer pass ({decision.passes} of "
@@ -1671,7 +1701,7 @@ class GatePipeline:
         ref: PullRequestRef,
         pr_tests: list[str],
         passes: int,
-    ) -> None:
+    ) -> FixerResult:
         """Dispatch the single fixer the STANDARD bar allows, and push its work.
 
         The fixer is told the reviewer's findings and the PR's failing tests and
@@ -1681,9 +1711,12 @@ class GatePipeline:
         lane: a fixer that pushes to a lane-derived branch moves a head nobody is
         re-gating, and the run then reports "no push" over a PR that did move.
 
-        A fixer that changes nothing is the disputed case, and it is recorded
-        rather than inferred here: the next run's state machine reads it and falls
-        back instead of spending another pass.
+        What it did is measured, not believed: the worktree the fixer ran in is
+        the one place its commits can be seen, so the head that existed before
+        the run and the head after it are compared there. The forge is asked
+        afterwards as a cross-check, and a push the worktree cannot confirm is
+        treated as no push — the disputed case has to be the safe answer, since
+        the alternative is paying for a re-gate of a head that never moved.
         """
         fix_wt = self.gate_dir / "standard-fix"
         prepare_worktree(self.repo, fix_wt, ref.head_sha)
@@ -1708,8 +1741,25 @@ class GatePipeline:
                 task_text=self._task_text()[:6000],
             )
             self._run_fixer(prompt, model=model, cwd=fix_wt)
+            return self._standard_fixer_result(fix_wt, ref)
         finally:
             remove_worktree(self.repo, fix_wt)
+
+    def _standard_fixer_result(self, fix_wt: Path, ref: PullRequestRef) -> FixerResult:
+        """Whether the fixer round left the PR's head with a new commit on it.
+
+        Two independent witnesses have to agree before this bar treats a fixer as
+        having fixed anything: the worktree it was given has to hold a commit
+        that was not the head, and the forge has to report a head that moved. A
+        commit the fixer never pushed fixes nothing anybody will re-gate, and a
+        head that moved without one is not the fixer's work, so either witness
+        missing reads as changed-nothing.
+        """
+        fixer_head = worktree_head_sha(fix_wt)
+        committed = bool(fixer_head) and fixer_head != ref.head_sha
+        fetch_base(self.repo, self.config.base_branch)
+        pushed = current_pr_head(self.repo, self.pr_number) != ref.head_sha
+        return FixerResult(committed=committed, pushed=pushed)
 
     # -- entry point -----------------------------------------------------
 

@@ -123,6 +123,20 @@ def _no_history(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def _fixer_witnesses(monkeypatch: pytest.MonkeyPatch, *, committed: str, forge_head: str) -> None:
+    """The two independent witnesses a fixer round is measured against.
+
+    ``committed`` is the head left in the fixer's worktree, ``forge_head`` the head
+    the forge reports for the PR. Only a commit that is not the PR's head *and* a
+    head that moved count as work, so a test states the pair it wants.
+    """
+    monkeypatch.setattr("agent_fleet.gate.pipeline.fetch_base", lambda *_a, **_k: None)
+    monkeypatch.setattr("agent_fleet.gate.pipeline.prepare_worktree", lambda *_a, **_k: None)
+    monkeypatch.setattr("agent_fleet.gate.pipeline.remove_worktree", lambda *_a, **_k: None)
+    monkeypatch.setattr("agent_fleet.gate.pipeline.worktree_head_sha", lambda *_a, **_k: committed)
+    monkeypatch.setattr("agent_fleet.gate.pipeline.current_pr_head", lambda *_a, **_k: forge_head)
+
+
 # ---------------------------------------------------------------------------
 # Tier selection
 # ---------------------------------------------------------------------------
@@ -241,9 +255,7 @@ def test_a_raised_budget_buys_more_passes() -> None:
 
 def test_disputed_beats_the_budget_check() -> None:
     """When a fixer changed nothing we name *that*, not the generic budget reason."""
-    decision = next_action(
-        StandardState(findings=1, passes=3, fixer_changed_nothing=True)
-    )
+    decision = next_action(StandardState(findings=1, passes=3, fixer_changed_nothing=True))
     assert decision.fallback_reason is FallbackReason.DISPUTED
 
 
@@ -289,9 +301,60 @@ def test_prior_passes_ignores_full_gate_rows() -> None:
 
 
 def test_prior_passes_stops_at_a_fallback() -> None:
-    """Once a head was handed to the full gate, the cheap-bar budget is spent."""
-    rows = [_row(), _row(), _row(outcome=OUTCOME_FALLBACK)]
-    assert prior_passes(rows, repo="agent-fleet", pr=42) == 0
+    """A later head must not reopen a fallback, and must not reset the budget.
+
+    Rows are walked newest-first, so the fallback is the first row seen. Reporting
+    the passes as zero there gives the next head a full budget again, and a PR the
+    cheap bar had already refused buys one more fixer pass per new head — the
+    treadmill the budget exists to stop. A fallback saturates the count to the
+    budget instead: what the refusal cost is the whole budget, not zero.
+    """
+    rows = [_row(), _row(), _row(), _row(outcome=OUTCOME_FALLBACK)]
+    assert prior_passes(rows, repo="agent-fleet", pr=42) == 3
+    # A disputed refusal on the first pass spent nothing, yet the head is still
+    # terminal: the next head must escalate, not buy the same pass again.
+    rows = [_row(outcome=OUTCOME_FALLBACK)]
+    assert prior_passes(rows, repo="agent-fleet", pr=42) == 3
+
+
+def test_prior_passes_saturates_to_the_configured_budget() -> None:
+    """The saturation follows the budget in force, not a hardcoded three."""
+    rows = [_row(outcome=OUTCOME_FALLBACK)]
+    assert prior_passes(rows, repo="agent-fleet", pr=42, max_passes=1) == 1
+    assert prior_passes(rows, repo="agent-fleet", pr=42, max_passes=5) == 5
+
+
+def test_a_head_after_a_fallback_escalates_instead_of_fixing() -> None:
+    """The state after a fallback falls back again, without spending a pass.
+
+    This is the end-to-end shape of the durability guarantee: the metrics rows
+    of a PR that exhausted its budget, read back by the next run, must produce
+    the escalation rather than a fourth fixer pass.
+    """
+    rows = [
+        _row(),
+        _row(),
+        _row(),
+        _row(outcome=OUTCOME_FALLBACK),
+    ]
+    passes = prior_passes(rows, repo="agent-fleet", pr=42)
+    decision = next_action(StandardState(findings=1, passes=passes, max_passes=3))
+
+    assert passes == 3
+    assert decision.action is StandardAction.FALLBACK
+    assert decision.fallback_reason is FallbackReason.PASS_BUDGET
+    assert decision.passes == 3
+
+
+def test_a_head_after_a_disputed_fallback_also_escalates() -> None:
+    """The disputed refusal is terminal too, and spends no pass to say so."""
+    rows = [_row(outcome=OUTCOME_FALLBACK)]
+    passes = prior_passes(rows, repo="agent-fleet", pr=42)
+    decision = next_action(StandardState(findings=2, passes=passes, max_passes=3))
+
+    assert passes == 3
+    assert decision.action is StandardAction.FALLBACK
+    assert decision.passes == 3
 
 
 def test_prior_passes_does_not_count_a_standard_approval() -> None:
@@ -385,14 +448,11 @@ def test_a_reported_finding_dispatches_one_fixer_and_ends_as_re_gate(
     pipe = _pipeline(tmp_path, backend, _config())
     prompts = backend.prompts
     monkeypatch.setattr(
-        "agent_fleet.gate.pipeline.GatePipeline._standard_fixer",
+        "agent_fleet.gate.pipeline.GatePipeline._run_fixer",
         lambda _self, *_a, **_k: prompts.append("fixer"),
     )
-    # The fixer pushed a new head, so this run re-gates rather than falling back.
-    monkeypatch.setattr("agent_fleet.gate.pipeline.fetch_base", lambda *_a, **_k: None)
-    monkeypatch.setattr(
-        "agent_fleet.gate.pipeline.current_pr_head", lambda *_a, **_k: "b" * 40
-    )
+    # The fixer committed and pushed, so this run re-gates rather than falling back.
+    _fixer_witnesses(monkeypatch, committed="b" * 40, forge_head="b" * 40)
 
     result = pipe.run_standard(_ref(), tmp_path / "wt", [])
 
@@ -432,13 +492,10 @@ def test_a_fixer_that_pushed_nothing_falls_back_as_disputed(
     backend = _FakeBackend(answer=answer)
     pipe = _pipeline(tmp_path, backend, _config())
     monkeypatch.setattr(
-        "agent_fleet.gate.pipeline.GatePipeline._standard_fixer", lambda *_a, **_k: None
+        "agent_fleet.gate.pipeline.GatePipeline._run_fixer", lambda _self, *_a, **_k: None
     )
-    monkeypatch.setattr("agent_fleet.gate.pipeline.fetch_base", lambda *_a, **_k: None)
-    # The head never moved: the fixer changed nothing.
-    monkeypatch.setattr(
-        "agent_fleet.gate.pipeline.current_pr_head", lambda *_a, **_k: "a" * 40
-    )
+    # No commit and no moved head: the fixer disputed everything and changed nothing.
+    _fixer_witnesses(monkeypatch, committed="a" * 40, forge_head="a" * 40)
 
     result = pipe.run_standard(_ref(), tmp_path / "wt", [])
 
@@ -474,19 +531,21 @@ def test_a_spent_budget_ends_as_fallback_to_the_full_gate(
     # This PR already spent its three passes on earlier heads.
     monkeypatch.setattr(
         "agent_fleet.gate.metrics.read_metrics",
-        lambda *_a, **_k: [
-            {
-                "repo": "agent-fleet",
-                "pr": 42,
-                "tier": STANDARD_TIER,
-                "outcome": OUTCOME_FIX_AND_REGATE,
-            }
-        ]
-        * 3,
+        lambda *_a, **_k: (
+            [
+                {
+                    "repo": "agent-fleet",
+                    "pr": 42,
+                    "tier": STANDARD_TIER,
+                    "outcome": OUTCOME_FIX_AND_REGATE,
+                }
+            ]
+            * 3
+        ),
     )
     monkeypatch.setattr(
-        "agent_fleet.gate.pipeline.GatePipeline._standard_fixer",
-        lambda *_a, **_k: pytest.fail("a spent budget must not dispatch another fixer"),
+        "agent_fleet.gate.pipeline.GatePipeline._run_fixer",
+        lambda _self, *_a, **_k: pytest.fail("a spent budget must not dispatch another fixer"),
     )
 
     result = pipe.run_standard(_ref(), tmp_path / "wt", [])
@@ -510,18 +569,10 @@ def test_a_sensitive_diff_never_reaches_the_cheap_bar(
     diff(["dags/gold/daily_sales.py", "agent_fleet/foo.py"])
     backend = _FakeBackend()
     pipe = _pipeline(tmp_path, backend, _config())
-    monkeypatch.setattr(
-        "agent_fleet.gate.pipeline.fetch_base", lambda *_a, **_k: None
-    )
-    monkeypatch.setattr(
-        "agent_fleet.gate.pipeline.prepare_worktree", lambda *_a, **_k: None
-    )
-    monkeypatch.setattr(
-        "agent_fleet.gate.pipeline.remove_worktree", lambda *_a, **_k: None
-    )
-    monkeypatch.setattr(
-        "agent_fleet.gate.pipeline.resolve_pull_request", lambda *_a, **_k: _ref()
-    )
+    monkeypatch.setattr("agent_fleet.gate.pipeline.fetch_base", lambda *_a, **_k: None)
+    monkeypatch.setattr("agent_fleet.gate.pipeline.prepare_worktree", lambda *_a, **_k: None)
+    monkeypatch.setattr("agent_fleet.gate.pipeline.remove_worktree", lambda *_a, **_k: None)
+    monkeypatch.setattr("agent_fleet.gate.pipeline.resolve_pull_request", lambda *_a, **_k: _ref())
     monkeypatch.setattr(
         "agent_fleet.gate.pipeline.GatePipeline.run_pr_tests", lambda _self, *_a, **_k: []
     )
@@ -540,3 +591,217 @@ def test_a_sensitive_diff_never_reaches_the_cheap_bar(
     assert result.metrics is not None
     assert result.metrics.tier != STANDARD_TIER
     assert backend.prompts, "the sensitive diff must still be reviewed"
+
+
+# ---------------------------------------------------------------------------
+# The three refusals that keep the cheap bar honest
+# ---------------------------------------------------------------------------
+
+
+def _blocking_answer() -> str:
+    return json.dumps(
+        {
+            "findings": [
+                {
+                    "id": "F1",
+                    "file": "a.py",
+                    "line": 3,
+                    "claim": "off by one",
+                    "repro": "x",
+                    "testable": True,
+                }
+            ]
+        }
+    )
+
+
+def test_a_pr_that_fell_back_does_not_buy_another_pass(
+    tmp_path: Path, diff: _DiffSetter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fallback row must not reset the budget: the next head escalates.
+
+    The pipeline reads its own history, so a PR that already spent three passes
+    and fell back comes back as zero passes and is handed a fourth fixer pass on
+    a head the bar has already refused. Pinning the row sequence that a real run
+    produces — three re-gates then the fallback — is what catches it.
+    """
+    diff(["agent_fleet/foo.py"])
+    backend = _FakeBackend(answer=_blocking_answer())
+    pipe = _pipeline(tmp_path, backend, _config())
+    monkeypatch.setattr(
+        "agent_fleet.gate.metrics.read_metrics",
+        lambda *_a, **_k: [
+            {
+                "repo": "agent-fleet",
+                "pr": 42,
+                "tier": STANDARD_TIER,
+                "outcome": outcome,
+            }
+            for outcome in (
+                OUTCOME_FIX_AND_REGATE,
+                OUTCOME_FIX_AND_REGATE,
+                OUTCOME_FIX_AND_REGATE,
+                OUTCOME_FALLBACK,
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        "agent_fleet.gate.pipeline.GatePipeline._run_fixer",
+        lambda _self, *_a, **_k: pytest.fail("a PR that fell back must not get another pass"),
+    )
+
+    result = pipe.run_standard(_ref(), tmp_path / "wt", [])
+
+    assert not result.approved
+    assert result.metrics is not None
+    assert result.metrics.outcome == OUTCOME_FALLBACK
+    assert result.metrics.passes == 3
+    assert "pass-budget" in result.reasons[0]
+
+
+def test_the_pass_counter_reads_a_bounded_window(
+    tmp_path: Path, diff: _DiffSetter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pass counter must not read the whole, never-rotated metrics file.
+
+    ``metrics.jsonl`` is shared by every run on the host and grows without bound,
+    so an unbounded read makes the cheap bar's bookkeeping cost more than the
+    bar it is meant to keep cheap. The limit has to be passed at the call site;
+    a bounded reader with no bound at the caller is still unbounded.
+    """
+    diff(["agent_fleet/foo.py"])
+    backend = _FakeBackend(answer=_blocking_answer())
+    pipe = _pipeline(tmp_path, backend, _config())
+    seen: list[int | None] = []
+
+    def _record(*_args: object, limit: int | None = None) -> list[dict[str, object]]:
+        seen.append(limit)
+        return []
+
+    monkeypatch.setattr("agent_fleet.gate.metrics.read_metrics", _record)
+    monkeypatch.setattr(
+        "agent_fleet.gate.pipeline.GatePipeline._run_fixer",
+        lambda _self, *_a, **_k: None,
+    )
+    _fixer_witnesses(monkeypatch, committed="b" * 40, forge_head="b" * 40)
+
+    pipe.run_standard(_ref(), tmp_path / "wt", [])
+
+    assert seen, "run_standard must read the metrics history"
+    assert all(limit is not None and limit > 0 for limit in seen), (
+        f"the pass counter read the unbounded metrics file: {seen}"
+    )
+
+
+def test_a_fixer_that_committed_nothing_is_reported_as_a_disputed_fallback(
+    tmp_path: Path, diff: _DiffSetter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A commit the fixer never pushed is the disputed case, not a re-gate.
+
+    The worktree the fixer ran in is the only place its work can be seen. If it
+    left no commit there, the forge head moving says something else moved it, and
+    re-gating on that would pay a pass for nothing.
+    """
+    diff(["agent_fleet/foo.py"])
+    backend = _FakeBackend(answer=_blocking_answer())
+    pipe = _pipeline(tmp_path, backend, _config())
+    monkeypatch.setattr(
+        "agent_fleet.gate.pipeline.GatePipeline._run_fixer", lambda _self, *_a, **_k: None
+    )
+    # The forge reports a moved head, but the worktree holds no new commit.
+    _fixer_witnesses(monkeypatch, committed="a" * 40, forge_head="b" * 40)
+
+    result = pipe.run_standard(_ref(), tmp_path / "wt", [])
+
+    assert not result.approved
+    assert result.metrics is not None
+    assert result.metrics.outcome == OUTCOME_FALLBACK
+    assert "disputed" in result.reasons[0]
+
+
+def test_a_fixer_that_committed_but_did_not_push_is_disputed(
+    tmp_path: Path, diff: _DiffSetter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A commit that never reached the PR's head ref fixes nothing to re-gate."""
+    diff(["agent_fleet/foo.py"])
+    backend = _FakeBackend(answer=_blocking_answer())
+    pipe = _pipeline(tmp_path, backend, _config())
+    monkeypatch.setattr(
+        "agent_fleet.gate.pipeline.GatePipeline._run_fixer", lambda _self, *_a, **_k: None
+    )
+    # The worktree moved, the PR's head did not.
+    _fixer_witnesses(monkeypatch, committed="b" * 40, forge_head="a" * 40)
+
+    result = pipe.run_standard(_ref(), tmp_path / "wt", [])
+
+    assert not result.approved
+    assert result.metrics is not None
+    assert result.metrics.outcome == OUTCOME_FALLBACK
+    assert "disputed" in result.reasons[0]
+
+
+def test_a_disputed_fallback_spends_no_pass(
+    tmp_path: Path, diff: _DiffSetter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A no-op fixer must not be charged a pass.
+
+    The pass counter bounds real work. Recording one against a fixer that changed
+    nothing lets a PR that disputes every finding walk the budget down one pass at
+    a time instead of escalating on the first refusal.
+    """
+    diff(["agent_fleet/foo.py"])
+    backend = _FakeBackend(answer=_blocking_answer())
+    pipe = _pipeline(tmp_path, backend, _config())
+    monkeypatch.setattr(
+        "agent_fleet.gate.pipeline.GatePipeline._run_fixer", lambda _self, *_a, **_k: None
+    )
+    _fixer_witnesses(monkeypatch, committed="a" * 40, forge_head="a" * 40)
+
+    result = pipe.run_standard(_ref(), tmp_path / "wt", [])
+
+    assert result.metrics is not None
+    assert result.metrics.outcome == OUTCOME_FALLBACK
+    assert result.metrics.passes == 0
+
+
+def test_the_disputed_fallback_reports_a_reason(
+    tmp_path: Path, diff: _DiffSetter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reason line must name why the bar gave up, not read "unknown"."""
+    diff(["agent_fleet/foo.py"])
+    backend = _FakeBackend(answer=_blocking_answer())
+    pipe = _pipeline(tmp_path, backend, _config())
+    monkeypatch.setattr(
+        "agent_fleet.gate.pipeline.GatePipeline._run_fixer", lambda _self, *_a, **_k: None
+    )
+    _fixer_witnesses(monkeypatch, committed="a" * 40, forge_head="a" * 40)
+
+    result = pipe.run_standard(_ref(), tmp_path / "wt", [])
+
+    assert "unknown" not in result.reasons[0]
+    assert "disputed" in result.reasons[0]
+
+
+def test_a_clean_fix_is_still_re_gated(
+    tmp_path: Path, diff: _DiffSetter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The disputed case must not swallow the ordinary re-gate.
+
+    Both witnesses have to say the fixer worked for the bar to spend a pass on it;
+    the boundary case is the other direction — a fixer that did its job still
+    re-gates, and is charged exactly one pass.
+    """
+    diff(["agent_fleet/foo.py"])
+    backend = _FakeBackend(answer=_blocking_answer())
+    pipe = _pipeline(tmp_path, backend, _config())
+    monkeypatch.setattr(
+        "agent_fleet.gate.pipeline.GatePipeline._run_fixer", lambda _self, *_a, **_k: None
+    )
+    _fixer_witnesses(monkeypatch, committed="b" * 40, forge_head="b" * 40)
+
+    result = pipe.run_standard(_ref(), tmp_path / "wt", [])
+
+    assert result.metrics is not None
+    assert result.metrics.outcome == OUTCOME_FIX_AND_REGATE
+    assert result.metrics.passes == 1
+    assert "re-gate new head" in result.reasons[0]
