@@ -55,6 +55,11 @@ FORBIDDEN_GIT_FLAGS = ("--no-verify", "-n")
 #: written by the worktree step, and this function is also called directly.
 RUN_DIR_EXCLUDE = ".agent-fleet"
 
+#: The engine's transcript directory, relative to a worktree root. Staging
+#: excludes this subtree rather than all of ``RUN_DIR_EXCLUDE``, so a lane's
+#: real work under a *tracked* ``.agent-fleet/`` is still committed.
+RUN_DIR_LOGS = f"{RUN_DIR_EXCLUDE}/runs"
+
 #: pre-commit reports each failing hook as a ``- hook id: <id>`` block. The rest
 #: of the output is hundreds of lines of tool output; the id is the only part
 #: that tells an operator which hook to fix.
@@ -185,6 +190,57 @@ def build_commit_message(
     return "\n".join(lines)
 
 
+def _stage_lane_work(
+    worktree: Path, *, env: dict[str, str] | None = None, runner: Runner | None = None
+) -> tuple[bool, str]:
+    """Stage the lane's work, leaving the engine's run logs out of the index.
+
+    Staging is all-then-unstage rather than an exclusion pathspec, because a
+    single ``git add -A`` cannot express "all of it except the run dir". Given
+    a ``:(exclude)`` pathspec git still walks the ignored paths, and as soon as
+    an ignored ``.agent-fleet`` exists on disk it exits 1 with "The following
+    paths are ignored", aborting the whole add:
+
+    * the stale in-worktree run dir left by a build older than the one that
+      moved the run dir outside the worktree — ``ensure_lane_worktree`` only
+      hides it in ``info/exclude``, it never removes it, so every reused
+      pre-existing lane worktree trips this on its next run; and
+    * a *tracked* ``.agent-fleet/``, where excluding the path additionally
+      drops the lane's real changes to that directory.
+
+    Either way the lane escalates as ``commit_failed`` for a worktree full of
+    real work, which is the exact misreport this guarantee exists to prevent.
+    So the add is unconditional — it cannot fail on an ignore rule — and the
+    run-log subtree is then taken back out of the index. Unstaging also covers
+    a *tracked* transcript, which an exclusion pathspec could not, and
+    ``info/exclude`` still governs the untracked half: a run log that no repo
+    tracks never reaches the index at all.
+    """
+    add = _git(
+        ["git", "add", "-A", "--", "."],
+        cwd=worktree,
+        runner=runner,
+        env=env,
+        timeout=300,
+    )
+    if add.returncode != 0:
+        return False, f"git add failed: {(add.stderr or add.stdout).strip()[:500]}"
+
+    # `git reset` (not `rm --cached`) so an *edit* to a tracked run log is
+    # unstaged back to HEAD rather than turned into a deletion. A path that is
+    # not in the index is a no-op here, so this never fails on a clean lane.
+    unstage = _git(
+        ["git", "reset", "-q", "--", RUN_DIR_LOGS],
+        cwd=worktree,
+        runner=runner,
+        env=env,
+        timeout=300,
+    )
+    if unstage.returncode != 0:
+        return False, f"git reset failed: {(unstage.stderr or unstage.stdout).strip()[:500]}"
+    return True, ""
+
+
 def commit_worktree(
     worktree: Path,
     *,
@@ -194,7 +250,7 @@ def commit_worktree(
     skip_hooks: Sequence[str] = (),
     runner: Runner | None = None,
 ) -> tuple[bool, str | None, str, list[str]]:
-    """Stage everything *except the run dir* and commit with hooks enabled.
+    """Stage everything *except the run logs* and commit with hooks enabled.
 
     Returns ``(committed, sha, detail, hooks_failed)``. *skip_hooks* becomes the
     ``SKIP=`` environment overlay — pre-commit's own selective-skip mechanism.
@@ -202,26 +258,20 @@ def commit_worktree(
     commit, and both the ids of the failing hooks and the output are surfaced so
     the lane can escalate with something actionable.
 
-    The run dir is excluded twice over: ``info/exclude`` (written when the
-    worktree was set up) and an explicit ``:(exclude)`` pathspec here. The second
-    one is what makes the guarantee correct on its own — an explicit ``--run-dir``
-    inside the worktree, or a repo whose exclude file could not be written, must
-    not be able to put a transcript into a commit.
+    The run logs are kept out twice over: ``info/exclude`` (written when the
+    worktree was set up) and the explicit filtering in :func:`_stage_lane_work`
+    — an explicit ``--run-dir`` inside the worktree, or a repo whose exclude
+    file could not be written, must not be able to put a transcript into a
+    commit.
     """
     skip_env = {"SKIP": ",".join(h for h in skip_hooks if h)} if any(skip_hooks) else {}
     # Overlay SKIP on the real environment: a bare {"SKIP": ...} env strips PATH/HOME and
     # breaks the very hooks the manager promises to keep live.
     env = {**os.environ, **skip_env} if skip_env else None
 
-    add = _git(
-        ["git", "add", "-A", "--", ".", f":(exclude){RUN_DIR_EXCLUDE}"],
-        cwd=worktree,
-        runner=runner,
-        env=env,
-        timeout=300,
-    )
-    if add.returncode != 0:
-        return False, None, f"git add failed: {(add.stderr or add.stdout).strip()[:500]}", []
+    staged, stage_detail = _stage_lane_work(worktree, env=env, runner=runner)
+    if not staged:
+        return False, None, stage_detail, []
 
     message = build_commit_message(engine, task_file=task_file, lane=lane)
     commit = _git(
