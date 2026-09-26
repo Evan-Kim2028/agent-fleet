@@ -228,15 +228,12 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
         collect_from_status_dir,
         dedupe_approvals,
     )
-    from agent_fleet.merge_plan.config import resolve_repo_specs
+    from agent_fleet.merge_plan.config import resolve_train_repo_name
+    from agent_fleet.merge_plan.plan import normalize_repo
     from agent_fleet.merge_plan.train import TrainPR, run_train
 
-    config_path = getattr(args, "config", None)
     repo_path = Path(args.repo_path).expanduser()
-    specs = resolve_repo_specs(
-        [str(repo_path)], fleet_config_path=Path(config_path) if config_path else None
-    )
-    repo = args.repo or next(iter(specs), repo_path.name)
+    repo = args.repo or resolve_train_repo_name(repo_path)
     if not repo_path.is_dir():
         print(f"error: repo path does not exist: {repo_path}", file=sys.stderr)
         return 2
@@ -244,7 +241,12 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
     approvals = list(collect_from_lanes(operator=args.operator))
     if args.status_dir:
         approvals += collect_from_status_dir(Path(args.status_dir).expanduser(), default_repo=repo)
-    approvals = [a for a in dedupe_approvals(approvals) if a.repo == repo]
+    # Gate and lane sources record ``owner/name``; the checkout names the bare
+    # ``name``.  Without the reconciliation every real approval reads as another
+    # repo's and the batch is empty.
+    approvals = [
+        a for a in dedupe_approvals(approvals) if normalize_repo(a, {repo: repo}).repo == repo
+    ]
     if not approvals:
         print(f"no approved PRs found for {repo}")
         return 0
@@ -261,6 +263,7 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
                 number=approval.pr_number,
                 head_sha=approval.approved_sha,
                 base_ref=str(detail.get("baseRefName") or ""),
+                head_branch=str(detail.get("headRefName") or ""),
                 current_head=str(detail.get("headRefOid") or ""),
                 files=tuple(f for f in files if f),
             )

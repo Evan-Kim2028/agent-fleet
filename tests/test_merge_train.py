@@ -17,10 +17,12 @@ Covers:
 
 from __future__ import annotations
 
+import argparse
+import itertools
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -28,6 +30,7 @@ import pytest
 # "test", so pytest collects both and tries to resolve their parameters as
 # fixtures.  They are imported under underscore aliases instead; the library
 # should not have to know it is sometimes under pytest.
+from agent_fleet.merge_plan.collect import GitHubClient
 from agent_fleet.merge_plan.train import (
     LANDED,
     NEEDS_REBASE,
@@ -49,8 +52,14 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 
-def pr(number: int, *, base: str = "", files: tuple[str, ...] = ()) -> TrainPR:
-    return TrainPR(number=number, head_sha=f"sha{number}", base_ref=base, files=files)
+def pr(number: int, *, base: str = "", head: str = "", files: tuple[str, ...] = ()) -> TrainPR:
+    return TrainPR(
+        number=number,
+        head_sha=f"sha{number}",
+        base_ref=base,
+        head_branch=head or f"feat/pr-{number}",
+        files=files,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -115,13 +124,33 @@ def test_a_stacked_pr_follows_its_base_even_at_a_lower_number() -> None:
     assert [p.number for p in ordered] == [4, 5, 7]
 
 
+def test_a_stacked_pr_is_ordered_by_head_branch_not_by_its_base_ref() -> None:
+    # #3 sits on #1's branch.  Two other PRs also target main, so a map keyed
+    # on base_ref would hand "main" to whichever came last and then block every
+    # other PR on it — folding the stack child before its own parent.
+    ordered = order_batch([pr(1, base="main"), pr(2, base="main"), pr(3, base="feat/pr-1")])
+    assert [p.number for p in ordered] == [1, 2, 3]
+
+
+def test_a_deep_stack_survives_unrelated_prs_targeting_the_same_base() -> None:
+    prs = [pr(1, base="main"), pr(2, base="feat/pr-1"), pr(3, base="main"), pr(4, base="feat/pr-2")]
+    assert [p.number for p in order_batch(prs)] == [1, 2, 3, 4]
+
+
+def test_a_pr_with_no_known_head_branch_is_ordered_as_ordinary_work() -> None:
+    # GitHub did not report a head branch: the PR is still approved work and
+    # must land in number order rather than be dropped.
+    unlabelled = TrainPR(number=2, head_sha="b", base_ref="main")
+    assert [p.number for p in order_batch([pr(1), unlabelled])] == [1, 2]
+
+
 def test_a_three_deep_stack_keeps_its_order() -> None:
-    prs = [pr(1), pr(2, base="feat/one"), pr(3, base="feat/two")]
+    prs = [pr(1), pr(2, base="feat/pr-1"), pr(3, base="feat/pr-2")]
     assert [p.number for p in order_batch(prs)] == [1, 2, 3]
 
 
 def test_a_circular_stack_still_orders_instead_of_hanging() -> None:
-    ordered = order_batch([pr(1, base="b"), pr(2, base="a")])
+    ordered = order_batch([pr(1, base="feat/pr-2"), pr(2, base="feat/pr-1")])
     assert sorted(p.number for p in ordered) == [1, 2]
 
 
@@ -130,10 +159,28 @@ def test_a_base_ref_outside_the_batch_does_not_block_it() -> None:
 
 
 def test_order_is_deterministic_for_identical_input() -> None:
-    prs = [pr(5), pr(2, base="feat/a"), pr(4, base="feat/b"), pr(1)]
+    prs = [pr(5), pr(2, base="feat/pr-1"), pr(4, base="feat/pr-3"), pr(1)]
     assert [p.number for p in order_batch(prs)] == [
         p.number for p in order_batch(list(reversed(prs)))
     ]
+
+
+def test_order_does_not_depend_on_the_order_the_batch_was_collected_in() -> None:
+    # The fold and merge sequence is driven by this order, so a batch collected
+    # in a different order must not ship a different tree.
+    prs = [pr(n, base="main") for n in range(1, 7)]
+    expected = [1, 2, 3, 4, 5, 6]
+    for permutation in itertools.permutations(prs):
+        assert [p.number for p in order_batch(permutation)] == expected
+
+
+def test_a_stacked_batch_folds_identically_however_it_was_collected() -> None:
+    # A map keyed on base_ref hands "main" to #4 here, so #1 and #2 both end up
+    # blocked on it and the stack child #3 lands before its own parent.
+    prs = [pr(1, base="main"), pr(2, base="main"), pr(3, base="feat/pr-1"), pr(4, base="main")]
+    expected = [1, 2, 3, 4]
+    for permutation in itertools.permutations(prs):
+        assert [p.number for p in order_batch(permutation)] == expected
 
 
 # ---------------------------------------------------------------------------
@@ -517,3 +564,118 @@ def test_run_train_writes_a_report_for_the_batch(
     assert report.is_file()
     assert result.test_runs >= 1
     assert set(result.verdicts[0].to_dict()) == {"pr", "status", "reason", "failing_tests"}
+
+
+def test_a_hanging_test_command_is_killed_and_counted_red(
+    origin_repo: OriginRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A test command that never returns is a test outcome, not a crash.
+
+    Without the guard the timeout escapes ``evaluate``, unwinds through
+    ``MergeTrain.run`` and ``run_train``, and abandons the run with no report —
+    the candidate worktree left behind and no verdict for anything.
+    """
+    monkeypatch.setenv("AGENT_FLEET_HOME", str(origin_repo.clone.parent / "home"))
+
+    def hang_on_tests_only(
+        argv: Sequence[str], *, cwd: Path, timeout: int = 600
+    ) -> subprocess.CompletedProcess[str]:
+        if argv[:1] == ["pytest"]:
+            raise subprocess.TimeoutExpired(cmd=list(argv), timeout=timeout)
+        return subprocess.run(argv, cwd=cwd, capture_output=True, text=True, check=False)
+
+    # PR 3 is stale against main by construction, so it never reaches the test
+    # run; the two clean PRs are what the hanging command has to survive.
+    clean = [p for p in origin_repo.prs() if p.number != 3]
+
+    monkeypatch.setattr("agent_fleet.merge_plan.train._run", hang_on_tests_only)
+    trainer = GitTrainer(origin_repo.clone, command="pytest -q", timeout=1)
+
+    hung = trainer.evaluate(clean)
+    assert hung.passed is False
+    assert hung.conflicts == ()
+    assert "timeout" in hung.summary
+
+    merger = FakeMerger()
+    run = MergeTrain(tester=trainer.evaluate, repo="demo").run(clean, merger=merger)
+    assert merger.landed == []
+    assert {v.pr for v in run.verdicts} == {1, 2}
+    assert [v.pr for v in run.by_status(REGRESSION)] == [1, 2]
+
+
+# ---------------------------------------------------------------------------
+# The CLI seam: which repository the train is about
+# ---------------------------------------------------------------------------
+
+
+def test_a_train_names_the_checkout_it_was_pointed_at(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--repo-path`` decides the repository, not the first configured repo.
+
+    fleet.yaml lists every repo the fleet knows about.  Taking its first entry
+    would name a different repository than the operator passed, drop every
+    approval belonging to the checkout they asked for, and report under the
+    wrong name.
+    """
+    from agent_fleet.merge_plan import cli as merge_cli
+
+    config = tmp_path / "fleet.yaml"
+    config.write_text(
+        "merge_plan:\n  repos:\n    - name: other-repo\n      path: /somewhere/other\n",
+        encoding="utf-8",
+    )
+    checkout = tmp_path / "agent-fleet"
+    checkout.mkdir()
+    _git(checkout, "init", "-q", "-b", "main")
+    _git(checkout, "config", "user.email", "t@example.com")
+    _git(checkout, "config", "user.name", "T")
+    _git(checkout, "remote", "add", "origin", "https://github.com/Evan-Kim2028/agent-fleet.git")
+
+    status = tmp_path / "status"
+    status.mkdir()
+    (status / "gate.md").write_text(
+        "Evan-Kim2028/agent-fleet#12\nPREMERGE-APPROVED dc91fac\n", encoding="utf-8"
+    )
+    (status / "other.md").write_text(
+        "other/other-repo#77\nPREMERGE-APPROVED deadbee\n", encoding="utf-8"
+    )
+
+    monkeypatch.setattr(GitHubClient, "for_repo", _stub_detail_client)
+    args = argparse.Namespace(
+        repo_path=str(checkout),
+        repo=None,
+        config=str(config),
+        operator=None,
+        status_dir=str(status),
+        test_command="pytest",
+        max_batch_size=5,
+        report=None,
+        dry_run=True,
+        json=False,
+    )
+    assert merge_cli.cmd_merge_train(args) == 0
+    out = capsys.readouterr().out
+    assert "agent-fleet" in out
+    assert "other-repo" not in out
+    assert "#12" in out
+    assert "#77" not in out
+
+
+class StubDetailClient:
+    """A ``GitHubClient`` whose every PR is open on ``feat/thing`` over main."""
+
+    def pr_detail(self, pr_number: int) -> dict[str, Any]:
+        del pr_number
+        return {
+            "state": "OPEN",
+            "headRefOid": "dc91fac7c9233ec3da9e9",
+            "headRefName": "feat/thing",
+            "baseRefName": "main",
+            "files": [{"path": "agent_fleet/thing.py"}],
+        }
+
+
+def _stub_detail_client(self: GitHubClient, repo_path: Path) -> StubDetailClient:
+    del self, repo_path
+    return StubDetailClient()

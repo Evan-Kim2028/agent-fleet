@@ -9,7 +9,9 @@ that question once for the whole batch instead of once per PR.
 One run, for one repository
 ---------------------------
 1. **Order** the approved PRs oldest first, respecting stacks: a PR whose base
-   is another PR's branch lands after that PR (:func:`order_batch`).
+   branch is another PR's head branch lands after that PR (:func:`order_batch`).
+   The order is a function of the batch's *contents* alone, so a batch collected
+   in a different order still folds and merges identically.
 2. **Fold** each PR head into a candidate branch built from ``origin/main``
    with ``git merge --no-ff``, in a throwaway worktree so the operator's
    checkout is never touched.  A PR that conflicts is set aside as
@@ -81,16 +83,18 @@ _TEST_SUFFIXES = ("test_", "_test")
 class TrainPR:
     """One PR the gate approved, and the facts the train acts on.
 
-    ``head_sha`` is the approved head the train merges.  ``base_ref`` names the
-    PR's base branch, which is what makes stack order recoverable: a PR based
-    on another PR's branch has to land after it or its base will not exist.
-    ``current_head`` is where the head points at *now*; when it disagrees with
-    ``head_sha`` the gate never reviewed those commits and the PR is dropped.
+    ``head_sha`` is the approved head the train merges.  ``base_ref`` and
+    ``head_branch`` are the two ends of the stack: a PR whose ``base_ref`` names
+    another PR's ``head_branch`` has to land after it or its base will not
+    exist.  ``current_head`` is where the head points at *now*; when it
+    disagrees with ``head_sha`` the gate never reviewed those commits and the
+    PR is dropped.
     """
 
     number: int
     head_sha: str
     base_ref: str = ""
+    head_branch: str = ""
     current_head: str = ""
     title: str = ""
     files: tuple[str, ...] = ()
@@ -113,6 +117,7 @@ class TrainPR:
             "number": self.number,
             "head_sha": self.head_sha,
             "base_ref": self.base_ref,
+            "head_branch": self.head_branch,
             "current_head": self.current_head,
             "moved": self.moved,
             "title": self.title,
@@ -237,24 +242,36 @@ def order_batch(prs: Sequence[TrainPR]) -> list[TrainPR]:
     """Order *prs* oldest first, honouring stacks.
 
     Stacks are the reason this is not simply ``sorted(by number)``: a PR whose
-    ``base_ref`` is another PR's head branch needs that PR merged first, or it
-    has nothing to merge into.  Each PR is placed as soon as the PRs it is
-    stacked on have been emitted, which keeps the order as close to PR-number
-    order as the stack constraints allow.
+    ``base_ref`` names another PR's ``head_branch`` needs that PR merged first,
+    or its base will not exist.  The map is built from head *branches* to PR
+    numbers, never from ``base_ref`` to numbers — indexing a batch of PRs that
+    all target ``main`` by their own base ref would make the last of them own
+    ``main``, and then fold that PR ahead of any stack parent waiting on it.
 
-    Deterministic and total: a cycle among base refs (a broken stack), or a base
-    ref naming a PR outside the batch, cannot deadlock the order, because a PR
-    only ever waits on a PR not yet emitted and the remainder is emitted in PR
-    order.
+    Each PR is placed as soon as the PRs it is stacked on have been emitted,
+    which keeps the order as close to PR-number order as the stack constraints
+    allow.
+
+    Deterministic and total.  Deterministic because the result is a function of
+    the *set* of PRs, not of the order they arrived in: the pending list is
+    sorted by number before every pass, so a batch a caller happened to collect
+    in a different order folds and merges identically.  Total because a cycle
+    among base refs (a broken stack), or a base ref naming a PR outside the
+    batch, cannot deadlock the order: a PR only ever waits on a PR not yet
+    emitted, and the remainder is emitted in PR order.
     """
+    pending = sorted(prs, key=lambda p: p.number)
+    base_owner: dict[str, int] = {}
+    for pr in pending:
+        if pr.head_branch:
+            base_owner.setdefault(pr.head_branch, pr.number)
+
     ordered: list[TrainPR] = []
     emitted: set[int] = set()
-    pending = sorted(prs, key=lambda p: p.number)
-    base_owner = {p.base_ref: p.number for p in prs if p.base_ref}
     while pending:
         progressed = False
         for pr in list(pending):
-            base = base_owner.get(pr.base_ref)
+            base = base_owner.get(pr.base_ref) if pr.base_ref else None
             if base is not None and base != pr.number and base not in emitted:
                 continue  # stacked on a PR that has not landed yet
             ordered.append(pr)
@@ -602,7 +619,9 @@ class GitTrainer:
 
     Each call folds exactly the PRs it was handed, so a bisect half is tested
     against its own combination and not against a tree still carrying the
-    batch's other half.
+    batch's other half.  A test command that outlives ``timeout`` is killed and
+    reported red, so a hang is a test outcome the train can bisect rather than
+    an exception that abandons the run mid-fold.
     """
 
     def __init__(
@@ -631,7 +650,16 @@ class GitTrainer:
                     conflicts=tuple(fold.conflicted),
                 )
             argv = self._argv(prs, fold)
-            result = _run(argv, cwd=fold.worktree, timeout=self.timeout)
+            try:
+                result = _run(argv, cwd=fold.worktree, timeout=self.timeout)
+            except subprocess.TimeoutExpired:
+                return TestResult(
+                    passed=False,
+                    summary=(
+                        f"test command exceeded its {self.timeout}s timeout after folding "
+                        f"{len(prs)} PR(s) and was killed"
+                    ),
+                )
         output = (result.stdout or result.stderr or "").strip()
         return TestResult(
             passed=result.returncode == 0,

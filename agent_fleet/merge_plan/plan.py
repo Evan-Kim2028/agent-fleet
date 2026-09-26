@@ -51,7 +51,7 @@ def build_plan(
     # recorded as ``owner/name#N`` by one source and as ``name`` by another, and
     # de-duping on the raw strings would keep both, planning one PR twice and
     # handing the operator's merge script the same PR twice in one batch.
-    approvals = dedupe_approvals([_normalize_repo(pr, repo_specs) for pr in approvals])
+    approvals = dedupe_approvals([normalize_repo(pr, repo_specs) for pr in approvals])
     approvals = [p for p in approvals if p.repo in repo_specs]
 
     notes: list[str] = []
@@ -90,12 +90,13 @@ def build_plan(
     )
 
 
-def _normalize_repo(pr: ApprovedPR, repo_specs: dict[str, RepoSpec]) -> ApprovedPR:
+def normalize_repo(pr: ApprovedPR, repo_specs: dict[str, RepoSpec]) -> ApprovedPR:
     """Rewrite an approval's repo to the key used in *repo_specs*.
 
     Gate and lane sources record a PR's repo as ``owner/name`` while a
     ``--repo-path`` yields the bare ``name``, so the two have to be reconciled
-    or every approval looks like it belongs to an unselected repo.
+    or every approval looks like it belongs to an unselected repo.  Shared with
+    ``merge train``, which selects one repo the same way.
     """
     if pr.repo in repo_specs:
         return pr

@@ -262,6 +262,18 @@ def resolve_repo_specs(
     return specs
 
 
+def resolve_train_repo_name(repo_path: Path) -> str:
+    """The repository name a train over *repo_path* is about.
+
+    Name comes from the checkout itself — the ``origin`` remote when it is
+    readable, the directory name otherwise — and never from the shape of
+    ``merge_plan.repos``.  That map is the whole fleet's inventory, so taking
+    its first key would name a different repository than the operator passed and
+    silently drop every approval belonging to the checkout they asked for.
+    """
+    return _repo_name_from_path(Path(repo_path).expanduser())
+
+
 def _repo_name_from_path(path: Path) -> str:
     """Best-effort repo name from a checkout path.
 

@@ -43,6 +43,7 @@ PR_DETAIL_FIELDS = ",".join(
         "state",
         "mergeable",
         "headRefOid",
+        "headRefName",
         "baseRefName",
         "additions",
         "deletions",
@@ -237,6 +238,8 @@ class GitHubClient:
         GitHub.  The executor branches on ``state`` and ``mergeable`` and hands
         ``mergeCommit`` to the deploy command; asking for anything less makes
         every PR look unreadable and the queue silently never ships.
+        ``headRefName`` and ``baseRefName`` together are what makes a stack
+        legible: a PR whose base names another PR's head branch lands after it.
 
         Returns {} on any failure so a PR whose state cannot be read is
         treated as unverifiable rather than assumed mergeable.
