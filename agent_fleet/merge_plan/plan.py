@@ -163,7 +163,7 @@ def _fleetobs_emit_available() -> bool:
             check=False,
             timeout=30,
         )
-    except (OSError, subprocess.SubprocessError):
+    except OSError, subprocess.SubprocessError:
         return False
     return result.returncode == 0 and "usage" in (result.stdout or "").lower()
 
