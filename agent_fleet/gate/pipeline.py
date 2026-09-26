@@ -930,26 +930,24 @@ class GatePipeline:
         ]
         if run.count == 0 and not untestable_open:
             return current, self._metrics(metric, ref, outcome=gate_metrics.OUTCOME_CONVERGED)
-        if run.count == 0 and untestable_open:
-            # Nothing fails and the only blockers are untestable ones no local
-            # test can demonstrate. A fixer cannot make progress on a green
-            # test set, so spending a round here just produced the misleading
-            # "cap after 1 round(s)" verdict: escalate and name what a human
-            # has to look at.
-            return current, self._metrics(
-                metric,
-                ref,
-                outcome=gate_metrics.OUTCOME_UNTESTABLE_NEEDS_REVIEW,
-                rounds=rounds,
-            )
 
+        # Nothing fails and the only blockers are untestable ones no local test
+        # can demonstrate. The convergence rule below is defined on a shrinking
+        # failing set, so there is no set to shrink here — but "no failing test"
+        # is not "no work": the judge ruled these real, and a docs
+        # contradiction or a script's behaviour is fixed by editing the thing.
+        # So dispatch exactly one fix round carrying the untestable list, then
+        # let the recheck judge decide. One round, not a loop: with no test to go
+        # green there is no measurable progress, only the judge's yes/no.
+        untestable_only = run.count == 0 and bool(untestable_open)
         push_branch = self.config.push_branch or ref.head_ref
         model = self._model_for(
             backend_name=self.config.backend, model=self.config.model, role=ROLE_FIX
         )
         outcome = gate_metrics.OUTCOME_CAP
+        round_limit = 1 if untestable_only else max(1, self.config.max_fix_rounds)
 
-        for round_number in range(1, max(1, self.config.max_fix_rounds) + 1):
+        for round_number in range(1, round_limit + 1):
             fix_wt = self.gate_dir / f"fix{round_number}"
             prepare_worktree(self.repo, fix_wt, current)
             try:
@@ -974,7 +972,11 @@ class GatePipeline:
             fetch_base(self.repo, self.config.base_branch)
             new_head = current_pr_head(self.repo, self.pr_number)
             if new_head == current:
-                outcome = gate_metrics.OUTCOME_NO_PUSH
+                outcome = (
+                    gate_metrics.OUTCOME_UNTESTABLE_NEEDS_REVIEW
+                    if untestable_only
+                    else gate_metrics.OUTCOME_NO_PUSH
+                )
                 self._log("gate.round", round=round_number, head=new_head[:9], outcome=outcome)
                 break
 
@@ -1024,6 +1026,12 @@ class GatePipeline:
                 new_failures=new_failures,
             )
             current = new_head
+            if untestable_only:
+                # No test existed to go green, so the failing-set numbers above
+                # say nothing about this defect. The recheck judge below rules
+                # on it; until then it is still open.
+                outcome = gate_metrics.OUTCOME_UNTESTABLE_UNRESOLVED
+                break
             if run.count == 0:
                 # Every test is green. The deterministic half has converged; if
                 # untestable blockers remain, the judge recheck below decides
@@ -1048,10 +1056,18 @@ class GatePipeline:
                 gate_metrics.OUTCOME_CONVERGED,
                 gate_metrics.OUTCOME_UNTESTABLE_UNRESOLVED,
             }
-            if needs_recheck and not self.recheck_untestable(head_wt, start_sha, current):
-                outcome = gate_metrics.OUTCOME_UNTESTABLE_UNRESOLVED
-            elif needs_recheck:
+            if needs_recheck and self.recheck_untestable(head_wt, start_sha, current):
                 outcome = gate_metrics.OUTCOME_CONVERGED
+            elif needs_recheck:
+                outcome = (
+                    # The untestable round was the only shot at a blocker no
+                    # test can demonstrate. It is still open, and repeating it
+                    # would spend fixer budget on a decision only a judge can
+                    # make: name what a human has to look at.
+                    gate_metrics.OUTCOME_UNTESTABLE_NEEDS_REVIEW
+                    if untestable_only
+                    else gate_metrics.OUTCOME_UNTESTABLE_UNRESOLVED
+                )
         finally:
             remove_worktree(self.repo, head_wt)
 
