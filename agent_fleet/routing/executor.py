@@ -218,6 +218,32 @@ def _status_line(mode: Mode) -> str:
     return escalation_line(f"fail-closed: {mode.value} agent pushed; re-gate")
 
 
+def _commit_or_reuse(
+    worktree: Path, *, mode: Mode, lane: str
+) -> tuple[bool, str | None, str, list[str]]:
+    """Commit the agent's work, or accept the commit the agent already made.
+
+    The agent's own prompt tells it to ``git add -A`` and commit, so on the normal
+    success path the worktree is *already clean* when this runs. Committing it
+    again is not a no-op: git exits 1 with "nothing to commit, working tree
+    clean", and reading that as a failure reported every successful rebase and
+    repair as one that did not complete — nothing pushed, no escalation line
+    written, exit 1. So the commit is only attempted when there is something to
+    commit, and a clean tree with a real HEAD is the agent having done its part.
+
+    The three returns are :func:`commit_worktree`'s, so the caller reads one
+    shape either way.
+    """
+    from agent_fleet.fleet_ops.guarantee import commit_worktree, head_sha, is_dirty
+
+    if is_dirty(worktree):
+        return commit_worktree(worktree, engine=mode.value, lane=lane)
+    sha = head_sha(worktree)
+    if sha is None:
+        return False, None, f"{mode.value} agent left the worktree at no commit at all", []
+    return True, sha, "", []
+
+
 def run_agent(
     mode: Mode,
     *,
@@ -240,12 +266,14 @@ def run_agent(
     Fails closed. If the worktree cannot be made, the agent dies, or the push
     does not land, this returns ``ok=False`` and writes no escalation line: the
     routing policy then sees no new verdict and will decide again on the old
-    one, rather than believing a half-finished rebase is a finished one.
+    one, rather than believing a half-finished rebase is a finished one. That
+    covers the bare ``RuntimeError`` :func:`ensure_lane_worktree` raises when the
+    worktree lock is unavailable or ``git worktree add`` fails, so an operator
+    gets the documented ``ok=False`` rather than a traceback.
 
     On success the status line is the ``fail-closed`` escalation, which routes
     straight back to the gate.
     """
-    from agent_fleet.fleet_ops.guarantee import commit_worktree
     from agent_fleet.fleet_ops.statusfile import append_status
     from agent_fleet.gate.gitops import resolve_pull_request
 
@@ -290,14 +318,14 @@ def run_agent(
                 f"{mode.value} agent exited {result.exit_code}: "
                 f"{(result.stderr or result.stdout or '').strip()[:300]}"
             )
-    except (RoutingError, OSError) as exc:
+    except (RuntimeError, OSError) as exc:
         return fail(str(exc), worktree=worktree)
 
     # Commit before pushing, and refuse to push a commit that failed its hooks:
     # pushing first would put a tree on the PR's head that no hook ever saw, and
     # the next gate run would judge it. A hook that failed on baseline debt
     # outside the diff is retried by name with SKIP=<hook-id>, never disabled.
-    committed, sha, detail, hooks_failed = commit_worktree(worktree, engine=mode.value, lane=lane)
+    committed, sha, detail, hooks_failed = _commit_or_reuse(worktree, mode=mode, lane=lane)
     if not committed:
         return fail(detail or f"{mode.value} agent left nothing to commit", worktree=worktree)
     if hooks_failed:

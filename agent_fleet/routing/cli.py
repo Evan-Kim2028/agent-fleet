@@ -90,11 +90,38 @@ def _cmd_pr_action(args: argparse.Namespace, mode: str) -> int:
         )
         return 1
 
-    if not args.dry_run:
-        # Charged before the action runs, not after: a run the machine drops still
-        # cost an agent, and a cap that only counted successes would hand this
-        # head an unbounded number of them.
-        record_attempt(mode, lane, head, home=home)
+    if args.dry_run:
+        # Nothing below this point runs: no attempt is charged, and no agent is
+        # launched. The flag's contract is "check the budget and report", and a
+        # worktree, a full agent run, and a force-push to the PR's real
+        # headRefName are not a report — the head would be rewritten with no
+        # counter spent, which is the one thing the once-per-head budget exists
+        # to prevent.
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "mode": mode,
+                        "ok": True,
+                        "dry_run": True,
+                        "head": head,
+                        "head_ref": head_ref,
+                        "lane": lane,
+                        "pushed": False,
+                        "detail": "dry run: budget available, no attempt charged, no agent run",
+                    },
+                    indent=2,
+                    default=str,
+                )
+            )
+        else:
+            print(f"{mode} would run on {lane}@{head[:9]} (dry run: no attempt charged)")
+        return 0
+
+    # Charged before the action runs, not after: a run the machine drops still
+    # cost an agent, and a cap that only counted successes would hand this
+    # head an unbounded number of them.
+    record_attempt(mode, lane, head, home=home)
     result = run_agent(
         Mode(mode),
         repo_path=repo,
@@ -110,7 +137,7 @@ def _cmd_pr_action(args: argparse.Namespace, mode: str) -> int:
         print(f"  {result.status_line}")
     else:
         print(f"{mode} did not complete: {result.detail}", file=sys.stderr)
-    return 0 if result.ok or args.dry_run else 1
+    return 0 if result.ok else 1
 
 
 def cmd_pr_rebase(args: argparse.Namespace) -> int:

@@ -110,16 +110,29 @@ _MERGED_TREE_RE = re.compile(r"merged-tree regression check failed", re.IGNORECA
 
 #: The *same* line as the last :data:`_INFRA_RE` alternative with the INFRA
 #: marker absent: the gate ran, the tests did not, and nothing about the machine
-#: stopped them. That is a PR that needs its tests made runnable.
+#: stopped them. That is a PR that needs its tests made runnable. The python
+#: pipeline spells this two ways — ``tests could not run on the rebased head:
+#: pytest could not run in <pkg> (exit 2)`` and a bare ``pytest could not run in
+#: <pkg> (exit 2)`` — and both carry the same meaning as the bash
+#: ``gate tests could not run at head`` form, so all three are UNRUNNABLE.
 _UNRUNNABLE_RE = re.compile(
-    r"gate tests could not run at head (?!.*\bINFRA\b)",
+    r"(?:gate tests could not run at head"
+    r"|tests could not run on the rebased head"
+    r"|pytest could not run in \S+ \(exit \d+\))(?!.*\bINFRA\b)",
     re.IGNORECASE,
 )
 
-_BROKEN_TESTS_RE = re.compile(r"\(\s*tests-broken after", re.IGNORECASE)
-_ROUND_LOOP_RE = re.compile(r"\(\s*(?:stalled|cap) after \d+ round\(s\)", re.IGNORECASE)
-_NO_PUSH_RE = re.compile(r"\(\s*no-push after", re.IGNORECASE)
-_UNTESTABLE_RE = re.compile(r"\(\s*untestable-unresolved after", re.IGNORECASE)
+#: The outcome-named fix-loop reasons. The leading ``(`` is optional because the
+#: two gate implementations wrap the escalation differently: the bash driver
+#: parenthesises the whole reason, while the python pipeline appends it bare
+#: (``f"{stamp} NEEDS-ESCALATION {reason}"`` with
+#: ``reason = f"{outcome} after {n} round(s); failing by round: ..."``). Requiring
+#: the parenthesis read every python-gate verdict as UNKNOWN, so a converging
+#: lane never got its rework round. The optional group accepts both spellings.
+_BROKEN_TESTS_RE = re.compile(r"\(?\s*tests-broken after", re.IGNORECASE)
+_ROUND_LOOP_RE = re.compile(r"\(?\s*(?:stalled|cap) after \d+ round\(s\)", re.IGNORECASE)
+_NO_PUSH_RE = re.compile(r"\(?\s*no-push after", re.IGNORECASE)
+_UNTESTABLE_RE = re.compile(r"\(?\s*untestable-unresolved after", re.IGNORECASE)
 
 #: The escalation markers, in the order they are checked. First match wins.
 #: The order is the spec's, and each row is also independently correct: the one
