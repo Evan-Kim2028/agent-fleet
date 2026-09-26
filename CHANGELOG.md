@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Fixed
+
+- **The admission pressure signal measured the wrong cgroup, and `Throttle.saturated` measured nothing at all.**
+  - `read_throttle()` built its candidate list as `[explicit path] + fallbacks`, and
+    `FALLBACK_PATHS` holds only the *containing* slices, so the documented
+    `DEFAULT_PSI_PATH` (the `agents.slice` `cpu.pressure`) was never a candidate.
+    The first fallback — `user@1000.service` — always won on a host where it is
+    readable, and that slice is the parent of `app.slice` and every other service
+    running as uid 1000. A non-agent workload could therefore inflate the
+    throttle while the agents sat idle, parking a busy host's fleet. The no-argument
+    call now measures `DEFAULT_PSI_PATH` first; the explicit `path` argument still
+    wins when given.
+  - `Throttle.saturated` returned `self.available and self.some_avg10 is not None`,
+    an exact restatement of `available`, so a machine reading `some avg10=0.00` was
+    reported as saturated. It now delegates to `throttled()` and therefore tracks
+    the same `DEFAULT_PSI_AVG10_MAX` ceiling, so the property cannot drift from the
+    threshold that actually gates launches.
+
 ## 0.16.2 — 2026-09-25
 
 ### Fixed

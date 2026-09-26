@@ -67,7 +67,13 @@ class Throttle:
 
     @property
     def saturated(self) -> bool:
-        return self.available and self.some_avg10 is not None
+        """Whether this reading is *above the ceiling*, not merely readable.
+
+        Delegates to :func:`throttled` so the two never disagree. An idle host
+        (``some avg10=0.00``) is available but not saturated, and an unavailable
+        reading is never saturated.
+        """
+        return throttled(self)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -121,14 +127,19 @@ def read_throttle(
     *,
     fallbacks: tuple[Path, ...] = FALLBACK_PATHS,
 ) -> Throttle:
-    """Read the first usable PSI file from *path* then *fallbacks*.
+    """Read the first usable PSI file from *path* (or the default) then *fallbacks*.
+
+    With no *path* the default is ``DEFAULT_PSI_PATH``, the agents slice, and it
+    must be consulted before the containing slices: ``user@1000.service`` is the
+    parent of ``app.slice`` and every other service running as uid 1000, so
+    leading with it throttles the swarm on unrelated CPU load. The default is
+    resolved on each call rather than captured in the signature, so the
+    ``fleet_ops.dispatch.psi_path`` override is picked up.
 
     Never raises. The result is ``available=False`` when nothing readable was
     found, which callers treat as "do not throttle".
     """
-    candidates: list[Path] = []
-    if path is not None:
-        candidates.append(Path(path))
+    candidates: list[Path] = [Path(path) if path is not None else Path(DEFAULT_PSI_PATH)]
     candidates.extend(Path(p) for p in fallbacks)
     for candidate in candidates:
         value = read_some_avg10(candidate)
