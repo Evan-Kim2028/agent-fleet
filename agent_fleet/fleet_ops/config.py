@@ -16,6 +16,16 @@ repo that omits ``fleet_ops:`` is unaffected::
           engine: devin
           push_branch: fb/{lane}
           on_approved: "cp $STATUS $REPO/reviews/$PR-$SHA9.md"
+      admission:
+        shared_dir: ~/.agent-fleet/admission
+        tests: 12
+        typecheck: 4
+        nice: 5
+
+``admission:`` is the lane subprocess budget — the shared ``uv run pytest`` /
+``pyright`` slot pools every operator contends for. Every key is optional and
+every one of them defaults to the machine-global budget, because admission is a
+throttle: a knob a repo omits must never keep a lane from running.
 
 ``baseline_skip_hooks`` is deliberately scoped to ``fleet_ops`` rather than to
 the global repo config: skipping a hook is a decision about the *lane manager's
@@ -26,8 +36,10 @@ globally — every commit the manager makes still runs every hook not listed her
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+from agent_fleet.fleet_ops.admission import AdmissionConfig
 from agent_fleet.repo import REPO_CONFIG_NAMES
 
 DEFAULT_BASE_BRANCH = "main"
@@ -105,6 +117,10 @@ class FleetOpsConfig:
     #: can *add* rules; it can never shorten them.
     fences: tuple[str, ...] = ()
     operators: dict[str, OperatorSpec] = field(default_factory=dict)
+    #: Lane admission budget. ``AdmissionConfig()`` defaults are the whole
+    #: config: a repo that says nothing about admission gets the machine-global
+    #: pools, and a missing knob throttles nobody rather than aborting the lane.
+    admission: AdmissionConfig = field(default_factory=AdmissionConfig)
 
     def operator(self, name: str) -> OperatorSpec | None:
         return self.operators.get(name)
@@ -145,6 +161,42 @@ def _parse_operator(name: str, raw: Any) -> OperatorSpec | None:  # noqa: ANN401
     )
 
 
+def _parse_admission(raw: Any) -> AdmissionConfig:  # noqa: ANN401
+    """Parse the ``admission:`` sub-section, defaulting every absent knob.
+
+    Admission is a throttle. Every value is optional and an unparseable one
+    falls back to the :class:`AdmissionConfig` default, because a lane that
+    cannot start is strictly worse than a lane that runs unthrottled.
+    """
+    if not isinstance(raw, dict):
+        return AdmissionConfig()
+    defaults = AdmissionConfig()
+    shared = _optional_str(raw.get("shared_dir"))
+    return AdmissionConfig(
+        shared_dir=Path(shared) if shared else None,
+        tests=_positive_int(raw.get("tests"), defaults.tests),
+        typecheck=_positive_int(raw.get("typecheck"), defaults.typecheck),
+        nice=_positive_int(raw.get("nice"), defaults.nice),
+        wait_s=_positive_float(raw.get("wait_s"), defaults.wait_s),
+    )
+
+
+def _positive_int(value: Any, default: int) -> int:  # noqa: ANN401
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int) and value > 0:
+        return value
+    return default
+
+
+def _positive_float(value: Any, default: float) -> float:  # noqa: ANN401
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)) and value > 0:
+        return float(value)
+    return default
+
+
 def load_fleet_ops_config(raw: dict[str, Any] | None) -> FleetOpsConfig | None:
     """Parse the ``fleet_ops:`` block out of an already-loaded repo config dict.
 
@@ -174,6 +226,7 @@ def load_fleet_ops_config(raw: dict[str, Any] | None) -> FleetOpsConfig | None:
         baseline_skip_hooks=tuple(str(h).strip() for h in hooks if str(h).strip()),
         fences=tuple(str(f).strip() for f in fences if str(f).strip()),
         operators=operators,
+        admission=_parse_admission(section.get("admission")),
     )
 
 

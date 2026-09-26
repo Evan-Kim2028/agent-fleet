@@ -36,9 +36,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from agent_fleet.fleet_ops import admission as admission_mod
 from agent_fleet.fleet_ops import binding as binding_mod
 from agent_fleet.fleet_ops import engines, lazyexit
 from agent_fleet.fleet_ops import gate as gate_mod
+from agent_fleet.fleet_ops.admission import AdmissionConfig
 from agent_fleet.fleet_ops.config import (
     DEFAULT_BASE_BRANCH,
     DEFAULT_ENGINE,
@@ -201,6 +203,7 @@ def run_lane(
     branch: str | None = None,
     status_file: Path | str | None = None,
     config: FleetOpsConfig | None = None,
+    admission_config: AdmissionConfig | None = None,
     known_gate_subcommands: set[str] | None = None,
     gate: bool = True,
     run_dir: Path | str | None = None,
@@ -214,6 +217,13 @@ def run_lane(
     repo = Path(repo_path).expanduser().resolve()
     if config is None:
         config = load_fleet_ops_config_from_repo(repo) or FleetOpsConfig()
+    if admission_config is None:
+        admission_config = AdmissionConfig(
+            shared_dir=Path(config.admission.shared_dir) if config.admission.shared_dir else None,
+            tests=config.admission.tests,
+            typecheck=config.admission.typecheck,
+            nice=config.admission.nice,
+        )
 
     spec: OperatorSpec | None = config.operator(operator)
     selected_engine = (engine or (spec.engine if spec else DEFAULT_ENGINE)).strip().lower()
@@ -386,6 +396,17 @@ def run_lane(
     def pr_probe() -> bool:
         return _pr_exists(workdir, push_branch)
 
+    # The admission shim goes on the *engine* child's PATH only. The gate and
+    # the hooks keep the manager's environment: a gate that silently queued
+    # behind a lane's test slots would stall the merge path, and a hook is
+    # operator-authored config that should not inherit fleet internals.
+    engine_env = admission_mod.shim_env(
+        os.environ,
+        config=admission_config,
+        operator=operator,
+        lane=lane,
+    )
+
     try:
         if selected_engine == "devin":
             engine_result = engines.run_devin_engine(
@@ -395,6 +416,7 @@ def run_lane(
                 name="impl",
                 pr_exists=pr_probe,
                 runner=runner,
+                env=engine_env,
             )
         elif selected_engine == "cmd":
             engine_result = engines.run_cmd_engine(
@@ -404,6 +426,7 @@ def run_lane(
                 name="impl",
                 pr_exists=pr_probe,
                 runner=runner,
+                env=engine_env,
             )
         else:
             raise ValueError(f"unsupported engine {selected_engine!r}")
