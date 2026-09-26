@@ -677,16 +677,25 @@ def cmd_pr_analyze(_args: argparse.Namespace) -> int:
     return _pr_analyze_main()
 
 
-def cmd_dispatch(_args: argparse.Namespace) -> int:
-    """Thin adapter: run a single issue-triggered fleet dispatch via env-var protocol.
+def cmd_dispatch(args: argparse.Namespace) -> int:
+    """Two dispatch modes behind one subcommand.
 
-    All configuration is read from environment variables:
-      ISSUE_NUMBER, COMMENT_BODY, PERSONA,
-      AGENT_FLEET_WORKSPACE (or AGENT_FLEET_TARGET_CONFIG), AGENT_FLEET_CONFIG.
+    With a ``QUEUE.jsonl`` positional, this runs the durable **queue**
+    dispatcher (:mod:`agent_fleet.fleet_ops.dispatch`): it launches
+    ``fleet lane run --no-gate`` per item and gates whatever produced a PR.
 
-    The silent-cwd safety check (exit 2 when neither workspace env var is set)
-    is preserved inside the adapter — this subcommand does not bypass it.
+    With no positional it keeps the original meaning — a single issue-triggered
+    dispatch over the env-var protocol (``ISSUE_NUMBER``, ``PERSONA``,
+    ``AGENT_FLEET_WORKSPACE``, …) — which README, docs/SCHEDULES.md, and the
+    schedule watcher all document. The silent-cwd safety check (exit 2 when
+    neither workspace env var is set) is preserved inside that adapter: this
+    subcommand does not bypass it.
     """
+    if getattr(args, "queue", None):
+        from agent_fleet.fleet_ops.cli import cmd_dispatch_queue
+
+        return cmd_dispatch_queue(args)
+
     from agent_fleet.issue_loop.dispatch import main as _dispatch_main
 
     # The standalone main() uses raise SystemExit(...).  Wrap so we return
@@ -1316,14 +1325,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     pr_analyze_p.set_defaults(func=cmd_pr_analyze)
 
-    dispatch_p = sub.add_parser(
-        "dispatch",
-        help=(
-            "Run a single issue-triggered fleet dispatch (env-var protocol: "
-            "ISSUE_NUMBER, PERSONA, AGENT_FLEET_WORKSPACE, …)"
-        ),
-    )
-    dispatch_p.set_defaults(func=cmd_dispatch)
+    from agent_fleet.fleet_ops.cli import register_dispatch_command
+
+    register_dispatch_command(sub)
+    # `dispatch` has two modes, so its handler is chosen from the parsed
+    # namespace rather than fixed at registration: a QUEUE.jsonl positional
+    # means the queue dispatcher, no positional means the original
+    # issue-triggered dispatch.
+    sub.choices["dispatch"].set_defaults(func=cmd_dispatch)
 
     schedule_p = sub.add_parser(
         "schedule",

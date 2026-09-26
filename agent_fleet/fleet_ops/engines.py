@@ -190,6 +190,7 @@ def _spawn_capture(
     stream_path: Path | None,
     timeout_s: int,
     runner: Runner | None,
+    env: dict[str, str] | None = None,
 ) -> tuple[int, str, str, int | None, int | None]:
     """Run *argv* and return ``(exit_code, stdout, stderr, pid, pgid)``.
 
@@ -198,6 +199,12 @@ def _spawn_capture(
     what lets ``lanes stop`` signal exactly one lane. When *stream_path* is given,
     stdout is written there as well, because the cmd JSONL stream is what the
     lazy-exit and stall judgements read.
+
+    *env* is the child's complete environment (``None`` inherits the manager's).
+    It exists so a caller can put something on the child's ``PATH`` — the
+    admission shim in :mod:`agent_fleet.fleet_ops.admission` — which is not
+    otherwise reachable, since a parent's ``PATH`` change cannot affect a process
+    it has already started.
     """
     if runner is not None:
         result = runner(
@@ -212,6 +219,7 @@ def _spawn_capture(
             proc = subprocess.Popen(
                 list(argv),
                 cwd=workdir,
+                env=env,
                 stdout=handle,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -224,6 +232,7 @@ def _spawn_capture(
     proc = subprocess.run(
         list(argv),
         cwd=workdir,
+        env=env,
         capture_output=True,
         text=True,
         check=False,
@@ -249,6 +258,7 @@ def run_cmd_engine(
     use_systemd: bool | None = None,
     max_resumes: int = 1,
     pr_exists: Callable[[], bool] | None = None,
+    env: dict[str, str] | None = None,
 ) -> EngineResult:
     """Run the ``cmd`` engine headless and judge the result for a lazy exit.
 
@@ -259,6 +269,10 @@ def run_cmd_engine(
     The run is memory-capped (owner fence: 6G for anything that runs tests), and
     an exit-8 turn-budget exhaustion gets *one* ``continue`` — the resume
     documents-1d asked for, and the same single-attempt discipline devin gets.
+
+    *env* is the child's complete environment. It is how the admission shim
+    reaches the engine (see :func:`agent_fleet.fleet_ops.admission.shim_env`);
+    ``None`` inherits the manager's environment unchanged.
     """
     selected = enforce_implementation_model("cmd", model)
     run_path = Path(run_dir)
@@ -293,6 +307,7 @@ def run_cmd_engine(
         stream_path=stream_path,
         timeout_s=timeout_s,
         runner=runner,
+        env=env,
     )
 
     resumes = 0
@@ -327,6 +342,7 @@ def run_cmd_engine(
                 stream_path=None,
                 timeout_s=timeout_s,
                 runner=runner,
+                env=env,
             )
             resumes += 1
             stream_text = f"{stream_text}\n{cont_stdout}"
@@ -386,6 +402,7 @@ def run_devin_engine(
     max_continues: int = 1,
     pr_exists: Callable[[], bool] | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    env: dict[str, str] | None = None,
 ) -> EngineResult:
     """Run the devin engine with capacity fallback and one auto-continue.
 
@@ -396,6 +413,9 @@ def run_devin_engine(
     *run_dir* mirrors :func:`run_cmd_engine`: the per-attempt output is written
     there and recorded on the result, so a devin lane leaves the same auditable
     artifact trail the cmd engine does.
+
+    *env* is the child's complete environment, the same admission seam
+    :func:`run_cmd_engine` exposes; ``None`` inherits the manager's.
     """
     selected = model or DEVIN_MODEL_LADDER[0]
     # Validate against policy without pinning devin to a single model: the
@@ -426,6 +446,7 @@ def run_devin_engine(
             timeout_s=timeout_s,
             devin_bin=devin_bin,
             runner=runner,
+            env=env,
         )
         last_result = result
         if not looks_like_capacity_error(result.detail):
@@ -456,6 +477,7 @@ def run_devin_engine(
                 timeout_s=timeout_s,
                 devin_bin=devin_bin,
                 runner=runner,
+                env=env,
             )
             result.continued = True
             result.final_text = f"{result.final_text}\n{cont.final_text}".strip()
@@ -481,11 +503,14 @@ def _devin_attempt(
     timeout_s: int,
     devin_bin: str | None,
     runner: Runner | None,
+    env: dict[str, str] | None = None,
 ) -> EngineResult:
     """One devin attempt through the existing backend."""
     from agent_fleet.devin_backend import DevinBackend
 
     if runner is not None:
+        # The injected runner owns its own spawning, so there is no environment
+        # for this module to hand it — `env` applies to the real path below.
         return _devin_attempt_subprocess(
             workdir=workdir,
             prompt=prompt,
@@ -504,6 +529,7 @@ def _devin_attempt(
         timeout_s=timeout_s,
         cwd=workdir,
         runner=runner,
+        env=env,
     )
     return EngineResult(
         engine="devin",

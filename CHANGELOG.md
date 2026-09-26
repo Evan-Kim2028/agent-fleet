@@ -4,6 +4,60 @@
 
 ### Added
 
+- **`fleet dispatch QUEUE.jsonl --operator NAME`:** the two operator sessions'
+  ad-hoc dispatch loops are now a command, with durable restart-safe state. The
+  shell driver held its state in local variables and lost the swarm six ways in
+  one day; each failure is now structurally impossible and has a test named
+  after it. A lane that finished but was missing from the queue raised
+  `StopIteration` and took the whole dispatcher down, so every finished lane
+  after it was never gated — the queue is now a dict and an unresolvable lane is
+  *recorded* as `unknown_item` rather than looked up. Two operators wrote the
+  same `events.log` and detected liveness with `ps -eo args`, so each adopted
+  the other's lanes — durable state is namespaced by operator and liveness is a
+  recorded `(pid, starttime)` fingerprint, never a command-line match. A restart
+  relaunched lanes that had already run — a lane with a terminal state or a live
+  process is now never relaunched. Eighteen gates were released in one tick
+  (load 200) because the cap was enforced a tick late — `plan_tick` now counts
+  the gates it has already decided *within* the tick, so `--max-gates` is exact.
+  A dependency cycle would hang the queue forever, so it is detected and the
+  affected lanes finish as `dependency_deadlock`. The scheduling decision is a
+  pure function over an immutable state, which is what makes all of this
+  testable without spawning anything. With no positional `QUEUE.jsonl`, `dispatch`
+  keeps its original issue-triggered meaning, so README, `docs/SCHEDULES.md`,
+  and the schedule watcher are unchanged. Honours `depends_on` (released on any
+  terminal state, so a failure cannot deadlock its chain) and an optional
+  `cluster` ordering. `--gate-cmd TEMPLATE` runs an external gate script for
+  lanes that produced a PR; the template is `shlex`-split and executed **without
+  a shell**, so a `;` stays inert data. See `docs/FLEET-OPS.md`.
+- **CPU pressure as the dispatch throttle:** the shell driver's `--max-load` used
+  `os.getloadavg()`, which is wrong on this box — the agents run under a cgroup
+  CPU quota, so a quota-throttled task still counts as *running* and load reads
+  high while the machine is idle-but-stalled. That blocked every launch for forty
+  minutes. The throttle is now `some avg10` from the agents slice's
+  `cpu.pressure`, read **fail-open** so an unreadable file never becomes another
+  false block. `getloadavg` is no longer called anywhere in the throttle path.
+- **Lane admission pools:** `fleet lane run` puts a generated `uv` shim dir first
+  on the engine's `PATH`, so a lane's `uv run pytest` and `uv run
+  pyright|pre-commit` acquire one of N shared flock slots (tests 12, typecheck 4,
+  configurable under `fleet_ops.admission`, shared across operators) instead of
+  twenty lanes each starting a suite at once. Everything else — `uv sync`,
+  `uv --version` — passes straight through and takes no slot. The shim resolves
+  the real `uv` with its own directory stripped from `PATH` so it cannot resolve
+  to itself, and makes the slot fd inheritable across `execv`: Python opens files
+  `O_CLOEXEC` by default, so without that the lock is dropped the moment the real
+  `uv` starts and the pool silently admits everybody. Admission covers the engine
+  only — the gate and the hooks keep the manager's environment so a gate can
+  never queue behind a lane's test slots.
+- **Per-repository gate worktree lock:** concurrent gates each ran `git worktree
+  prune`, which deleted a sibling gate's half-created worktree registration and
+  lost it with `fatal: could not open '.git/worktrees/<name>/locked' for writing:
+  No such file or directory` (reproduced at ~1 in 40 concurrent adds).
+  `agent_fleet/gate/gitops.py` now serializes add/remove/prune per repo under a
+  `flock`, keyed on the repo's `origin` slug so two checkouts share one lock. The
+  lock covers all three operations together — locking only `add` would still let
+  one gate's prune run while another's add is mid-flight, which is the actual
+  corruption — is re-entrant per thread, and degrades to running unlocked rather
+  than stopping a gate.
 - **`agent-fleet merge-plan`:** the command center now decides which gate-approved
   PRs ship *together*. Merging and deploying is the slowest serialized step in
   the loop (~15-20 min per lake-of-rage deploy, ~9 min per silphcoanalytics), so
