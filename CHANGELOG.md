@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.16.2 — 2026-09-25
+
 ### Fixed
 
 - **Gate lenses no longer lose their findings (the `candidates=0` false negative).**
