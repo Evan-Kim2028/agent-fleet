@@ -20,6 +20,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from agent_fleet.fleet_paths import agent_fleet_home
+from agent_fleet.gate.standard import OUTCOME_APPROVED as OUTCOME_STANDARD_APPROVED
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -39,6 +40,11 @@ OUTCOME_TESTS_BROKEN = "tests-broken"
 OUTCOME_UNTESTABLE_UNRESOLVED = "untestable-unresolved"
 OUTCOME_UNTESTABLE_NEEDS_REVIEW = "untestable-needs-review"
 OUTCOME_CAP = "cap"
+
+#: The STANDARD bar records its own approval outcome (imported above, so the two
+#: modules cannot disagree on the string); a full-gate run approves with
+#: ``converged``. Both are approvals and both belong in the approval rate.
+_APPROVAL_OUTCOMES = frozenset({OUTCOME_CONVERGED, OUTCOME_STANDARD_APPROVED})
 
 
 def metrics_path() -> Path:
@@ -87,6 +93,14 @@ class GateMetrics:
     head_sha: str = ""
     reasons: list[str] = field(default_factory=list)
     at: str = ""
+    #: Which review bar ran: ``standard`` (the risk-matched cheap bar) or
+    #: ``sensitive``/empty for the full evidence pipeline. See
+    #: :mod:`agent_fleet.gate.standard`.
+    tier: str = ""
+    #: STANDARD fixer passes this PR has spent when this row was written. The
+    #: counter is read back by :func:`agent_fleet.gate.standard.prior_passes` to
+    #: bound the next head, so it has to be a column, not a log line.
+    passes: int = 0
     #: Per-agent-call parse state (lens/verify/judge). See GateCallRecord.
     calls: list[dict[str, object]] = field(default_factory=list)
 
@@ -116,6 +130,8 @@ class GateMetrics:
             "rejected": self.rejected,
             "untestable": self.untestable,
             "untestable_real": self.untestable_real,
+            "tier": self.tier,
+            "passes": self.passes,
             "rounds": [r.to_dict() for r in self.rounds],
             "failing_by_round": self.failing_by_round,
             "reasons": list(self.reasons),
@@ -189,8 +205,8 @@ def render_metrics_table(rows: Iterable[dict[str, object]]) -> str:
     if not materialized:
         return "No gate runs recorded yet."
     header = (
-        f"{'AT':<19}  {'PR':>4}  {'CAND':>4}  {'CONF':>4}  {'REJ':>3}  "
-        f"{'UTEST':>5}  {'RND':>3}  {'FAILING':<12}  OUTCOME"
+        f"{'AT':<19}  {'PR':>4}  {'TIER':<9}  {'PASS':>4}  {'CAND':>4}  {'CONF':>4}  "
+        f"{'REJ':>3}  {'UTEST':>5}  {'RND':>3}  {'FAILING':<12}  OUTCOME"
     )
     lines = [header, "-" * len(header)]
     for row in materialized:
@@ -198,6 +214,8 @@ def render_metrics_table(rows: Iterable[dict[str, object]]) -> str:
         failing_str = ",".join(str(f) for f in failing) if failing else "-"
         lines.append(
             f"{str(row.get('at', '?'))[:19]:<19}  {row.get('pr', '?')!s:>4}  "
+            f"{str(row.get('tier', '')) or '-':<9}  "
+            f"{_as_int(row.get('passes')):>4}  "
             f"{_as_int(row.get('candidates')):>4}  {_as_int(row.get('confirmed')):>4}  "
             f"{_as_int(row.get('rejected')):>3}  {_as_int(row.get('untestable')):>5}  "
             f"{len(failing):>3}  {failing_str:<12}  {row.get('outcome', '?')!s}"
@@ -211,21 +229,28 @@ def summarize_rows(rows: Iterable[dict[str, object]]) -> dict[str, object]:
     outcomes: dict[str, int] = {}
     rounds_total = 0
     candidates = confirmed = 0
+    approvals = 0
     for row in materialized:
         outcome = str(row.get("outcome", "unknown"))
         outcomes[outcome] = outcomes.get(outcome, 0) + 1
         rounds_total += len(_as_round_counts(row.get("failing_by_round")))
         candidates += _as_int(row.get("candidates"))
         confirmed += _as_int(row.get("confirmed"))
+        approvals += int(outcome in _APPROVAL_OUTCOMES)
+    by_tier: dict[str, int] = {}
+    for row in materialized:
+        tier = str(row.get("tier", "")) or "full"
+        by_tier[tier] = by_tier.get(tier, 0) + 1
     return {
         "runs": len(materialized),
         "outcomes": dict(sorted(outcomes.items())),
+        "by_tier": dict(sorted(by_tier.items())),
         "rounds_total": rounds_total,
         "candidates_total": candidates,
         "confirmed_total": confirmed,
-        "approval_rate": (
-            round(outcomes.get(OUTCOME_CONVERGED, 0) / len(materialized), 3)
-            if materialized
-            else 0.0
-        ),
+        # Either bar's approval is an approval. Reading the rate as converged-only
+        # would score every cheap-bar success as a failure, which is exactly
+        # backwards: the standard bar exists to approve more PRs per unit of
+        # machine, and its approvals would show up here as misses.
+        "approval_rate": (round(approvals / len(materialized), 3) if materialized else 0.0),
     }

@@ -228,6 +228,56 @@ The tier is a cost decision, so it is deliberately the *number* of configured
 lenses rather than a fixed 4: a repo that configures two lenses gets tier 2, and
 one that configures four gets tier 4. Both are the full-set tier.
 
+#### The STANDARD bar — risk-matched review
+
+The tier table above picks *how many* reviewers a diff earns. Underneath it sits
+a second, independent question: **is the cheap bar safe for this diff at all?**
+That is the SENSITIVE/STANDARD decision, made from the changed paths before any
+model runs.
+
+- **SENSITIVE** — the diff touches at least one sensitive path. Today's full
+  evidence pipeline runs, unchanged: lens fan-out, a verifier per claim, a judge,
+  and the convergence loop.
+- **STANDARD** — the diff touches no sensitive path. One reviewer covering all four
+  focuses. No parallel lenses, no per-claim verifier, no judge.
+
+The default sensitive patterns are `gold|sales`, `identity`, `stamp`,
+`migrations?/`, `schema`, `.github/workflows/`, `infra/vps/`, `deploy` and
+`run_prod` — the changes where a wrong verdict costs a sale, an identity record,
+a schema, or a production host, and where no number of re-gate passes makes the
+verdict recoverable. Override them per repo with `gate.sensitive_paths`; an empty
+list means "nothing is sensitive here".
+
+What buys the confidence on a STANDARD PR is the **deterministic** half, which
+the full gate also runs and which STANDARD leans on harder:
+
+- the PR's own changed tests are run at head (step0) before anything else, and a
+  red test is a blocker whatever the reviewer says;
+- zero findings + green PR tests ⇒ **approve**, on the same two-part evidence
+  tier 0 rests on: step0 at head plus the merged-tree
+  [recheck](#carrying-an-approval-across-a-patch-identical-rebase) that runs
+  before the merge and re-establishes the tests green with the base merged in;
+- any blocker ⇒ **one** fixer gets the findings and the failing tests, adds a
+  focused test per real finding, and pushes to the PR's own head ref. The run
+  ends **`re-gate new head`**: the pushed head is not trusted, the next gate run
+  reads it from scratch.
+
+The cheap bar is **finite**, in two ways, so it can never become a treadmill:
+
+- **a disputed pass**: if the fixer changed nothing (pushed no new head, i.e. it
+  disputed every finding), the bar falls back to the full evidence gate for that
+  head instead of spending a pass;
+- **a pass counter**: at most `standard_max_passes` (default 3) fixer passes are
+  spent on a PR; the head is then read by the full evidence gate. The counter is
+  durable — it is recovered from the gate's own metrics log per `(repo, pr)`,
+  because the gate process exits after one run and the re-gate happens on the
+  next invocation. A fall-back or a full-gate run closes the budget for that PR.
+
+Tier selection, the state machine, and the pass counter are all pure functions
+(`agent_fleet.gate.standard`), unit-tested without a network, a repository, or a
+model. Every STANDARD row records its `tier` and `passes`, visible in
+`agent-fleet gate metrics`.
+
 ### verify — one failing test per claim
 
 One verifier per testable claim. It must create **exactly one new test file**,
@@ -487,6 +537,8 @@ Machine-wide (`~/.agent-fleet/fleet.yaml`):
 | `gate.tier0` | `true` | approve a docs/tests-only PR on step0 evidence, no model review |
 | `gate.big_lines` | `1200` | non-test changed lines above which the full lens set runs |
 | `gate.prodsensitive_paths` | 6 defaults | regexes for changed paths that keep the full lens set at any size |
+| `gate.sensitive_paths` | 9 defaults | regexes for changed paths that force the full evidence gate (SENSITIVE tier) |
+| `gate.standard_max_passes` | `3` | STANDARD fixer passes before the bar falls back to the full gate |
 | `gate.max_candidates` | `12` | cap on claims carried into verify |
 | `gate.max_parallel_lenses` | `8` | concurrent lens reviewers |
 | `gate.max_parallel_verifiers` | `6` | concurrent verifiers |
