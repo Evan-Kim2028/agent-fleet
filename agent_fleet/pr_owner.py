@@ -723,6 +723,13 @@ def own_round(
     pushed = moved
     if moved:
         pushed, push_detail = _push_head(worktree, branch)
+        if pushed:
+            # The push may have rebased this round's commit onto origin/<branch>,
+            # which rewrites it to a new sha. Re-read the head from the worktree
+            # so the sha reported here, written to the notes and returned in
+            # to_dict() is the one actually on the branch — not the pre-rebase
+            # commit, which exists nowhere and would strand the next round.
+            new_head = _head_oid(worktree) or new_head
 
     tests = _run_tests(worktree, test_command, failing)
     # Appended before returning in every case: a round that pushed nothing, or
@@ -875,20 +882,27 @@ def run_own(
     itself are handled in :func:`_push_head` rather than here, so a failed or
     timed-out push is recorded as a round outcome instead of ending the round.
     """
+    import yaml
+
     from agent_fleet.repo import resolve_repo_config
 
     repo_path = Path(repo_path).expanduser().resolve()
     if not repo_path.is_dir():
         return {"error": f"repo path is not a directory: {repo_path}"}
-    repo = resolve_repo_config(repo_path)
-    if repo is None:
-        return {
-            "error": f"no .agent-fleet.yaml for {repo_path}, so there is no test command to run"
-        }
+    # Reading the repo's own config is as fallible as anything else the round
+    # does: a malformed ``.agent-fleet.yaml`` raises ``yaml.YAMLError`` and an
+    # ``AGENT_FLEET_TARGET_CONFIG`` pointing at a missing file raises
+    # ``FileNotFoundError``. Both are caught below so the caller still gets
+    # ``{"error": ...}`` instead of a traceback out of ``main``.
     try:
+        repo = resolve_repo_config(repo_path)
+        if repo is None:
+            return {
+                "error": f"no .agent-fleet.yaml for {repo_path}, so there is no test command to run"
+            }
         findings = load_findings(Path(findings_path) if findings_path else None)
         task_spec = read_task_spec(task_file)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError, yaml.YAMLError, json.JSONDecodeError) as exc:
         return {"error": str(exc)}
 
     try:
