@@ -40,6 +40,7 @@ import pytest
 # "test", so pytest collects both and tries to resolve their parameters as
 # fixtures.  They are imported under underscore aliases instead; the library
 # should not have to know it is sometimes under pytest.
+from agent_fleet.merge_plan import cli as merge_cli
 from agent_fleet.merge_plan.collect import GitHubClient
 from agent_fleet.merge_plan.train import (
     LANDED,
@@ -1212,6 +1213,158 @@ def _stub_detail_client_head(head: str) -> Callable[[GitHubClient, Path], StubDe
         return _AtHead()
 
     return _factory
+
+
+# ---------------------------------------------------------------------------
+# The status files lor-main actually writes
+# ---------------------------------------------------------------------------
+
+
+class _LaneTrainClient:
+    """A ``GitHubClient`` with one open PR per lane, on that lane's branch."""
+
+    def __init__(self, heads: dict[int, str], *, head_sha: str) -> None:
+        self._heads = heads
+        self._head_sha = head_sha
+        self.list_calls = 0
+
+    def for_repo(self, repo_path: Path | None) -> _LaneTrainClient:
+        del repo_path
+        return self
+
+    def list_open_approved(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        del limit
+        self.list_calls += 1
+        return [
+            {"number": n, "headRefName": h, "headRefOid": self._head_sha}
+            for n, h in self._heads.items()
+        ]
+
+    def pr_detail(self, pr_number: int) -> dict[str, Any]:
+        return {
+            "state": "OPEN",
+            "headRefOid": self._head_sha,
+            "headRefName": self._heads.get(pr_number, ""),
+            "baseRefName": "main",
+            "files": [{"path": "agent_fleet/thing.py"}],
+        }
+
+
+def _install_lane_client(
+    monkeypatch: pytest.MonkeyPatch, heads: dict[int, str], *, head_sha: str
+) -> _LaneTrainClient:
+    client = _LaneTrainClient(heads, head_sha=head_sha)
+
+    def _for_repo(self: GitHubClient, repo_path: Path) -> _LaneTrainClient:
+        del self, repo_path
+        return client
+
+    monkeypatch.setattr(GitHubClient, "for_repo", _for_repo)
+    return client
+
+
+def _isolate_lane_registry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Point the real lane registry at an empty dir.
+
+    ``cmd_merge_train`` always reads the operator's own ``~/.agent-fleet/lanes``
+    alongside the status dir, so without this a test that means to exercise the
+    status dir silently also batches whatever lanes the machine happens to run.
+    """
+    empty = tmp_path / "no-lanes"
+    empty.mkdir(exist_ok=True)
+    monkeypatch.setattr("agent_fleet.merge_plan.collect.lanes_dir", lambda: empty)
+
+
+def _lane_status_dir(tmp_path: Path, lanes: dict[str, str]) -> Path:
+    """``DIR/<lane>.status`` exactly as lor-main writes it: verdicts, no PR ref."""
+    status = tmp_path / "status"
+    status.mkdir()
+    for lane, sha in lanes.items():
+        (status / f"{lane}.status").write_text(
+            f"17:08:05 NEEDS-ESCALATION first run failed\n18:37:13 PREMERGE-APPROVED {sha}\n",
+            encoding="utf-8",
+        )
+    return status
+
+
+def test_train_batches_a_lane_status_file_that_names_no_pr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The reported bug: a real ``<lane>.status`` used to yield an empty batch.
+
+    lor-main writes ``DIR/<lane>.status`` with a verdict per event and no PR
+    reference anywhere, so ``collect_from_status_dir`` had no number to hand on
+    and every dry run said "no open approved PRs" while the gate had approved
+    them.  The lane's push branch, ``fb/<lane>``, is the only thing that joins
+    the status file to its PR.
+    """
+    checkout, head = _repo_on_branch(tmp_path, "main", with_pr=True)
+    status = _lane_status_dir(tmp_path, {"train-status-compat": head})
+    client = _install_lane_client(monkeypatch, {126: "fb/train-status-compat"}, head_sha=head)
+    _isolate_lane_registry(monkeypatch, tmp_path)
+
+    args = _train_args(
+        checkout, config=tmp_path / "none.yaml", over={"status_dir": str(status), "dry_run": True}
+    )
+    assert merge_cli.cmd_merge_train(args) == 0
+    out = capsys.readouterr().out
+    assert "would test 1 PR(s) combined" in out
+    assert "#126" in out
+    assert client.list_calls == 1
+
+
+def test_a_lane_escalated_after_approval_is_not_batched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A later escalation retracts the earlier approval, so the PR is not shipped."""
+    checkout, head = _repo_on_branch(tmp_path, "main", with_pr=True)
+    status = tmp_path / "status"
+    status.mkdir()
+    (status / "train-status-compat.status").write_text(
+        f"18:37:13 PREMERGE-APPROVED {head}\n19:02:41 NEEDS-ESCALATION the rebase landed wrong\n",
+        encoding="utf-8",
+    )
+    _install_lane_client(monkeypatch, {126: "fb/train-status-compat"}, head_sha=head)
+    _isolate_lane_registry(monkeypatch, tmp_path)
+
+    args = _train_args(
+        checkout, config=tmp_path / "none.yaml", over={"status_dir": str(status), "dry_run": True}
+    )
+    assert merge_cli.cmd_merge_train(args) == 0
+    assert "no approved PRs found" in capsys.readouterr().out
+
+
+def test_a_lane_whose_head_moved_is_reported_as_moved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The approved sha no longer matches the head, so the PR is reported moved."""
+    checkout, _head = _repo_on_branch(tmp_path, "main", with_pr=True)
+    status = _lane_status_dir(tmp_path, {"train-status-compat": "deadbeef"})
+    _install_lane_client(monkeypatch, {126: "fb/train-status-compat"}, head_sha="a" * 40)
+    _isolate_lane_registry(monkeypatch, tmp_path)
+
+    args = _train_args(
+        checkout, config=tmp_path / "none.yaml", over={"status_dir": str(status), "dry_run": True}
+    )
+    assert merge_cli.cmd_merge_train(args) == 0
+    out = capsys.readouterr().out
+    assert "#126 SKIPPED-MOVED" in out
+    assert "would test 0 PR(s)" in out
+
+
+def test_a_dq1d_lane_status_file_batches_its_own_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    checkout, head = _repo_on_branch(tmp_path, "main", with_pr=True)
+    status = _lane_status_dir(tmp_path, {"dq1d-9-contracts": head})
+    _install_lane_client(monkeypatch, {77: "dq1d/9-contracts"}, head_sha=head)
+    _isolate_lane_registry(monkeypatch, tmp_path)
+
+    args = _train_args(
+        checkout, config=tmp_path / "none.yaml", over={"status_dir": str(status), "dry_run": True}
+    )
+    assert merge_cli.cmd_merge_train(args) == 0
+    assert "#77" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------

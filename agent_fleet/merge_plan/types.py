@@ -21,6 +21,25 @@ DEFAULT_MAX_BATCH_SIZE = 5
 
 
 @dataclass(frozen=True)
+class Verdict:
+    """The gate's most recent decision about a lane, read out of a status file.
+
+    A status file is appended to, so it holds every verdict the gate has ever
+    drawn for a lane and only the last one describes the lane now.  ``approved_sha``
+    is non-empty exactly when the current verdict is an approval; ``verdict`` is
+    empty for a file that has drawn none, which is not the same as a refusal.
+    """
+
+    verdict: str = ""
+    approved_sha: str = ""
+    line: str = ""
+
+    @property
+    def is_approval(self) -> bool:
+        return bool(self.approved_sha)
+
+
+@dataclass(frozen=True)
 class ApprovedPR:
     """A PR the gate has approved, before its change profile is built.
 

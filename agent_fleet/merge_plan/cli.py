@@ -242,6 +242,7 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
         collect_from_lanes,
         collect_from_status_dir,
         dedupe_approvals,
+        resolve_lane_approvals,
     )
     from agent_fleet.merge_plan.config import (
         resolve_train_repo_name,
@@ -264,6 +265,13 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
     approvals = list(collect_from_lanes(operator=args.operator))
     if args.status_dir:
         approvals += collect_from_status_dir(Path(args.status_dir).expanduser(), default_repo=repo)
+    # A real status file is ``lanes/<lane>.status`` and names its PR nowhere, so
+    # the approval arrives with only a lane.  Resolving it here, before the
+    # empty check, is what keeps a train from reporting "no open approved PRs"
+    # while the gate has approved six of them: without a PR number there is
+    # nothing to ask GitHub about, and the run would stop one line below.
+    client = GitHubClient().for_repo(repo_path)
+    approvals = resolve_lane_approvals(approvals, client=client, repo=repo)
     # Gate and lane sources record ``owner/name``; the checkout names the bare
     # ``name``.  Without the reconciliation every real approval reads as another
     # repo's and the batch is empty.  Normalising before de-duplicating, as
@@ -278,7 +286,6 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
 
     config_path = getattr(args, "config", None)
     lanes = {a.pr_number: a.lane for a in approvals}
-    client = GitHubClient().for_repo(repo_path)
     prs: list[TrainPR] = []
     for approval in approvals:
         detail = client.pr_detail(approval.pr_number)

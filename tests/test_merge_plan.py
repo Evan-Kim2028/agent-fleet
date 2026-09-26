@@ -27,11 +27,13 @@ if TYPE_CHECKING:
 from agent_fleet.merge_plan.batching import dbt_groups, merge_compatible, plan_batches
 from agent_fleet.merge_plan.collect import (
     GitHubClient,
+    branch_names_for_lane,
     collect_from_lanes,
     collect_from_status_dir,
     dedupe_approvals,
     parse_approval,
     profile_approvals,
+    resolve_lane_approvals,
 )
 from agent_fleet.merge_plan.config import builtin_spec
 from agent_fleet.merge_plan.plan import render_plan_text
@@ -420,6 +422,154 @@ def test_collect_from_status_dir(tmp_path: Path) -> None:
     found = collect_from_status_dir(d)
     assert found[0].repo == "owner/lake-of-rage"
     assert found[0].pr_number == 12
+
+
+# ---------------------------------------------------------------------------
+# The status files the real fleet writes
+# ---------------------------------------------------------------------------
+
+
+def _lane_status(status: Path, lane: str, lines: str) -> Path:
+    """Write ``DIR/<lane>.status`` the way lor-main does: verdicts, no PR ref."""
+    path = status / f"{lane}.status"
+    path.write_text(lines, encoding="utf-8")
+    return path
+
+
+class _ListingClient:
+    """A ``GitHubClient`` serving a canned open-PR listing, and counting calls."""
+
+    def __init__(self, prs: list[dict]) -> None:
+        self._prs = prs
+        self.calls = 0
+
+    def list_open_approved(self, *, limit: int = 50) -> list[dict]:
+        del limit
+        self.calls += 1
+        return self._prs
+
+
+def _open_pr(number: int, head: str, sha: str = "aaaaaaa") -> dict:
+    return {"number": number, "headRefName": head, "headRefOid": sha * 4}
+
+
+def _resolve(
+    found: list[ApprovedPR], client: _ListingClient, *, repo: str = "agent-fleet"
+) -> list[ApprovedPR]:
+    return resolve_lane_approvals(found, client=cast("GitHubClient", client), repo=repo)
+
+
+def test_status_file_without_a_pr_ref_resolves_by_head_branch(tmp_path: Path) -> None:
+    """A ``<lane>.status`` naming no PR still finds it via ``fb/<lane>``."""
+    status = tmp_path / "status"
+    status.mkdir()
+    _lane_status(status, "train-status-compat", "18:37:13 PREMERGE-APPROVED 7890c2207\n")
+
+    found = collect_from_status_dir(status, default_repo="agent-fleet")
+    assert [(a.lane, a.pr_number) for a in found] == [("train-status-compat", 0)]
+
+    client = _ListingClient([_open_pr(126, "fb/train-status-compat")])
+    resolved = _resolve(found, client)
+    assert [(a.lane, a.pr_number, a.approved_sha) for a in resolved] == [
+        ("train-status-compat", 126, "7890c2207")
+    ]
+
+
+def test_dq1d_lane_resolves_on_its_own_branch_prefix(tmp_path: Path) -> None:
+    """``dq1d-<x>`` lanes run on ``dq1d/<x>``, not ``fb/dq1d-<x>``."""
+    status = tmp_path / "status"
+    status.mkdir()
+    _lane_status(status, "dq1d-9-contracts", "12:00:00 PREMERGE-APPROVED 1234abcd\n")
+
+    found = collect_from_status_dir(status, default_repo="agent-fleet")
+    client = _ListingClient([_open_pr(77, "dq1d/9-contracts")])
+    assert [a.pr_number for a in _resolve(found, client)] == [77]
+
+
+def test_dq1d_lane_is_also_tried_under_the_fb_prefix() -> None:
+    """The ``fb/`` spelling is tried first, so a lane on it still resolves."""
+    assert branch_names_for_lane("dq1d-9-contracts") == (
+        "fb/dq1d-9-contracts",
+        "dq1d/9-contracts",
+    )
+    assert branch_names_for_lane("train-status-compat") == ("fb/train-status-compat",)
+
+
+def test_one_pr_list_per_run_not_one_per_file(tmp_path: Path) -> None:
+    status = tmp_path / "status"
+    status.mkdir()
+    for lane in ("alpha", "beta", "gamma"):
+        _lane_status(status, lane, "18:37:13 PREMERGE-APPROVED 7890c2207\n")
+
+    found = collect_from_status_dir(status, default_repo="agent-fleet")
+    client = _ListingClient(
+        [_open_pr(n, f"fb/{lane}") for n, lane in ((1, "alpha"), (2, "beta"), (3, "gamma"))]
+    )
+    resolved = _resolve(found, client)
+    assert [a.pr_number for a in resolved] == [1, 2, 3]
+    assert client.calls == 1
+
+
+def test_a_lane_with_no_open_pr_is_dropped(tmp_path: Path) -> None:
+    """No PR to batch means nothing to ship, so it is not handed downstream."""
+    status = tmp_path / "status"
+    status.mkdir()
+    _lane_status(status, "alpha", "18:37:13 PREMERGE-APPROVED 7890c2207\n")
+    _lane_status(status, "gone", "18:37:13 PREMERGE-APPROVED 7890c2207\n")
+
+    found = collect_from_status_dir(status, default_repo="agent-fleet")
+    client = _ListingClient([_open_pr(1, "fb/alpha")])
+    assert [a.lane for a in _resolve(found, client)] == ["alpha"]
+
+
+def test_an_approval_that_already_names_a_pr_is_not_looked_up() -> None:
+    """The listing is only needed for lanes that are unresolved."""
+    client = _ListingClient([_open_pr(9, "fb/alpha")])
+    named = ApprovedPR("owner/lake-of-rage", 12, "0dc2391ab", source="status_dir")
+    assert _resolve([named], client, repo="x") == [named]
+    assert client.calls == 0
+
+
+# ---------------------------------------------------------------------------
+# Latest-verdict wins (merge safety)
+# ---------------------------------------------------------------------------
+
+
+def test_an_approval_followed_by_an_escalation_is_not_collected() -> None:
+    """Regression: the file's LAST verdict is the only current one.
+
+    A status file is appended to, so it holds every verdict the lane has drawn.
+    Reading the first approval shipped a lane the gate had since refused.
+    """
+    text = "18:37:13 PREMERGE-APPROVED 7890c2207\n19:02:41 NEEDS-ESCALATION rebase landed wrong\n"
+    assert parse_approval(text) == ""
+
+
+@pytest.mark.parametrize(
+    ("last_line", "expected"),
+    [
+        ("18:37:13 PREMERGE-APPROVED 7890c2207", "7890c2207"),
+        ("19:02:41 NEEDS-ESCALATION rebase landed wrong", ""),
+        ("19:05:00 NEEDS-REBASE onto main", ""),
+        ("19:06:00 GATE-SKIPPED PR #12 @7890c2207 (gate not installed)", ""),
+    ],
+)
+def test_only_the_last_verdict_line_decides(last_line: str, expected: str) -> None:
+    history = "18:37:13 PREMERGE-APPROVED 7890c2207\n" + last_line + "\n"
+    assert parse_approval(history) == expected
+
+
+def test_an_escalation_reason_quoting_the_marker_stays_an_escalation() -> None:
+    """The anchor is what makes this safe: a quoted marker is not a verdict."""
+    text = '19:02:41 NEEDS-ESCALATION reviewer wrote "needs PREMERGE-APPROVED 1234abcd"'
+    assert parse_approval(text) == ""
+
+
+def test_a_pr_reference_line_is_not_a_verdict() -> None:
+    """``owner/repo#12`` names a PR; it says nothing about merging it."""
+    history = "owner/lake-of-rage#12\n18:37:13 PREMERGE-APPROVED 7890c2207"
+    assert parse_approval(history) == "7890c2207"
+    assert parse_approval("owner/lake-of-rage#12") == ""
 
 
 def test_dedupe_prefers_first_source() -> None:
