@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING
 from agent_fleet.fleet_paths import agent_fleet_home
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Mapping
     from pathlib import Path
 
 #: Subdirectories created on first use.
@@ -102,7 +102,7 @@ def ensure_serve_dir(operator: str) -> Path:
     return root
 
 
-def write_json_atomic(path: Path, payload: dict[str, object]) -> None:
+def write_json_atomic(path: Path, payload: Mapping[str, object]) -> None:
     """Write *payload* to *path* via a temp file + rename.
 
     A supervisor that dies mid-write must not leave a half-written capacity

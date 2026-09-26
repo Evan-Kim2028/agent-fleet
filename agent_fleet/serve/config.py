@@ -125,6 +125,9 @@ class ServeConfig:
 
     operator: str = ""
     tick_seconds: float = 15.0
+    #: Seconds the supervisor waits for children to exit cleanly on shutdown,
+    #: before escalating to a group KILL.
+    shutdown_grace_s: float = 10.0
     #: The agents cgroup. A bare slice name is resolved under systemd's nesting
     #: prefixes; see :func:`agent_fleet.serve.pressure.resolve_cgroup`.
     cgroup: str = DEFAULT_CGROUP_NAME
@@ -308,12 +311,16 @@ def parse_serve_config(section: Any, *, operator: str = "") -> ServeConfig | Non
             entry = components_raw.get(name)
         components[name] = _load_component(name, entry)
     queue = section.get("queue_files") or []
+    capacity_section = section.get("capacity")
+    if not isinstance(capacity_section, dict):
+        capacity_section = {}
     return ServeConfig(
         operator=operator,
         tick_seconds=max(1.0, _float(section.get("tick_seconds"), 15.0)),
+        shutdown_grace_s=max(0.1, _float(section.get("shutdown_grace_s"), 10.0)),
         cgroup=_str(section.get("cgroup")) or DEFAULT_CGROUP_NAME,
         watchdog_every_ticks=max(1, _int(section.get("watchdog_every_ticks"), 1)),
-        capacity=_load_capacity(section),
+        capacity=_load_capacity(capacity_section),
         components=components,
         watchdog=_load_watchdog(section.get("watchdog")),
         queue_files=tuple(str(q) for q in queue if str(q).strip()),

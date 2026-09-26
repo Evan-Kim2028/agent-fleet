@@ -1359,6 +1359,10 @@ def main(argv: list[str] | None = None) -> int:
 
     register_lane_commands(sub)
 
+    from agent_fleet.serve.cli import register_serve_commands
+
+    register_serve_commands(sub)
+
     summon_p = sub.add_parser(
         "summon",
         help="First-run setup: init config (if absent) + doctor + ready banner (idempotent)",

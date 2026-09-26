@@ -237,6 +237,11 @@ class CapacityController:
 
     # -------------------------------------------------------------------- signals
 
+    @property
+    def degraded_ticks(self) -> int:
+        """Consecutive ticks the pressure source has been unreadable."""
+        return self._degraded_ticks
+
     def note_completion(self, *, count: int = 1) -> None:
         """Record that *count* items finished this tick. Resets starvation."""
         if count > 0:
