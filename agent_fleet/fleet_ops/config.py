@@ -47,6 +47,12 @@ DEFAULT_STALL_MINUTES = 20
 DEFAULT_PUSH_BRANCH = "fb/{lane}"
 DEFAULT_ENGINE = "cmd"
 
+#: Queue-dispatch defaults. ``max_gates`` is deliberately far below the shell
+#: driver's 10: that driver released eighteen gates in one tick and drove the box
+#: to load 200. See docs/FLEET-OPS.md.
+DEFAULT_MAX_LANES = 8
+DEFAULT_MAX_GATES = 4
+
 _FIELDS = (
     "engine",
     "push_branch",
@@ -105,6 +111,29 @@ class OperatorSpec:
 
 
 @dataclass(frozen=True)
+class DispatchConfig:
+    """The ``fleet_ops.dispatch:`` block — how a queue is run.
+
+    ``psi_avg10_max`` is the throttle that replaced the shell driver's
+    ``--max-load``. Load average is the wrong signal on a box whose agents run
+    under a cgroup CPU quota: a quota-throttled task is still *running* as far as
+    the load average is concerned, so load reads high while the machine is idle
+    but stalled, and the dispatcher refused to launch anything for forty
+    minutes. CPU PSI measures saturation instead, and :mod:`.pressure` fails
+    open when it cannot be read.
+    """
+
+    max_lanes: int = DEFAULT_MAX_LANES
+    max_gates: int = DEFAULT_MAX_GATES
+    #: Percent of the last 10s that at least one task was runnable-but-waiting.
+    psi_avg10_max: float = 25.0
+    #: Override the agents-slice ``cpu.pressure`` (tests, unusual cgroup trees).
+    psi_path: str | None = None
+    #: Cluster launch order; unknown clusters sort last.
+    cluster_order: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class FleetOpsConfig:
     """The whole ``fleet_ops:`` section."""
 
@@ -116,6 +145,7 @@ class FleetOpsConfig:
     #: Extra standing fences for this repo, appended to the house rules. A repo
     #: can *add* rules; it can never shorten them.
     fences: tuple[str, ...] = ()
+    dispatch: DispatchConfig = field(default_factory=DispatchConfig)
     operators: dict[str, OperatorSpec] = field(default_factory=dict)
     #: Lane admission budget. ``AdmissionConfig()`` defaults are the whole
     #: config: a repo that says nothing about admission gets the machine-global
@@ -161,6 +191,26 @@ def _parse_operator(name: str, raw: Any) -> OperatorSpec | None:  # noqa: ANN401
     )
 
 
+def _parse_dispatch(raw: Any) -> DispatchConfig:  # noqa: ANN401
+    defaults = DispatchConfig()
+    if not isinstance(raw, dict):
+        return defaults
+    clusters = raw.get("cluster_order") or ()
+    if isinstance(clusters, str):
+        clusters = (clusters,)
+    try:
+        psi_max = float(raw.get("psi_avg10_max", defaults.psi_avg10_max))
+    except TypeError, ValueError:
+        psi_max = defaults.psi_avg10_max
+    return DispatchConfig(
+        max_lanes=_positive_int(raw.get("max_lanes"), defaults.max_lanes),
+        max_gates=_positive_int(raw.get("max_gates"), defaults.max_gates),
+        psi_avg10_max=psi_max,
+        psi_path=_optional_str(raw.get("psi_path")),
+        cluster_order=tuple(str(c).strip() for c in clusters if str(c).strip()),
+    )
+
+
 def _parse_admission(raw: Any) -> AdmissionConfig:  # noqa: ANN401
     """Parse the ``admission:`` sub-section, defaulting every absent knob.
 
@@ -176,7 +226,7 @@ def _parse_admission(raw: Any) -> AdmissionConfig:  # noqa: ANN401
         shared_dir=Path(shared) if shared else None,
         tests=_positive_int(raw.get("tests"), defaults.tests),
         typecheck=_positive_int(raw.get("typecheck"), defaults.typecheck),
-        nice=_positive_int(raw.get("nice"), defaults.nice),
+        nice=_non_negative_int(raw.get("nice"), defaults.nice),
         wait_s=_positive_float(raw.get("wait_s"), defaults.wait_s),
     )
 
@@ -185,6 +235,20 @@ def _positive_int(value: Any, default: int) -> int:  # noqa: ANN401
     if isinstance(value, bool):
         return default
     if isinstance(value, int) and value > 0:
+        return value
+    return default
+
+
+def _non_negative_int(value: Any, default: int) -> int:  # noqa: ANN401
+    """Like :func:`_positive_int`, but ``0`` is a real choice rather than a mistake.
+
+    ``nice: 0`` means "do not renice the admitted work", which is a legitimate
+    request for a lane that is meant to run at full priority. A negative value
+    is still nonsense and still falls back.
+    """
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int) and value >= 0:
         return value
     return default
 
@@ -225,8 +289,9 @@ def load_fleet_ops_config(raw: dict[str, Any] | None) -> FleetOpsConfig | None:
         stall_minutes=int(stall) if isinstance(stall, int) and stall > 0 else DEFAULT_STALL_MINUTES,
         baseline_skip_hooks=tuple(str(h).strip() for h in hooks if str(h).strip()),
         fences=tuple(str(f).strip() for f in fences if str(f).strip()),
-        operators=operators,
+        dispatch=_parse_dispatch(section.get("dispatch")),
         admission=_parse_admission(section.get("admission")),
+        operators=operators,
     )
 
 
@@ -265,8 +330,12 @@ def effective_stall_minutes(config: FleetOpsConfig | None, operator: str | None)
 __all__ = [
     "DEFAULT_BASE_BRANCH",
     "DEFAULT_ENGINE",
+    "DEFAULT_MAX_GATES",
+    "DEFAULT_MAX_LANES",
     "DEFAULT_PUSH_BRANCH",
     "DEFAULT_STALL_MINUTES",
+    "AdmissionConfig",
+    "DispatchConfig",
     "FleetOpsConfig",
     "OperatorSpec",
     "effective_stall_minutes",

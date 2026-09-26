@@ -5,6 +5,10 @@ Adds two subcommands to the top-level parser:
 * ``agent-fleet lane run …``     — drive one lane end to end
 * ``agent-fleet lanes status|stop`` — cross-operator view and precise stop
 
+and, in :mod:`agent_fleet.cli`, the queue dispatcher
+(``agent-fleet dispatch QUEUE.jsonl --operator NAME``), which reuses
+:mod:`agent_fleet.fleet_ops.dispatch` to run many lanes from one triaged queue.
+
 Registered via :func:`register_lane_commands`, mirroring
 ``workstreams.cli.register_workstream_commands``, so ``cli.py`` only gains a
 two-line import and call and the argparse surface stays in one place.
@@ -21,6 +25,16 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from agent_fleet.fleet_ops import pressure
+from agent_fleet.fleet_ops.config import FleetOpsConfig, load_fleet_ops_config_from_repo
+from agent_fleet.fleet_ops.dispatch import (
+    DEFAULT_MAX_THROTTLE_TICKS,
+    DEFAULT_TICK_SECONDS,
+    DispatchItem,
+    load_queue,
+    render_summary,
+    run_dispatch,
+)
 from agent_fleet.fleet_ops.models import ModelPolicyError
 from agent_fleet.fleet_ops.runner import run_lane
 from agent_fleet.fleet_ops.status import render_table, status_dicts, status_rows
@@ -28,6 +42,7 @@ from agent_fleet.fleet_ops.stop import stop_lane_by_name
 
 if TYPE_CHECKING:
     import argparse
+    from collections.abc import Mapping, Sequence
 
 
 def cmd_lane_run(args: argparse.Namespace) -> int:
@@ -97,6 +112,245 @@ def cmd_lanes_stop(args: argparse.Namespace) -> int:
         if result.detail:
             print(f"  {result.detail}", file=sys.stderr)
     return 0 if result.stopped else 1
+
+
+def _resolve_repos(args: argparse.Namespace, items: Sequence[DispatchItem]) -> dict[str, str]:
+    """Map each queue item's ``repo`` field to a checkout on disk.
+
+    Resolution is explicit and fails loudly. The shell driver hard-coded a
+    ``REPOS`` dict at the top of the file and refused to start when a path was
+    missing, which meant editing a script to dispatch a new repo; here the map
+    comes from repeated ``--repo NAME=PATH`` flags, so an unmapped repo is an
+    error naming exactly which ones are missing.
+    """
+    repos: dict[str, str] = {}
+    for entry in getattr(args, "repo", None) or []:
+        if "=" not in entry:
+            raise ValueError(f"--repo expects NAME=PATH, got {entry!r}")
+        name, _, path = entry.partition("=")
+        name = name.strip()
+        if name and path.strip():
+            repos[name] = path.strip()
+    missing = sorted({item.repo for item in items} - set(repos))
+    if missing:
+        raise ValueError(
+            "no checkout for: " + ", ".join(missing) + " (pass --repo NAME=PATH for each)"
+        )
+    return repos
+
+
+def cmd_dispatch_queue(args: argparse.Namespace) -> int:
+    """Run a triaged JSONL queue as lanes, then gate whatever produced a PR."""
+    queue = Path(args.queue).expanduser()
+    try:
+        items = load_queue(queue)
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if not items:
+        print(f"error: {queue} contains no queue items", file=sys.stderr)
+        return 2
+    if not args.operator:
+        print(
+            "error: queue dispatch needs --operator NAME (it namespaces the "
+            "durable state and the event stream)",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        repos = _resolve_repos(args, items)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    config = _dispatch_config(repos)
+    dcfg = config.dispatch
+    fences = "\n".join(config.fences)
+    spec = config.operator(args.operator)
+    judge_engine = getattr(args, "judge_engine", None) or (spec.judge_engine if spec else None)
+    try:
+        summary = run_dispatch(
+            operator=args.operator,
+            queue_path=queue,
+            items=items,
+            repos=repos,
+            max_lanes=args.max_lanes if args.max_lanes is not None else dcfg.max_lanes,
+            max_gates=args.max_gates if args.max_gates is not None else dcfg.max_gates,
+            gate_cmd=args.gate_cmd,
+            cluster_order=dcfg.cluster_order,
+            fences=fences,
+            judge_engine=judge_engine,
+            psi_avg10_max=(
+                args.psi_avg10_max if args.psi_avg10_max is not None else dcfg.psi_avg10_max
+            ),
+            psi_reader=((lambda: pressure.read_throttle(dcfg.psi_path)) if dcfg.psi_path else None),
+            throttle_max_ticks=_throttle_ticks(args),
+            tick_seconds=_tick_seconds(args),
+        )
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(json.dumps(summary.to_dict(), indent=2, default=str))
+    else:
+        print(render_summary(summary))
+    return summary.exit_code()
+
+
+def _throttle_ticks(args: argparse.Namespace) -> int:
+    """``--max-throttle-ticks`` when given, else the module default.
+
+    Zero is rejected for the same reason a non-positive ``--tick-seconds`` is:
+    the bound is how long a saturated box may hold the queue back before the run
+    reports the lanes it never ran. At zero the first tick trips it, so the
+    bounded wait the loop exists to provide collapses into a single tick.
+    """
+    value = getattr(args, "max_throttle_ticks", None)
+    if value is None:
+        return DEFAULT_MAX_THROTTLE_TICKS
+    ticks = int(value)
+    if ticks < 1:
+        raise ValueError(f"--max-throttle-ticks must be at least 1, got {ticks}")
+    return ticks
+
+
+def _dispatch_config(repos: Mapping[str, str]) -> FleetOpsConfig:
+    """The ``fleet_ops:`` config that governs this dispatch.
+
+    Read from the repos the queue actually names, not from ``Path.cwd()``. The
+    dispatcher is routinely run from somewhere else entirely — the operator's
+    shell, a scratch dir, a fleet worktree — so resolving against the cwd
+    silently returned ``None`` and every ``fleet_ops.dispatch:`` knob
+    (max_lanes, max_gates, cluster_order, psi_avg10_max, psi_path) was ignored
+    even though the repo being worked on declared it. ``runner.run_lane`` already
+    resolves the same file against the repo it is about to work on; this keeps
+    the two from disagreeing about what the repo asked for.
+
+    A queue may name several repos. The first, in sorted order, that declares a
+    ``fleet_ops:`` block wins — a queue is dispatched as one run under one set of
+    limits, and picking per lane would make ``max_lanes`` depend on iteration
+    order. Falling back to the cwd keeps a repo-less invocation working as it did
+    before.
+    """
+    for name in sorted(repos):
+        config = load_fleet_ops_config_from_repo(repos[name])
+        if config is not None:
+            return config
+    return load_fleet_ops_config_from_repo(Path.cwd()) or FleetOpsConfig()
+
+
+def _tick_seconds(args: argparse.Namespace) -> float:
+    """``--tick-seconds`` when given, else the module default.
+
+    A non-positive interval would turn the dispatcher's wait into a busy loop
+    against a saturated box, so it is rejected rather than clamped: the operator
+    who asked for it has a reason, and silently substituting a different number
+    is how a configured wait turns into the default hour.
+    """
+    value = getattr(args, "tick_seconds", None)
+    if value is None:
+        return DEFAULT_TICK_SECONDS
+    if value <= 0:
+        raise ValueError(f"--tick-seconds must be greater than 0, got {value:g}")
+    return float(value)
+
+
+def register_dispatch_command(sub: argparse._SubParsersAction) -> None:
+    """Register ``dispatch`` on the top-level parser.
+
+    The queue dispatcher lives with the rest of the lane manager, so its flags
+    are declared here; :mod:`agent_fleet.cli` calls this from ``main()`` and
+    routes the parsed namespace back to :func:`cmd_dispatch_queue`.
+    """
+    dispatch_p = sub.add_parser(
+        "dispatch",
+        help=(
+            "Run a queue of triaged items as lanes (QUEUE.jsonl), or a single "
+            "issue-triggered dispatch when no queue is given (env-var protocol: "
+            "ISSUE_NUMBER, PERSONA, AGENT_FLEET_WORKSPACE, …)"
+        ),
+    )
+    dispatch_p.add_argument(
+        "queue",
+        nargs="?",
+        default=None,
+        metavar="QUEUE.jsonl",
+        help=(
+            "JSONL queue of triaged items. When given, run the durable queue "
+            "dispatcher instead of the issue-triggered dispatch"
+        ),
+    )
+    dispatch_p.add_argument(
+        "--operator",
+        default=None,
+        help="Operator session name for queue dispatch (e.g. documents-0e)",
+    )
+    dispatch_p.add_argument(
+        "--max-lanes",
+        type=int,
+        default=None,
+        help="Concurrent lanes (default: fleet_ops.dispatch.max_lanes, else 8)",
+    )
+    dispatch_p.add_argument(
+        "--max-gates",
+        type=int,
+        default=None,
+        help="Concurrent gates (default: fleet_ops.dispatch.max_gates, else 4)",
+    )
+    dispatch_p.add_argument(
+        "--gate-cmd",
+        default=None,
+        metavar="TEMPLATE",
+        help=(
+            "Gate command template, e.g. '/path/fbgate {lane} {repo} {pr}'. "
+            "Expanded and split with shlex, then run WITHOUT a shell. "
+            "Default: the built-in `agent-fleet gate`"
+        ),
+    )
+    dispatch_p.add_argument(
+        "--judge-engine",
+        default=None,
+        metavar="ENGINE",
+        help=(
+            "Engine the gate uses as its judge. Defaults to the operator's "
+            "fleet_ops.operators.NAME.judge_engine, else the gate's own default"
+        ),
+    )
+    dispatch_p.add_argument(
+        "--repo",
+        action="append",
+        default=None,
+        metavar="NAME=PATH",
+        help="Repo checkout for a queue item's 'repo' field; repeatable",
+    )
+    dispatch_p.add_argument(
+        "--psi-avg10-max",
+        type=float,
+        default=None,
+        help="CPU PSI some-avg10 ceiling above which no new lane is launched",
+    )
+    dispatch_p.add_argument(
+        "--tick-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Seconds between dispatch-loop ticks while waiting on lanes and gates "
+            f"(default: {DEFAULT_TICK_SECONDS:g})"
+        ),
+    )
+    dispatch_p.add_argument(
+        "--max-throttle-ticks",
+        type=int,
+        default=None,
+        help=(
+            "How many ticks a saturated machine may hold the queue back before the "
+            "dispatcher gives up and reports the lanes it never ran as errors"
+        ),
+    )
+    dispatch_p.add_argument("--json", action="store_true", help="Emit the dispatch summary as JSON")
+    dispatch_p.set_defaults(func=None)
 
 
 def register_lane_commands(sub: argparse._SubParsersAction) -> None:

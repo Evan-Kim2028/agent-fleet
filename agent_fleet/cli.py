@@ -677,16 +677,25 @@ def cmd_pr_analyze(_args: argparse.Namespace) -> int:
     return _pr_analyze_main()
 
 
-def cmd_dispatch(_args: argparse.Namespace) -> int:
-    """Thin adapter: run a single issue-triggered fleet dispatch via env-var protocol.
+def cmd_dispatch(args: argparse.Namespace) -> int:
+    """Two dispatch modes behind one subcommand.
 
-    All configuration is read from environment variables:
-      ISSUE_NUMBER, COMMENT_BODY, PERSONA,
-      AGENT_FLEET_WORKSPACE (or AGENT_FLEET_TARGET_CONFIG), AGENT_FLEET_CONFIG.
+    With a ``QUEUE.jsonl`` positional, this runs the durable **queue**
+    dispatcher (:mod:`agent_fleet.fleet_ops.dispatch`): it launches
+    ``fleet lane run --no-gate`` per item and gates whatever produced a PR.
 
-    The silent-cwd safety check (exit 2 when neither workspace env var is set)
-    is preserved inside the adapter — this subcommand does not bypass it.
+    With no positional it keeps the original meaning — a single issue-triggered
+    dispatch over the env-var protocol (``ISSUE_NUMBER``, ``PERSONA``,
+    ``AGENT_FLEET_WORKSPACE``, …) — which README, docs/SCHEDULES.md, and the
+    schedule watcher all document. The silent-cwd safety check (exit 2 when
+    neither workspace env var is set) is preserved inside that adapter: this
+    subcommand does not bypass it.
     """
+    if getattr(args, "queue", None):
+        from agent_fleet.fleet_ops.cli import cmd_dispatch_queue
+
+        return cmd_dispatch_queue(args)
+
     from agent_fleet.issue_loop.dispatch import main as _dispatch_main
 
     # The standalone main() uses raise SystemExit(...).  Wrap so we return
@@ -949,16 +958,51 @@ def cmd_summon(args: argparse.Namespace) -> int:
     return doctor_rc
 
 
+def _gate_escalation(reason: str) -> int:
+    """Emit a NEEDS-ESCALATION for *reason* and return the gate's exit code 1.
+
+    Shared by every ``cmd_gate`` failure that is an escalation rather than a
+    caller error, so a wrapper gating on the status line or the exit code sees
+    the same shape whichever step failed. The caller-error case,
+    :class:`GateTargetMismatch`, stays a plain ``error:`` line.
+    """
+    from agent_fleet.contracts.gate import GateOutcome
+    from agent_fleet.gate.pipeline import status_line_for
+
+    print(
+        status_line_for(GateOutcome.NEEDS_ESCALATION, "", [reason]),
+        file=sys.stderr,
+    )
+    print(
+        json.dumps(
+            {
+                "outcome": GateOutcome.NEEDS_ESCALATION.value,
+                "approved": False,
+                "sha": "",
+                "reasons": [reason],
+            },
+            indent=2,
+            default=str,
+        )
+    )
+    return 1
+
+
 def cmd_gate(args: argparse.Namespace) -> int:
     """Run the evidence-based pre-merge gate against an existing PR head.
 
-    Exit code 0 only on APPROVED: NEEDS_ESCALATION, an unusable PR, or a
+    Exit code 0 only on APPROVED: NEEDS-ESCALATION, an unusable PR, or a
     deterministic step that could not run all exit 1, so an automerge wrapper
     can gate on the exit code alone as well as on the status line.
+
+    ``--repo``/``--head-ref`` are cross-checks, not inputs: the gate resolves
+    the PR itself, and a caller that names a different repo or head than the PR
+    actually has is pointing a pre-merge review at the wrong code. A mismatch
+    is an error, not a warning, because the cost of getting it wrong is a whole
+    review pipeline reviewing something other than the PR it was asked about.
     """
-    from agent_fleet.contracts.gate import GateOutcome
-    from agent_fleet.gate.gitops import GateError
-    from agent_fleet.gate.pipeline import run_gate, status_line_for
+    from agent_fleet.gate.gitops import GateError, GateTargetMismatch, cross_check_gate_target
+    from agent_fleet.gate.pipeline import run_gate
     from agent_fleet.model_policy import ModelPolicyError
 
     if getattr(args, "gate_command", None) == "recheck":
@@ -966,13 +1010,32 @@ def cmd_gate(args: argparse.Namespace) -> int:
     if getattr(args, "pr", None) is None:
         print("error: gate requires --pr <n> (or 'fleet gate metrics')", file=sys.stderr)
         return 2
+    repo_path = Path(getattr(args, "repo_path", None) or Path.cwd())
+    try:
+        cross_check_gate_target(
+            repo_path,
+            int(args.pr),
+            repo=getattr(args, "repo", None),
+            head_ref=getattr(args, "head_ref", None),
+        )
+    except GateTargetMismatch as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except GateError as exc:
+        # The cross-check resolves the PR to read its head ref, so an
+        # unresolvable PR — no gh, no auth, no remote, no such PR — raises a
+        # plain GateError here too, before run_gate is ever called. Same
+        # reasoning as the handler below: a gate that cannot find its PR is a
+        # NEEDS-ESCALATION, not a traceback for the automerge wrapper.
+        return _gate_escalation(f"full gate required: {exc}"[:300])
     try:
         result = run_gate(
-            repo_path=Path(getattr(args, "repo_path", None) or Path.cwd()),
+            repo_path=repo_path,
             pr_number=int(args.pr),
             task_file=getattr(args, "task_file", None),
             status_file=getattr(args, "status_file", None),
             config_path=getattr(args, "config", None),
+            judge_engine=getattr(args, "judge_engine", None),
             lane_slug=getattr(args, "lane_slug", None),
         )
     except ModelPolicyError as exc:
@@ -985,24 +1048,7 @@ def cmd_gate(args: argparse.Namespace) -> int:
         # handler. A gate that cannot even find its PR is a NEEDS-ESCALATION
         # like every other failure in this command, not a traceback for the
         # automerge wrapper to choke on.
-        reason = f"full gate required: {exc}"[:300]
-        print(
-            status_line_for(GateOutcome.NEEDS_ESCALATION, "", [reason]),
-            file=sys.stderr,
-        )
-        print(
-            json.dumps(
-                {
-                    "outcome": GateOutcome.NEEDS_ESCALATION.value,
-                    "approved": False,
-                    "sha": "",
-                    "reasons": [reason],
-                },
-                indent=2,
-                default=str,
-            )
-        )
-        return 1
+        return _gate_escalation(f"full gate required: {exc}"[:300])
     if result.status_line:
         print(result.status_line, file=sys.stderr)
     print(json.dumps(result.to_dict(), indent=2, default=str))
@@ -1386,14 +1432,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     pr_analyze_p.set_defaults(func=cmd_pr_analyze)
 
-    dispatch_p = sub.add_parser(
-        "dispatch",
-        help=(
-            "Run a single issue-triggered fleet dispatch (env-var protocol: "
-            "ISSUE_NUMBER, PERSONA, AGENT_FLEET_WORKSPACE, …)"
-        ),
-    )
-    dispatch_p.set_defaults(func=cmd_dispatch)
+    from agent_fleet.fleet_ops.cli import register_dispatch_command
+
+    register_dispatch_command(sub)
+    # `dispatch` has two modes, so its handler is chosen from the parsed
+    # namespace rather than fixed at registration: a QUEUE.jsonl positional
+    # means the queue dispatcher, no positional means the original
+    # issue-triggered dispatch.
+    sub.choices["dispatch"].set_defaults(func=cmd_dispatch)
 
     schedule_p = sub.add_parser(
         "schedule",
@@ -1451,6 +1497,35 @@ def main(argv: list[str] | None = None) -> int:
     )
     gate_p.add_argument("--pr", type=int, default=None, help="PR number to gate")
     gate_p.add_argument(
+        "--lane",
+        default=None,
+        help=(
+            "Queue lane this gate belongs to, as named on the dispatcher's command "
+            "line. Attribution only: a gate reads the PR head it is pointed at."
+        ),
+    )
+    gate_p.add_argument(
+        "--repo",
+        default=None,
+        help=(
+            "owner/name of the repo holding the PR, as verified by the caller. "
+            "Cross-checks the reviewed repo; the gate is driven by --repo-path."
+        ),
+    )
+    gate_p.add_argument(
+        "--head-ref",
+        default=None,
+        help=(
+            "Branch the PR head is on, as verified by the caller. Cross-checks the "
+            "reviewed head; the gate is driven by --pr."
+        ),
+    )
+    gate_p.add_argument(
+        "--judge-engine",
+        default=None,
+        help="Override the judge engine for this gate run (config key: judge_engine)",
+    )
+    gate_p.add_argument(
         "--lane-slug",
         default=None,
         help=("Slug folded into verifier-created test file names (default: the PR's head ref)"),
@@ -1468,7 +1543,10 @@ def main(argv: list[str] | None = None) -> int:
             "'HH:MM:SS PREMERGE-APPROVED <sha9>' or 'HH:MM:SS NEEDS-ESCALATION <reason>'"
         ),
     )
-    gate_p.set_defaults(func=cmd_gate, pr=None)
+    # Resolved through the module namespace at call time, not bound here, so the
+    # subcommand's handler can be replaced (in tests, and by a plugin) without
+    # re-registering the parser.
+    gate_p.set_defaults(func=lambda args: cmd_gate(args), pr=None)
 
     gate_sub = gate_p.add_subparsers(dest="gate_command")
     gate_metrics_p = gate_sub.add_parser(
