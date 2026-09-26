@@ -145,3 +145,81 @@ pipelines:
     - implement
     - verify
     - review
+
+# `fleet serve` — one supervisor for the whole pipeline. Machine-level, so it
+# lives in the GLOBAL fleet.yaml under a top-level `serve:` key; a repo may also
+# carry `fleet_ops.serve` in its .agent-fleet.yaml. Every threshold has a safe
+# default, so a repo with no serve section is unaffected. See docs/FLEET-SERVE.md.
+serve:
+  tick_seconds: 15
+  shutdown_grace_s: 10
+  # A bare slice NAME is resolved under systemd's nesting prefixes
+  # (user.slice/user-N.slice/user@N.service/agents.slice), because
+  # /sys/fs/cgroup/agents.slice does not exist on a systemd user session.
+  cgroup: agents.slice
+  throughput_window_hours: 1
+
+  capacity:
+    # AIMD watermarks. Below psi_low -> add; above psi_high -> drop; between
+    # -> hold (that band is the hysteresis).
+    psi_low: 10
+    psi_high: 25
+    memory_low_ratio: 0.70
+    memory_high_ratio: 0.85
+    # Hard limits, applied after every adjustment.
+    floors:
+      lanes: 1
+      gates: 1
+      tests: 1
+      typecheck: 1
+    ceilings:
+      lanes: 20
+      gates: 12
+      tests: 6
+      typecheck: 6
+    step: 1
+    decrease: 0.5
+    # Saturated with nothing completing for this many ticks -> hold lanes at
+    # the floor and prioritise finishing gates.
+    starvation_ticks: 6
+
+  # Command templates. Placeholders: {operator} {serve_dir} {capacity_file}
+  # {max_lanes} {max_gates} {test_pool} {typecheck_pool} {gates_priority}.
+  # Commands are exec'd WITHOUT a shell, so no $VAR expansion and no globs.
+  components:
+    dispatcher:
+      command: "fleet dispatch --operator {operator} --max {max_lanes} --gates {max_gates}"
+      backoff_initial_s: 5
+      backoff_max_s: 300
+      timeouts:
+        crash:
+          threshold: 5
+          window_minutes: 15
+        no_progress:
+          restarts: 2
+          window_minutes: 30
+    merger:
+      command: "fleet merge run --operator {operator} --capacity {capacity_file}"
+    janitor:
+      command: "true"
+
+  watchdog:
+    orphan_minutes: 60
+    stale_lock_minutes: 15
+    deadlock_minutes: 20
+    no_progress_minutes: 30
+    # How many times the owning component may retry a stage the watchdog killed.
+    stage_retry_budget: 1
+    # Grace before escalating TERM to KILL, spent once per tick, not per pid.
+    kill_grace_s: 5
+    # Per-tick remediation budget, so a tick cannot block long enough to trip
+    # the watchdog's own no-progress rule.
+    remediation_budget:
+      max_per_tick: 5
+    # Per-stage output-growth timeouts, in minutes.
+    timeouts:
+      lane: 180
+      gate: 90
+      fix: 60
+      rebase: 45
+      merge: 60
