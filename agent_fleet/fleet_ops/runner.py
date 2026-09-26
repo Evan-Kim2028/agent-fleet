@@ -39,9 +39,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from agent_fleet.fleet_ops import admission as admission_mod
 from agent_fleet.fleet_ops import binding as binding_mod
 from agent_fleet.fleet_ops import engines, lazyexit
 from agent_fleet.fleet_ops import gate as gate_mod
+from agent_fleet.fleet_ops.admission import AdmissionConfig
 from agent_fleet.fleet_ops.config import (
     DEFAULT_BASE_BRANCH,
     DEFAULT_ENGINE,
@@ -295,6 +297,7 @@ def run_lane(
     branch: str | None = None,
     status_file: Path | str | None = None,
     config: FleetOpsConfig | None = None,
+    admission_config: AdmissionConfig | None = None,
     known_gate_subcommands: set[str] | None = None,
     gate: bool = True,
     run_dir: Path | str | None = None,
@@ -308,6 +311,14 @@ def run_lane(
     repo = Path(repo_path).expanduser().resolve()
     if config is None:
         config = load_fleet_ops_config_from_repo(repo) or FleetOpsConfig()
+    if admission_config is None:
+        # The whole repo-configured budget, every knob included. Rebuilding it
+        # field by field is how a configured ``wait_s`` silently became the
+        # default hour, so a wedged pool looked like a hung lane.
+        configured = getattr(config, "admission", None)
+        admission_config = (
+            configured if isinstance(configured, AdmissionConfig) else AdmissionConfig()
+        )
 
     spec: OperatorSpec | None = config.operator(operator)
     selected_engine = (engine or (spec.engine if spec else DEFAULT_ENGINE)).strip().lower()
@@ -492,12 +503,25 @@ def run_lane(
     def pr_probe() -> bool:
         return _pr_exists(workdir, push_branch)
 
+    # The admission shim goes on the *engine* child's PATH only. The gate and
+    # the hooks keep the manager's environment: a gate that silently queued
+    # behind a lane's test slots would stall the merge path, and a hook is
+    # operator-authored config that should not inherit fleet internals.
+    engine_env = admission_mod.shim_env(
+        os.environ,
+        config=admission_config,
+        operator=operator,
+        lane=lane,
+    )
+
     def invoke_engine(engine_prompt: str, *, name: str) -> engines.EngineResult:
         """One engine invocation. A raised exception becomes a failed result.
 
         Wrapped rather than inlined because the lazy-exit retry below runs the
         same call a second time, and a retry that failed to be caught would
-        leave the lane with no verdict at all.
+        leave the lane with no verdict at all. Every invocation carries
+        *engine_env*, so the admission shim on the child's PATH survives the
+        nudge retry as well as the first attempt.
         """
         try:
             if selected_engine == "devin":
@@ -508,6 +532,7 @@ def run_lane(
                     name=name,
                     pr_exists=pr_probe,
                     runner=runner,
+                    env=engine_env,
                 )
             if selected_engine == "cmd":
                 return engines.run_cmd_engine(
@@ -517,6 +542,7 @@ def run_lane(
                     name=name,
                     pr_exists=pr_probe,
                     runner=runner,
+                    env=engine_env,
                 )
             raise ValueError(f"unsupported engine {selected_engine!r}")
         except Exception as exc:
