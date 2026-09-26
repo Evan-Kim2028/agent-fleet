@@ -12,12 +12,17 @@ real top-level CLI so the whole path -- argparse dispatch, ``_spec()``,
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 from agent_fleet.cli import main
 
 
-def _write_bad_config(tmp_path: object) -> str:
+def _write_bad_config(tmp_path: Path) -> str:
     path = tmp_path / "fleet.yaml"  # type: ignore[operator]
     path.write_text(
         "merge_plan:\n  executor:\n    post_merge_hold_second: 300\n",  # typo: missing trailing 's'
@@ -35,7 +40,7 @@ def _write_bad_config(tmp_path: object) -> str:
     ],
 )
 def test_malformed_executor_block_reports_error_not_traceback(
-    tmp_path: object, capsys: object, argv: list[str], label: str
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], argv: list[str], label: str
 ) -> None:
     config = _write_bad_config(tmp_path)
     args = [*argv, "--config", config]
