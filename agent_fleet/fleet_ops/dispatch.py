@@ -68,7 +68,7 @@ from agent_fleet.fleet_ops.registry import (
 from agent_fleet.fleet_ops.statusfile import APPROVED_TOKEN, ESCALATION_TOKEN
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Iterator, Mapping, Sequence
     from typing import IO, Protocol
 
     #: A spawned child: pid, and a ``poll()`` returning its exit code (or None
@@ -1040,6 +1040,30 @@ def classify_status(status_line: str, *, exit_code: int | None = None) -> str:
     return "escalated (no approval line)"
 
 
+def _iter_json_objects(text: str) -> Iterator[Any]:
+    """Yield each JSON value in *text*, pretty-printed or not.
+
+    ``raw_decode`` is what makes a multi-line object readable: a line-by-line
+    reader cannot see it, and ``indent=2`` puts every key on its own line. Text
+    that is not JSON at all (a lane's ordinary log chatter) simply decodes to
+    nothing, so the reader never has to guess which lines are payload.
+    """
+    decoder = json.JSONDecoder()
+    index = 0
+    length = len(text)
+    while index < length:
+        brace = text.find("{", index)
+        if brace < 0:
+            return
+        try:
+            value, end = decoder.raw_decode(text, brace)
+        except ValueError:
+            index = brace + 1
+            continue
+        yield value
+        index = end
+
+
 def read_lane_result(
     stdout: str,
 ) -> tuple[int | None, str | None, str | None]:
@@ -1048,16 +1072,17 @@ def read_lane_result(
     The PR comes from the lane's own JSON, not from a ``ps`` scan or a fresh
     ``gh`` call: the lane already resolved and verified the binding, so re-asking
     risks reading a different PR than the one the lane guaranteed.
+
+    ``lane run --json`` prints ``json.dumps(..., indent=2)`` (see
+    ``fleet_ops.cli``), which is a *multi-line* object. Matching line by line
+    only ever saw a single-line object, so the one format the lane actually
+    emits never parsed: a lane that guaranteed PR #42 was reaped as ``no_pr``
+    and no gate ever ran. The whole log is therefore decoded as a stream of
+    concatenated JSON values, and the last object carrying a ``state`` wins, so
+    a pretty-printed result and a run of single-line results are both read.
     """
     payload = None
-    for line in (stdout or "").splitlines():
-        line = line.strip()
-        if not line.startswith("{"):
-            continue
-        try:
-            candidate = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    for candidate in _iter_json_objects(stdout or ""):
         if isinstance(candidate, dict) and "state" in candidate:
             payload = candidate
     if not isinstance(payload, dict):
@@ -1067,6 +1092,20 @@ def read_lane_result(
     worktree = payload.get("worktree")
     detail = payload.get("detail") or payload.get("reason") or ""
     return pr, (str(worktree) if worktree else None), (str(detail) or None)
+
+
+def _require_positive(name: str, value: int) -> None:
+    """Reject a bound that cannot admit work.
+
+    A concurrency bound of zero is not "run nothing", it is a dispatcher that
+    silently dispatches nothing: ``plan_tick`` sees ``lanes_in_flight >= 0`` so
+    it plans no launch, nothing is in flight so the queue counts as complete,
+    and the loop breaks on its first tick having tallied zero errors. That is a
+    green run over a queue that never ran, which is worse than a refusal, so the
+    bound is rejected instead of honoured.
+    """
+    if value < 1:
+        raise ValueError(f"dispatch: {name} must be at least 1, got {value}")
 
 
 def run_dispatch(
@@ -1108,6 +1147,9 @@ def run_dispatch(
         items = load_queue(queue)
     if not repos:
         raise ValueError("dispatch needs a repo map (repo name -> repo path)")
+    _require_positive("max_lanes", max_lanes)
+    _require_positive("max_gates", max_gates)
+    _require_positive("throttle_max_ticks", throttle_max_ticks)
     missing = sorted({item.repo for item in items} - set(repos))
     if missing:
         raise ValueError(f"dispatch: no repo path configured for: {', '.join(missing)}")
@@ -1450,14 +1492,17 @@ def _launch_lane(
     with log.open("w", encoding="utf-8") as log_handle:
         proc = spawn(argv, stdout=log_handle, stderr=subprocess.STDOUT, start_new_session=True)
 
-    lanes = dict(state.lanes)
-    # The live handle MUST be recorded here. `os.kill(pid, 0)` answers for a
-    # zombie, so a child that has exited but not been reaped still looks alive;
-    # only the handle can report its exit and clear it. Without this the lane
-    # would hold its slot until the dispatcher itself died.
-    procs = dict(state.procs)
-    procs[item.lane] = proc
-    lanes[item.lane] = replace(
+    # The identity is persisted here and not after the caller saves the state,
+    # because the window between those two points is where a child gets
+    # orphaned. The caller only reaches save_state when this function returns,
+    # so anything raised past the spawn -- and a `save_state` that itself fails
+    # on a full disk -- left a running lane recorded as QUEUED with no identity
+    # at all. The next run read that as a crashed lane, put it back on the queue
+    # and launched a second child for the same work, with nothing left that
+    # could ever reap the first. Recording the child as running before returning
+    # makes every path out of here durable: a lane that really did start is
+    # always recorded as started.
+    running = replace(
         record,
         state=DISPATCH_RUNNING,
         lane_pid=proc.pid,
@@ -1467,9 +1512,18 @@ def _launch_lane(
         status_file=str(status_file),
         updated_ts=time.time(),
     )
-    new_state = replace(state, lanes=lanes, procs=procs)
-    _event(new_state, item.lane, "dispatch.launched", repo=item.repo, pid=proc.pid)
-    return new_state
+    lanes = dict(state.lanes)
+    lanes[item.lane] = running
+    # The live handle MUST be recorded here. `os.kill(pid, 0)` answers for a
+    # zombie, so a child that has exited but not been reaped still looks alive;
+    # only the handle can report its exit and clear it. Without this the lane
+    # would hold its slot until the dispatcher itself died.
+    procs = dict(state.procs)
+    procs[item.lane] = proc
+    spawned = replace(state, lanes=lanes, procs=procs)
+    save_state(spawned)
+    _event(spawned, item.lane, "dispatch.launched", repo=item.repo, pid=proc.pid)
+    return spawned
 
 
 def _reap_lane(
@@ -1523,6 +1577,22 @@ def _reap_lane(
 
 
 def _recover_lane(state: DispatchState, action: RecoverLane) -> DispatchState:
+    """Reclaim a slot recorded as running with no identity to reattach to.
+
+    The lane is put back on the queue for a fresh launch, which is the only way
+    a crashed lane ever runs again. Two things must not ride along with that
+    decision, or the reclaimed slot becomes a way to *duplicate* a lane:
+
+    * a process group. A record whose ``lane_pgid`` is still there is evidence a
+      child was started even though no pid was written, and returning the lane to
+      the queue lets the next tick launch a second lane for the same work while
+      the first child is still running. Nothing would ever reap the original: it
+      was not this dispatcher's child, so there is no handle to poll, and the
+      record's pid is null so the liveness probe cannot find it either. It would
+      hold its worktree and write to the lane's status file for ever.
+    * a worktree. Re-launching reuses the recorded one, so clearing the pid but
+      keeping the path handed a second agent the checkout the first still owns.
+    """
     record = state.lanes.get(action.lane)
     if record is None:
         return state
@@ -1533,6 +1603,7 @@ def _recover_lane(state: DispatchState, action: RecoverLane) -> DispatchState:
         lane_pid=None,
         lane_pgid=None,
         lane_starttime=None,
+        worktree=None if record.lane_pgid else record.worktree,
         updated_ts=time.time(),
     )
     new_state = replace(state, lanes=lanes)

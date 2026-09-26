@@ -481,12 +481,32 @@ re-evaluating every `--tick-seconds`. If the queue has still not run after
 never reports success for a queue it dropped; re-running the command resumes
 from the durable state.
 
+`--max-lanes`, `--max-gates` and `--max-throttle-ticks` must all be at least 1,
+and are rejected otherwise. A bound of zero is not "run nothing": the plan can
+never admit a lane, the queue then counts as finished with nothing in flight,
+and the run would exit 0 over a queue that never ran.
+
+### `--judge-engine`
+
+The engine the gate uses as its **judge**. It defaults to the dispatching
+operator's own pin, `fleet_ops.operators.NAME.judge_engine`, exactly as `lane
+run` resolves it, so a session that pins a model for everything (`documents-1d`
+pins `cmd`, "never grok for this operator") keeps that promise on the queue path
+too. Pass the flag to override the pin for a single run. With neither, the gate
+uses its own `GateConfig.judge_backend` default.
+
 The bound is a **wait, never a verdict**. It only abandons lanes when nothing at
 all is in flight — a box that refused to free up with a live child attached is a
 run waiting on itself, and finishing that child would drop a running gate and the
 verdict it still owes. A lane left in flight keeps its state, and the next run
 re-attaches and collects the verdict. The same bound applies on an idle box, so
 a child that never exits cannot hang the run either.
+
+A child is recorded as running **the moment it is spawned**, before the tick
+that spawned it can fail or return. A lane whose identity is only written when
+the tick ends is, for that window, a running child recorded as queued with no
+pid — and the next run reads that as a crashed lane, requeues it and starts a
+second agent on the same work, with nothing left that could ever reap the first.
 
 The status file is emptied just before the gate is spawned. Lane names are
 reused, so a `PREMERGE-APPROVED` line from an earlier PR of the same lane would

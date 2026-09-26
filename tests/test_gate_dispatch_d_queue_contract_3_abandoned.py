@@ -73,7 +73,10 @@ def _run(tmp_path: Path) -> Any:  # noqa: ANN401
         spawn=_NeverSpawned(),
         psi_reader=lambda: SATURATED,
         sleep=lambda _seconds: None,
-        throttle_max_ticks=0,
+        # The lowest bound that still reaches the abandonment branch: a run that
+        # gives up after its first idle tick. Zero is refused outright, since a
+        # dispatcher that may not wait at all is not a dispatcher.
+        throttle_max_ticks=1,
         run_dir=tmp_path / "out",
     )
 

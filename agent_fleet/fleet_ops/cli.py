@@ -167,6 +167,8 @@ def cmd_dispatch_queue(args: argparse.Namespace) -> int:
     config = _dispatch_config(repos)
     dcfg = config.dispatch
     fences = "\n".join(config.fences)
+    spec = config.operator(args.operator)
+    judge_engine = getattr(args, "judge_engine", None) or (spec.judge_engine if spec else None)
     try:
         summary = run_dispatch(
             operator=args.operator,
@@ -178,6 +180,7 @@ def cmd_dispatch_queue(args: argparse.Namespace) -> int:
             gate_cmd=args.gate_cmd,
             cluster_order=dcfg.cluster_order,
             fences=fences,
+            judge_engine=judge_engine,
             psi_avg10_max=(
                 args.psi_avg10_max if args.psi_avg10_max is not None else dcfg.psi_avg10_max
             ),
@@ -197,9 +200,20 @@ def cmd_dispatch_queue(args: argparse.Namespace) -> int:
 
 
 def _throttle_ticks(args: argparse.Namespace) -> int:
-    """``--max-throttle-ticks`` when given, else the module default."""
+    """``--max-throttle-ticks`` when given, else the module default.
+
+    Zero is rejected for the same reason a non-positive ``--tick-seconds`` is:
+    the bound is how long a saturated box may hold the queue back before the run
+    reports the lanes it never ran. At zero the first tick trips it, so the
+    bounded wait the loop exists to provide collapses into a single tick.
+    """
     value = getattr(args, "max_throttle_ticks", None)
-    return DEFAULT_MAX_THROTTLE_TICKS if value is None else int(value)
+    if value is None:
+        return DEFAULT_MAX_THROTTLE_TICKS
+    ticks = int(value)
+    if ticks < 1:
+        raise ValueError(f"--max-throttle-ticks must be at least 1, got {ticks}")
+    return ticks
 
 
 def _dispatch_config(repos: Mapping[str, str]) -> FleetOpsConfig:
@@ -293,6 +307,15 @@ def register_dispatch_command(sub: argparse._SubParsersAction) -> None:
             "Gate command template, e.g. '/path/fbgate {lane} {repo} {pr}'. "
             "Expanded and split with shlex, then run WITHOUT a shell. "
             "Default: the built-in `agent-fleet gate`"
+        ),
+    )
+    dispatch_p.add_argument(
+        "--judge-engine",
+        default=None,
+        metavar="ENGINE",
+        help=(
+            "Engine the gate uses as its judge. Defaults to the operator's "
+            "fleet_ops.operators.NAME.judge_engine, else the gate's own default"
         ),
     )
     dispatch_p.add_argument(
