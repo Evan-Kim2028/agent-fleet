@@ -31,6 +31,7 @@ from agent_fleet.fleet_ops.admission import (
     shim_env,
     write_shim,
 )
+from agent_fleet.fleet_ops.config import FleetOpsConfig, load_fleet_ops_config
 from agent_fleet.fleet_ops.engines import _spawn_capture
 from agent_fleet.slots import SlotPool
 
@@ -267,6 +268,58 @@ def test_the_pool_size_comes_from_config() -> None:
     config = AdmissionConfig(shared_dir=Path("/x"), tests=7, typecheck=3)
     assert config.pool_size(admission.TEST_POOL) == 7
     assert config.pool_size(admission.TYPECHECK_POOL) == 3
+
+
+# ------------------------------------------------------------- fleet_ops config
+
+
+def test_a_fleet_ops_config_carries_a_default_admission_budget() -> None:
+    """``run_lane`` reads ``config.admission`` before its engine try/except.
+
+    Every lane goes through that read, so a ``FleetOpsConfig`` without the
+    field turns every lane into an ``AttributeError`` and takes the lane
+    manager and the CLI with it.
+    """
+    assert FleetOpsConfig().admission == AdmissionConfig()
+
+
+def test_the_admission_section_sets_every_knob(tmp_path: Path) -> None:
+    config = load_fleet_ops_config(
+        {
+            "fleet_ops": {
+                "admission": {
+                    "shared_dir": str(tmp_path / "pools"),
+                    "tests": 6,
+                    "typecheck": 2,
+                    "nice": 3,
+                    "wait_s": 12.5,
+                }
+            }
+        }
+    )
+    assert config is not None
+    assert config.admission.shared_dir == tmp_path / "pools"
+    assert config.admission.tests == 6
+    assert config.admission.typecheck == 2
+    assert config.admission.nice == 3
+    assert config.admission.wait_s == 12.5
+
+
+@pytest.mark.parametrize("section", [None, {}, "nonsense", {"tests": 0, "nice": -1}])
+def test_a_missing_or_nonsense_admission_section_falls_back_to_defaults(
+    section: object,
+) -> None:
+    """Admission is a throttle: a bad knob must never stop a lane from running."""
+    config = load_fleet_ops_config({"fleet_ops": {"admission": section}})
+    assert config is not None
+    assert config.admission == AdmissionConfig()
+
+
+def test_a_repo_without_an_admission_section_still_runs_admitted() -> None:
+    config = load_fleet_ops_config({"fleet_ops": {"base_branch": "trunk"}})
+    assert config is not None
+    assert config.admission == AdmissionConfig()
+    assert config.admission.shared_dir is None
 
 
 def test_the_shim_slot_layout_matches_the_fleet_slot_pool(tmp_path: Path) -> None:
