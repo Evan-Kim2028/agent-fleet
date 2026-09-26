@@ -2,6 +2,80 @@
 
 ## Unreleased
 
+### Fixed
+
+- **Judge-confirmed untestable blockers are now fixed, not escalated on first
+  sight.** A blocker that no local test can express — a docs contradiction, a
+  script's behaviour — ended the run the moment it was observed: the test set was
+  green, the convergence rule is defined on a *shrinking failing set*, so
+  `converge()` had nothing to measure and escalated without ever dispatching a
+  fixer. The gate reported "untestable blocker(s) need human review" about work a
+  fixer could have done in one commit, and nothing was ever attempted.
+  A green test set with open untestable blockers now runs **exactly one** fix
+  round carrying the untestable list, and the recheck judge — not the fixer —
+  decides whether they are resolved. Resolved approves; still open, or a round
+  that pushed nothing, escalates as `untestable-needs-review` naming the
+  blockers. One round and not a loop, because with no test to turn green there
+  is no measurable progress, only the judge's yes/no: raising `max_fix_rounds`
+  does not buy more attempts. `enable_fix: false` still dispatches nothing.
+- **Gate test files are named per PR, so concurrent PRs stop colliding.** A
+  verifier's test was named from the finding id alone, so two PRs gating
+  different branches both produced `tests/test_gate_contract_1.py` in the same
+  test directory. Merging one into main turned the other into an add/add
+  conflict, which is what forced a rebase plus a full re-gate for every PR that
+  landed after it. The name is now
+  `test_gate_<lane_slug>_<finding_id>.py`, with the slug from `--lane-slug`, else
+  `gate.lane_slug`, else the PR's own head ref; both halves are folded to
+  alphanumerics and bounded. The name is computed once and passed into the
+  prompt, so the instruction, the run command and the answer example cannot
+  disagree — that drift is how the old `test_gate_x.py` placeholder survived into
+  the fix prompt's run hint.
+- **A stage timeout is now named, and the fixer is covered.** A stage that ran
+  out of budget already failed closed, but only as a generic "gave no usable
+  result (dead)" — an operator could not tell a crash from a budget, and the
+  fixer's timeout was merely logged before the round carried on to report the
+  misleading `no-push`. Exit 124 is now classified as its own failure kind and
+  the escalation names the stage, the budget it blew, and how long it actually
+  ran. A timed-out lens reporting `candidates=0` is indistinguishable from a
+  clean review — the bug class that once approved a PR with three real blockers —
+  so it is asserted not to.
+
+### Added
+
+- **Every gate prompt forbids commands that never exit.** An agent running
+  `tail -f`, `watch`, an interactive pager or a foreground server is not a slow
+  stage but a dead one: the slot is held, no answer arrives, and the stage burns
+  its whole budget before the run escalates. All five role prompts now open with
+  a `NO BLOCKING COMMANDS` rule naming the offenders and requiring bounded polls
+  with timeouts and exit conditions. It composes with the existing
+  `PROCESS_SAFETY` rule into one shared `AGENT_RULES` prefix, so a role added
+  later inherits both by construction.
+- **Per-stage timeouts.** One `agent_timeout_s` (30 min) drove lens, verify and
+  fix while the judge got a separate 7200s — wrong in both directions, since a
+  fixer that commits, pushes and waits on a test suite never fits in a reviewer's
+  budget. Stages now have their own: `lens/verify/judge_timeout_s` default to
+  2400s (40 min) and `fix_timeout_s` to 5400s (90 min), read through a
+  `stage_timeout(role)` helper. `agent_timeout_s` is deprecated but still
+  honoured — applied to the three stages it used to drive, with a warning naming
+  the replacement, and an explicit per-stage key always wins — so no existing
+  `fleet.yaml` silently loses its budget.
+- **`agent-fleet gate recheck --approved-sha OLD --head NEW` carries an approval
+  across a patch-identical rebase.** When a PR is rebased onto a moved `main` the
+  change is often identical, and paying for a full find → verify → judge run to
+  rediscover that is waste — and the common case, since a moving `main` is what
+  forces rebases. `recheck` is deterministic and dispatches no agent: it compares
+  the change's `git patch-id` (excluding `test_gate_*`, which are gate evidence
+  and routinely the cause of the rebase) and re-runs the PR's tests plus the
+  archived gate tests on the new head with the base merged in. An approval is
+  carried only when the approved sha is real, the status file holds a
+  `PREMERGE-APPROVED` line for it, the patch-id is unchanged, and every test
+  passes; anything else, including a suite that could not run at all, says a
+  full gate is required. The emitted status line names the *new* head, and the
+  metrics row is marked as a recheck so a carried approval is not mistaken for a
+  reviewed one.
+- `gate.lane_slug` config key and `--lane-slug` flag, for setting the gate test
+  file name slug explicitly rather than deriving it from the PR's head ref.
+
 ## 0.16.2 — 2026-09-25
 
 ### Fixed

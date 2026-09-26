@@ -184,3 +184,155 @@ def changed_test_files(worktree: Path, base_branch: str) -> list[str]:
         if (worktree / rel).is_file():
             out.append(rel)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Patch identity: is this the same change, re-parented?
+# ---------------------------------------------------------------------------
+
+#: Shortest sha the gate matches an approval line by. The status line is written
+#: at 9 characters and the automerge's regex accepts 7 to 40, so anything shorter
+#: than the minimum is a prefix too weak to identify a commit: "123" matches
+#: "1234abcd", which is a different one.
+SHA_MIN_CHARS = 7
+
+#: Where a gate-written test file lands: the test directory the verifier was told
+#: to use, keyed on the lane-unique file name that ``gate_test_name`` produces.
+#: Patch identity excludes that *path* rather than a name glob, because a glob
+#: also hides any product code a contributor chose to call ``test_gate_*.py`` —
+#: invisible new code under a name the gate itself chose.
+_GATE_TEST_DIRS = (
+    ":(exclude,glob)tests/test_gate_*.py",
+    ":(exclude,glob)**/tests/test_gate_*.py",
+)
+
+
+def merge_base(repo: Path, a: str, b: str) -> str:
+    """The common ancestor of *a* and *b* (empty string when there is none)."""
+    return _run_git(repo, "merge-base", a, b, check=False).strip()
+
+
+def merge_base_into(worktree: Path, base: str) -> None:
+    """Merge *base* into the gate worktree, tolerating an already-merged base.
+
+    A rebase means the PR has the base as an ancestor, so this is usually a
+    no-op; it matters when the operator rebases by merging instead, or when the
+    PR was approved before a commit landed on main. "Already merged" is not an
+    error, so the exit code is not checked for that. Everything *else* is.
+
+    A merge that did not happen is never a silent no-op. The three ways this
+    bites, all of which used to return success:
+
+    1. a *conflict*: the merge leaves conflict markers in the tree, and the
+       deterministic half would then run against a tree no real merge produces
+       — a file pytest cannot even import, or one that passes on a spliced
+       result;
+    2. an *unrelated history* (or any other ref git refuses to merge): the PR
+       and the base share no ancestor, so nothing was merged at all;
+    3. a *ref git cannot resolve* — a base branch that was never fetched, a
+       deleted remote branch. The tests then run against the PR's own tree while
+       the carry-over reports a verdict for a merge it never made.
+
+    All three abort any half-finished merge and raise, which is the recheck
+    refusing rather than reporting a verdict it never established.
+    """
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(worktree), "merge", "--no-edit", base],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise GateError(f"git merge {base} failed to launch: {exc}") from exc
+    if completed.returncode == 0:
+        return
+    output = (completed.stdout or "") + (completed.stderr or "")
+    if "Already up to date" in output or "Already up-to-date" in output:
+        # The base is already an ancestor: the merge is genuinely a no-op.
+        return
+    _run_git(worktree, "merge", "--abort", check=False)
+    if "CONFLICT" in output or "Automatic merge failed" in output:
+        raise GateError(
+            f"git merge {base} conflicted: the PR and the base both change the same lines. "
+            f"{(completed.stderr or completed.stdout).strip()[:300]}"
+        )
+    raise GateError(
+        f"git merge {base} did not merge the base: exit {completed.returncode}. "
+        f"{(completed.stderr or completed.stdout).strip()[:300]}"
+    )
+
+
+def patch_id(repo: Path, sha: str, base: str) -> str:
+    """A content hash of *sha*'s change against *base*, ignoring gate tests.
+
+    ``git patch-id`` hashes the diff itself, not the commit, so two commits
+    carrying the same change hash the same even when their parents, authors and
+    timestamps differ — which is exactly the "rebased onto a moved main" case
+    an approval should survive. Only the gate's own test directory is dropped
+    from the diff, so product code stays in the identity even when it is named
+    like gate evidence. Returns ``""`` when the diff cannot be computed, so an
+    unknown sha is never mistaken for "identical".
+    """
+    base_point = merge_base(repo, base, sha)
+    if not base_point:
+        return ""
+    diff = _run_git(
+        repo,
+        "diff",
+        base_point,
+        sha,
+        "--",
+        ".",
+        *_GATE_TEST_DIRS,
+        check=False,
+    )
+    if not diff.strip():
+        # An empty diff has no patch-id; treat it as "no change" rather than
+        # letting an empty string compare equal to a real hash.
+        return ""
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repo), "patch-id", "--stable"],
+            input=diff,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise GateError(f"git patch-id failed to launch: {exc}") from exc
+    if completed.returncode != 0:
+        return ""
+    return (completed.stdout or "").split()[0] if completed.stdout.split() else ""
+
+
+def has_approval_line(status_file: Path, sha: str) -> bool:
+    """Whether *status_file* records a ``PREMERGE-APPROVED`` line for *sha*.
+
+    The same line contract the automerge reads, enforced by the automerge's own
+    regex rather than re-derived: a reason quoting the marker inline, a trailing
+    note after the sha, or anything but the marker followed by one hex sha can
+    therefore never read as an approval. The sha is matched by prefix, because
+    the status line is written at 9 characters — and only when it is at least
+    that long, since a three-character prefix would match any sha starting with
+    those three characters, which is a different commit. A missing file is not
+    an approval.
+    """
+    from agent_fleet.fleet_ops.gate import _APPROVAL_LINE_RE, APPROVAL_MARKER
+
+    if not status_file.is_file() or not sha or len(sha) < SHA_MIN_CHARS:
+        return False
+    try:
+        lines = status_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return False
+    prefix = sha[:SHA_MIN_CHARS]
+    for line in lines:
+        if APPROVAL_MARKER not in line:
+            continue
+        match = _APPROVAL_LINE_RE.match(line.strip())
+        if match is not None and match.group(0).split()[-1].startswith(prefix):
+            return True
+    return False
