@@ -206,6 +206,7 @@ def test_summary_of_no_runs() -> None:
         "runs": 0,
         "outcomes": {},
         "by_tier": {},
+        "check_outcomes": {"passed": 0, "failed": 0, "could-not-run": 0},
         "rounds_total": 0,
         "candidates_total": 0,
         "confirmed_total": 0,

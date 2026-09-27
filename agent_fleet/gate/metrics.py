@@ -103,6 +103,12 @@ class GateMetrics:
     passes: int = 0
     #: Per-agent-call parse state (lens/verify/judge). See GateCallRecord.
     calls: list[dict[str, object]] = field(default_factory=list)
+    #: Per-run REQUIRED CHECK results (see :mod:`agent_fleet.gate.checks`): each
+    #: row is one check's name, stage, exit code and whether it could run at all.
+    #: The column exists so a run that merged on a red check is distinguishable
+    #: after the fact from one that never configured the check — the two look
+    #: identical in every other column.
+    checks: list[dict[str, object]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.at:
@@ -136,6 +142,7 @@ class GateMetrics:
             "failing_by_round": self.failing_by_round,
             "reasons": list(self.reasons),
             "calls": list(self.calls),
+            "checks": list(self.checks),
         }
 
     def append_metrics(self, path: Path | None = None) -> Path:
@@ -199,6 +206,23 @@ def _as_round_counts(value: object) -> list[int]:
     return [_as_int(item) for item in value]
 
 
+def _as_check_rows(value: object) -> list[dict[str, object]]:
+    """Coerce the per-run ``checks`` column to a list of dicts.
+
+    Metrics are read back from a file other processes and older runs wrote, so
+    every field here is treated as untrusted: a row that is not a mapping, or a
+    row from a run predating this column, is skipped rather than raising inside
+    a summary the operator is reading.
+    """
+    if not isinstance(value, list):
+        return []
+    rows: list[dict[str, object]] = []
+    for row in value:
+        if isinstance(row, dict):
+            rows.append({str(k): v for k, v in row.items()})
+    return rows
+
+
 def render_metrics_table(rows: Iterable[dict[str, object]]) -> str:
     """Render metric rows as a fixed-column table. Pure: rows -> text."""
     materialized = list(rows)
@@ -241,10 +265,24 @@ def summarize_rows(rows: Iterable[dict[str, object]]) -> dict[str, object]:
     for row in materialized:
         tier = str(row.get("tier", "")) or "full"
         by_tier[tier] = by_tier.get(tier, 0) + 1
+    # Check outcomes are counted, not just collected: a table that grows a
+    # `checks` column nobody ever reads is a column that gets ignored the first
+    # time a check is red on a run that still merged.
+    check_outcomes: dict[str, int] = {"passed": 0, "failed": 0, "could-not-run": 0}
+    for row in materialized:
+        for check in _as_check_rows(row.get("checks")):
+            if check.get("could_not_run"):
+                key = "could-not-run"
+            elif check.get("passed"):
+                key = "passed"
+            else:
+                key = "failed"
+            check_outcomes[key] += 1
     return {
         "runs": len(materialized),
         "outcomes": dict(sorted(outcomes.items())),
         "by_tier": dict(sorted(by_tier.items())),
+        "check_outcomes": check_outcomes,
         "rounds_total": rounds_total,
         "candidates_total": candidates,
         "confirmed_total": confirmed,

@@ -12,6 +12,12 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from agent_fleet.gate.checks import (
+    DEFAULT_CHECK_MEMORY,
+    DEFAULT_CHECK_TIMEOUT_S,
+    MATCH_ALL,
+    RequiredCheck,
+)
 from agent_fleet.gate.prompts import lane_slug_token
 
 logger = logging.getLogger(__name__)
@@ -190,6 +196,11 @@ class GateConfig:
     #: Consecutive STANDARD fixer passes before the bar falls back to the full
     #: evidence gate. Zero findings and green tests approve without a pass.
     standard_max_passes: int = _STD_MAX_PASSES
+    #: Repo-configured commands the diff must survive, selected by changed path.
+    #: Empty by default: the gate enforces only what a repo has explicitly asked
+    #: for, so enabling the gate on a repo with no ``required_checks`` changes
+    #: nothing. See :mod:`agent_fleet.gate.checks`.
+    required_checks: tuple[RequiredCheck, ...] = ()
 
     def is_prodsensitive(self, path: str) -> bool:
         """Whether *path* matches a configured production-sensitive pattern."""
@@ -251,6 +262,62 @@ def _apply_legacy_timeout(section: dict[str, Any], kwargs: dict[str, Any]) -> No
         " / ".join(_LEGACY_TIMEOUT_TARGETS),
         ", ".join(applied) or "nothing (per-stage keys already set)",
     )
+
+
+def _parse_required_checks(raw: Any) -> tuple[RequiredCheck, ...]:  # noqa: ANN401
+    """Parse ``gate.required_checks`` into :class:`RequiredCheck` objects.
+
+    The list is repo-authored config, so every field is treated as untrusted and
+    a malformed entry is dropped with a warning naming it rather than raising or
+    being silently kept. Two rules matter more than the parsing:
+
+    - **A dropped entry is never a bypass.** A check with no ``command`` cannot
+      be run, so keeping it would produce a check that fails closed on every PR
+      and a config nobody can debug. Dropping it means the PR is gated by
+      whatever else is configured, and the warning is the only trace — which is
+      why the warning names the entry.
+    - **An empty list is honoured, not defaulted.** Same rule as
+      ``sensitive_paths``: a repo that configures no checks has said so.
+    """
+    if not isinstance(raw, list):
+        return ()
+    checks: list[RequiredCheck] = []
+    for index, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            logger.warning("gate: required_checks[%d] is not a mapping; ignored", index)
+            continue
+        fields = {str(k): v for k, v in entry.items()}
+        name = str(fields.get("name") or "").strip()
+        command = str(fields.get("command") or "").strip()
+        if not name or not command:
+            logger.warning(
+                "gate: required_checks[%d] needs both a name and a command; ignored",
+                index,
+            )
+            continue
+        when_paths = fields.get("when_paths")
+        patterns = (
+            tuple(str(p) for p in when_paths)
+            if isinstance(when_paths, list) and when_paths
+            else MATCH_ALL
+        )
+        try:
+            timeout_s = int(str(fields.get("timeout_s")))
+        except ValueError:
+            logger.warning("gate: required check %r has an unusable timeout_s; using default", name)
+            timeout_s = DEFAULT_CHECK_TIMEOUT_S
+        checks.append(
+            RequiredCheck(
+                name=name,
+                command=command,
+                when_paths=patterns,
+                # A non-positive budget would kill the check instantly and read
+                # as an infra failure on every PR, so it is treated as unset.
+                timeout_s=timeout_s if timeout_s > 0 else DEFAULT_CHECK_TIMEOUT_S,
+                memory=str(fields.get("memory") or DEFAULT_CHECK_MEMORY),
+            )
+        )
+    return tuple(checks)
 
 
 def load_gate_config(raw: dict[str, Any] | None) -> GateConfig | None:
@@ -317,4 +384,7 @@ def load_gate_config(raw: dict[str, Any] | None) -> GateConfig | None:
     sensitive = section.get("sensitive_paths")
     if isinstance(sensitive, list):
         kwargs["sensitive_paths"] = tuple(str(p) for p in sensitive)
+    # Checks are opt-in per repo, so this is the one section whose absence means
+    # "no checks" rather than "the defaults" — there are no default checks.
+    kwargs["required_checks"] = _parse_required_checks(section.get("required_checks"))
     return GateConfig(**kwargs)

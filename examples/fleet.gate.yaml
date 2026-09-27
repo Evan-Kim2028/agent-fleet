@@ -131,6 +131,28 @@ gate:
   # consumed 36GB. The cap is used as given; the gate never raises it.
   test_memory: 6G
 
+  # -------------------------------------------------------------------------
+  # REQUIRED CHECKS — the repo's own build, beyond pytest.
+  #
+  # pytest is not every repo's deterministic half. A PR that broke dbt
+  # unit-test compilation reviewed clean and merged, because nothing in the
+  # gate knew that repo had a second kind of build. Each selected check runs at
+  # the head and again on the merged-with-base tree; a non-zero exit is a
+  # CONFIRMED blocker carrying the command's output tail as evidence, and a
+  # check that could not run (missing command, timeout) fails closed rather
+  # than reading as a pass.
+  #
+  # Empty by default: a repo with no required_checks is unaffected until
+  # someone says what that repo's build is.
+  # required_checks:
+  #   - name: dbt-compile
+  #     command: uv run dbt compile
+  #     # Matched with re.search against repo-relative changed paths; any match
+  #     # selects the check. Omit for "run on every diff".
+  #     when_paths: ['^transform/']
+  #     timeout_s: 900
+  #     memory: 6G
+
   # Machine-wide admission: these size the shared cross-process slot pools
   # under ~/.agent-fleet/slots, so several independent fleet processes on this
   # box share one budget instead of each getting its own. The test pool is

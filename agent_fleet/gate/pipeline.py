@@ -61,6 +61,7 @@ from agent_fleet.contracts.gate import (
     validate_verify,
 )
 from agent_fleet.fleet_ops.gate import APPROVAL_MARKER
+from agent_fleet.gate import checks as gate_checks
 from agent_fleet.gate import metrics as gate_metrics
 from agent_fleet.gate.config import GateConfig, load_gate_config
 from agent_fleet.gate.gitops import (
@@ -154,6 +155,11 @@ ROLE_FIX = "fix"
 ROLE_JUDGE = "judge"
 
 _NO_TASK_TEXT = "(no task file supplied; judge against the PR description)"
+
+#: What :meth:`GatePipeline.run_required_checks` returns: one row per check it
+#: actually ran. Named here so the pipeline does not repeat the module path on a
+#: signature the callers read often.
+CheckRun = gate_checks.CheckResult
 
 
 class GateInfraError(RuntimeError):
@@ -615,6 +621,11 @@ class GatePipeline:
         #: step0's result, kept for the tier-0 decision. ``None`` means no
         #: changed test was run at all, which is a green run of nothing.
         self._step0_run: TestRun | None = None
+        #: Every REQUIRED CHECK result this run has produced, in order. Kept on
+        #: the pipeline rather than returned so the metrics row carries the same
+        #: list whichever stage wrote it, and so a check that ran at head and was
+        #: re-run on the merged tree is one trace with two rows.
+        self._check_results: list[gate_checks.CheckResult] = []
 
     # -- helpers ---------------------------------------------------------
 
@@ -783,6 +794,109 @@ class GatePipeline:
             packages=run.ran,
         )
         return pr_tests
+
+    # -- repo-configured required checks ----------------------------------
+
+    def run_required_checks(self, worktree: Path, *, stage: str = "head") -> list[CheckRun]:
+        """Run the repo's REQUIRED CHECKS against the tree in *worktree*.
+
+        Selection is by changed path, so a docs PR does not pay for a dbt
+        compile; with nothing selected this returns immediately and no check row
+        is written, which is what keeps the metrics column meaningful (an empty
+        list means "no check was selected", not "a check passed").
+
+        The two outcomes are deliberately not merged:
+
+        - a non-zero exit becomes a **confirmed blocker**, with the command's own
+          output tail as the evidence, in the same shape a step0 failing test
+          produces — the fixer is handed both the same way;
+        - a check that could not run (missing command, timeout, unparseable
+          argv) raises :class:`GateInfraError`, which fails the whole run closed
+          as "check could not run". It is never counted as a pass, and it is
+          never phrased as a finding about the code, because it is not one.
+
+        The blocker is recorded before the raise, so a run that escalates on an
+        unrunnable check still carries its results into the metrics row.
+
+        Every selected check holds a slot from the *test* pool for as long as its
+        subprocess lives, the same budget pytest is bounded by. A required check
+        is an arbitrary repo build — a dbt compile is as hungry as a suite — so
+        running it outside that budget is what turns four concurrent gate runs
+        into four uncapped builds, and the pool that exists to prevent exactly
+        that is silently bypassed.
+        """
+        if not self.config.required_checks:
+            return []
+        changed = changed_paths(worktree, self.config.base_branch)
+        # run_checks does the path selection itself, so an empty diff selects
+        # nothing here too rather than running the whole set against a list that
+        # is just as likely to be a failed git call.
+        results = gate_checks.run_checks(
+            self.config.required_checks,
+            worktree=worktree,
+            stage=stage,
+            changed_files=changed,
+            use_systemd=self.use_systemd,
+            pool=self.test_pool,
+        )
+        if not results:
+            self._log(
+                "gate.checks",
+                stage=stage,
+                selected=0,
+                configured=len(self.config.required_checks),
+            )
+            return []
+        # Recorded before any raise below, so a run that escalates on an
+        # unrunnable check still carries the result into its metrics row.
+        self._check_results.extend(results)
+        failed = [r for r in results if not r.passed and not r.could_not_run]
+        broken = [r for r in results if r.could_not_run]
+        self._log(
+            "gate.checks",
+            stage=stage,
+            selected=len(results),
+            failed=len(failed),
+            could_not_run=len(broken),
+            names=[r.name for r in failed or broken],
+        )
+
+        for result in failed:
+            self.evidence.confirmed.append(gate_checks.to_evidence(result))
+        if broken:
+            # Fail closed before any reviewer is dispatched: a gate that cannot
+            # run the check a repo asked for has no basis for approving anything,
+            # and the cheapest place to say so is before the model budget.
+            raise GateInfraError(
+                f"fail-closed: {gate_checks.cannot_run_claim(broken[0])}"
+                + (f" (+{len(broken) - 1} more)" if len(broken) > 1 else "")
+            )
+        return results
+
+    def _refresh_required_checks(self, worktree: Path, *, stage: str) -> list[CheckRun]:
+        """Re-measure the repo's REQUIRED CHECKS at *worktree*, replacing the rows.
+
+        A required check is a deterministic fact about a tree, so the fix loop
+        re-runs it at every head it is about to judge — the same way it re-runs
+        pytest. The rows are *replaced* rather than appended, because the set of
+        red checks is the state being tracked, not a log: at the new head the
+        old row is either still true (and rewritten identically) or false (and
+        the fixer actually repaired it). Accumulating both would leave a fixed
+        check blocking the run forever.
+
+        Results are still appended to :attr:`_check_results`, so the metrics row
+        keeps one trace per head a check was measured on.
+        """
+        # Drop the previous head's rows first: a red check that has just been
+        # fixed must not survive into this round's evidence.
+        self.evidence.confirmed[:] = [
+            c for c in self.evidence.confirmed if c.get("source") != "required-check"
+        ]
+        return self.run_required_checks(worktree, stage=stage)
+
+    def _check_blockers(self) -> list[dict[str, Any]]:
+        """The confirmed blockers that are open red required checks."""
+        return [c for c in self.evidence.confirmed if c.get("source") == "required-check"]
 
     # -- review tiering ---------------------------------------------------
 
@@ -1193,6 +1307,11 @@ class GatePipeline:
                 raise GateInfraError(f"converge {run.infra_error}")
             metric.failing = run.count
             previous = run.failing_set
+            # The repo's required checks are re-measured on the same tree as the
+            # tests, so "this head is green" is a claim about both. A check the
+            # fixer already repaired clears here; one still red stays open, and
+            # the round below judges the head on the check, not only on pytest.
+            self._refresh_required_checks(test_wt, stage="converge")
         finally:
             remove_worktree(self.repo, test_wt)
 
@@ -1200,7 +1319,8 @@ class GatePipeline:
         untestable_open = [
             c for c in self.evidence.confirmed if c.get("source") == "judge-untestable"
         ]
-        if run.count == 0 and not untestable_open:
+        check_blockers = self._check_blockers()
+        if run.count == 0 and not untestable_open and not check_blockers:
             return current, self._metrics(metric, ref, outcome=gate_metrics.OUTCOME_CONVERGED)
 
         # Nothing fails and the only blockers are untestable ones no local test
@@ -1211,7 +1331,12 @@ class GatePipeline:
         # So dispatch exactly one fix round carrying the untestable list, then
         # let the recheck judge decide. One round, not a loop: with no test to go
         # green there is no measurable progress, only the judge's yes/no.
-        untestable_only = run.count == 0 and bool(untestable_open)
+        #
+        # A red required check does *not* belong in that bucket: it is a
+        # deterministic fact about this tree with a real exit code, not a judge's
+        # read of something no test can show, so it is measured on every round
+        # like a failing test rather than handed to a one-shot judge.
+        untestable_only = run.count == 0 and bool(untestable_open) and not check_blockers
         push_branch = self.config.push_branch or ref.head_ref
         model = self._model_for(
             backend_name=self.config.backend, model=self.config.model, role=ROLE_FIX
@@ -1276,6 +1401,10 @@ class GatePipeline:
                     current = new_head
                     break
                 now = run.failing_set
+                # Judge the pushed head on its required checks too, so a fixer
+                # that repaired a red check clears it and one that did not
+                # leaves it open for the outcome below.
+                self._refresh_required_checks(check_wt, stage="converge")
             finally:
                 remove_worktree(self.repo, check_wt)
 
@@ -1290,6 +1419,7 @@ class GatePipeline:
                     new_failures=new_failures,
                 )
             )
+            round_checks_open = self._check_blockers()
             self._log(
                 "gate.round",
                 round=round_number,
@@ -1298,6 +1428,7 @@ class GatePipeline:
                 failing_after=run.count,
                 fixed=fixed,
                 new_failures=new_failures,
+                checks_open=len(round_checks_open),
             )
             current = new_head
             if untestable_only and run.count == 0:
@@ -1316,10 +1447,20 @@ class GatePipeline:
                 # is authoritative at whatever head it ran on, and it is red.
                 outcome = gate_metrics.OUTCOME_STALLED
                 break
+            if run.count == 0 and round_checks_open:
+                # The suite is green but a required check the diff selects is
+                # still red at the new head. The failing-test set is empty, so
+                # there is no shrinking set to converge on: the round did not
+                # clear the thing it was sent to fix. Refusing here is the whole
+                # point of the feature — approving on a green suite would merge
+                # exactly the build break it exists to catch.
+                outcome = gate_metrics.OUTCOME_STALLED
+                break
             if run.count == 0:
-                # Every test is green. The deterministic half has converged; if
-                # untestable blockers remain, the judge recheck below decides
-                # them, so stop fixing and go straight there.
+                # Every test is green and the required checks are green too. The
+                # deterministic half has converged; if untestable blockers
+                # remain, the judge recheck below decides them, so stop fixing
+                # and go straight there.
                 outcome = (
                     gate_metrics.OUTCOME_CONVERGED
                     if not untestable_open
@@ -1513,6 +1654,7 @@ class GatePipeline:
                 gate_metrics.OUTCOME_CONVERGED if outcome is GateOutcome.APPROVED else "recheck"
             ),
             reasons=list(reasons),
+            checks=[r.to_dict() for r in self._check_results],
         )
         # A carried approval is not a gate run. Marking it keeps the metrics
         # table honest about how much review a given approval actually had.
@@ -1556,6 +1698,7 @@ class GatePipeline:
             untestable_real=untestable_real,
             rounds=all_rounds,
             calls=self.recorder.rows(),
+            checks=[r.to_dict() for r in self._check_results],
         )
 
     # -- the STANDARD bar -------------------------------------------------
@@ -1782,6 +1925,10 @@ class GatePipeline:
             prepare_worktree(self.repo, worktree, ref.head_sha)
             self._runner = self._runner_for(worktree)
             pr_tests = self.run_pr_tests(worktree)
+            # The repo's other required checks, at head, before any model is
+            # consulted. A red check is a confirmed blocker the same way a red
+            # test is, so the fixer is dispatched for it like any other finding.
+            self.run_required_checks(worktree)
 
             # Tier 0: a docs/tests-only PR with its own tests green at head has
             # nothing for a model to review. Its approval rests on step0 plus the
@@ -1858,6 +2005,24 @@ class GatePipeline:
             reasons.append(f"gate filesystem failure: {exc}"[:300])
         finally:
             remove_worktree(self.repo, worktree)
+
+        # A required check that exited non-zero is a confirmed blocker, and a
+        # confirmed blocker never produces an approval. This is enforced here,
+        # at the one place a run's outcome becomes a verdict, rather than only
+        # inside converge(): every path that can approve — the "no blockers"
+        # shortcut above and each convergence state that maps to APPROVED — has
+        # to be covered, and the earlier bug was precisely a check recorded as a
+        # blocker and then read as nothing by one of them. A green pytest run
+        # says nothing about the repo's other builds, which is the whole reason
+        # the check exists.
+        open_checks = self._check_blockers()
+        if open_checks and outcome is GateOutcome.APPROVED:
+            outcome = GateOutcome.NEEDS_ESCALATION
+            sha = ""
+            reasons.append(
+                "required check(s) failed: "
+                + "; ".join(str(c.get("claim") or c.get("id")) for c in open_checks[:3])
+            )
 
         return self._finish(outcome, sha, reasons, ref, metric=converged_metric)
 
@@ -2285,11 +2450,42 @@ def run_gate_recheck(
             pipeline.archive.materialise(worktree, gate_tests)
             test_files = sorted(set(changed) | set(gate_tests))
             run = pipeline._runner_for(worktree).run(test_files)
+            # The repo's required checks, re-run on the merged tree. A check that
+            # is green on the PR's own tree and red once the base is merged in is
+            # exactly the regression this recheck exists to catch, so it runs here
+            # and not only at head. An unrunnable check raises, and the handler
+            # below turns that into the same refusal — the merged tree is never
+            # approved on evidence the gate could not collect.
+            check_results = pipeline.run_required_checks(worktree, stage="merged")
         finally:
             remove_worktree(repo, worktree)
     except (GateError, OSError) as exc:
         reasons.append(f"full gate required: recheck could not run: {str(exc)[:160]}")
         return pipeline._carry_over_result(GateOutcome.NEEDS_ESCALATION, "", reasons)
+    except GateInfraError as exc:
+        # An unrunnable required check is the same refusal as an unrunnable test:
+        # the merged tree is not approved on evidence the gate could not collect.
+        reasons.append(f"full gate required: {str(exc)[:160]}")
+        return pipeline._carry_over_result(GateOutcome.NEEDS_ESCALATION, "", reasons)
+
+    # A red check on the merged tree refuses the carried approval outright. It is
+    # read here rather than folded into the test run above because a check failure
+    # is not a failing test: there is no node id to put in the reason line, and a
+    # recheck that reported "all tests green" while a required check was red would
+    # be describing the tests accurately and the decision wrongly.
+    for result in check_results:
+        if not result.passed:
+            reasons.append(
+                "full gate required: "
+                + (
+                    gate_checks.cannot_run_claim(result)
+                    if result.could_not_run
+                    else gate_checks.blocker_claim(result)
+                )
+            )
+            if result.evidence:
+                reasons.append(result.evidence)
+            return pipeline._carry_over_result(GateOutcome.NEEDS_ESCALATION, "", reasons)
 
     return pipeline.recheck_carry_over(
         approved_sha=approved_sha,
