@@ -33,9 +33,13 @@ DEFAULT_PSI_PATH = Path(
     "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/agents.slice/cpu.pressure"
 )
 
-#: Tried in order when the configured path is unusable. The user's own slice is
-#: a much closer proxy than the root cgroup, so it is the first fallback.
+#: Tried when no path is configured, in order. The agents slice comes first: it
+#: is the cgroup every lane, gate and dispatch child actually lives in, so it is
+#: the only reading that describes the swarm rather than the operator's
+#: unrelated sessions. The user's own slice is a much closer proxy than the root
+#: cgroup, so it is the first fallback, and the root cgroup is the last resort.
 FALLBACK_PATHS: tuple[Path, ...] = (
+    DEFAULT_PSI_PATH,
     Path("/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/cpu.pressure"),
     Path("/sys/fs/cgroup/user.slice/cpu.pressure"),
     Path("/sys/fs/cgroup/cpu.pressure"),

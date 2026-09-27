@@ -66,19 +66,27 @@ from agent_fleet.gate.config import GateConfig, load_gate_config
 from agent_fleet.gate.gitops import (
     GateError,
     PullRequestRef,
+    changed_paths,
+    changed_test_config_paths,
     changed_test_files,
     current_pr_head,
+    deleted_test_paths,
+    diff_line_stats,
     fetch_base,
     has_approval_line,
+    is_docs_or_test,
     merge_base_into,
     patch_id,
     prepare_worktree,
+    prodsensitive_paths,
     remove_worktree,
     resolve_diff_base,
     resolve_pull_request,
     worktree_head_sha,
 )
 from agent_fleet.gate.prompts import (
+    ALL_FOCUS,
+    ALL_FOCUS_LENS,
     find_prompt,
     fix_prompt,
     gate_test_name,
@@ -95,6 +103,34 @@ from agent_fleet.gate.pytest_runner import (
     systemd_run_available,
     to_package_path,
     to_repo_node_id,
+)
+from agent_fleet.gate.standard import (
+    OUTCOME_APPROVED as STD_OUTCOME_APPROVED,
+)
+from agent_fleet.gate.standard import (
+    OUTCOME_FALLBACK as STD_OUTCOME_FALLBACK,
+)
+from agent_fleet.gate.standard import (
+    OUTCOME_FIX_AND_REGATE as STD_OUTCOME_FIX_AND_REGATE,
+)
+from agent_fleet.gate.standard import (
+    STANDARD_HISTORY_ROWS,
+    STANDARD_TIER,
+    FallbackReason,
+    StandardAction,
+    StandardState,
+)
+from agent_fleet.gate.standard import (
+    approval_reason as standard_approval_reason,
+)
+from agent_fleet.gate.standard import (
+    next_action as standard_next_action,
+)
+from agent_fleet.gate.standard import (
+    prior_passes as standard_prior_passes,
+)
+from agent_fleet.gate.standard import (
+    select_tier as standard_select_tier,
 )
 from agent_fleet.gate.structured import TIMEOUT_EXIT, StructuredCallError, call_structured
 from agent_fleet.model_policy import ModelPolicy, ModelPolicyError, parse_model_policy
@@ -122,6 +158,37 @@ _NO_TASK_TEXT = "(no task file supplied; judge against the PR description)"
 
 class GateInfraError(RuntimeError):
     """A deterministic step could not run — the gate must not claim a verdict."""
+
+
+@dataclass(frozen=True)
+class ReviewTier:
+    """The review tier a PR earned, and the lens set that goes with it.
+
+    ``tier`` is the number of reviewers, and it is the *number* rather than a
+    label because the configured lens set is what it counts: a repo that
+    configures two lenses gets 2 and a repo that configures four gets 4, and
+    both are the "full lens set" tier. The log line is written from these
+    numbers so a run's depth can be read after the fact without re-deriving the
+    diff.
+    """
+
+    tier: int
+    lenses: tuple[str, ...]
+    #: Non-test changed lines in the PR (see :func:`diff_line_stats`).
+    lines: int
+    #: Changed paths that matched a production-sensitive pattern.
+    risky: list[str] = field(default_factory=list)
+    #: Why this tier was chosen, when the default reason does not explain it.
+    note: str = ""
+
+    @property
+    def summary(self) -> str:
+        """The one line that says which tier ran and on what evidence."""
+        head = (
+            f"review tier: {self.tier} "
+            f"(non-test diff {self.lines} lines, {len(self.risky)} production-sensitive files)"
+        )
+        return f"{head}; {self.note}" if self.note else head
 
 
 # ---------------------------------------------------------------------------
@@ -499,6 +566,27 @@ class GateTestArchive:
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class FixerResult:
+    """What one fixer round actually did, measured rather than believed.
+
+    Two facts, both read from the state the fixer left behind: whether its
+    worktree holds a commit that was not the PR's head, and whether the PR's head
+    moved. Neither is the fixer's say-so, because a fixer that disputes every
+    finding will say it fixed something.
+    """
+
+    #: A commit exists in the fixer worktree that was not in the PR's head.
+    committed: bool
+    #: The forge reports a head for the PR that is not the one the gate read.
+    pushed: bool
+
+    @property
+    def changed_nothing(self) -> bool:
+        """No commit, or a commit that never reached the PR's head."""
+        return not self.committed or not self.pushed
+
+
 @dataclass
 class _Evidence:
     """The gate's accumulated blocker evidence, split by how it was established."""
@@ -567,6 +655,9 @@ class GatePipeline:
         self.recorder = GateCallRecorder(gate_dir)
         self._candidates: list[dict[str, Any]] = []
         self._runner: GateTestRunner | None = None
+        #: step0's result, kept for the tier-0 decision. ``None`` means no
+        #: changed test was run at all, which is a green run of nothing.
+        self._step0_run: TestRun | None = None
 
     # -- helpers ---------------------------------------------------------
 
@@ -709,12 +800,17 @@ class GatePipeline:
         A pytest exit >= 2 raises :class:`GateInfraError`: the suite could not
         run, so the gate has no evidence the PR is green. Treating that as a pass
         would approve a PR whose own tests were never executed.
+
+        The result is also kept on :attr:`_step0_run`, because tier 0 approves on
+        exactly this evidence: the PR's own changed tests green at head, with no
+        model involved.
         """
         pr_tests = changed_test_files(worktree, self.config.base_branch)
         if not pr_tests:
             return []
         runner = self._runner_for(worktree)
         run = runner.run(pr_tests)
+        self._step0_run = run
         if run.infra_error:
             raise GateInfraError(f"step0 {run.infra_error}")
         for node_id in run.failing:
@@ -736,20 +832,153 @@ class GatePipeline:
         )
         return pr_tests
 
+    # -- review tiering ---------------------------------------------------
+
+    def review_tier(self, worktree: Path) -> ReviewTier:
+        """How much review this PR earns, from the shape of its diff alone.
+
+        Tiers 1 and 4 are the only ones that differ in cost, so this returns the
+        lens set rather than a bare number. Tier 0 is decided in :meth:`run`,
+        where step0's result is already known — a docs/tests-only PR whose own
+        tests failed has blockers, whatever its diff looks like.
+        """
+        lines = diff_line_stats(worktree, self.config.base_branch)
+        risky = prodsensitive_paths(worktree, self.config.base_branch, self.config)
+        if lines > self.config.big_lines or risky:
+            lenses = self.config.lenses[: self.config.max_parallel_lenses]
+            return ReviewTier(tier=len(lenses), lenses=lenses, lines=lines, risky=risky)
+        return ReviewTier(
+            tier=1,
+            lenses=(ALL_FOCUS_LENS,),
+            lines=lines,
+            note=f"non-test diff {lines} lines under big_lines={self.config.big_lines}",
+        )
+
+    def _lens_focus(self, lens: str) -> str:
+        """Reviewer focus text for *lens*, including the synthetic all-focus lens."""
+        return ALL_FOCUS if lens == ALL_FOCUS_LENS else self.config.focus_for(lens)
+
+    def tier0_eligible(self, worktree: Path) -> list[str]:
+        """The changed paths when this PR can be approved on evidence alone, else ``[]``.
+
+        A PR whose changed files are *only* docs, tests and fixtures carries no
+        product behaviour for a reviewer to reason about — the tests are the
+        change. When they are green at head, approving is a statement about
+        evidence, not a shortcut past it, so no model is dispatched.
+
+        Returning the path list (empty meaning "not eligible") rather than a bool
+        is what lets the caller log which files justified the tier without
+        re-running the same git call.
+
+        Every precondition is a refusal, and they all matter:
+
+        - ``tier0: false`` turns the tier off for a repo that wants it off.
+        - a step0 that could not run raised before reaching here, but the check
+          is kept so this method is safe to call on its own.
+        - **any** confirmed blocker — including a failing PR test — refuses.
+          Approving a red PR on the grounds that its tests are the only thing it
+          changes is exactly backwards.
+        - an empty changed-file list refuses, so a git failure can never read as
+          "docs/tests only, therefore approved".
+        - an :meth:`tier0_evidence_gap` refuses, because a PR that deleted the
+          tests it touched, or that only rewrote the suite config, has no step0
+          run for the approval to rest on.
+        """
+        if not self.config.tier0:
+            return []
+        changed = changed_paths(worktree, self.config.base_branch)
+        if not changed or any(not is_docs_or_test(path) for path in changed):
+            return []
+        if self._step0_run is not None and self._step0_run.infra_error:
+            return []
+        if self.tier0_evidence_gap(worktree):
+            return []
+        return [] if self.evidence.confirmed else changed
+
+    def tier0_evidence_gap(self, worktree: Path) -> list[str]:
+        """Why tier 0's own evidence never ran, or ``[]`` when it did.
+
+        Tier 0 approves on one thing: the PR's own changed tests, green at head.
+        Two shapes of test-only PR have no such run, and both are approved for
+        that reason alone rather than in spite of it.
+
+        - a **deletion** — :func:`changed_test_files` keeps only tests that still
+          exist, so the one the PR removed drops out of the step0 set, the run
+          never happens, and the empty result is indistinguishable from a green
+          one. Removing the regression test that guards a data-loss bug then
+          merges with a ``PREMERGE-APPROVED`` line and no test ever executed,
+          while an edit to that same test is still sent to a model reviewer.
+        - **suite-level test config** — ``conftest.py`` and the rest are not
+          ``test_*.py``, so they are never step0-runnable, and they are what
+          decides what the suite collects. A skip, an xfail or a silenced
+          collection error is invisible to a run that never touched them.
+
+        Nothing else sizes either one as risky either: the non-test line count
+        excludes test paths, and no path matches a production-sensitive pattern.
+        So the gap has to be read off the diff itself. The guard is a refusal
+        *and* an escalation — see :meth:`run`, where a refusal alone would hand
+        the PR to a reviewer that, finding nothing, approves it on the very
+        evidence that never existed.
+        """
+        reasons: list[str] = []
+        deleted = deleted_test_paths(worktree, self.config.base_branch)
+        if deleted:
+            reasons.append(
+                f"the PR deletes {len(deleted)} of its own test file(s) "
+                f"({', '.join(deleted[:3])}), so step0 ran none of them: "
+                "removing a test removes the evidence that approves it"
+            )
+        config_paths = changed_test_config_paths(worktree, self.config.base_branch)
+        if config_paths:
+            reasons.append(
+                f"the PR changes suite-level test config ({', '.join(config_paths[:3])}), "
+                "which is never a step0 test: what the suite collects is not evidence"
+            )
+        return reasons
+
+    @staticmethod
+    def tier0_tier(changed: list[str]) -> ReviewTier:
+        """The tier-0 record for an already-decided docs/tests-only diff.
+
+        Takes the changed paths rather than re-reading the diff: :meth:`run` has
+        them, and running the same git call twice to format one log line is the
+        kind of duplication that goes stale.
+        """
+        return ReviewTier(
+            tier=0,
+            lenses=(),
+            lines=0,
+            note=f"{len(changed)} changed file(s), all docs/tests/fixtures; no model review",
+        )
+
     # -- step 1 ----------------------------------------------------------
 
-    def find(self, worktree: Path, ref: PullRequestRef) -> list[Finding]:
-        """Run the lens reviewers in parallel and dedupe their candidate claims."""
+    def find(
+        self,
+        worktree: Path,
+        ref: PullRequestRef,
+        lenses: tuple[str, ...] | None = None,
+    ) -> list[Finding]:
+        """Run the lens reviewers in parallel and dedupe their candidate claims.
+
+        *lenses* is the tier's reviewer set. It defaults to the configured lenses
+        so a caller reviewing in isolation still gets the full set; :meth:`run`
+        always passes the tier's. An explicitly empty tuple means *no reviewers*
+        rather than falling back to the default, which is what makes "dispatch
+        nothing" expressible.
+        """
         model = self._model_for(
             backend_name=self.config.backend, model=self.config.model, role=ROLE_LENS
         )
         task_text = self._task_text()
-        lenses = self.config.lenses[: self.config.max_parallel_lenses]
+        chosen = (self.config.lenses if lenses is None else lenses)[
+            : self.config.max_parallel_lenses
+        ]
 
         def _one(lens: str) -> list[Finding]:
             prompt = find_prompt(
                 lens=lens,
-                focus=self.config.focus_for(lens),
+                focus=self._lens_focus(lens),
                 worktree=str(worktree),
                 base_branch=resolve_diff_base(worktree, self.config.base_branch),
                 head_sha=ref.short_sha,
@@ -770,8 +999,8 @@ class GatePipeline:
             )
             return _tag_lens(FindingsReport.from_dict(answer.data).findings, lens)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max(len(lenses), 1)) as pool:
-            batches = list(pool.map(_one, lenses))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(len(chosen), 1)) as pool:
+            batches = list(pool.map(_one, chosen))
 
         return _dedupe_findings([f for batch in batches for f in batch])[
             : self.config.max_candidates
@@ -1450,6 +1679,209 @@ class GatePipeline:
             calls=self.recorder.rows(),
         )
 
+    # -- the STANDARD bar -------------------------------------------------
+
+    def run_standard(
+        self,
+        ref: PullRequestRef,
+        worktree: Path,
+        pr_tests: list[str],
+    ) -> GateResult:
+        """Review a non-sensitive diff under the risk-matched bar.
+
+        One reviewer covering all four focuses — no parallel lenses, no
+        per-claim verifier, no judge. That is the only difference in *who looks*;
+        the difference that matters is what happens next, and that is
+        :mod:`agent_fleet.gate.standard`'s state machine, given here the two
+        facts it reads: what the reviewer and step0 found, and how many passes
+        this PR has already spent on earlier heads.
+
+        Every terminal state except approval ends the run as NEEDS_ESCALATION,
+        which is the automerge's "not approved" and exits non-zero. The label
+        in the reason line is what distinguishes them after the fact — a cheap-bar
+        approval, a re-gate, and a fall-back to the full gate are three
+        different claims about a PR and must not read the same in the log.
+        """
+        reasons: list[str] = []
+        # A bounded tail, not the whole file: metrics.jsonl is shared by every run
+        # on the host and is never rotated, and this counter needs one PR's rows.
+        passes = standard_prior_passes(
+            gate_metrics.read_metrics(limit=STANDARD_HISTORY_ROWS),
+            repo=self.repo.name,
+            pr=self.pr_number,
+            max_passes=self.config.standard_max_passes,
+        )
+        findings = self.find(worktree, ref, (ALL_FOCUS_LENS,))
+        self._candidates = [f.to_dict() for f in findings]
+        self._log(
+            "gate.find",
+            candidates=len(findings),
+            lenses=[ALL_FOCUS_LENS],
+            tier=STANDARD_TIER,
+        )
+
+        # Without a verifier or a judge there is nothing between the reviewer and
+        # the verdict, so its findings are the blockers: promoting them is what
+        # makes "reported blockers" mean the same thing here as in the full gate.
+        for finding in findings:
+            self.evidence.confirmed.append(
+                {
+                    **finding.to_dict(),
+                    "source": "all-focus",
+                    "test_file": None,
+                }
+            )
+        pr_tests_failed = any(c.get("source") == "pr-tests" for c in self.evidence.confirmed)
+        state = StandardState(
+            tier=STANDARD_TIER,
+            findings=len(self.evidence.confirmed),
+            pr_tests_failed=pr_tests_failed,
+            passes=passes,
+            max_passes=self.config.standard_max_passes,
+            head=ref.head_sha,
+        )
+        decision = standard_next_action(state)
+        self._log("gate.standard", **decision.to_dict(), findings=state.findings)
+
+        if decision.action is StandardAction.APPROVE:
+            reasons.append(standard_approval_reason(state))
+            return self._finish(
+                GateOutcome.APPROVED,
+                ref.head_sha,
+                reasons,
+                ref,
+                tier=STANDARD_TIER,
+                metric_outcome=STD_OUTCOME_APPROVED,
+                passes=decision.passes,
+            )
+
+        if decision.action is StandardAction.FIX_AND_REGATE:
+            result = self._standard_fixer(ref, pr_tests, passes)
+            # What the fixer did is a fact only it can report, and the bar's rules
+            # are written in terms of that fact — so the same state machine is
+            # asked again with the answer in hand rather than the fallback being
+            # hand-built here, which is what left a no-op run with no reason
+            # recorded against it and its pass count claiming progress. The
+            # action can only move to FALLBACK: nothing between here and the
+            # re-gate changes what is blocked.
+            after = standard_next_action(
+                replace(state, fixer_changed_nothing=result.changed_nothing)
+            )
+            if after.action is StandardAction.FALLBACK:
+                reason = (
+                    after.fallback_reason.value
+                    if after.fallback_reason
+                    else FallbackReason.DISPUTED.value
+                )
+                reasons.append(
+                    f"full evidence gate required: the standard bar gave up on this head "
+                    f"({reason}) at pass {after.passes}; this head goes to the full review pipeline"
+                )
+                return self._finish(
+                    GateOutcome.NEEDS_ESCALATION,
+                    ref.head_sha,
+                    reasons,
+                    ref,
+                    tier=STANDARD_TIER,
+                    metric_outcome=STD_OUTCOME_FALLBACK,
+                    passes=after.passes,
+                )
+            reasons.append(
+                f"re-gate new head: one standard-bar fixer pass ({decision.passes} of "
+                f"{state.max_passes}) dispatched; the pushed head is not trusted and is "
+                "re-gated from scratch"
+            )
+            return self._finish(
+                GateOutcome.NEEDS_ESCALATION,
+                ref.head_sha,
+                reasons,
+                ref,
+                tier=STANDARD_TIER,
+                metric_outcome=STD_OUTCOME_FIX_AND_REGATE,
+                passes=decision.passes,
+            )
+
+        reason = decision.fallback_reason.value if decision.fallback_reason else "unknown"
+        reasons.append(
+            f"full evidence gate required: the standard bar gave up on this head "
+            f"({reason}) after {decision.passes} pass(es); this PR now gets the full "
+            "review pipeline"
+        )
+        return self._finish(
+            GateOutcome.NEEDS_ESCALATION,
+            ref.head_sha,
+            reasons,
+            ref,
+            tier=STANDARD_TIER,
+            metric_outcome=STD_OUTCOME_FALLBACK,
+            passes=decision.passes,
+        )
+
+    def _standard_fixer(
+        self,
+        ref: PullRequestRef,
+        pr_tests: list[str],
+        passes: int,
+    ) -> FixerResult:
+        """Dispatch the single fixer the STANDARD bar allows, and push its work.
+
+        The fixer is told the reviewer's findings and the PR's failing tests and
+        is asked for a focused test per real finding, then it commits and pushes
+        to the PR's own head ref. The push target is ``ref.head_ref`` — the
+        ``headRefName`` the forge reports — and never a name derived from the
+        lane: a fixer that pushes to a lane-derived branch moves a head nobody is
+        re-gating, and the run then reports "no push" over a PR that did move.
+
+        What it did is measured, not believed: the worktree the fixer ran in is
+        the one place its commits can be seen, so the head that existed before
+        the run and the head after it are compared there. The forge is asked
+        afterwards as a cross-check, and a push the worktree cannot confirm is
+        treated as no push — the disputed case has to be the safe answer, since
+        the alternative is paying for a re-gate of a head that never moved.
+        """
+        fix_wt = self.gate_dir / "standard-fix"
+        prepare_worktree(self.repo, fix_wt, ref.head_sha)
+        try:
+            model = self._model_for(
+                backend_name=self.config.backend, model=self.config.model, role=ROLE_FIX
+            )
+            failing = self._step0_run.failing if self._step0_run else []
+            prompt = fix_prompt(
+                pr_number=self.pr_number,
+                worktree=str(fix_wt),
+                head_sha=ref.head_sha[:9],
+                push_branch=ref.head_ref,
+                round_number=passes + 1,
+                failing="\n".join(sorted(failing)),
+                confirmed=_json_blob(self.evidence.confirmed, 8000),
+                untestable="",
+                all_tests=" ".join(pr_tests),
+                pytest_cmd_hint=self._runner_for(fix_wt).pytest_hint(
+                    gate_test_name(self.lane_slug, "x")
+                ),
+                task_text=self._task_text()[:6000],
+            )
+            self._run_fixer(prompt, model=model, cwd=fix_wt)
+            return self._standard_fixer_result(fix_wt, ref)
+        finally:
+            remove_worktree(self.repo, fix_wt)
+
+    def _standard_fixer_result(self, fix_wt: Path, ref: PullRequestRef) -> FixerResult:
+        """Whether the fixer round left the PR's head with a new commit on it.
+
+        Two independent witnesses have to agree before this bar treats a fixer as
+        having fixed anything: the worktree it was given has to hold a commit
+        that was not the head, and the forge has to report a head that moved. A
+        commit the fixer never pushed fixes nothing anybody will re-gate, and a
+        head that moved without one is not the fixer's work, so either witness
+        missing reads as changed-nothing.
+        """
+        fixer_head = worktree_head_sha(fix_wt)
+        committed = bool(fixer_head) and fixer_head != ref.head_sha
+        fetch_base(self.repo, self.config.base_branch)
+        pushed = current_pr_head(self.repo, self.pr_number) != ref.head_sha
+        return FixerResult(committed=committed, pushed=pushed)
+
     # -- entry point -----------------------------------------------------
 
     def run(self) -> GateResult:
@@ -1471,9 +1903,46 @@ class GatePipeline:
             prepare_worktree(self.repo, worktree, ref.head_sha)
             self._runner = self._runner_for(worktree)
             pr_tests = self.run_pr_tests(worktree)
-            candidates = self.find(worktree, ref)
+
+            # Tier 0: a docs/tests-only PR with its own tests green at head has
+            # nothing for a model to review. Its approval rests on step0 plus the
+            # recheck that runs before the merge, both of which already happened
+            # or already refuse. Every other PR is reviewed, so the tiers below
+            # only ever choose between one reviewer and the full lens set.
+            tier0 = self.tier0_eligible(worktree)
+            if tier0:
+                self._log("gate.tier", **tier_fields(self.tier0_tier(tier0)))
+                sha = ref.head_sha
+                outcome = GateOutcome.APPROVED
+                return self._finish(outcome, sha, reasons, ref)
+
+            # Tier 0's evidence is a green run of the PR's own changed tests.
+            # A PR that deletes them, or that only rewrites the suite config
+            # that decides what runs, has no such run — so its approval would
+            # rest on a green run of nothing. Refusing tier 0 is not enough
+            # here: that hands the PR to a lens, and a lens with nothing to
+            # report is exactly the "no blockers, therefore approved" verdict
+            # this refuses. Review is what the tier was skipping, so the run
+            # has to end as the escalation it is.
+            evidence_gap = self.tier0_evidence_gap(worktree)
+            if evidence_gap:
+                self._log("gate.tier0.gap", reasons=evidence_gap)
+                return self._finish(GateOutcome.NEEDS_ESCALATION, "", evidence_gap, ref)
+
+            # Risk-matched bar. A diff that touches nothing sensitive is reviewed
+            # once by an all-focus reviewer under the STANDARD rules (one fixer
+            # pass, then re-gate); anything sensitive keeps today's full evidence
+            # pipeline below, unchanged. Decided after step0 so a red PR test is
+            # already a confirmed blocker the STANDARD state machine can act on.
+            changed = changed_paths(worktree, self.config.base_branch)
+            if standard_select_tier(self.config, changed) == STANDARD_TIER:
+                return self.run_standard(ref, worktree, pr_tests)
+
+            tier = self.review_tier(worktree)
+            self._log("gate.tier", **tier_fields(tier))
+            candidates = self.find(worktree, ref, tier.lenses)
             self._candidates = [f.to_dict() for f in candidates]
-            self._log("gate.find", candidates=len(candidates), lenses=list(self.config.lenses))
+            self._log("gate.find", candidates=len(candidates), lenses=list(tier.lenses))
             self.verify(worktree, candidates, source="lens")
             self.judge(worktree, ref)
 
@@ -1521,24 +1990,41 @@ class GatePipeline:
         ref: PullRequestRef | None,
         *,
         metric: gate_metrics.GateMetrics | None = None,
+        tier: str = "",
+        metric_outcome: str = "",
+        passes: int = 0,
     ) -> GateResult:
-        """Record the outcome. Keeps converge()'s per-round trace when one exists."""
+        """Record the outcome. Keeps converge()'s per-round trace when one exists.
+
+        ``tier``, ``passes`` and ``metric_outcome`` are the STANDARD bar's: they
+        are stamped onto the metrics row *before* it is appended, because that row
+        is what the next run reads back to recover the pass counter. Appending
+        first and stamping after would make every STANDARD run look like a fresh
+        one to the next head, and the bar would never exhaust its budget.
+        """
         if metric is not None:
-            if outcome is GateOutcome.APPROVED:
+            if outcome is GateOutcome.APPROVED and not metric_outcome:
                 metric.outcome = gate_metrics.OUTCOME_CONVERGED
+            if metric_outcome:
+                metric.outcome = metric_outcome
+            metric.tier = tier or metric.tier
+            metric.passes = passes or metric.passes
             metric.reasons = list(reasons)
             metric.append_metrics()
             return self._finish_result(outcome, sha, reasons, metric)
         metric = self._metrics(
             gate_metrics.RoundMetric(round=0, head=(sha or "")[:9], failing=0),
             ref or PullRequestRef(number=self.pr_number, head_ref="", head_sha=sha, state=""),
-            outcome=(
+            outcome=metric_outcome
+            or (
                 gate_metrics.OUTCOME_CONVERGED
                 if outcome is GateOutcome.APPROVED
                 else gate_metrics.OUTCOME_STALLED
             ),
             head=sha,
         )
+        metric.tier = tier
+        metric.passes = passes
         metric.reasons = list(reasons)
         metric.append_metrics()
         return self._finish_result(outcome, sha, reasons, metric)
@@ -1606,6 +2092,24 @@ class GatePipeline:
 # ---------------------------------------------------------------------------
 # Small pure helpers
 # ---------------------------------------------------------------------------
+
+
+def tier_fields(tier: ReviewTier) -> dict[str, Any]:
+    """The ``gate.tier`` log payload, including the human-readable summary line.
+
+    The summary is a field rather than the log call's message so the numbers
+    survive structured-log sinks that drop the message, and so one line can
+    carry the whole reason: which tier, on how many lines, touching how many
+    production-sensitive files.
+    """
+    return {
+        "tier": tier.tier,
+        "lenses": list(tier.lenses),
+        "non_test_lines": tier.lines,
+        "prodsensitive": tier.risky[:10],
+        "n_prodsensitive": len(tier.risky),
+        "summary": tier.summary,
+    }
 
 
 def _n_items(data: dict[str, Any]) -> int:
@@ -1748,6 +2252,7 @@ def run_gate(
     gate_dir: Path | None = None,
     run_id: str | None = None,
     use_systemd: bool | None = None,
+    judge_engine: str | None = None,
     lane_slug: str | None = None,
 ) -> GateResult:
     """Run the ``gate`` pipeline for *pr_number* in *repo_path*.
@@ -1756,6 +2261,11 @@ def run_gate(
     misconfigured or policy-violating model fails in a second rather than after
     a fan-out has already spent the budget.
 
+    *judge_engine* overrides ``gate.judge_backend`` for this run only, so the
+    documented ``--judge-engine`` flag and ``judge_engine`` config key have an
+    observable effect on the gate that actually judges. The lens backend is left
+    alone: the engine that judges is the one the operator asked to change.
+
     *lane_slug* makes gate test file names unique per PR; when it is omitted the
     PR's own head ref supplies it, which is unique for any two distinct PRs.
     """
@@ -1763,6 +2273,8 @@ def run_gate(
     raw = _load_raw_config(config_path)
     policy = parse_model_policy(raw)
     gate_cfg = load_gate_config(raw) or GateConfig()
+    if judge_engine:
+        gate_cfg = replace(gate_cfg, judge_backend=judge_engine)
 
     # Fail fast on policy before constructing anything expensive.
     policy.check(backend=gate_cfg.backend, model=gate_cfg.model, role=ROLE_LENS)

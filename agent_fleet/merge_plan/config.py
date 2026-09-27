@@ -19,7 +19,7 @@ from agent_fleet.merge_plan.profile import (
     LAKE_OF_RAGE_UNITS,
     SILPH_UNITS,
 )
-from agent_fleet.merge_plan.types import ClusterHold, ExecutorSpec, RepoSpec
+from agent_fleet.merge_plan.types import ClusterHold, ExecutorSpec, MergeTrainSpec, RepoSpec
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -38,6 +38,12 @@ _EXECUTOR_KEYS = frozenset(
         "state_dir",
     }
 )
+
+#: Every key ``merge_plan.merge_train`` accepts, checked for the same reason as
+#: :data:`_EXECUTOR_KEYS`.  A misspelled ``include_head_prefixes`` would
+#: otherwise leave the train with the default list, and a train that silently
+#: lands another session's PRs looks exactly like a train that is working.
+_MERGE_TRAIN_KEYS = frozenset({"include_head_prefixes", "exclude_head_prefixes"})
 
 #: Keys accepted inside one ``executor.holds[]`` entry.
 _HOLD_KEYS = frozenset({"name", "match"})
@@ -95,6 +101,8 @@ def parse_repo_spec(raw: Mapping[str, Any]) -> RepoSpec:
         spec.rebase_template = str(raw["rebase_template"])
     if raw.get("dbt_manifest_path"):
         spec.dbt_manifest_path = str(raw["dbt_manifest_path"])
+    if raw.get("base_branch"):
+        spec.base_branch = str(raw["base_branch"])
     globs = raw.get("risk_globs")
     if isinstance(globs, list):
         spec.risk_globs = tuple(str(g) for g in globs)
@@ -260,6 +268,80 @@ def resolve_repo_specs(
         else:
             specs[name] = builtin_spec(name, str(path))
     return specs
+
+
+def _prefixes(block: Mapping[str, object], key: str) -> tuple[str, ...] | None:
+    """One prefix list from the ``merge_train`` block, or ``None`` when unset.
+
+    A YAML ``include_head_prefixes:`` with nothing after it is not the same as
+    an absent key: it asks for no prefixes at all, and is reported as such
+    rather than being quietly replaced by the default that owns ``fb/``.
+    """
+    value = block.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError(f"merge_plan.merge_train.{key} must be a list of branch prefixes")
+    return tuple(str(v) for v in value)
+
+
+def parse_merge_train_spec(raw: Mapping[str, object] | None) -> MergeTrainSpec:
+    """Build a MergeTrainSpec from the ``merge_plan.merge_train:`` mapping.
+
+    Validated strictly, on :data:`_EXECUTOR_KEYS`'s reasoning.  Absent block or
+    absent key means the built-in default, which is the fleet's own ``fb/``
+    convention rather than "allow everything": a train that is only as careful
+    as whoever last edited fleet.yaml is not an ownership filter.
+    """
+    if not isinstance(raw, dict):
+        return MergeTrainSpec()
+    block = cast("Mapping[str, object]", raw)
+    unknown = set(block) - _MERGE_TRAIN_KEYS
+    if unknown:
+        raise ValueError(
+            f"merge_plan.merge_train contains unknown key(s) {sorted(unknown)}; "
+            f"valid keys: {sorted(_MERGE_TRAIN_KEYS)}"
+        )
+    include = _prefixes(block, "include_head_prefixes")
+    exclude = _prefixes(block, "exclude_head_prefixes")
+    return MergeTrainSpec(
+        include_head_prefixes=MergeTrainSpec.include_head_prefixes if include is None else include,
+        exclude_head_prefixes=MergeTrainSpec.exclude_head_prefixes if exclude is None else exclude,
+    )
+
+
+def load_merge_train_spec(fleet_config_path: Path | None = None) -> MergeTrainSpec:
+    """Read ``merge_plan.merge_train:`` from fleet.yaml.
+
+    Returns the defaults when the block is absent.  Raises ``ValueError`` on a
+    malformed block, which the CLI surfaces rather than degrading to a filter
+    that may not be the one that was written.
+    """
+    return parse_merge_train_spec(_read_merge_plan_block(fleet_config_path).get("merge_train"))
+
+
+def resolve_train_base_branch(repo_name: str, fleet_config_path: Path | None = None) -> str:
+    """The base branch ``merge train`` folds onto, from fleet.yaml or ``""``.
+
+    Read for the same repository the train is about, and only for that one: a
+    ``base_branch`` declared for some other repo says nothing about this one.
+    An empty answer means the train resolves the branch from the batch and the
+    remote instead of being told one here.
+    """
+    spec = load_merge_plan_config(fleet_config_path).get(repo_name)
+    return spec.base_branch if spec is not None else ""
+
+
+def resolve_train_repo_name(repo_path: Path) -> str:
+    """The repository name a train over *repo_path* is about.
+
+    Name comes from the checkout itself — the ``origin`` remote when it is
+    readable, the directory name otherwise — and never from the shape of
+    ``merge_plan.repos``.  That map is the whole fleet's inventory, so taking
+    its first key would name a different repository than the operator passed and
+    silently drop every approval belonging to the checkout they asked for.
+    """
+    return _repo_name_from_path(Path(repo_path).expanduser())
 
 
 def _repo_name_from_path(path: Path) -> str:

@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import json
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -22,10 +23,11 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import argparse
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping, Sequence
 
     from agent_fleet.merge_plan.execute import EventSink, TickResult
-    from agent_fleet.merge_plan.types import ExecutorSpec
+    from agent_fleet.merge_plan.train import HeadFilter, TrainPR
+    from agent_fleet.merge_plan.types import ExecutorSpec, RepoSpec
 
 
 def _spec(args: argparse.Namespace) -> ExecutorSpec:
@@ -214,6 +216,372 @@ def cmd_merge_release(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_merge_train(args: argparse.Namespace) -> int:
+    """Run one merge train: test the approved batch combined, land it once.
+
+    The batch comes from the same gate approvals ``merge run`` reads, and the
+    per-PR merge/deploy/verify commands are rendered but *not* executed: a
+    landed train is one deploy, and the operator decides that.  ``--dry-run``
+    prints what would run and reports nothing as landed.
+
+    Three things are decided *before* the base branch is, and each of them
+    decides whether there is a batch at all.  The batch is the first eligible
+    PRs in fold order, and the active cluster holds are consulted against it —
+    the same ledger and the same matcher ``merge run`` uses, so a freeze
+    declared for ``merge run`` is a freeze for the train too.  Resolving the
+    branch over a different set than the one that runs would mean asking the
+    batch a question it is not the one being asked, which is how a folded-onto
+    and a landed-onto branch drift apart.  Last of the three, a branch the
+    operator or fleet.yaml declared that the batch contradicts is refused: a
+    declared branch outranks the repository, so a stale one is folded onto as
+    typed while ``gh pr merge`` lands into the base each PR actually targets —
+    a green verdict for a tree no PR will ever merge as.
+    """
+    from agent_fleet.merge_plan.collect import (
+        GitHubClient,
+        collect_from_lanes,
+        collect_from_status_dir,
+        dedupe_approvals,
+        resolve_lane_approvals,
+    )
+    from agent_fleet.merge_plan.config import (
+        resolve_train_repo_name,
+    )
+    from agent_fleet.merge_plan.plan import normalize_repo
+    from agent_fleet.merge_plan.train import (
+        TrainPR,
+        order_batch,
+        partition_batch,
+        resolve_base_branch,
+        run_train,
+    )
+
+    repo_path = Path(args.repo_path).expanduser()
+    repo = args.repo or resolve_train_repo_name(repo_path)
+    if not repo_path.is_dir():
+        print(f"error: repo path does not exist: {repo_path}", file=sys.stderr)
+        return 2
+
+    approvals = list(collect_from_lanes(operator=args.operator))
+    if args.status_dir:
+        approvals += collect_from_status_dir(Path(args.status_dir).expanduser(), default_repo=repo)
+    # A real status file is ``lanes/<lane>.status`` and names its PR nowhere, so
+    # the approval arrives with only a lane.  Resolving it here, before the
+    # empty check, is what keeps a train from reporting "no open approved PRs"
+    # while the gate has approved six of them: without a PR number there is
+    # nothing to ask GitHub about, and the run would stop one line below.
+    client = GitHubClient().for_repo(repo_path)
+    approvals = resolve_lane_approvals(approvals, client=client, repo=repo)
+    # Gate and lane sources record ``owner/name``; the checkout names the bare
+    # ``name``.  Without the reconciliation every real approval reads as another
+    # repo's and the batch is empty.  Normalising before de-duplicating, as
+    # ``build_plan`` does, is what makes one PR one batch entry: de-duplicating
+    # first keys on the raw spelling, so the two records of the same PR both
+    # survive and it is folded, tested and merged twice.
+    approvals = dedupe_approvals([normalize_repo(a, {repo: repo}) for a in approvals])
+    approvals = [a for a in approvals if normalize_repo(a, {repo: repo}).repo == repo]
+    if not approvals:
+        print(f"no approved PRs found for {repo}")
+        return 0
+
+    config_path = getattr(args, "config", None)
+    lanes = {a.pr_number: a.lane for a in approvals}
+    prs: list[TrainPR] = []
+    for approval in approvals:
+        detail = client.pr_detail(approval.pr_number)
+        if detail.get("state") != "OPEN":
+            continue
+        files = tuple(f.get("path", "") for f in detail.get("files") or [] if isinstance(f, dict))
+        prs.append(
+            TrainPR(
+                number=approval.pr_number,
+                head_sha=approval.approved_sha,
+                base_ref=str(detail.get("baseRefName") or ""),
+                head_branch=str(detail.get("headRefName") or ""),
+                current_head=str(detail.get("headRefOid") or ""),
+                files=tuple(f for f in files if f),
+                head_ref=f"refs/pull/{approval.pr_number}/head",
+            )
+        )
+    if not prs:
+        print(f"no open approved PRs found for {repo}")
+        return 0
+
+    try:
+        head_filter = _head_filter(args, config_path)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    # Ownership is decided before the cap, so a batch is never filled with PRs
+    # that are not this operator's, and before the hold check, so a freeze is
+    # not reported against a PR this train was never going to merge.
+    owned, not_owned = head_filter.split(prs)
+
+    if not owned:
+        # Named and refused, rather than the "no open approved PRs" line above:
+        # the PRs are open and approved, this train just does not own them, and
+        # silence is how another session's PR ends up in the next train.
+        print(
+            f"merge train [{repo}]: nothing to run; "
+            f"{len(not_owned)} approved PR(s) are not owned by this train "
+            f"({head_filter.describe()}): "
+            f"{', '.join(f'#{p.number} {p.head_branch or "(none)"}' for p in not_owned)}",
+            file=sys.stderr,
+        )
+        return 1
+
+    # One batch, resolved once: the PRs that survive the staleness filter, in
+    # fold order, capped.  The cap belongs here rather than inside run_train so
+    # the base branch, the hold check and the run are all answered about the same
+    # set of PRs.
+    keep, moved = partition_batch(owned)
+    batch = order_batch(keep)[: args.max_batch_size]
+
+    if args.dry_run:
+        print(f"merge train dry-run [{repo}]: would test {len(batch)} PR(s) combined")
+        for pr in batch:
+            print(f"  #{pr.number} {pr.head_sha[:9]} base={pr.base_ref or '-'}")
+        for pr in moved:
+            print(f"  #{pr.number} SKIPPED-MOVED head moved to {pr.current_head[:9]}")
+        for pr in not_owned:
+            print(f"  #{pr.number} SKIPPED-NOT-OWNED head {pr.head_branch or '(none)'}")
+        return 0
+
+    held = _held_batch(batch, lanes=lanes, args=args)
+    if held is not None:
+        print(held, file=sys.stderr)
+        return 1
+
+    drift = _base_branch_drift(batch, configured=_configured_base(args, repo, config_path))
+    if drift is not None:
+        print(drift, file=sys.stderr)
+        return 2
+
+    try:
+        base_branch = resolve_base_branch(
+            repo_path,
+            configured=_configured_base(args, repo, config_path),
+            prs=batch,
+        )
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        result = run_train(
+            repo=repo,
+            repo_path=repo_path,
+            prs=batch,
+            command=args.test_command,
+            max_batch_size=args.max_batch_size,
+            report_path=Path(args.report).expanduser() if args.report else None,
+            base_branch=base_branch,
+            head_filter=head_filter,
+            not_owned=not_owned,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # Every git call the fold makes carries a timeout, and only the test
+        # command used to handle one.  A hang in the fetch or the worktree add
+        # therefore escaped as a raw traceback past a command that turns every
+        # other fold failure into an ``error: ...`` sentence, and the candidate
+        # directory it had already made stayed behind.
+        command = " ".join(str(a) for a in (exc.cmd or ()))
+        print(
+            f"error: merge train could not fold onto origin/{base_branch}: "
+            f"{command} timed out after {exc.timeout}s",
+            file=sys.stderr,
+        )
+        return 2
+    except (OSError, RuntimeError) as exc:
+        print(
+            f"error: merge train could not fold onto origin/{base_branch}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+    # The batch the run was given is the CLI's own, decided above; the trainer
+    # narrows it as it folds.  A result that came back without naming its batch
+    # would report ``batch_size: 0`` for a train that ran, so the batch is
+    # stamped onto a result that carries none.  Never overwritten: a trainer
+    # that did fold legitimately drops conflicts and moved heads from ``ordered``.
+    if not result.ordered:
+        result.ordered = tuple(batch)
+    # The PRs this train declined to land are not in the batch, so the run's own
+    # split finds none and its report would omit the reason a run covered fewer
+    # PRs than were approved.  They are handed to run_train above, so they reach
+    # the persisted report; this is the same stamp for a caller that hands the
+    # trainer a batch it filtered itself.  Never overwritten: a run that reported
+    # its own is describing the same set.
+    if not result.not_owned:
+        result.not_owned = tuple(not_owned)
+    print(
+        json.dumps(result.to_dict(), indent=2, default=str) if args.json else result.render_text()
+    )
+    return 0 if result.landed else 1
+
+
+def _head_filter(args: argparse.Namespace, config_path: str | None) -> HeadFilter:
+    """The head-branch filter this train runs with, from flags then fleet.yaml.
+
+    Each flag overrides only its own half of ``merge_plan.merge_train``, on
+    ``--base-branch``'s reasoning that a flag is an instruction and the config is
+    a declaration: naming one prefix on the command line is a correction to what
+    fleet.yaml says this train may land, not a statement that it may land
+    everything.  Omitting both leaves fleet.yaml's answer, and a box with no
+    config at all gets ``MergeTrainSpec``'s own ``fb/`` default.
+
+    Raises ``ValueError`` for a malformed ``merge_train`` block, which the caller
+    reports rather than degrading to the default list: the default is a real
+    ownership filter, so a typo in the configured one must not quietly become it.
+
+    ``getattr`` rather than ``args.include_head_prefix`` because the attribute
+    only exists once the flag is registered, and every other reader in this
+    module reads its arguments the same way.
+    """
+    from agent_fleet.merge_plan.config import load_merge_train_spec
+    from agent_fleet.merge_plan.train import HeadFilter
+
+    spec = load_merge_train_spec(Path(config_path) if config_path else None)
+    include = getattr(args, "include_head_prefix", None)
+    exclude = getattr(args, "exclude_head_prefix", None)
+    return HeadFilter(
+        include=tuple(include) if include else spec.include_head_prefixes,
+        exclude=tuple(exclude) if exclude else spec.exclude_head_prefixes,
+    )
+
+
+def _configured_base(args: argparse.Namespace, repo: str, config_path: str | None) -> str:
+    """The branch the operator or fleet.yaml declares this train folds onto.
+
+    An operator's ``--base-branch`` is an instruction and fleet.yaml's
+    ``base_branch`` is a declaration, so the flag wins; the config answers for
+    every run that did not pass one.  Read through the same resolution the run
+    itself uses, so the drift check and the fold are looking at one branch and
+    not two answers to the same question.
+    """
+    from agent_fleet.merge_plan.config import resolve_train_base_branch
+
+    return getattr(args, "base_branch", "") or resolve_train_base_branch(
+        repo, Path(config_path) if config_path else None
+    )
+
+
+def _base_branch_drift(batch: Sequence[TrainPR], *, configured: str) -> str | None:
+    """Why the configured base is not a branch this batch merges into, or ``None``.
+
+    A configured branch outranks anything read off the repository, so a stale
+    ``merge_plan.repos[].base_branch`` is folded onto exactly as typed.  But
+    ``gh pr merge`` merges each PR into the base GitHub says it targets, so the
+    two only agree while they are the same branch: fold onto ``develop`` a batch
+    that targets ``main`` and the whole run is tested against a tree that will
+    never be the tree that lands, then every PR lands anyway.  A green verdict
+    over a combination no PR will ever merge as is worse than a refusal, because
+    it looks like the work was checked.
+
+    Only the batch's roots are asked (:func:`stack_roots`), for the same reason
+    the base resolution asks them: a stacked PR's base names a sibling in the
+    same batch, not a branch this run merges into.  A batch with no declared
+    bases at all is not contradicted by anything, so it is left to the fold to
+    answer, and so is a run that configured no branch of its own.
+    """
+    from agent_fleet.merge_plan.train import names_of, stack_roots
+
+    declared = {pr.base_ref for pr in stack_roots(batch) if pr.base_ref.strip()}
+    if not configured.strip() or len(declared) != 1:
+        return None
+    (base,) = declared
+    if base == configured.strip():
+        return None
+    return (
+        f"error: configured base branch {configured.strip()!r} is not the branch this batch "
+        f"merges into ({base!r}): the train would fold and test onto "
+        f"origin/{configured.strip()} and land into {base}. Fix the base branch for "
+        f"{names_of(tuple(sorted(pr.number for pr in batch)))} or rebase the PRs"
+    )
+
+
+def _held_batch(
+    batch: Sequence[TrainPR], *, lanes: Mapping[int, str], args: argparse.Namespace
+) -> str | None:
+    """Why this batch may not be merged under an active cluster hold, or ``None``.
+
+    A hold is an operator saying *nothing* merges for these lanes until they
+    release it, and it is held in the ledger rather than in the code, so a
+    command that merges without reading it is not subject to the freeze the
+    operator is relying on.  A train lands PRs one after another with no other
+    checkpoint, so it is the one path that has to ask.
+
+    Matching is ``merge run``'s own: the same active holds, the same per-PR
+    ``ClusterHold.matches``, so the set of merges a hold stops is the same set
+    whichever command the operator reaches for.  Both halves of that matcher are
+    supplied, because a hold is configured on either: the lane the PR is
+    recorded under, and the deploy unit its changed files resolve to.  A train
+    picks the deploy unit *after* the merges, but each PR already carries the
+    files ``gh pr view`` reported and the unit is per-PR
+    (``deploy_unit_for``), exactly as ``build_profile`` derives it — so a freeze
+    declared over ``deploy_units`` applies here too.  Matching on lane alone made
+    ``ClusterHold.matches`` short-circuit on the empty unit and let a
+    ``deploy_units``-only freeze be bypassed outright.
+    """
+    from agent_fleet.merge_plan.config import load_merge_plan_config
+    from agent_fleet.merge_plan.execute import load_ledger
+    from agent_fleet.merge_plan.profile import deploy_unit_for
+    from agent_fleet.merge_plan.train import names_of
+
+    if not batch:
+        return None
+    try:
+        spec = _spec(args)
+    except ValueError as exc:
+        return f"error: {exc}"
+    repo = getattr(args, "repo", "") or ""
+    config_path = getattr(args, "config", None)
+    repo_specs = load_merge_plan_config(Path(config_path) if config_path else None)
+    units = _deploy_units(repo, repo_specs)
+    active = load_ledger(spec).active_holds(spec)
+    held_by_lane = [
+        (hold.name, pr.number)
+        for pr in batch
+        for hold in active
+        if hold.matches(
+            lane=lanes.get(pr.number, ""),
+            deploy_unit=deploy_unit_for(pr.files, units),
+        )
+    ]
+    if not held_by_lane:
+        return None
+    name, _first = held_by_lane[0]
+    return (
+        f"error: cluster hold {name} is holding "
+        f"{names_of(tuple(sorted(n for held, n in held_by_lane if held == name)))} "
+        f"(release: fleet merge release {name})"
+    )
+
+
+def _deploy_units(repo: str, repo_specs: Mapping[str, RepoSpec]) -> Mapping[str, str]:
+    """The ``path prefix -> unit`` table this train's PRs are resolved against.
+
+    A train is over exactly one repository, so the table is that repository's:
+    the one named on the command line when the config declares it under a
+    different spelling, the config's sole declaration when the command line
+    names nothing, and the built-in table for the well-known fleet repos
+    otherwise.  Falling back to an empty table is what let a ``deploy_units``
+    freeze read as "no unit" and slip past the hold, so every path here resolves
+    the real table or the built-in one — never none.
+    """
+    from agent_fleet.merge_plan.config import builtin_spec
+
+    if repo in repo_specs:
+        return repo_specs[repo].deploy_units
+    bare = repo.rsplit("/", 1)[-1]
+    for name, repo_spec in repo_specs.items():
+        if name.rsplit("/", 1)[-1] == bare:
+            return repo_spec.deploy_units
+    if not repo and len(repo_specs) == 1:
+        return next(iter(repo_specs.values())).deploy_units
+    return builtin_spec(repo).deploy_units
+
+
 def register_merge_commands(sub: argparse._SubParsersAction) -> None:
     """Register the ``merge`` command tree on the top-level parser."""
     merge_p = sub.add_parser(
@@ -294,3 +662,64 @@ def register_merge_commands(sub: argparse._SubParsersAction) -> None:
         help="Path to fleet.yaml (default: ~/.agent-fleet/fleet.yaml)",
     )
     release_p.set_defaults(func=cmd_merge_release)
+
+    train_p = merge_sub.add_parser(
+        "train",
+        help="Test the approved batch combined, then land it in one go",
+    )
+    train_p.add_argument("--repo-path", required=True, help="Checkout to land the batch in")
+    train_p.add_argument("--repo", default=None, help="Repo name (default: from --repo-path)")
+    train_p.add_argument(
+        "--config",
+        default=None,
+        help="Path to fleet.yaml (default: ~/.agent-fleet/fleet.yaml)",
+    )
+    train_p.add_argument(
+        "--operator",
+        default=None,
+        help="Only read lanes for this operator (default: all operators)",
+    )
+    train_p.add_argument(
+        "--status-dir",
+        help="Directory of gate status files containing PREMERGE-APPROVED <sha> lines",
+    )
+    train_p.add_argument(
+        "--base-branch",
+        default=None,
+        help="Branch the batch is folded onto (default: the base the PRs name, "
+        "else the remote's default branch)",
+    )
+    train_p.add_argument(
+        "--test-command",
+        default=None,
+        help="Test command for the combined tree; {tree} is the candidate checkout "
+        "(default: pytest over the batch's changed test files)",
+    )
+    train_p.add_argument(
+        "--max-batch-size",
+        type=int,
+        default=5,
+        help="Cap on PRs per train (default 5)",
+    )
+    train_p.add_argument(
+        "--include-head-prefix",
+        action="append",
+        default=None,
+        help="Head-branch prefix this train may land (repeatable). Overrides "
+        "fleet.yaml merge_train.include_head_prefixes; default 'fb/'",
+    )
+    train_p.add_argument(
+        "--exclude-head-prefix",
+        action="append",
+        default=None,
+        help="Head-branch prefix this train may never land, whatever includes "
+        "match (repeatable). Overrides fleet.yaml merge_train.exclude_head_prefixes",
+    )
+    train_p.add_argument("--report", help="Where to write the JSON report")
+    train_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the batch that would be tested without folding, testing, or merging",
+    )
+    train_p.add_argument("--json", action="store_true", help="Emit the result as JSON")
+    train_p.set_defaults(func=cmd_merge_train)

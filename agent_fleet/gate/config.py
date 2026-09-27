@@ -8,6 +8,7 @@ lane on the box shares one approved-model list.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -42,6 +43,52 @@ DEFAULT_LENSES: dict[str, str] = {
 
 DEFAULT_LENS_ORDER: tuple[str, ...] = ("correctness", "contract", "prodsafety", "spec")
 
+#: Non-test changed lines above which a PR gets the full lens set rather than one
+#: all-focus reviewer. Tests, fixtures, docs, snapshots and JSON inflate a diff
+#: without adding review risk, so the count excludes them (see
+#: :func:`agent_fleet.gate.gitops.diff_line_stats`).
+DEFAULT_BIG_LINES = 1200
+
+#: Path patterns that make a PR production-sensitive whatever its size. These
+#: are the changes where one reviewer covering four focuses is thinner than the
+#: work deserves, so they keep the parallel lenses. Configurable via
+#: ``gate.prodsensitive_paths``; the list is matched with ``re.search``.
+DEFAULT_PRODSENSITIVE_PATHS: tuple[str, ...] = (
+    r"^infra/vps/",
+    r"^\.github/workflows/",
+    r"^scripts/(deploy|lor-api-ship|platform-deploy)",
+    r"(^|/)migrations?/",
+    r"(gold|sales).*(write|publish|restat|backfill|apply)",
+    r"run_prod",
+)
+
+#: Path patterns that force a PR onto the full evidence gate. A diff that
+#: touches none of them is reviewed under the lighter STANDARD bar (one
+#: all-focus reviewer, no per-claim verifier, no judge) — see
+#: :mod:`agent_fleet.gate.standard`. This is deliberately coarser than
+#: ``prodsensitive_paths``: that list asks "does this need more than one
+#: reviewer", this one asks "is the cheap bar safe at all".
+#:
+#: The defaults name the changes where a wrong verdict costs a sale, an identity
+#: record, a schema, or a production host: gold/sales tables, identity, stamps,
+#: migrations, schema, CI workflows, the VPS and deploy scripts. Configurable via
+#: ``gate.sensitive_paths``; the list is matched with ``re.search`` against the
+#: repo-relative path, so ``migrations?/`` catches a top-level ``migrations/``
+#: and a nested one alike.
+DEFAULT_SENSITIVE_PATHS: tuple[str, ...] = (
+    r"gold|sales",
+    r"identity",
+    r"stamp",
+    r"migrations?/",
+    r"schema",
+    r"\.github/workflows/",
+    r"infra/vps/",
+    r"deploy",
+    r"run_prod",
+)
+
+_STD_MAX_PASSES = 3
+
 _SCALARS: tuple[str, ...] = (
     "max_findings",
     "max_candidates",
@@ -53,9 +100,11 @@ _SCALARS: tuple[str, ...] = (
     "max_parallel_lenses",
     "max_parallel_verifiers",
     "max_fix_rounds",
+    "big_lines",
     "agent_slots",
     "test_slots",
     "test_cache_ttl_s",
+    "standard_max_passes",
 )
 
 #: Stages the legacy ``agent_timeout_s`` used to drive, in the order the fixer
@@ -77,7 +126,7 @@ _OPTIONAL_STRINGS: tuple[str, ...] = ("model", "judge_model", "push_branch", "pa
 #: by default so the PR's head ref can supply it at run time.
 _OPTIONAL_SLUGS: tuple[str, ...] = ("lane_slug",)
 
-_BOOLS: tuple[str, ...] = ("enable_fix", "enable_judge", "enable_test_cache")
+_BOOLS: tuple[str, ...] = ("enable_fix", "enable_judge", "enable_test_cache", "tier0")
 
 #: Pipeline role -> the budget field that governs it. Spelled out rather than
 #: derived as ``f"{role}_timeout_s"`` because the two vocabularies differ: the
@@ -138,6 +187,38 @@ class GateConfig:
     enable_test_cache: bool = True
     test_cache_dir: str = str(DEFAULT_CACHE_DIR)
     test_cache_ttl_s: int = 24 * 3600
+    #: Approve a docs/tests-only PR on deterministic evidence alone (its own
+    #: changed tests green at head plus the merged-tree check), skipping the
+    #: model review entirely. See docs/GATE.md.
+    tier0: bool = True
+    #: Non-test changed lines above which review gets the full lens set.
+    big_lines: int = DEFAULT_BIG_LINES
+    #: Regexes for changed paths that are production-sensitive regardless of size.
+    prodsensitive_paths: tuple[str, ...] = DEFAULT_PRODSENSITIVE_PATHS
+    #: Regexes for changed paths that force the full evidence gate. A PR touching
+    #: none of them is reviewed under the STANDARD bar (one all-focus reviewer,
+    #: pass-counted fixer); see :mod:`agent_fleet.gate.standard`.
+    sensitive_paths: tuple[str, ...] = DEFAULT_SENSITIVE_PATHS
+    #: Consecutive STANDARD fixer passes before the bar falls back to the full
+    #: evidence gate. Zero findings and green tests approve without a pass.
+    standard_max_passes: int = _STD_MAX_PASSES
+
+    def is_prodsensitive(self, path: str) -> bool:
+        """Whether *path* matches a configured production-sensitive pattern."""
+        return any(re.search(pattern, path) for pattern in self.prodsensitive_paths)
+
+    def is_sensitive(self, path: str) -> bool:
+        """Whether *path* matches a configured sensitive pattern.
+
+        A match here is a veto: the PR keeps the full evidence gate whatever its
+        size, because a wrong verdict on a gold/sales/identity/schema/deploy
+        change is not recoverable by a re-gate pass.
+        """
+        return any(re.search(pattern, path) for pattern in self.sensitive_paths)
+
+    def sensitive_paths_in(self, paths: list[str]) -> list[str]:
+        """The subset of *paths* that is sensitive, in the order given."""
+        return [path for path in paths if self.is_sensitive(path)]
 
     def focus_for(self, lens: str) -> str:
         """Reviewer focus text for *lens* (custom or default)."""
@@ -234,4 +315,18 @@ def load_gate_config(raw: dict[str, Any] | None) -> GateConfig | None:
         kwargs[key] = lane_slug_token(str(value)) if value else getattr(defaults, key)
     for key in _BOOLS:
         kwargs[key] = bool(section.get(key, getattr(defaults, key)))
+    # An empty list is a deliberate "nothing is production-sensitive here", so
+    # it is honoured rather than treated as absent: a repo that has moved its
+    # deploy scripts can say so instead of editing the defaults.
+    patterns = section.get("prodsensitive_paths")
+    if isinstance(patterns, list):
+        kwargs["prodsensitive_paths"] = tuple(str(p) for p in patterns)
+    # Same rule for the sensitive list, with the same reason: "this repo has no
+    # gold tables, so nothing is sensitive here" is a real answer, and silently
+    # restoring the defaults would put every PR on the full gate again. An
+    # empty sensitive list is a safe direction to fail open (the cheap bar) only
+    # because it was asked for explicitly.
+    sensitive = section.get("sensitive_paths")
+    if isinstance(sensitive, list):
+        kwargs["sensitive_paths"] = tuple(str(p) for p in sensitive)
     return GateConfig(**kwargs)

@@ -77,6 +77,34 @@ def _have_systemd_run() -> bool:
     )
 
 
+SCOPE_SLICE_ENV = "AGENT_FLEET_SCOPE_SLICE"
+
+
+def scope_slice(cgroup_file: str = "/proc/self/cgroup") -> str | None:
+    """Slice that a capped scope should join, or ``None`` for systemd's default.
+
+    ``systemd-run --user --scope`` without ``--slice`` lands in ``app.slice``. On a host
+    where ``app.slice`` carries a small MemoryHigh envelope, every agent a fleet unit
+    spawned was throttled there instead of running under the fleet's own slice. The
+    scope therefore joins the slice the caller already runs in (``AGENT_FLEET_SCOPE_SLICE``
+    overrides; an empty value keeps systemd's default).
+    """
+    env = os.environ.get(SCOPE_SLICE_ENV)
+    if env is not None:
+        return env.strip() or None
+    try:
+        text = Path(cgroup_file).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        path = line.rsplit(":", 1)[-1]
+        slices = [part for part in path.split("/") if part.endswith(".slice")]
+        slices = [sl for sl in slices if not sl.startswith(("user-", "user."))]
+        if slices:
+            return slices[-1]
+    return None
+
+
 def plan_memory_cap(
     argv: Sequence[str],
     *,
@@ -104,6 +132,7 @@ def plan_memory_cap(
                 "--user",
                 "--scope",
                 "-q",
+                *([f"--slice={sl}"] if (sl := scope_slice()) else []),
                 "-p",
                 f"MemoryMax={memory_max}",
                 "-p",

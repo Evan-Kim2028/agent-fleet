@@ -7,8 +7,14 @@ the repo; ``.gitignore`` ignores ``.agent-fleet-state.json`` but not
 ``.agent-fleet/``, so the transcript is committed and lands in the merged tree.
 
 The repro assertion: ``git check-ignore .agent-fleet/runs/gate-test-batching/impl.jsonl``
--> no match. These tests fail on the current head and pass once the directory is
-gitignored.
+-> no match.
+
+Those repro assertions were inverted when ``origin/main`` landed the ignore rules
+(``.agent-fleet/runs/`` and ``.agent-fleet/pr/``) and dropped the transcripts that
+were already committed. The invariant the claim asks for -- run transcripts are
+never committed and never committable -- now holds, so that is what is asserted
+here: the runs dir is ignored, and no ``.agent-fleet/runs/`` file is tracked. The
+tests fail again if either side regresses.
 
 Note: the claim's stated impact ('consuming diff budget that the gate caps at
 150000 chars') is not reproducible -- no such cap exists anywhere in
@@ -32,36 +38,33 @@ def _git(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_transcript_path_is_not_covered_by_gitignore() -> None:
-    """`.agent-fleet/` has no ignore rule, so transcripts are committable."""
+def test_transcript_path_is_covered_by_gitignore() -> None:
+    """`.agent-fleet/runs/` is ignored, so transcripts are not committable."""
     result = _git("check-ignore", "-v", TRANSCRIPT)
-    assert result.returncode != 0, (
-        f"gitignore covers {TRANSCRIPT} (matched {result.stdout.strip()!r}); the claim "
-        "says it does not, and a cover is exactly the fix the claim asks for"
+    assert result.returncode == 0, (
+        f"gitignore does not cover {TRANSCRIPT}, so a run transcript can be "
+        "committed into the source tree; the claim asks for exactly this rule"
     )
 
 
-def test_state_file_is_ignored_but_runs_dir_is_not() -> None:
-    """Only the state file is ignored -- the artifact tree beside it is not."""
+def test_state_file_is_ignored_and_so_is_the_runs_dir() -> None:
+    """Both the state file and the artifact tree beside it are ignored."""
     state = _git("check-ignore", "-q", ".agent-fleet-state.json")
-    assert state.returncode == 0, (
-        "precondition: .agent-fleet-state.json is ignored while the run-artifact "
-        "directory is not -- that asymmetry is what lets a transcript through"
-    )
+    assert state.returncode == 0, "precondition: .agent-fleet-state.json is ignored"
     runs = _git("check-ignore", "-q", TRANSCRIPT_OUT)
-    assert runs.returncode != 0, (
-        f"{TRANSCRIPT_OUT} should not be ignored; nothing in .gitignore covers "
-        ".agent-fleet/runs/, so run transcripts are committed to the repo"
+    assert runs.returncode == 0, (
+        f"{TRANSCRIPT_OUT} is not ignored; without a rule covering .agent-fleet/runs/, "
+        "run transcripts can be committed to the repo"
     )
 
 
-def test_branch_introduces_the_transcript_files() -> None:
-    """The transcript must be absent from the branch's tree."""
+def test_no_run_transcript_is_tracked_in_the_tree() -> None:
+    """No run-log transcript is tracked anywhere under the runs dir."""
     listed = _git("ls-tree", "-r", "--name-only", "HEAD")
-    shipped = [line for line in listed.stdout.splitlines() if line in (TRANSCRIPT, TRANSCRIPT_OUT)]
+    shipped = [line for line in listed.stdout.splitlines() if line.startswith(".agent-fleet/runs/")]
     assert not shipped, (
-        f"the branch ships agent run-log transcript(s) in the merged tree: {shipped}. "
-        "Drop them and gitignore .agent-fleet/runs/."
+        f"run-log transcript(s) are tracked in the merged tree: {shipped}. They are "
+        "machine-local state that changes on every dispatch and must never be committed."
     )
 
 
