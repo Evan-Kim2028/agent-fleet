@@ -55,6 +55,7 @@ import logging
 import shlex
 import shutil
 import subprocess
+from dataclasses import replace
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -485,12 +486,51 @@ def bisect(prs: Sequence[TrainPR], tester: Tester) -> tuple[list[TrainPR], list[
 
 
 def _culprit(pr: TrainPR, result: TestResult | None, reason: str) -> PRVerdict:
+    failing = result.failing if result else ()
+    # A red run that names no test is how a missing pytest or a collection
+    # error gets recorded as "the PR is bad" with nothing to fix. Keep the
+    # tail of the output on the verdict so the next gate can see it.
+    if result is not None and not failing and result.summary.strip():
+        tail = " ".join(result.summary.split())[-240:]
+        reason = f"{reason}: {tail}"
     return PRVerdict(
         pr=pr.number,
         status=REGRESSION,
         reason=reason,
-        failing_tests=result.failing if result else (),
+        failing_tests=failing,
     )
+
+
+def adopt_merged_parents(
+    prs: Sequence[TrainPR],
+    *,
+    default: str,
+    parent_is_merged: Callable[[str], bool],
+    retarget: Callable[[TrainPR, str], bool],
+) -> tuple[list[TrainPR], list[TrainPR]]:
+    """Point a child at *default* when its parent pull is already merged.
+
+    The child stays mergeable against the old parent branch after that parent
+    lands, so the train holds it and then has nothing that targets *default*.
+    A base that is another pull's head in this batch is a live stack and is
+    left alone. Returns the batch with those bases updated, and the pulls
+    that changed.
+    """
+    heads = {pr.head_branch for pr in prs if pr.head_branch}
+    updated: list[TrainPR] = []
+    changed: list[TrainPR] = []
+    for pr in prs:
+        base = pr.base_ref
+        if not base or base == default or base in heads or not parent_is_merged(base):
+            updated.append(pr)
+            continue
+        if not retarget(pr, default):
+            updated.append(pr)
+            continue
+        pr = replace(pr, base_ref=default)
+        updated.append(pr)
+        changed.append(pr)
+    return updated, changed
 
 
 # ---------------------------------------------------------------------------

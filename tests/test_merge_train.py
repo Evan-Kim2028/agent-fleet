@@ -55,6 +55,8 @@ from agent_fleet.merge_plan.train import (
     TrainResult,
     bisect,
     ensure_heads_local,
+    _culprit,
+    adopt_merged_parents,
     narrow_mixed_base,
     order_batch,
     partition_batch,
@@ -1702,6 +1704,44 @@ def test_narrow_mixed_base_keeps_a_stack_whose_parent_is_in_the_batch() -> None:
     kept, waiting = narrow_mixed_base([child, parent], configured="", default="main")
     assert waiting == []
     assert {item.number for item in kept} == {1, 2}
+
+
+def test_adopt_merged_parents_retargets_a_child_whose_parent_landed() -> None:
+    child = pr(2, base="dq1d/parent", head="dq1d/child")
+    calls: list[tuple[int, str]] = []
+    updated, changed = adopt_merged_parents(
+        [child],
+        default="main",
+        parent_is_merged=lambda branch: branch == "dq1d/parent",
+        retarget=lambda item, base: calls.append((item.number, base)) or True,
+    )
+    assert [item.number for item in changed] == [2]
+    assert updated[0].base_ref == "main"
+    assert child.base_ref == "dq1d/parent"
+    assert calls == [(2, "main")]
+
+
+def test_adopt_merged_parents_leaves_a_live_stack_alone() -> None:
+    parent = pr(1, base="main", head="dq1d/parent")
+    child = pr(2, base="dq1d/parent", head="dq1d/child")
+    _updated, changed = adopt_merged_parents(
+        [parent, child],
+        default="main",
+        parent_is_merged=lambda _branch: True,
+        retarget=lambda *_args: True,
+    )
+    assert changed == []
+    assert child.base_ref == "dq1d/parent"
+
+
+def test_culprit_keeps_unparsed_output_on_the_reason() -> None:
+    verdict = _culprit(
+        pr(7),
+        _TestResult(passed=False, summary="Failed to spawn: pytest\nNo such file"),
+        "fails on its own against the candidate",
+    )
+    assert verdict.failing_tests == ()
+    assert "Failed to spawn: pytest" in verdict.reason
 
 
 def test_narrow_mixed_base_leaves_a_single_base_batch_alone() -> None:
