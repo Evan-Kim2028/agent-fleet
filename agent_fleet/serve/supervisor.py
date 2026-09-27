@@ -58,7 +58,13 @@ from agent_fleet.serve.paths import (
     read_json,
     write_json_atomic,
 )
-from agent_fleet.serve.procs import ProcIdentity, pid_alive, starttime_fingerprint, terminate_group
+from agent_fleet.serve.procs import (
+    ProcIdentity,
+    escalate_kill_group,
+    pid_alive,
+    starttime_fingerprint,
+    terminate_group,
+)
 
 if TYPE_CHECKING:
     from agent_fleet.serve.clock import Clock
@@ -79,6 +85,16 @@ STATE_CRASH_LOOPING = "crash_looping"
 #: Cap on remembered crash epochs per component, so a long-lived supervisor's
 #: state file does not grow without bound.
 _MAX_CRASH_HISTORY = 50
+
+#: How often the stop path re-checks whether a TERMed component has actually
+#: exited. Short enough that a component that dies on the TERM costs almost
+#: nothing, long enough that the poll is not the dominant cost of the wait.
+_EXIT_POLL_INTERVAL_S = 0.05
+
+#: How long the stop path gives a group KILL to land before reporting the
+#: process as still present. A SIGKILL is delivered by the kernel, so this only
+#: has to cover the reap; it is bounded so a stop can never hang the watchdog.
+_KILL_SETTLE_S = 2.0
 
 
 def expand_command(
@@ -572,19 +588,103 @@ class Supervisor:
         return self.start(name, cause=CAUSE_REQUESTED)
 
     def stop_component(self, name: str, *, cause: str = CAUSE_REQUESTED) -> bool:
-        """TERM a component's group, by recorded fingerprint only."""
+        """Stop a component, by recorded fingerprint only, and wait for it to go.
+
+        Signalling is driven from the *recorded identity*, never from whether a
+        ``Popen`` handle happens to be in :attr:`_procs`. An adopted component
+        — one this supervisor re-attached to at boot rather than spawned — is
+        in exactly that state: it is in :attr:`children` and it is running, but
+        it has no handle here. Gating the TERM on the handle meant an adopted
+        component was never signalled, its pid file was cleared anyway, and the
+        follow-up ``start`` then re-checked :meth:`adopt` against a pid file
+        that no longer existed — so the fingerprint proof never ran and a second
+        process was spawned for the same role. Re-attach, never double-start.
+
+        The wait is what makes the TERM worth sending. ``stop_component`` is
+        followed by an immediate ``start``, so returning while the old process
+        is still alive leaves the wedged one running alongside its replacement:
+        a component that traps SIGTERM would leak one unkillable process per
+        watchdog retry, forever, because nulling the identity here is exactly
+        what makes the TERM impossible to escalate. So the identity is held
+        until the process is confirmed gone, and a group KILL finishes the job
+        when the grace runs out. The grace is spent once, per component, and is
+        bounded by config.
+        """
         state = self.children.get(name)
         if state is None:
             return False
         state.pending_cause = cause
+        identity = state.identity
         proc = self._procs.get(name)
-        if proc is not None and proc.poll() is None:
-            terminate_group(state.identity, proc_root=self.proc_root)
+        if proc is not None and proc.poll() is not None:
+            # Already exited; _reap will account for it. Nothing to signal.
+            identity = None
+        if identity is not None:
+            terminate_group(identity, proc_root=self.proc_root)
+            self._await_exit(name, identity, proc)
         self._clear_pidfile(name)
         state.state = STATE_STOPPED
         state.pid = None
         state.starttime = None
         return True
+
+    def _await_exit(
+        self,
+        name: str,
+        identity: ProcIdentity,
+        proc: subprocess.Popen[bytes] | None,
+    ) -> bool:
+        """Wait out the TERM grace, then group-KILL whatever is still there.
+
+        Returns True when the process is gone by the time this returns, so the
+        caller knows a replacement ``start`` is safe. Polls on a short interval
+        rather than sleeping the whole grace, so a component that exits on the
+        TERM does not cost the caller the full wait.
+        """
+        grace = max(0.0, float(self.config.shutdown_grace_s))
+        deadline = self.clock.monotonic() + grace
+        while self.clock.monotonic() < deadline:
+            if self._exited(identity, proc):
+                return True
+            self.clock.sleep(_EXIT_POLL_INTERVAL_S)
+        if self._exited(identity, proc):
+            return True
+        # Still there after the grace: the TERM was ignored or trapped. The
+        # identity is still intact precisely because stop_component has not
+        # nulled it yet, so the escalation can still prove it owns the pid.
+        killed = escalate_kill_group(identity, proc_root=self.proc_root)
+        if killed.signalled:
+            emit_serve_event(
+                self.operator,
+                "serve.component.kill_escalated",
+                level="warning",
+                data={"component": name, "pid": identity.pid},
+            )
+        # The KILL is not instantaneous; give it a bounded moment to land so
+        # the caller does not spawn a replacement while the corpse is still
+        # holding the group's resources.
+        kill_deadline = self.clock.monotonic() + _KILL_SETTLE_S
+        while self.clock.monotonic() < kill_deadline:
+            if self._exited(identity, proc):
+                return True
+            self.clock.sleep(_EXIT_POLL_INTERVAL_S)
+        return self._exited(identity, proc)
+
+    def _exited(
+        self,
+        identity: ProcIdentity,
+        proc: subprocess.Popen[bytes] | None,
+    ) -> bool:
+        """True once the process is gone, by waitpid or by ``/proc``.
+
+        A process this supervisor spawned can be reaped, and ``proc.poll`` is
+        the authoritative answer for it. An adopted one cannot — it is not our
+        child, so there is nothing to waitpid — and is judged by whether its
+        fingerprint still resolves in ``/proc``.
+        """
+        if proc is not None:
+            return proc.poll() is not None
+        return not identity.matches(proc_root=self.proc_root)
 
     def shutdown(self) -> None:
         """Stop every child, in reverse start order, then persist state.

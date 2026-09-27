@@ -290,7 +290,6 @@ def register_serve_commands(sub: argparse._SubParsersAction) -> None:
         "serve",
         help="Supervise the fleet end to end (dispatch, gate, fix, merge) with no babysitter",
     )
-    serve_sub = serve_p.add_subparsers(dest="serve_command")
 
     def add_common(parser: argparse.ArgumentParser) -> None:
         parser.add_argument(
@@ -303,6 +302,15 @@ def register_serve_commands(sub: argparse._SubParsersAction) -> None:
             help="Explicit serve config file (must contain a `serve:` section)",
         )
         parser.add_argument("--repo-root", default=None, help=argparse.SUPPRESS)
+
+    # `fleet serve` with no subcommand runs the supervisor, so the flags `run`
+    # understands have to live on the parent too — without them the Namespace
+    # that reaches cmd_serve_run has no `operator` at all. The same flags stay
+    # on every subparser so the documented `fleet serve run --operator x` still
+    # works; argparse lets the subparser's own value win when the flag is
+    # repeated, and the parent's default only fills in the no-subcommand case.
+    add_common(serve_p)
+    serve_sub = serve_p.add_subparsers(dest="serve_command")
 
     run_p = serve_sub.add_parser("run", help="Run the supervisor in the foreground (long-running)")
     add_common(run_p)
