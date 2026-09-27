@@ -55,6 +55,7 @@ from agent_fleet.merge_plan.train import (
     TrainResult,
     bisect,
     ensure_heads_local,
+    narrow_mixed_base,
     order_batch,
     partition_batch,
     resolve_base_branch,
@@ -1685,6 +1686,29 @@ def test_roots_that_really_disagree_are_still_refused() -> None:
     # for, and dropping it would fold a develop PR onto main.
     with pytest.raises(ValueError, match="more than one base branch"):
         resolve_base_branch(Path("/nonexistent"), prs=[pr(1, base="main"), pr(2, base="develop")])
+
+
+def test_narrow_mixed_base_holds_a_child_whose_parent_is_absent() -> None:
+    main = pr(1, base="main", head="fb/one")
+    child = pr(2, base="dq1d/collmodern", head="dq1d/gradeambig-manifest")
+    kept, waiting = narrow_mixed_base([main, child], configured="", default="main")
+    assert [item.number for item in kept] == [1]
+    assert [item.number for item in waiting] == [2]
+
+
+def test_narrow_mixed_base_keeps_a_stack_whose_parent_is_in_the_batch() -> None:
+    parent = pr(1, base="main", head="fb/parent")
+    child = pr(2, base="fb/parent", head="fb/child")
+    kept, waiting = narrow_mixed_base([child, parent], configured="", default="main")
+    assert waiting == []
+    assert {item.number for item in kept} == {1, 2}
+
+
+def test_narrow_mixed_base_leaves_a_single_base_batch_alone() -> None:
+    batch = [pr(1, base="develop"), pr(2, base="develop")]
+    kept, waiting = narrow_mixed_base(batch, configured="", default="main")
+    assert waiting == []
+    assert kept == batch
     # A base naming a PR outside the batch is a root, and it is the only answer
     # there is, so the batch is not read as ambiguous.
     assert resolve_base_branch(Path("/nonexistent"), prs=[pr(1, base="feat/gone")]) == "feat/gone"

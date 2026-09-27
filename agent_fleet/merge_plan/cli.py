@@ -250,6 +250,8 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
     from agent_fleet.merge_plan.plan import normalize_repo
     from agent_fleet.merge_plan.train import (
         TrainPR,
+        _default_branch,
+        narrow_mixed_base,
         order_batch,
         partition_batch,
         resolve_base_branch,
@@ -337,6 +339,26 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
     # set of PRs.
     keep, moved = partition_batch(owned)
     batch = order_batch(keep)[: args.max_batch_size]
+    batch, waiting = narrow_mixed_base(
+        batch,
+        configured=_configured_base(args, repo, config_path),
+        default=_default_branch(repo_path) or "main",
+    )
+    batch = order_batch(batch)[: args.max_batch_size]
+    if waiting and not batch:
+        print(
+            f"error: no approved PR targets the train base for {repo}; holding "
+            + ", ".join(f"#{pr.number} (base {pr.base_ref})" for pr in waiting),
+            file=sys.stderr,
+        )
+        return 2
+    if waiting:
+        print(
+            f"merge train [{repo}]: holding "
+            + ", ".join(f"#{pr.number} (base {pr.base_ref})" for pr in waiting)
+            + "; their parent is not in this batch",
+            file=sys.stderr,
+        )
 
     if args.dry_run:
         print(f"merge train dry-run [{repo}]: would test {len(batch)} PR(s) combined")
