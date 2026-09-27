@@ -134,11 +134,39 @@ class RequiredCheck:
         to be a failed ``git diff`` as a PR that touched no file — so running
         the whole set against it would either burn a budget for no evidence or,
         worse, report a red check for code the PR never touched.
+
+        A malformed ``when_paths`` regex is a config error, not a code fact, and
+        must not decide a verdict. Rather than letting ``re.search`` raise out
+        of the gate, a bad pattern makes the check *selected* so that it is
+        reached and reported: it is then surfaced as ``could_not_run`` (see
+        :meth:`bad_patterns` and :func:`run_checks`), which the pipeline already
+        fails closed on. Silently skipping the pattern would read a misconfigured
+        check as "not applicable" and let the PR through — the exact failure this
+        feature exists to prevent.
         """
         if not changed:
             return False
+        if self.bad_patterns():
+            return True
         patterns = self.when_paths or MATCH_ALL
         return any(re.search(pattern, str(path)) for path in changed for pattern in patterns)
+
+    def bad_patterns(self) -> list[str]:
+        """The ``when_paths`` entries that are not valid regexes.
+
+        Empty for a well-formed check. Used to turn a config typo into the same
+        fail-closed "could not run" the gate already reports for a missing
+        binary, instead of an uncaught :class:`re.error` that kills the run with
+        a traceback.
+        """
+        patterns = self.when_paths or MATCH_ALL
+        bad: list[str] = []
+        for pattern in patterns:
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                bad.append(f"{pattern!r} ({exc})")
+        return bad
 
 
 @dataclass(frozen=True)
@@ -192,6 +220,12 @@ def _render(command: str, *, changed_files: Sequence[str], changed_models: Seque
     is not silently rewritten. The values are whitespace-joined and never
     quoted here: the check author decides how to quote them, and a value that
     reached the shell unquoted is the config's command, run as written.
+
+    The substitution is done with a *function* replacement, not a string, so the
+    value is inserted literally. A string replacement is a template: a backslash
+    in a filename is legal on Linux and ``models/a\\1b.sql`` would be read as a
+    backreference and raise :class:`re.error` — crashing the gate over an
+    ordinary repo path.
     """
     values = {
         "changed_files": " ".join(changed_files),
@@ -199,7 +233,7 @@ def _render(command: str, *, changed_files: Sequence[str], changed_models: Seque
     }
     rendered = command
     for key in PLACEHOLDERS:
-        rendered = re.sub(rf"\{{{key}\}}", values[key], rendered)
+        rendered = re.sub(rf"\{{{key}\}}", lambda _m, v=values[key]: v, rendered)
     return rendered
 
 
@@ -250,6 +284,22 @@ def run_check(
     the budget means anything. ``None`` means the caller supplied no pool, and
     the run is then bounded only by the memory cap.
     """
+    bad = check.bad_patterns()
+    if bad:
+        # A malformed when_paths regex is a config typo, not a fact about the
+        # code. It cannot be ignored (that would read as "not selected" and let
+        # the PR through) and it is not a red check, so it is reported as the
+        # infra failure it is — the same fail-closed path a missing binary
+        # takes, with no uncaught re.error escaping the gate.
+        return CheckResult(
+            name=check.name,
+            command=check.command,
+            stage=stage,
+            returncode=127,
+            duration_s=0.0,
+            could_not_run=True,
+            reason=f"invalid when_paths regex: {'; '.join(bad)}",
+        )
     rendered = _render(check.command, changed_files=changed_files, changed_models=changed_models)
     try:
         argv = shlex.split(rendered)
