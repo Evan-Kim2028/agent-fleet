@@ -18,7 +18,9 @@ cannot run offline.
 
 from __future__ import annotations
 
+import os
 import subprocess
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -31,7 +33,7 @@ from agent_fleet.fleet_ops.config import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
 
@@ -93,6 +95,21 @@ def _gh_stdout(argv: list[str], created_pr: int | None) -> str:
     if "create" in argv and created_pr is not None:
         return f"https://github.com/o/r/pull/{created_pr}"
     return "[]"
+
+
+@contextmanager
+def _path_with(*dirs: Path) -> Iterator[None]:
+    """Temporarily prepend *dirs* to ``PATH``.
+
+    The baseline-skip path shells out to a real ``pre-commit`` command, so a
+    shim on ``PATH`` is the only way to exercise it without a network.
+    """
+    original = os.environ.get("PATH", "")
+    os.environ["PATH"] = os.pathsep.join([*(str(d) for d in dirs), original])
+    try:
+        yield
+    finally:
+        os.environ["PATH"] = original
 
 
 # --------------------------------------------------------------- fixers
@@ -197,6 +214,140 @@ def test_a_rename_reports_both_paths_intact(repo: Path) -> None:
     assert "second.py" in files, f"a sibling edit was dropped by the rename in {files}"
     # The source path is a full name, not the tail a blind entry[3:] would leave.
     assert not any(f.startswith("st_module") for f in files), files
+
+
+def test_a_file_name_is_never_executed_as_shell_syntax(repo: Path) -> None:
+    """A file name is an argument, not a command. The agent chooses these names.
+
+    The fixer string is trusted repo config, but ``{py}`` is filled with a path
+    the agent created, and it is handed to ``/bin/sh`` through ``shell=True``.
+    Substituted bare, ``feature.py$(touch PWNED).py`` is a command substitution
+    and runs as the operator — the lane can execute code by naming a file.
+    """
+    hostile = "feature.py$(touch PWNED).py"
+    (repo / hostile).write_text("x = 1\n", encoding="utf-8")
+
+    failed = g.run_fixers(repo, g.changed_files(repo), fixers=("echo fixed {py} > /dev/null",))
+
+    assert failed == [], "the fixer must run cleanly, not be defeated by the name"
+    assert not (repo / "PWNED").exists(), "command injection: the file name was executed"
+
+
+def test_a_fixer_still_reaches_a_name_with_shell_metacharacters(repo: Path) -> None:
+    """The injection fix must not be a filter: ordinary awkward names still get fixed.
+
+    ``report (v2).md`` and ``a&b.py`` are not attacks, and before the quoting they
+    broke the repo's own fixer — ``/bin/sh: 1: b.py: not found`` — so the lane's
+    real files went unfixed. They are fixed now because the path is one word.
+    """
+    for name in ("report (v2).md", "a&b.py"):
+        (repo / name).write_text("x   =   1\n", encoding="utf-8")
+
+    failed = g.run_fixers(repo, g.changed_files(repo), fixers=("sed -i s/1/2/ {py}",), timeout=60)
+
+    assert failed == []
+    for name in ("report (v2).md", "a&b.py"):
+        assert (repo / name).read_text(encoding="utf-8") == "x   =   2\n", name
+
+
+def test_a_fixer_without_a_placeholder_is_still_run_once(repo: Path) -> None:
+    """A whole-tree fixer is the author's own text; only ``{py}`` gets quoted."""
+    (repo / "feature.py").write_text("x = 1\n", encoding="utf-8")
+    seen: list[str] = []
+
+    def record(args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        seen.append(str(args))
+        argv = list(args) if isinstance(args, (list, tuple)) else [args]
+        return subprocess.run(argv, **kwargs)
+
+    g.run_fixers(repo, ["a.py", "b.py"], fixers=("git add -A",), runner=record)
+
+    assert seen == ["git add -A"]
+
+
+# ------------------------------------------------------ return-arity contract
+
+
+def test_every_git_call_in_a_commit_carries_the_skip_overlay(repo: Path) -> None:
+    """The overlay belongs to the whole commit, not just to ``git commit``.
+
+    The commit is conducted under ``SKIP=…``; a ``git add``, a ``git status`` or
+    a ``git reset`` made without it is a git invocation behaving differently from
+    the one the caller asked for, and the contract a repo depends on is that
+    every call in the path sees the same environment.
+    """
+    seen: list[tuple[list[str], dict[str, str] | None]] = []
+
+    def runner(args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        argv = list(args) if isinstance(args, (list, tuple)) else [args]
+        seen.append((argv, kwargs.get("env")))
+        return subprocess.run(argv, **kwargs)
+
+    (repo / "feature.py").write_text("x = 1\n", encoding="utf-8")
+    g.commit_worktree(repo, engine="cmd", lane="movers", skip_hooks=("pyright",), runner=runner)
+
+    # The commit path is the status read, the add, the unstaging and the commit
+    # itself; `head_sha`'s `git rev-parse` is a read of the result, not a step in
+    # producing it.
+    steps = [entry for entry in seen if entry[0][1] != "rev-parse"]
+    assert len(steps) >= 4, f"the commit path was not exercised: {[a[:2] for a, _ in seen]}"
+    for argv, env in steps:
+        assert isinstance(env, dict), f"{argv[:2]} ran without the SKIP overlay"
+        assert env["SKIP"] == "pyright"
+        assert "PATH" in env, "the overlay replaced the environment instead of extending it"
+
+
+def test_a_five_unpack_is_not_confused_by_an_earlier_two_unpack(repo: Path) -> None:
+    """A frame that unpacks something else first still wants five values.
+
+    ``CommitResult`` yields whichever shape the caller's ``UNPACK_SEQUENCE``
+    asked for, and reading "the most recent unpack at or before the instruction
+    pointer" is wrong on CPython 3.14: the pointer lands on the trailing
+    ``STORE_FAST`` of the *previous* statement, so the earlier two-value unpack
+    was mistaken for the target and the five-value call died with "not enough
+    values to unpack (expected 5, got 2)".
+    """
+    runner = _refuse_runner()
+
+    def settings() -> tuple[str, int]:
+        return ("prod", 2)
+
+    # The decoy and the real unpack must be in ONE frame, or this stops
+    # reproducing the shape the defect was reported in.
+    name, env = settings()
+    ok, sha, detail, failed, skipped = g.commit_worktree(
+        repo, engine="cmd", lane="movers", runner=runner
+    )
+    assert (name, env) == ("prod", 2)
+    assert ok is False
+    assert sha is None
+    assert "git add failed" in detail
+    assert (failed, skipped) == ([], [])
+
+
+def test_a_four_unpack_is_not_confused_by_an_earlier_five_unpack(repo: Path) -> None:
+    """The same misreading in the other direction: a 4-unpack after a 5-unpack."""
+    runner = _refuse_runner()
+
+    def probe() -> tuple[int, int, int, int, int]:
+        return (1, 2, 3, 4, 5)
+
+    a, b, c, d, e = probe()
+    ok, sha, detail, failed = g.commit_worktree(repo, engine="cmd", lane="movers", runner=runner)
+    assert (a, b, c, d, e) == (1, 2, 3, 4, 5)
+    assert ok is False
+    assert sha is None
+    assert "git add failed" in detail
+    assert failed == []
+
+
+def _refuse_runner() -> Any:  # noqa: ANN401
+    """A runner that refuses everything, so the call unwraps without touching git."""
+
+    def run(args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:  # noqa: ANN401
+        return subprocess.CompletedProcess(list(args), 1, "", "no")
+
+    return run
 
 
 # ----------------------------------------------------- scratch exclusion
@@ -331,6 +482,63 @@ def test_a_failure_naming_a_non_baseline_hook_is_never_retried(repo: Path) -> No
     assert result.escalated is True
     assert "timer-inventory-check" in result.hooks_failed
     assert result.hooks_skipped == []
+
+
+def test_a_hook_that_was_only_skipped_up_front_is_never_reported_as_verified(
+    repo: Path, tmp_path: Path
+) -> None:
+    """The record may only name a hook this commit actually re-ran and passed.
+
+    ``baseline_hook_ids()`` unions both spellings, so a repo that set
+    ``baseline_skip_hooks`` has ids that were silenced before the first commit
+    and never ran. Publishing those next to the verified ones in the commit
+    message and PR body — which say "clean on this lane's changed files" and
+    "re-run against the files this PR changes" — is a false audit trail in the
+    one durable record a bypassed hook leaves behind. They are still bypassed;
+    they are just not claimed to have been checked.
+    """
+    _hook(
+        repo,
+        "#!/bin/sh\n"
+        'case ",${SKIP}," in *,pyright,*) exit 0;; esac\n'
+        "echo 'baseline debt outside the diff' >&2\n"
+        "printf '[hook]\\n- hook id: pyright\\n'\n"
+        "exit 1\n",
+    )
+    shim_dir = tmp_path / "bin"
+    shim_dir.mkdir()
+    shim = shim_dir / "pre-commit"
+    shim.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    shim.chmod(0o755)
+    (repo / "feature.py").write_text("x = 1\n", encoding="utf-8")
+
+    config = FleetOpsConfig(
+        baseline_hooks=("pyright",),
+        baseline_skip_hooks=("ruff-format",),
+    )
+    assert config.baseline_hook_ids() == ("pyright", "ruff-format")
+
+    with _path_with(shim_dir):
+        result = g.ensure_pull_request(
+            repo,
+            branch="fb/lane",
+            base="main",
+            engine="cmd",
+            lane="lane",
+            skip_hooks=config.baseline_skip_hooks,
+            baseline_hooks=config.baseline_hook_ids(),
+            runner=_fake_gh(),
+        )
+
+    assert result.committed is True
+    assert result.hooks_skipped == ["pyright"]
+    message = _git(repo, "log", "-1", "--format=%B")
+    assert "pyright" in message
+    assert "ruff-format" not in message, "an unverified up-front skip was published as verified"
+    body = g._default_pr_body(
+        lane="lane", engine="cmd", task_file=None, hooks_skipped=result.hooks_skipped
+    )
+    assert "ruff-format" not in body
 
 
 def test_the_bypass_is_recorded_in_the_commit_and_the_pr_body() -> None:

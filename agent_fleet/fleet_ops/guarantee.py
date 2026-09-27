@@ -44,11 +44,11 @@ the diff.
 from __future__ import annotations
 
 import dis
-import itertools
 import json
 import logging
 import os
 import re
+import shlex
 import subprocess
 import sys
 from collections.abc import Callable, Iterator, Sequence
@@ -231,7 +231,11 @@ def build_commit_message(
 
 
 def changed_files(
-    worktree: Path, *, scratch_excludes: Sequence[str] = (), runner: Runner | None = None
+    worktree: Path,
+    *,
+    scratch_excludes: Sequence[str] = (),
+    env: dict[str, str] | None = None,
+    runner: Runner | None = None,
 ) -> list[str]:
     """The worktree-relative paths this lane changed, scratch removed.
 
@@ -245,11 +249,18 @@ def changed_files(
     much the lane's work as one it edited — and scratch is dropped, because a
     fixer rewriting a transcript is pure waste and a formatter touching the
     agent's own config can break the session that produced the work.
+
+    *env* is the caller's ``SKIP=`` overlay. This read is made in the middle of
+    a commit, and a git invocation that runs without the overlay the commit is
+    being conducted under is a way for that commit to behave differently than the
+    one the caller asked for — so the overlay travels with the call rather than
+    being re-derived at each site.
     """
     result = _git(
         ["git", "status", "--porcelain", "-z", "-uall"],
         cwd=worktree,
         runner=runner,
+        env=env,
         timeout=60,
     )
     if result.returncode != 0:
@@ -300,6 +311,12 @@ def run_fixers(
     placeholder runs once per file, so a fixer that cannot parse a particular
     path does not stop the others.
 
+    The substituted path is **shell-quoted** (see :func:`_expand_fixer`), so the
+    file name is an argument and never a piece of the command. It comes from
+    ``git status`` and the agent chooses it, so a name like
+    ``feature.py$(id).py`` would otherwise be executed by the shell, and even an
+    innocent ``report (v2).md`` would break the fixer.
+
     A fixer failing is recorded, never raised. The commit that follows is the
     real authority on whether these files are acceptable and will name whatever
     the fixer could not fix; turning a fixer's exit code into a lane escalation
@@ -317,7 +334,7 @@ def run_fixers(
         if FIXER_PLACEHOLDER in command:
             targets = list(files) or [""]
         for target in targets:
-            argv = command if not target else command.replace(FIXER_PLACEHOLDER, target)
+            argv = _expand_fixer(command, target)
             try:
                 result = run(
                     argv,
@@ -343,6 +360,28 @@ def run_fixers(
                 failed.append(command)
                 break
     return failed
+
+
+def _expand_fixer(command: str, target: str) -> str:
+    """*command* with ``{py}`` replaced by *target*, as one shell word.
+
+    The substitution is quoted, and that is the whole point: the fixer string is
+    trusted config, but the path it is filled with is not — it is whatever the
+    agent happened to create, and it is handed to ``/bin/sh`` through
+    ``shell=True``. Left bare, ``notes.py; rm -rf .`` is two commands and
+    ``report (v2).md`` is a syntax error, so one agent-controlled file name
+    could run arbitrary commands as the operator or stop the repo's own fixer
+    from ever reaching the lane's real files.
+
+    ``shlex.quote`` is the shell's own word-safety answer and is what the path
+    needs regardless of the shell: quoting is a property of the *word*, not of
+    how the command was spelled. An empty *target* (the whole-tree fixer case)
+    is left alone — there is nothing to substitute and the command is the
+    author's own text.
+    """
+    if not target:
+        return command
+    return command.replace(FIXER_PLACEHOLDER, shlex.quote(target))
 
 
 def verify_hook_on_files(
@@ -505,7 +544,7 @@ class CommitResult:
         arity = _caller_unpack_arity()
         if arity is None or arity >= len(self._values):
             return iter(self._values)
-        return itertools.islice(iter(self._values), arity)
+        return iter(self._values[:arity])
 
     def __len__(self) -> int:
         return len(self._values)
@@ -520,12 +559,19 @@ class CommitResult:
 def _caller_unpack_arity() -> int | None:
     """How many values the calling frame is unpacking this result into.
 
-    ``UNPACK_SEQUENCE`` drives iteration synchronously, and the frame holding it
-    has already advanced its instruction pointer past the instruction by the
-    time this runs, so the target is the *most recent* ``UNPACK_SEQUENCE`` at or
-    before that pointer. Returns None for anything unexpected (no such
-    instruction, an unparseable code object, introspection unavailable) so the
-    caller falls back to the full five-value form.
+    CPython evaluates the right-hand side of an unpacking assignment, and only
+    then executes ``UNPACK_SEQUENCE`` on it. So the frame is standing *on* that
+    instruction when iteration begins, and ``f_lasti`` is its offset — not past
+    it, and not the trailing ``STORE_FAST`` of some earlier statement. That is
+    what makes the lookup exact: a frame that unpacks something else first, in an
+    earlier statement, has a *different* ``f_lasti`` and is never confused for
+    this one. Matching the most recent unpack at or before the pointer, as an
+    earlier version of this did, picked up that unrelated one instead and handed
+    back its arity.
+
+    Returns None for anything unexpected (introspection unavailable, an
+    instruction the interpreter is not actually running, a code object that
+    cannot be disassembled) so the caller falls back to the full five-value form.
     """
     try:
         # From this helper: 0=helper, 1=__iter__, 2=the frame doing the unpack.
@@ -533,10 +579,11 @@ def _caller_unpack_arity() -> int | None:
         if frame is None:
             return None
         for instruction in dis.get_instructions(frame.f_code):
-            if instruction.offset > frame.f_lasti:
-                break
+            if instruction.offset != frame.f_lasti:
+                continue
             if instruction.opname == "UNPACK_SEQUENCE":
                 return int(instruction.arg or 0)
+            return None
     except Exception:  # pragma: no cover - never let introspection break a commit
         return None
     return None
@@ -588,14 +635,17 @@ def commit_worktree(
 
     ``--no-verify`` is never used.
     """
-    files = changed_files(worktree, scratch_excludes=scratch_excludes, runner=runner)
-    if fixers and files:
-        run_fixers(worktree, files, fixers=fixers, runner=runner)
-
     # Overlay SKIP on the real environment: a bare {"SKIP": ...} env strips
     # PATH/HOME and breaks the very hooks the manager promises to keep live.
+    # Built before the first git call so that *every* git this function makes —
+    # the status read, the add, the unstaging and the commit itself — carries
+    # the overlay, not just the commit.
     legacy_skip = [h.strip() for h in skip_hooks if h.strip()]
     env = {**os.environ, "SKIP": ",".join(legacy_skip)} if legacy_skip else None
+
+    files = changed_files(worktree, env=env, scratch_excludes=scratch_excludes, runner=runner)
+    if fixers and files:
+        run_fixers(worktree, files, fixers=fixers, runner=runner)
 
     staged, stage_detail = _stage_lane_work(
         worktree, scratch_excludes=scratch_excludes, env=env, runner=runner
@@ -621,7 +671,9 @@ def commit_worktree(
 
     # Re-read the index, not the worktree: a fixer can have rewritten files
     # after `changed_files` was read, and a stale list would verify a hook
-    # against paths this commit no longer contains.
+    # against paths this commit no longer contains. A plain `git status`, and it
+    # deliberately carries no SKIP: the verification below is the one place a
+    # hook must be asked to run for real.
     staged_paths = changed_files(worktree, scratch_excludes=scratch_excludes, runner=runner)
     clean, still_red = verify_hook_on_files(
         worktree, [h for h in hooks_failed if h in baseline], staged_paths, runner=runner
@@ -629,11 +681,17 @@ def commit_worktree(
     if still_red or not clean:
         return CommitResult((False, None, detail, hooks_failed, []))
 
-    # An id the repo listed both ways is named once, and named as skipped: the
-    # up-front SKIP is what let the first commit through, and the verification
-    # is what proves that was safe. Reporting it as skipped is the honest record.
-    skipped = sorted({*clean, *legacy_skip})
-    retry_env = {**os.environ, "SKIP": ",".join(skipped)}
+    # Only the hooks this commit actually *proved* are reported. The up-front
+    # skip ids are not among them: `FleetOpsConfig.baseline_hook_ids()` unions
+    # both spellings, so a repo that set `baseline_skip_hooks` has ids that were
+    # silenced before the first commit and never ran against anything. They are
+    # still *bypassed* — the retry's SKIP below has to keep carrying them, or the
+    # retry is not the commit the caller asked for — but publishing them under
+    # the wording build_commit_message and _default_pr_body use ("clean on this
+    # lane's changed files") would claim a verification that never happened, in
+    # the one durable record a bypassed hook leaves behind.
+    skipped = sorted(set(clean))
+    retry_env = {**os.environ, "SKIP": ",".join(sorted({*clean, *legacy_skip}))}
     # The index is empty when a hook aborts a commit, so restage: the retry has
     # to carry the same content the first attempt was refused for.
     restaged, restage_detail = _stage_lane_work(

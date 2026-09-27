@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+### Fixed
+
+- **The PR guarantee no longer misreports itself in four ways.** Each of these is a
+  claim the manager makes about the commit it just made, and each was wrong:
+  - **A file name is no longer executed as shell syntax.** `pre_commit_fixers` fill
+    `{py}` with a path the *agent* chose and hand it to `/bin/sh` through
+    `shell=True`; substituted bare, a file called `feature.py$(id).py` ran `id` as
+    the operator, and ordinary names like `report (v2).md` or `a&b.py` broke the
+    repo's own fixer so the lane's real files went unfixed. The path is now
+    shell-quoted, so it is one argument whatever it is named. A fixer *without*
+    `{py}` is the author's own text and is still run once, unquoted.
+  - **The `SKIP=` overlay now covers the whole commit, not just `git commit`.** The
+    status read, the `git add` and the scratch unstaging all run under the same
+    environment the commit does, instead of one call in the path running without
+    an overlay the repo depends on.
+  - **A bypass is only recorded as *verified* if this commit verified it.**
+    `baseline_hook_ids()` unions both spellings, so a repo that set
+    `baseline_skip_hooks` had ids silenced before the first commit and never run —
+    and they were published in the commit message and PR body under wording that
+    claims each "was re-run against the files this PR changes and passed there".
+    Those ids are still bypassed (the retry must keep carrying them); they are just
+    no longer claimed to have been checked, because that record is the only durable
+    trace a bypassed hook leaves.
+  - **`commit_worktree`'s dual 4-/5-value result no longer misreads the caller.**
+    It yields whichever shape the caller's `UNPACK_SEQUENCE` asked for, read from
+    the frame's instruction pointer. Matching "the most recent unpack at or before"
+    the pointer picked up an unrelated earlier unpack in the same frame on CPython
+    3.14, so a 5-value call after a 2-value one raised "not enough values to unpack
+    (expected 5, got 2)" — and the reverse for a 4-value call after a 5-value one.
+    The pointer is now matched exactly, which is where CPython leaves it.
+
 ### Added
 
 - **`fleet lane run` never ends "success" with uncommitted work, and commits through baseline debt
