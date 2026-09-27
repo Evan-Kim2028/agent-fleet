@@ -1897,6 +1897,31 @@ class GatePipeline:
             )
         prior = self.state.reusable_verified(self._pr_patch)
         if prior is not None:
+            # A patch-id is the *PR's own change*, and it says nothing about
+            # what the base did. A rebase onto a moved main can introduce a
+            # fresh regression in the very files the earlier run reviewed while
+            # leaving the PR's diff — and so its patch-id — byte-identical.
+            #
+            # When the earlier run approved it holds no findings, and its
+            # approval was the statement "these lenses found nothing in this
+            # diff at that head". That statement is not a transferable
+            # artifact: carrying it across a rebase lets a head no reviewer
+            # ever looked at take the reuse branch, dispatch nothing, and land
+            # on "nothing confirmed, therefore approved". An empty payload
+            # therefore proves nothing, so the *soundness* re-run cannot rescue
+            # it (it has no test to re-run) and reuse is refused outright.
+            #
+            # Same-head reuse is untouched: there the code is identical, so the
+            # earlier "found nothing" is a statement about exactly this head.
+            evidence = prior.payload.get("evidence", {})
+            if not evidence.get("confirmed") and not evidence.get("gate_tests"):
+                self._log(
+                    "gate.reuse.refused",
+                    prior_head=prior.head_sha[:9],
+                    patch_id=self._pr_patch[:12],
+                    reason="no findings to carry across a rebase",
+                )
+                return None
             self._log(
                 "gate.reuse",
                 pr_diff="unchanged",
