@@ -18,11 +18,27 @@ Only when there is genuinely nothing to publish (a clean tree, no commits ahead
 of base) does it give up, and then it says so explicitly with a reason.
 
 On hooks: the manager uses plain ``git commit`` so the repo's real hooks run.
-``--no-verify`` is never used. The *only* concession is a ``SKIP=`` environment
-overlay naming the hook ids the repo declared as baseline-red — pre-commit's
-own supported mechanism, and narrower than disabling hooks. If a non-baseline
-hook fails, the commit fails and the lane escalates with the hook output
-attached, which is the correct outcome: that is a real problem with the diff.
+``--no-verify`` is never used. There are two ways a hook can be stepped around,
+and the difference between them is the whole point:
+
+* ``baseline_skip_hooks`` — those ids are skipped up front and never run. A
+  blunt instrument, kept because repos already configure it.
+* ``baseline_hooks`` — *verified* baseline debt. The first commit runs every
+  hook live. Only a failure naming one of these earns a retry, and only after
+  each one has been re-run against the lane's own changed files and passed
+  there. A hook that is red about this diff is still red, still fails the lane,
+  and is never skipped.
+
+The second exists because a repo-wide hook that fails on the base branch's own
+debt blocks every lane in the repo, and the operator's only way out is to skip
+it for everything — which then waves through real failures too. Verifying
+against the lane's own files keeps the two apart, and the ids that were bypassed
+are recorded in the commit message and the PR body, because a hook that never
+ran leaves no other trace.
+
+If a non-baseline hook fails, the commit fails and the lane escalates with the
+hook output attached, which is the correct outcome: that is a real problem with
+the diff.
 """
 
 from __future__ import annotations
@@ -36,6 +52,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from agent_fleet.fleet_ops.config import DEFAULT_FIXER_TIMEOUT_S, FIXER_PLACEHOLDER
 
 #: A subprocess callable, injected by callers that need to stub ``gh``.
 Runner = Callable[..., subprocess.CompletedProcess[str]]
@@ -81,6 +99,11 @@ class GuaranteeResult:
     #: Hook ids that refused the auto-commit, in the order pre-commit listed them.
     #: Empty for a commit failure that was not a hook failure.
     hooks_failed: list[str] = field(default_factory=list)
+    #: Baseline hook ids that failed the first commit, were confirmed clean on the
+    #: lane's own files, and were then bypassed with ``SKIP=``. Recorded rather
+    #: than merely applied: a bypassed hook is invisible in the diff, so the only
+    #: trace of it is the commit message and the PR body written from this.
+    hooks_skipped: list[str] = field(default_factory=list)
 
     @property
     def guaranteed(self) -> bool:
@@ -98,6 +121,7 @@ class GuaranteeResult:
             "escalated": self.escalated,
             "detail": self.detail,
             "hooks_failed": self.hooks_failed,
+            "hooks_skipped": self.hooks_skipped,
         }
 
 
@@ -171,13 +195,22 @@ def head_sha(worktree: Path, *, runner: Runner | None = None, short: int = 0) ->
 
 
 def build_commit_message(
-    engine: str, *, task_file: str | None = None, lane: str | None = None
+    engine: str,
+    *,
+    task_file: str | None = None,
+    lane: str | None = None,
+    hooks_skipped: Sequence[str] = (),
 ) -> str:
     """Commit message for the manager's auto-commit.
 
     Subject is the fixed ``fleet: auto-commit after <engine> run`` convention.
     The body records provenance, so a reviewer seeing this commit in the PR
     history knows the agent did not make it and where the work came from.
+
+    *hooks_skipped* is written into the body when the commit had to bypass any
+    baseline hook. That line is the only durable record of the bypass: the hook
+    leaves no trace in a diff it never saw, so a commit that passed the way this
+    one did is otherwise indistinguishable from a commit that needed nothing.
     """
     subject = AUTO_COMMIT_SUBJECT.format(engine=engine)
     lines = [subject, ""]
@@ -187,13 +220,168 @@ def build_commit_message(
         lines.append(f"Lane: {lane}")
     if task_file:
         lines.append(f"Task file: {task_file}")
+    if hooks_skipped:
+        ids = ", ".join(hooks_skipped)
+        lines.append("")
+        lines.append(f"Skipped baseline hooks (clean on this lane's changed files): {ids}")
     return "\n".join(lines)
 
 
+def changed_files(
+    worktree: Path, *, scratch_excludes: Sequence[str] = (), runner: Runner | None = None
+) -> list[str]:
+    """The worktree-relative paths this lane changed, scratch removed.
+
+    ``git status --porcelain -z`` rather than the newline form: a path
+    containing a newline would otherwise be split into two entries, and a fixer
+    would then be handed half a filename. ``-z`` NUL-separates and quotes
+    nothing, so the split is exact.
+
+    Staged, unstaged and untracked all count — a file the agent created is as
+    much the lane's work as one it edited — and scratch is dropped, because a
+    fixer rewriting a transcript is pure waste and a formatter touching the
+    agent's own config can break the session that produced the work.
+    """
+    result = _git(
+        ["git", "status", "--porcelain", "-z", "-uall"],
+        cwd=worktree,
+        runner=runner,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        return []
+    files: list[str] = []
+    for entry in (result.stdout or "").split("\0"):
+        if len(entry) < 4:
+            continue
+        # "XY <path>": the first three characters are the two status columns and
+        # the space. Both are fixed width, so a rename's "-> " tail starts past
+        # them and is dropped by the scratch check rather than read as a path.
+        files.append(entry[3:])
+    return [f for f in files if f and not _is_scratch(f, scratch_excludes)]
+
+
+def _is_scratch(path: str, scratch_excludes: Sequence[str]) -> bool:
+    """Whether *path* falls under any configured scratch prefix."""
+    return any(path == p or path.startswith(p) for p in scratch_excludes if p)
+
+
+def run_fixers(
+    worktree: Path,
+    files: Sequence[str],
+    *,
+    fixers: Sequence[str] = (),
+    timeout: int = DEFAULT_FIXER_TIMEOUT_S,
+    runner: Runner | None = None,
+) -> list[str]:
+    """Run the repo's fixers over *files*; return the fixers that failed.
+
+    Each command is a shell string from repo config with ``{py}`` standing in
+    for the file. A command carrying no placeholder is a whole-tree fixer by
+    design (a codemod that is not a per-file one) and runs once; one that has the
+    placeholder runs once per file, so a fixer that cannot parse a particular
+    path does not stop the others.
+
+    A fixer failing is recorded, never raised. The commit that follows is the
+    real authority on whether these files are acceptable and will name whatever
+    the fixer could not fix; turning a fixer's exit code into a lane escalation
+    would fail a lane whose files are fine, on a tool's opinion of itself.
+    """
+    failed: list[str] = []
+    run = runner or subprocess.run
+    for fixer in fixers:
+        command = (fixer or "").strip()
+        if not command:
+            continue
+        # No placeholder means "this fixer takes the worktree", not "this fixer
+        # takes the literal string {py}"; run it exactly once.
+        targets: list[str] = [""]
+        if FIXER_PLACEHOLDER in command:
+            targets = list(files) or [""]
+        for target in targets:
+            argv = command if not target else command.replace(FIXER_PLACEHOLDER, target)
+            try:
+                result = run(
+                    argv,
+                    shell=True,
+                    cwd=worktree,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=timeout,
+                )
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                logger.warning("fixer %r failed on %s: %s", command, target or ".", exc)
+                failed.append(command)
+                break
+            if result.returncode != 0:
+                logger.warning(
+                    "fixer %r exited %d on %s: %s",
+                    command,
+                    result.returncode,
+                    target or ".",
+                    (result.stderr or result.stdout or "").strip()[:200],
+                )
+                failed.append(command)
+                break
+    return failed
+
+
+def verify_hook_on_files(
+    worktree: Path,
+    hook_ids: Sequence[str],
+    files: Sequence[str],
+    *,
+    runner: Runner | None = None,
+) -> tuple[list[str], list[str]]:
+    """Re-run named pre-commit hooks over *files* only: ``(clean, still_red)``.
+
+    This is the check that makes a baseline skip safe. A repo-wide hook fails on
+    the base branch's own debt; the question before bypassing one is whether it
+    would *also* have failed on this lane's files. ``pre-commit run <id> --files
+    ...`` answers exactly that, because the hooks framework applies each hook's
+    own ``files``/``types``/``exclude`` filters to the paths it is given.
+
+    ``--all-files`` is deliberately never used. It would re-run the hook over
+    the whole tree and reproduce the baseline debt this is measuring around.
+
+    A hook that is still red on the lane's own files is returned in *still_red*
+    and is never skipped: that is a real problem with the diff, which is the one
+    thing a baseline allowance must not paper over. A hook id the repo has no
+    config for is also *still_red* — there is nothing to verify it against, and
+    an unverifiable hook is not a clean one.
+    """
+    targets = [f for f in files if f]
+    if not targets:
+        return list(hook_ids), []
+    clean: list[str] = []
+    still_red: list[str] = []
+    for hook_id in hook_ids:
+        result = _git(
+            ["pre-commit", "run", hook_id, "--files", *targets],
+            cwd=worktree,
+            runner=runner,
+            timeout=DEFAULT_FIXER_TIMEOUT_S,
+        )
+        if result.returncode == 0:
+            clean.append(hook_id)
+        else:
+            logger.info(
+                "baseline hook %s is also red on the lane's own files; not skipping it",
+                hook_id,
+            )
+            still_red.append(hook_id)
+    return clean, still_red
+
+
 def _stage_lane_work(
-    worktree: Path, *, env: dict[str, str] | None = None, runner: Runner | None = None
+    worktree: Path,
+    *,
+    scratch_excludes: Sequence[str] = (),
+    env: dict[str, str] | None = None,
+    runner: Runner | None = None,
 ) -> tuple[bool, str]:
-    """Stage the lane's work, leaving the engine's run logs out of the index.
+    """Stage the lane's work, leaving scratch and the engine's run logs out of the index.
 
     Staging is all-then-unstage rather than an exclusion pathspec, because a
     single ``git add -A`` cannot express "all of it except the run dir". Given
@@ -211,10 +399,16 @@ def _stage_lane_work(
     Either way the lane escalates as ``commit_failed`` for a worktree full of
     real work, which is the exact misreport this guarantee exists to prevent.
     So the add is unconditional — it cannot fail on an ignore rule — and the
-    run-log subtree is then taken back out of the index. Unstaging also covers
+    scratch paths are then taken back out of the index. Unstaging also covers
     a *tracked* transcript, which an exclusion pathspec could not, and
     ``info/exclude`` still governs the untracked half: a run log that no repo
     tracks never reaches the index at all.
+
+    *scratch_excludes* is the repo-configured list of paths that are never
+    the lane's work — the agent's own ``.commandcode/`` and the ``%h/`` home a
+    shell driver leaves behind. They get the same unstage treatment as the run
+    logs, and for the same reason: unstaging leaves them in the worktree, so
+    nothing is lost, and they stop being able to *cause* a commit failure.
     """
     add = _git(
         ["git", "add", "-A", "--", "."],
@@ -226,19 +420,44 @@ def _stage_lane_work(
     if add.returncode != 0:
         return False, f"git add failed: {(add.stderr or add.stdout).strip()[:500]}"
 
-    # `git reset` (not `rm --cached`) so an *edit* to a tracked run log is
+    # `git reset` (not `rm --cached`) so an *edit* to a tracked scratch file is
     # unstaged back to HEAD rather than turned into a deletion. A path that is
     # not in the index is a no-op here, so this never fails on a clean lane.
-    unstage = _git(
-        ["git", "reset", "-q", "--", RUN_DIR_LOGS],
+    for path in (RUN_DIR_LOGS, *(p.strip("/ ") for p in scratch_excludes if p.strip())):
+        unstage = _git(
+            ["git", "reset", "-q", "--", path],
+            cwd=worktree,
+            runner=runner,
+            env=env,
+            timeout=300,
+        )
+        if unstage.returncode != 0:
+            return (
+                False,
+                f"git reset failed for {path}: {(unstage.stderr or unstage.stdout).strip()[:500]}",
+            )
+    return True, ""
+
+
+def _commit_once(
+    worktree: Path,
+    *,
+    message: str,
+    env: dict[str, str] | None,
+    runner: Runner | None,
+) -> tuple[bool, str, list[str]]:
+    """One plain ``git commit``; returns ``(ok, detail, hooks_failed)``."""
+    commit = _git(
+        ["git", "commit", "-m", message],
         cwd=worktree,
         runner=runner,
         env=env,
-        timeout=300,
+        timeout=900,
     )
-    if unstage.returncode != 0:
-        return False, f"git reset failed: {(unstage.stderr or unstage.stdout).strip()[:500]}"
-    return True, ""
+    if commit.returncode == 0:
+        return True, "", []
+    detail = "\n".join(p for p in (commit.stdout, commit.stderr) if p).strip()[:2000]
+    return False, detail or "git commit failed", failed_hook_ids(detail)
 
 
 def commit_worktree(
@@ -248,44 +467,105 @@ def commit_worktree(
     task_file: str | None = None,
     lane: str | None = None,
     skip_hooks: Sequence[str] = (),
+    baseline_hooks: Sequence[str] = (),
+    fixers: Sequence[str] = (),
+    scratch_excludes: Sequence[str] = (),
     runner: Runner | None = None,
-) -> tuple[bool, str | None, str, list[str]]:
-    """Stage everything *except the run logs* and commit with hooks enabled.
+) -> tuple[bool, str | None, str, list[str], list[str]]:
+    """Fix, stage and commit the lane's work. Returns
+    ``(committed, sha, detail, hooks_failed, hooks_skipped)``.
 
-    Returns ``(committed, sha, detail, hooks_failed)``. *skip_hooks* becomes the
-    ``SKIP=`` environment overlay — pre-commit's own selective-skip mechanism.
-    Hooks not named there run normally; a failure from one of them aborts the
-    commit, and both the ids of the failing hooks and the output are surfaced so
-    the lane can escalate with something actionable.
+    *skip_hooks* is the pre-existing up-front ``SKIP=`` overlay and keeps its
+    old meaning: those ids never run. *baseline_hooks* is the stronger,
+    verified form and is the one a repo should prefer.
 
-    The run logs are kept out twice over: ``info/exclude`` (written when the
-    worktree was set up) and the explicit filtering in :func:`_stage_lane_work`
-    — an explicit ``--run-dir`` inside the worktree, or a repo whose exclude
-    file could not be written, must not be able to put a transcript into a
-    commit.
+    With *baseline_hooks* the order is the point, and it is *live first*. The
+    first commit runs every hook. Only if that commit fails, and only on hooks
+    the repo declared baseline, is each one re-run against the lane's own
+    changed files; the ones that are clean there — red on the base branch's
+    debt alone — are bypassed on a second commit, and the rest still fail the
+    lane. That is what separates a repo-wide hook that has been red since
+    Tuesday from a hook that is red about *this diff*: the first is debt the
+    lane did not inherit, the second is the lane's problem, and a manager that
+    cannot tell them apart either blocks every lane in the repo or waves through
+    real failures.
+
+    A commit can therefore succeed two ways and the caller can tell which: with
+    every hook satisfied (*hooks_skipped* empty), or with baseline debt bypassed
+    after it was proven not to apply to this diff (*hooks_skipped* names it).
+    Only the second is reported anywhere else — the commit message and the PR
+    body — because a bypassed hook is otherwise invisible to every reviewer.
+
+    *fixers* run over the changed files before anything is staged, so a commit
+    the repo's own style hooks would reject is never attempted.
+    *scratch_excludes* keep the agent's own directories out of the index.
+    Neither can make a commit succeed that should fail — they only keep
+    avoidable failures off the path.
+
+    ``--no-verify`` is never used.
     """
-    skip_env = {"SKIP": ",".join(h for h in skip_hooks if h)} if any(skip_hooks) else {}
-    # Overlay SKIP on the real environment: a bare {"SKIP": ...} env strips PATH/HOME and
-    # breaks the very hooks the manager promises to keep live.
-    env = {**os.environ, **skip_env} if skip_env else None
+    files = changed_files(worktree, scratch_excludes=scratch_excludes, runner=runner)
+    if fixers and files:
+        run_fixers(worktree, files, fixers=fixers, runner=runner)
 
-    staged, stage_detail = _stage_lane_work(worktree, env=env, runner=runner)
+    # Overlay SKIP on the real environment: a bare {"SKIP": ...} env strips
+    # PATH/HOME and breaks the very hooks the manager promises to keep live.
+    legacy_skip = [h.strip() for h in skip_hooks if h.strip()]
+    env = {**os.environ, "SKIP": ",".join(legacy_skip)} if legacy_skip else None
+
+    staged, stage_detail = _stage_lane_work(
+        worktree, scratch_excludes=scratch_excludes, env=env, runner=runner
+    )
     if not staged:
-        return False, None, stage_detail, []
+        return False, None, stage_detail, [], []
 
     message = build_commit_message(engine, task_file=task_file, lane=lane)
-    commit = _git(
-        ["git", "commit", "-m", message],
-        cwd=worktree,
-        runner=runner,
-        env=env,
-        timeout=900,
-    )
-    if commit.returncode != 0:
-        detail = "\n".join(p for p in (commit.stdout, commit.stderr) if p).strip()[:2000]
-        return False, None, detail or "git commit failed", failed_hook_ids(detail)
+    ok, detail, hooks_failed = _commit_once(worktree, message=message, env=env, runner=runner)
+    if ok:
+        return True, head_sha(worktree, runner=runner), "", [], []
 
-    return True, head_sha(worktree, runner=runner), "", []
+    baseline = {h.strip() for h in baseline_hooks if h.strip()}
+    if not baseline or not hooks_failed:
+        return False, None, detail, hooks_failed, []
+
+    # Only a failure that is *entirely* baseline hooks earns a retry. One real
+    # hook in the list means this commit is not publishable, and a SKIP that
+    # left that hook out would be a quiet way to ship past it.
+    offending = [h for h in hooks_failed if h not in baseline]
+    if offending:
+        return False, None, detail, hooks_failed, []
+
+    # Re-read the index, not the worktree: a fixer can have rewritten files
+    # after `changed_files` was read, and a stale list would verify a hook
+    # against paths this commit no longer contains.
+    staged_paths = changed_files(worktree, scratch_excludes=scratch_excludes, runner=runner)
+    clean, still_red = verify_hook_on_files(
+        worktree, [h for h in hooks_failed if h in baseline], staged_paths, runner=runner
+    )
+    if still_red or not clean:
+        return False, None, detail, hooks_failed, []
+
+    # An id the repo listed both ways is named once, and named as skipped: the
+    # up-front SKIP is what let the first commit through, and the verification
+    # is what proves that was safe. Reporting it as skipped is the honest record.
+    skipped = sorted({*clean, *legacy_skip})
+    retry_env = {**os.environ, "SKIP": ",".join(skipped)}
+    # The index is empty when a hook aborts a commit, so restage: the retry has
+    # to carry the same content the first attempt was refused for.
+    restaged, restage_detail = _stage_lane_work(
+        worktree, scratch_excludes=scratch_excludes, env=retry_env, runner=runner
+    )
+    if not restaged:
+        return False, None, restage_detail, hooks_failed, []
+
+    message = build_commit_message(engine, task_file=task_file, lane=lane, hooks_skipped=skipped)
+    ok, detail, still_failing = _commit_once(
+        worktree, message=message, env=retry_env, runner=runner
+    )
+    if not ok:
+        return False, None, detail, still_failing or hooks_failed, []
+
+    return True, head_sha(worktree, runner=runner), "", [], skipped
 
 
 def resolve_push_target(
@@ -507,6 +787,9 @@ def ensure_pull_request(
     title: str | None = None,
     body: str | None = None,
     skip_hooks: Sequence[str] = (),
+    baseline_hooks: Sequence[str] = (),
+    fixers: Sequence[str] = (),
+    scratch_excludes: Sequence[str] = (),
     runner: Runner | None = None,
     skip_env: dict[str, str] | None = None,
     no_changes_detail: str = "",
@@ -534,13 +817,17 @@ def ensure_pull_request(
 
     committed = False
     commit_sha: str | None = None
+    hooks_skipped: list[str] = []
     if is_dirty(worktree, runner=runner):
-        ok, sha, detail, hooks_failed = commit_worktree(
+        ok, sha, detail, hooks_failed, hooks_skipped = commit_worktree(
             worktree,
             engine=engine,
             task_file=task_file,
             lane=lane,
             skip_hooks=tuple(skip_env.get("SKIP", "").split(",")) if skip_env.get("SKIP") else (),
+            baseline_hooks=baseline_hooks,
+            fixers=fixers,
+            scratch_excludes=scratch_excludes,
             runner=runner,
         )
         if not ok:
@@ -568,6 +855,7 @@ def ensure_pull_request(
             commit_sha=commit_sha,
             pushed=pushed,
             skip_env=skip_env,
+            hooks_skipped=hooks_skipped,
             reason="existing PR",
         )
 
@@ -582,6 +870,7 @@ def ensure_pull_request(
             commit_sha=commit_sha,
             pushed=pushed,
             skip_env=skip_env,
+            hooks_skipped=hooks_skipped,
             reason="no_changes_stopped" if no_changes_detail else "no_commits_ahead",
             escalated=True,
             detail=f"{summary}\n{no_changes_detail}".strip() if no_changes_detail else summary,
@@ -591,7 +880,13 @@ def ensure_pull_request(
         branch=branch,
         base=base,
         title=title or _default_pr_title(lane=lane, engine=engine, task_file=task_file),
-        body=body or _default_pr_body(lane=lane, engine=engine, task_file=task_file),
+        body=body
+        or _default_pr_body(
+            lane=lane,
+            engine=engine,
+            task_file=task_file,
+            hooks_skipped=hooks_skipped,
+        ),
         cwd=worktree,
         runner=runner,
     )
@@ -602,6 +897,7 @@ def ensure_pull_request(
             commit_sha=commit_sha,
             pushed=pushed,
             skip_env=skip_env,
+            hooks_skipped=hooks_skipped,
             reason="pr_create_failed",
             escalated=True,
             detail=f"gh pr create did not yield a PR for {branch}",
@@ -613,6 +909,7 @@ def ensure_pull_request(
         commit_sha=commit_sha,
         pushed=pushed,
         skip_env=skip_env,
+        hooks_skipped=hooks_skipped,
         reason="pr_created",
     )
 
@@ -645,7 +942,13 @@ def _first_heading(path: Path) -> str | None:
     return None
 
 
-def _default_pr_body(*, lane: str | None, engine: str, task_file: str | None) -> str:
+def _default_pr_body(
+    *,
+    lane: str | None,
+    engine: str,
+    task_file: str | None,
+    hooks_skipped: Sequence[str] = (),
+) -> str:
     lines = [
         "Opened automatically by the agent-fleet lane manager.",
         "",
@@ -655,6 +958,19 @@ def _default_pr_body(*, lane: str | None, engine: str, task_file: str | None) ->
         lines.append(f"**Lane:** `{lane}`")
     if task_file:
         lines.append(f"**Task file:** `{task_file}`")
+    if hooks_skipped:
+        # A reviewer looking at a diff cannot tell which hooks passed it and
+        # which were bypassed, so the bypass is stated here rather than left
+        # implicit. Each id was re-run against this lane's changed files and
+        # passed there; what it fails on is the base branch's own debt.
+        ids = ", ".join(f"`{h}`" for h in hooks_skipped)
+        lines.append(f"**Baseline hooks skipped on commit:** {ids}")
+        lines.append("")
+        lines.append(
+            "These hooks failed the first commit attempt on pre-existing debt outside "
+            "this diff. Each was re-run against the files this PR changes and passed "
+            "there, so the diff itself is clean by their own standard."
+        )
     lines.extend(
         [
             "",

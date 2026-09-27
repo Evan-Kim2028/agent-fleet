@@ -4,6 +4,31 @@
 
 ### Added
 
+- **`fleet lane run` never ends "success" with uncommitted work, and commits through baseline debt
+  without waving through real failures.** Observed on lor-main (lake-of-rage): 9 of 10 lanes exited 0
+  with 4–15 changed files, no commit, no PR and no status line. Three causes, three fixes.
+  **Fixers**: new `fleet_ops.pre_commit_fixers` runs the repo's own fixers over the lane's changed
+  files before staging (`{py}` is the file, e.g. `"python3 scripts/check_inline_comments.py --fix
+  {py}"`, `"ruff format {py}"`), so a commit the repo's style hooks would reject is never attempted.
+  A fixer that fails is recorded, not fatal — the commit remains the authority on the files.
+  **Scratch**: new `fleet_ops.scratch_excludes` (default `[".commandcode/", "%h/"]`) keeps the agent's
+  own directories out of the index, alongside the existing `.agent-fleet/runs/` exclusion. Unstaging
+  rather than deleting: the files stay in the worktree, they just cannot fail the commit — which
+  covers *tracked* scratch that an ignore rule would not.
+  **Verified baseline hooks**: new `fleet_ops.baseline_hooks` names hooks that fail on the base
+  branch's own debt. The first commit still runs every hook live; only a failure naming one of these
+  earns a `SKIP=` retry, and only after each is re-run against **the lane's own changed files**
+  (`pre-commit run <id> --files …`) and passes there. A hook that is red about this diff stays red and
+  is never skipped, and a failure naming any non-baseline hook blocks the retry entirely rather than
+  skipping the rest. Unioned with the existing `baseline_skip_hooks`, so a repo that set only the old
+  key gets the safer behaviour. Skipped ids are recorded in the commit message and the PR body,
+  because a hook that never ran leaves no other trace in the diff.
+  **Dirty exit**: after the guarantee commits, the runner re-checks the worktree with the same
+  exclusions; anything left is real work that did not get published and escalates `uncommitted_work`
+  naming the files and the worktree. `lane run` exits 1 and writes
+  `NEEDS-ESCALATION commit_failed hooks_failed=[…]`. No lane exits 0 holding unpublished work.
+  Also fixes a pre-existing `SyntaxError` in `fleet_ops/config.py` (`except TypeError, ValueError:`,
+  Python-2 syntax on `main` since 59fb033) that made the whole module unimportable.
 - **ops/vps: operational scripts that run the fleet (reconciler, tiered evidence gate, remote VPS gate worker, graduated memory guard, batch-window automerge, issue closer, no-model PR triage).** The scripts that
   actually execute the fleet — the laptop orchestrator (dispatch, gate, merge, deploy/verify, triage,
   issue closer) and the lor-main worker (remote gate, agent route, OpenRouter engine, memory guard,

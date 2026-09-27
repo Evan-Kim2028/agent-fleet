@@ -43,6 +43,7 @@ from agent_fleet.fleet_ops import admission as admission_mod
 from agent_fleet.fleet_ops import binding as binding_mod
 from agent_fleet.fleet_ops import engines, lazyexit
 from agent_fleet.fleet_ops import gate as gate_mod
+from agent_fleet.fleet_ops import guarantee as guarantee_mod
 from agent_fleet.fleet_ops.admission import AdmissionConfig
 from agent_fleet.fleet_ops.config import (
     DEFAULT_BASE_BRANCH,
@@ -79,6 +80,9 @@ if TYPE_CHECKING:
     import subprocess
     from collections.abc import Callable
 
+    #: A subprocess callable, injected by tests and by callers that stub ``gh``.
+    Runner = Callable[..., "subprocess.CompletedProcess[str]"]
+
 logger = logging.getLogger(__name__)
 
 #: A short sha is 7-9 hex chars. The status line carries the *prefix*, but the
@@ -109,6 +113,31 @@ STATUS_REASON_DETAIL_CHARS = 120
 REASON_NO_CHANGES_STOPPED = "no_changes_stopped"
 REASON_LAZY_EXIT = "lazy_exit"
 
+#: The lane finished with work still uncommitted in its worktree. Distinct from
+#: ``no_changes_stopped``: there the implementer decided to stop, here the work
+#: exists and could not be published. Both escalate, and the status line names
+#: which, because the first wants a decision and the second wants a commit.
+REASON_UNCOMMITTED_WORK = "uncommitted_work"
+
+
+def _uncommitted_leftovers(
+    workdir: Path, *, config: FleetOpsConfig, runner: Runner | None = None
+) -> list[str]:
+    """Worktree paths still uncommitted, with scratch and run logs removed.
+
+    This is the last line of defence for the promise that matters: a lane never
+    reports success while holding work it did not publish. The guarantee already
+    committed everything stageable, so a non-empty result here means the commit
+    path left something behind — the exact condition behind lanes that exited 0
+    with a full worktree and no commit.
+
+    Run logs and the repo's configured scratch are excluded, because they are
+    the lane's own byproducts and are *supposed* to be left behind; counting
+    them would make every successful lane look dirty.
+    """
+    excluded = (*config.scratch_excludes, f"{guarantee_mod.RUN_DIR_EXCLUDE}/")
+    return guarantee_mod.changed_files(workdir, scratch_excludes=excluded, runner=runner)
+
 
 @dataclass
 class LaneRunResult:
@@ -136,6 +165,10 @@ class LaneRunResult:
     #: produced no publishable work. Both exist so the operator reading only the
     #: result (or only the status file) sees *which* hook and *why*.
     hooks_failed: list[str] = field(default_factory=list)
+    #: Baseline hook ids that failed the first commit, were confirmed clean on
+    #: the lane's own files, and were bypassed. Reported alongside the commit
+    #: and in the PR body, because a bypassed hook is otherwise invisible.
+    hooks_skipped: list[str] = field(default_factory=list)
     no_change_detail: str = ""
 
     @property
@@ -161,6 +194,7 @@ class LaneRunResult:
             "detail": self.detail,
             "head": self.head,
             "hooks_failed": self.hooks_failed,
+            "hooks_skipped": self.hooks_skipped,
             "no_change_detail": self.no_change_detail,
             "guarantee": self.guarantee.to_dict() if self.guarantee else None,
             "gate": self.gate.to_dict() if self.gate else None,
@@ -640,11 +674,15 @@ def run_lane(
         task_file=str(task_file),
         lane=lane,
         skip_hooks=config.baseline_skip_hooks,
+        baseline_hooks=config.baseline_hook_ids(),
+        fixers=config.pre_commit_fixers,
+        scratch_excludes=config.scratch_excludes,
         runner=runner,
         skip_env=config.skip_env(),
         no_changes_detail=result.no_change_detail,
     )
     result.hooks_failed = list(guarantee.hooks_failed)
+    result.hooks_skipped = list(guarantee.hooks_skipped)
     result.guarantee = guarantee
     result.pr = guarantee.pr
     result.head = head_sha(workdir, runner=runner, short=9)
@@ -665,6 +703,11 @@ def run_lane(
             detail=guarantee.detail,
             exit_code=engine_result.exit_code,
         )
+
+    # The guarantee committed everything stageable, so what is left is scratch
+    # and, on a lane where a fixer or a hook mangled the index, work that did
+    # not make it in. The final check below is what turns the second into an
+    # escalation rather than a quiet success.
 
     # --- 5. binding: which repo, which PR, which branch --------------------
     update_record(operator, lane, state=STATE_RUNNING, phase=PHASE_GATE)
@@ -699,6 +742,17 @@ def run_lane(
     result.gate = outcome
 
     if outcome.skipped:
+        dirty = _uncommitted_leftovers(workdir, config=config, runner=runner)
+        if dirty:
+            return _escalate(
+                result,
+                reason=REASON_UNCOMMITTED_WORK,
+                detail=(
+                    f"{len(dirty)} file(s) are still uncommitted in {workdir}: "
+                    f"{', '.join(dirty[:20])}"
+                ),
+                exit_code=engine_result.exit_code,
+            )
         _event("gate.skipped", reason=outcome.reason, pr=guarantee.pr)
         result.state = STATE_PR_GUARANTEED
         result.reason = outcome.reason
@@ -734,6 +788,18 @@ def run_lane(
         )
 
     # --- 7. status line + on-approved hook ---------------------------------
+    # Checked *before* the approval line, so a lane holding uncommitted work
+    # never reaches the state downstream tooling reads as "this merged".
+    dirty = _uncommitted_leftovers(workdir, config=config, runner=runner)
+    if dirty:
+        return _escalate(
+            result,
+            reason=REASON_UNCOMMITTED_WORK,
+            detail=(
+                f"{len(dirty)} file(s) are still uncommitted in {workdir}: {', '.join(dirty[:20])}"
+            ),
+            exit_code=engine_result.exit_code,
+        )
     sha9 = outcome.sha9 or (result.head or "")[:9]
     result.status_line = write_status_line(
         status_file,

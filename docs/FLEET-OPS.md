@@ -114,12 +114,45 @@ and open a PR by hand.
 precisely the case that most needs the guarantee, so it runs anyway.
 
 **On hooks.** The manager commits with plain `git commit` so the repo's real
-hooks run. `--no-verify` is never used. The only concession is a `SKIP=`
-environment naming the hook ids the repo declared as baseline-red in
-`fleet_ops.baseline_skip_hooks` — pre-commit's own selective-skip mechanism, and
-narrower than disabling hooks. If a *non*-baseline hook fails, the commit fails
-and the lane escalates with the hook output attached, which is correct: that is
-a real problem with the diff, not something to bypass.
+hooks run. `--no-verify` is never used. There are two ways a hook can be stepped
+around, and the difference between them is the whole design:
+
+`fleet_ops.baseline_skip_hooks` skips those ids **up front** and they never run.
+`fleet_ops.baseline_hooks` is the *verified* form and is what a repo should
+configure. With it, the first commit runs every hook live. Only a failure naming
+one of these earns a retry, and only after each such hook has been re-run
+against **the lane's own changed files** (`pre-commit run <id> --files …`) and
+passed there. A hook that is red about *this* diff stays red, still fails the
+lane, and is never skipped.
+
+The verified form exists because a repo-wide hook that fails on the base
+branch's own debt blocks every lane in the repo, and the operator's only way out
+is to skip it for everything — which then waves through real failures too. Both
+lists are unioned, so a repo that already set the old key gets the new
+behaviour. The ids that were bypassed are recorded in the commit message and in
+the PR body, because a hook that never ran leaves no other trace in the diff.
+
+If a *non*-baseline hook fails, the commit fails and the lane escalates with the
+hook output attached, which is correct: that is a real problem with the diff.
+
+**Before the commit.** Two things happen to the changed files first, both scoped
+to the lane's own work:
+
+* `fleet_ops.pre_commit_fixers` — the repo's fixers, each with `{py}` standing in
+  for the file, e.g.
+  `["python3 scripts/check_inline_comments.py --fix {py}", "ruff format {py}"]`.
+  A fixer that fails is recorded, not fatal: the commit is the real authority on
+  whether the files are acceptable.
+* `fleet_ops.scratch_excludes` — paths never staged (default
+  `[".commandcode/", "%h/"]`). Unstaging, not deletion: the files stay in the
+  worktree, they just cannot fail the commit.
+
+**A lane never exits 0 holding uncommitted work.** After the guarantee commits,
+the runner re-checks the worktree with the same scratch and run-log exclusions.
+Anything left is real work that did not get published, and it escalates
+`uncommitted_work` naming the files and the worktree. Scratch and run logs are
+excluded from that check too — they are byproducts of running, and counting them
+would fail every lane forever.
 
 When a hook does refuse, the failing hook **ids** are parsed out of pre-commit's
 `- hook id: <id>` blocks and reported as `hooks_failed=[...]` — on
@@ -183,8 +216,20 @@ A repo without it is unaffected.
 fleet_ops:
   base_branch: main
   stall_minutes: 20
-  # Hook ids the manager's auto-commit may pass via SKIP=. Every other hook runs.
-  baseline_skip_hooks: [ruff-format, pyright]
+  # Hook ids that fail on the BASE BRANCH's own debt. They are not skipped up
+  # front: the first commit runs every hook, and one of these earns a SKIP=
+  # retry only after it passes on the lane's own changed files. Prefer this to
+  # baseline_skip_hooks. Skipped ids are named in the commit message and PR body.
+  baseline_hooks: [no-inline-comments, pyright, timer-inventory-check]
+  # The blunt form: those ids never run. Unioned with baseline_hooks.
+  baseline_skip_hooks: [ruff-format]
+  # Run over the lane's changed files before staging; {py} is the file.
+  pre_commit_fixers:
+    - "python3 scripts/check_inline_comments.py --fix {py}"
+    - "ruff check --fix {py}"
+    - "ruff format {py}"
+  # Never staged. Left on disk, just kept out of the commit.
+  scratch_excludes: [".commandcode/", "%h/"]
   # Appended to the house fences; can add rules, never shorten them.
   fences:
     - "silph: api/lor_client.py is fenced by the orchestrator; do not edit."

@@ -6,7 +6,10 @@ repo that omits ``fleet_ops:`` is unaffected::
     fleet_ops:
       base_branch: main
       stall_minutes: 20
-      baseline_skip_hooks: [ruff-format, pyright]
+      baseline_hooks: [no-inline-comments, pyright]
+      pre_commit_fixers: ["ruff format {py}"]
+      scratch_excludes: [".commandcode/", "%h/"]
+      baseline_skip_hooks: [ruff-format]
       operators:
         documents-0e:
           engine: cmd
@@ -27,10 +30,19 @@ repo that omits ``fleet_ops:`` is unaffected::
 every one of them defaults to the machine-global budget, because admission is a
 throttle: a knob a repo omits must never keep a lane from running.
 
-``baseline_skip_hooks`` is deliberately scoped to ``fleet_ops`` rather than to
-the global repo config: skipping a hook is a decision about the *lane manager's
-own auto-commit*, and the allowed ids differ per repo. Hooks are never disabled
-globally — every commit the manager makes still runs every hook not listed here.
+``baseline_skip_hooks`` skips those ids up front; ``baseline_hooks`` is the
+verified form, where the first commit still runs every hook and a listed id is
+only bypassed after it passes on the lane's own changed files. The two are
+unioned, so a repo that set only the old key still gets the safer behaviour.
+Both are deliberately scoped to ``fleet_ops`` rather than to the global repo
+config: skipping a hook is a decision about the *lane manager's own auto-commit*,
+and the allowed ids differ per repo. Hooks are never disabled globally — every
+commit the manager makes still runs every hook not listed here.
+
+``pre_commit_fixers`` and ``scratch_excludes`` are what keep a lane's commit
+from failing for reasons the lane did not cause: the repo's own fixers run over
+the changed files before staging, and the agent's scratch directories are never
+staged. Neither can make a commit succeed that should fail.
 """
 
 from __future__ import annotations
@@ -110,6 +122,22 @@ class OperatorSpec:
         return self.stall_minutes if self.stall_minutes is not None else default
 
 
+#: Never stage these. Each entry is a git pathspec prefix relative to a
+#: worktree root, so ``.commandcode/`` matches the agent's own scratch and
+#: ``%h/`` the per-run home a shell driver left behind. They are the two
+#: directories that turned up in the staged set of lanes that exited clean
+#: with no commit: staging them is what pushed those lanes past the point
+#: where the run could tell "the agent wrote scratch" from "the agent did work".
+DEFAULT_SCRATCH_EXCLUDES: tuple[str, ...] = (".commandcode/", "%h/")
+
+#: Placeholder expanded in each fixer command with the path of the changed
+#: file. A fixer without it would see no target and silently no-op.
+FIXER_PLACEHOLDER = "{py}"
+
+#: Cap on a single fixer's runtime. A fixer that hangs must not wedge the lane.
+DEFAULT_FIXER_TIMEOUT_S = 300
+
+
 @dataclass(frozen=True)
 class DispatchConfig:
     """The ``fleet_ops.dispatch:`` block — how a queue is run.
@@ -142,6 +170,20 @@ class FleetOpsConfig:
     #: Hook ids the manager's auto-commit may pass via ``SKIP=``. Every other
     #: hook still runs. Never a blanket disable.
     baseline_skip_hooks: tuple[str, ...] = ()
+    #: Hook ids that fail on the *base branch's* own debt rather than on the
+    #: lane's diff. They are not skipped up front: the first commit runs every
+    #: hook live, and only a failure naming one of these earns a retry with
+    #: ``SKIP=`` — and only after that hook is re-run against the lane's own
+    #: changed files, so a hook that is red because of *this* diff is still red
+    #: and still fails the lane. See :func:`verify_hook_on_files`.
+    baseline_hooks: tuple[str, ...] = ()
+    #: Fixers run over the lane's changed files before staging, e.g.
+    #: ``["python3 scripts/check_inline_comments.py --fix {py}", "ruff format {py}"]``.
+    #: Repo-specific because only the repo knows what its style hooks enforce;
+    #: the manager only knows the placeholder and the ordering.
+    pre_commit_fixers: tuple[str, ...] = ()
+    #: Paths never staged, relative to a worktree root.
+    scratch_excludes: tuple[str, ...] = DEFAULT_SCRATCH_EXCLUDES
     #: Extra standing fences for this repo, appended to the house rules. A repo
     #: can *add* rules; it can never shorten them.
     fences: tuple[str, ...] = ()
@@ -160,6 +202,21 @@ class FleetOpsConfig:
         if not self.baseline_skip_hooks:
             return {}
         return {"SKIP": ",".join(self.baseline_skip_hooks)}
+
+    def baseline_hook_ids(self) -> tuple[str, ...]:
+        """Hook ids a failed commit may be retried past with ``SKIP=``.
+
+        The union of the two lists, and the union is what makes a repo that
+        set only one of them still get the behaviour it asked for: they are two
+        spellings of one policy, and a lane should not depend on which one the
+        repo's config happened to use.
+        """
+        seen: dict[str, None] = {}
+        for hook in (*self.baseline_hooks, *self.baseline_skip_hooks):
+            name = hook.strip()
+            if name:
+                seen.setdefault(name, None)
+        return tuple(seen)
 
 
 def expand_template(template: str, *, lane: str = "", operator: str = "") -> str:
@@ -275,6 +332,9 @@ def load_fleet_ops_config(raw: dict[str, Any] | None) -> FleetOpsConfig | None:
 
     stall = section.get("stall_minutes")
     hooks = section.get("baseline_skip_hooks") or []
+    baseline_hooks = section.get("baseline_hooks") or []
+    fixers = section.get("pre_commit_fixers") or []
+    scratch = section.get("scratch_excludes")
     fences = section.get("fences") or []
     operators_raw = section.get("operators") or {}
     operators: dict[str, OperatorSpec] = {}
@@ -287,12 +347,24 @@ def load_fleet_ops_config(raw: dict[str, Any] | None) -> FleetOpsConfig | None:
     return FleetOpsConfig(
         base_branch=str(section.get("base_branch") or DEFAULT_BASE_BRANCH).strip(),
         stall_minutes=int(stall) if isinstance(stall, int) and stall > 0 else DEFAULT_STALL_MINUTES,
-        baseline_skip_hooks=tuple(str(h).strip() for h in hooks if str(h).strip()),
-        fences=tuple(str(f).strip() for f in fences if str(f).strip()),
+        baseline_skip_hooks=_str_tuple(hooks),
+        baseline_hooks=_str_tuple(baseline_hooks),
+        pre_commit_fixers=_str_tuple(fixers),
+        # An explicit empty list is a real choice ("this repo has no scratch
+        # patterns"), so only an *absent* key falls back to the defaults.
+        scratch_excludes=DEFAULT_SCRATCH_EXCLUDES if scratch is None else _str_tuple(scratch),
+        fences=_str_tuple(fences),
         dispatch=_parse_dispatch(section.get("dispatch")),
         admission=_parse_admission(section.get("admission")),
         operators=operators,
     )
+
+
+def _str_tuple(value: Any) -> tuple[str, ...]:  # noqa: ANN401
+    """Config list values as a tuple of non-empty strings, order preserved."""
+    if isinstance(value, str) or not value:
+        return ()
+    return tuple(str(item).strip() for item in value if str(item).strip())
 
 
 def load_fleet_ops_config_from_repo(repo_root: Any) -> FleetOpsConfig | None:  # noqa: ANN401
@@ -330,10 +402,13 @@ def effective_stall_minutes(config: FleetOpsConfig | None, operator: str | None)
 __all__ = [
     "DEFAULT_BASE_BRANCH",
     "DEFAULT_ENGINE",
+    "DEFAULT_FIXER_TIMEOUT_S",
     "DEFAULT_MAX_GATES",
     "DEFAULT_MAX_LANES",
     "DEFAULT_PUSH_BRANCH",
+    "DEFAULT_SCRATCH_EXCLUDES",
     "DEFAULT_STALL_MINUTES",
+    "FIXER_PLACEHOLDER",
     "AdmissionConfig",
     "DispatchConfig",
     "FleetOpsConfig",
