@@ -4,8 +4,11 @@ Two separate dedupes guard the rebuild:
 
 * **within a batch** — three PRs touching ``gold_sales`` queue one job
   (:func:`agent_fleet.post_merge.planner.dedupe_jobs`);
-* **across batches** — a job already triggered is recorded in a ledger and never
-  re-run, so a retried or overlapping batch cannot double-fire a rebuild.
+* **across batches** — a job already triggered *for the same batch* is recorded
+  in a ledger and never re-run, so a retried or overlapping batch cannot
+  double-fire a rebuild. The key is ``(batch, job)``, not the job name: a job
+  name is a dbt target that recurs across merges, and keying on it alone made
+  every rebuild after the first a silent no-op.
 
 Jobs only run when the deploy returned 0. A failed deploy means main is not in a
 rebuildable state, and queueing rebuilds against it would just produce work that
@@ -98,7 +101,7 @@ class JobOutcome:
 
 
 def read_ledger(path: Path) -> set[str]:
-    """Job names already triggered, from a one-per-line ledger."""
+    """Ledger keys already recorded, from a one-per-line ledger."""
     if not path.exists():
         return set()
     try:
@@ -108,13 +111,32 @@ def read_ledger(path: Path) -> set[str]:
     return {line.strip() for line in text.splitlines() if line.strip()}
 
 
-def _append_ledger(path: Path, job: str) -> None:
-    """Record *job* as triggered. Best-effort: a lost ledger costs a re-run,
+def ledger_key(batch: str, job: str) -> str:
+    """The ledger key for *job* within *batch*.
+
+    The batch belongs in the key because the ledger answers "has this rebuild
+    already fired for *this* merge", not "has this job name ever fired". Keyed
+    on the job name alone it fired once ever per repo, so a same-named dbt
+    target touched by a later commit was reported ``skipped — already
+    triggered``, queued nothing, and the rebuild silently never ran. Keying on
+    (batch, job) keeps a retry of the *same* batch from double-firing while
+    letting the next batch rebuild.
+
+    The separator must not be whitespace: :func:`read_ledger` strips each line,
+    so a tab would be trimmed off the front and flatten every key back to the
+    bare job name. A batch with no main sha is still a scope — it is simply the
+    one unnamed batch, so a retry of it still dedupes.
+    """
+    return f"{batch}@{job}"
+
+
+def _append_ledger(path: Path, key: str) -> None:
+    """Record *key* as triggered. Best-effort: a lost ledger costs a re-run,
     a failed merge costs the whole batch."""
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
-            handle.write(f"{job}\n")
+            handle.write(f"{key}\n")
     except OSError:
         return
 
@@ -126,11 +148,14 @@ def run_jobs(
     deploy_rc: int,
     trigger: TriggerFn | None = None,
     ledger: Path | None = None,
+    batch: str = "",
 ) -> list[JobOutcome]:
-    """Run each job at most once, and only when the deploy succeeded.
+    """Run each job at most once per batch, and only when the deploy succeeded.
 
-    A job that already fired is reported ``skipped``, so the hand-off note still
-    lists it without pretending it was queued again.
+    A job that already fired for *batch* is reported ``skipped``, so the
+    hand-off note still lists it without pretending it was queued again.
+    *batch* scopes the ledger key; with no main sha the run is its own scope
+    and behaves as before.
     """
     if deploy_rc != 0:
         return [
@@ -144,7 +169,8 @@ def run_jobs(
 
     outcomes: list[JobOutcome] = []
     for name, slot in jobs:
-        if name in already:
+        key = ledger_key(batch, name)
+        if key in already:
             outcomes.append(JobOutcome(name, slot, "skipped", "already triggered"))
             continue
         if not spec.trigger_command:
@@ -183,7 +209,7 @@ def run_jobs(
             detail = (result.stderr or result.stdout or "").strip()[-300:]
             outcomes.append(JobOutcome(name, slot, "failed", detail, result.returncode))
             continue
-        already.add(name)
-        _append_ledger(ledger_path, name)
+        already.add(key)
+        _append_ledger(ledger_path, key)
         outcomes.append(JobOutcome(name, slot, "ok", ""))
     return outcomes

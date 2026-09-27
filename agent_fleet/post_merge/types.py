@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 #: Label prefixes this package owns. Anything else on the PR is left alone, so
 #: post-merge never strips a human's ``needs-review`` or the gate's status label.
@@ -101,6 +101,30 @@ def _str_tuple(value: object, field: str) -> tuple[str, ...]:
     return tuple(str(v) for v in value if str(v).strip())
 
 
+def _file_paths(value: object, field: str) -> tuple[str, ...]:
+    """File paths from a forge payload, accepting both shapes gh uses.
+
+    ``gh pr view --json files`` returns objects — ``{"path": ..., "additions":
+    ...}`` — while the REST API and hand-written payloads use bare strings.
+    Stringifying the objects would hand the planner a list of dict *reprs*,
+    which match no model: every real run plans an empty rebuild, labels the PR
+    ``rebuild:none`` and queues nothing while reporting success. Read the
+    ``path`` field instead, the same way ``merge_plan.collect`` and
+    ``pr_loop.github_ops`` already do.
+    """
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ValueError(f"{field} must be a list of paths or objects")
+    paths: list[str] = []
+    for entry in cast("list[Any]", value):
+        path = str(entry.get("path") or "") if isinstance(entry, dict) else str(entry)
+        path = path.strip()
+        if path:
+            paths.append(path)
+    return tuple(paths)
+
+
 @dataclass(frozen=True)
 class MergedPR:
     """One PR in a merged batch, as read from the forge."""
@@ -135,7 +159,7 @@ class MergedPR:
             head_sha=str(raw.get("headRefOid") or raw.get("headSha") or raw.get("head_sha") or ""),
             merge_commit=str(raw.get("mergeCommit") or raw.get("merge_commit") or ""),
             merged_at=str(raw.get("mergedAt") or raw.get("merged_at") or ""),
-            files=_str_tuple(raw.get("files"), "pr.files"),
+            files=_file_paths(raw.get("files"), "pr.files"),
             labels=_str_tuple(raw.get("labels"), "pr.labels"),
         )
 

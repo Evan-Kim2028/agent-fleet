@@ -188,7 +188,13 @@ def run_post_merge(
                 desired=planned.plan.labels(),
                 apply=labeler,
             )
-        except (RuntimeError, OSError) as exc:
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+            # TimeoutExpired is a SubprocessError, not an OSError: a gh label
+            # call that blows its 120s timeout used to escape run_post_merge
+            # entirely, so the trigger never fired, no note was written and no
+            # INDEX line recorded the outstanding rebuild — the operator got a
+            # traceback instead of the hand-off. Losing one label must not cost
+            # the whole batch.
             result.errors.append(f"PR #{planned.pr_number}: labelling failed: {exc}")
             continue
         result.label_changes[planned.pr_number] = (delta.add, delta.remove)
@@ -199,6 +205,7 @@ def run_post_merge(
         dedupe_jobs(result.plans),
         deploy_rc=deploy_rc,
         trigger=trigger,
+        batch=main_sha,
     )
 
     # 4. Hand off one note per batch.

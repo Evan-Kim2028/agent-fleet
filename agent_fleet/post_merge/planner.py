@@ -143,8 +143,17 @@ def plan_for_pr(
     if hit is not None:
         return PlanResult(pr, hit, cached=True)
 
+    argv = plan_argv(spec)
+    if not argv:
+        # A plan_command of only whitespace splits to nothing, and spawning an
+        # empty argv raises IndexError from deep inside subprocess — a type the
+        # caller cannot meaningfully report. It is a config error, so say so.
+        raise RuntimeError(
+            f"plan_command for PR #{pr.number} is empty; nothing to plan with"
+        )
+
     result = run(
-        plan_argv(spec),
+        argv,
         "\n".join(pr.files) + ("\n" if pr.files else ""),
         repo_path(spec),
         spec.plan_timeout_seconds,
