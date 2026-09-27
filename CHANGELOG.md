@@ -12,6 +12,23 @@
   `FLEET_VPS_HOST`, `FLEET_GH_OWNER`) with the previous paths as defaults. `ops/vps/README.md`
   documents each piece, the data flow, the knobs and the VPS memory model;
   `tests/test_ops_vps_scripts.py` keeps every script parsing and free of machine paths and secrets.
+- **`fleet merge train` now lands only the PRs this operator owns.** A dry run on lor-main picked silph
+  #4257, whose head branch is `dq1d/apidocs` — documents-1d's, and documents-1d merges it with its own
+  shipper. The gate cannot catch this: a gate approves a *commit*, and it approves another session's
+  commits as readily as this one's, so the head branch is the only fact that distinguishes them. A new
+  head-branch filter (`merge_train.include_head_prefixes`, default `["fb/"]`, and
+  `merge_train.exclude_head_prefixes`, default `[]`, plus repeatable `--include-head-prefix` /
+  `--exclude-head-prefix` flags) splits the approved PRs before the batch cap, the cluster-hold check
+  and the fold. A PR the train does not own is reported as `SKIPPED-NOT-OWNED`, naming the branch and
+  the filter that declined it, and is never folded, tested or merged. A run that owns nothing says so
+  and exits 1 rather than reporting "nothing to run". A malformed `merge_train` block is refused rather
+  than falling back to the default list. The JSON report — the written `train-report.json`, not just the
+  result the command prints — gains `not_owned`, `not_owned_count` and `head_filter`, and every
+  `SKIPPED-NOT-OWNED` reason quotes the filter that was actually in force, so a skip caused by an
+  operator's `exclude` is not attributed to the built-in `fb/` include list. This changes the default
+  behaviour: a train that previously merged branches outside `fb/` now needs the prefix listed, which is
+  the point.
+
 ### Fixed
 
 - **The admission pressure signal measured the wrong cgroup, and `Throttle.saturated` measured nothing at all.**

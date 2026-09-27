@@ -30,8 +30,10 @@ import subprocess
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.merge_plan.collect import GitHubClient, collect_from_lanes, collect_from_status_dir
+from agent_fleet.merge_plan.train import TrainResult
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     import pytest
@@ -100,23 +102,31 @@ class _Detail:
         return {
             "state": "OPEN",
             "headRefOid": HEAD_SHA,
-            "headRefName": "feat/x",
+            "headRefName": "fb/contract-1",
             "baseRefName": "main",
             "files": [{"path": "a.txt"}],
         }
 
 
 def _install(monkeypatch: pytest.MonkeyPatch, calls: list[Any]) -> None:
-    monkeypatch.setattr(GitHubClient, "for_repo", lambda self, repo_path: _Detail())
+    monkeypatch.setattr(GitHubClient, "for_repo", _for_repo_returning(_Detail()))
     monkeypatch.setattr(
         "agent_fleet.merge_plan.train.run_train",
         lambda **kwargs: calls.append(kwargs) or _result(),
     )
 
 
-def _result() -> Any:
-    from agent_fleet.merge_plan.train import TrainResult
+def _for_repo_returning(client: _Detail) -> Callable[[GitHubClient, Path], _Detail]:
+    """A ``GitHubClient.for_repo`` replacement handing back *client*."""
 
+    def _factory(self: GitHubClient, repo_path: Path) -> _Detail:
+        del self, repo_path
+        return client
+
+    return _factory
+
+
+def _result() -> TrainResult:
     return TrainResult(repo="lake-of-rage", base_branch="main", detail="nothing landed")
 
 
@@ -148,7 +158,7 @@ def _config(tmp_path: Path, checkout: Path) -> Path:
 
 
 def test_one_approved_pr_enters_the_train_once_however_it_is_spelled(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The claimed defect: the batch holds PR #42 twice."""
     from agent_fleet.merge_plan import cli as merge_cli
@@ -193,9 +203,7 @@ def test_the_report_does_not_double_count_one_pr(
     )
 
 
-def test_the_batch_cap_counts_distinct_prs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_the_batch_cap_counts_distinct_prs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A duplicated PR must not eat a slot in ``--max-batch-size``.
 
     With the cap at 1, a batch that contains PR #42 twice is over the cap even

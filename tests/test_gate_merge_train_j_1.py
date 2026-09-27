@@ -28,7 +28,7 @@ import pytest
 from agent_fleet.merge_plan.collect import GitHubClient
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -98,10 +98,22 @@ class _StubDetailClient:
         return {
             "state": "OPEN",
             "headRefOid": self._head,
-            "headRefName": "feat/one",
+            "headRefName": "fb/one",
             "baseRefName": "main",
             "files": [{"path": "a.py"}],
         }
+
+
+def _for_repo_returning(
+    client: _StubDetailClient,
+) -> Callable[[GitHubClient, Path], _StubDetailClient]:
+    """A ``GitHubClient.for_repo`` replacement handing back *client*."""
+
+    def _factory(self: GitHubClient, repo_path: Path) -> _StubDetailClient:
+        del self, repo_path
+        return client
+
+    return _factory
 
 
 def test_a_hanging_git_call_in_the_fold_is_reported_not_raised(
@@ -128,7 +140,7 @@ def test_a_hanging_git_call_in_the_fold_is_reported_not_raised(
     (status / "gate.md").write_text(
         f"Evan-Kim2028/demo#12\nPREMERGE-APPROVED {head}\n", encoding="utf-8"
     )
-    monkeypatch.setattr(GitHubClient, "for_repo", lambda self, repo_path: _StubDetailClient(head))
+    monkeypatch.setattr(GitHubClient, "for_repo", _for_repo_returning(_StubDetailClient(head)))
 
     def hang_on_worktree_add(
         argv: Sequence[str], *, cwd: Path, timeout: int = 600
@@ -198,7 +210,7 @@ def test_a_hanging_git_call_writes_no_report_and_claims_no_verdict(
     (status / "gate.md").write_text(
         f"Evan-Kim2028/demo#12\nPREMERGE-APPROVED {head}\n", encoding="utf-8"
     )
-    monkeypatch.setattr(GitHubClient, "for_repo", lambda self, repo_path: _StubDetailClient(head))
+    monkeypatch.setattr(GitHubClient, "for_repo", _for_repo_returning(_StubDetailClient(head)))
 
     def hang_on_fetch(
         argv: Sequence[str], *, cwd: Path, timeout: int = 600

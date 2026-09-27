@@ -70,6 +70,7 @@ LANDED = "LANDED"
 NEEDS_REBASE = "NEEDS-REBASE"
 REGRESSION = "REGRESSION"
 SKIPPED_MOVED = "SKIPPED-MOVED"
+SKIPPED_NOT_OWNED = "SKIPPED-NOT-OWNED"
 UNFETCHABLE = "UNFETCHABLE"
 
 #: Branch the train folds onto when nothing says otherwise.  It is a fallback
@@ -90,6 +91,63 @@ _TEST_SUFFIXES = ("test_", "_test")
 # ---------------------------------------------------------------------------
 # Value types
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class HeadFilter:
+    """Which head branches this train is allowed to land.
+
+    A train merges PRs by head branch, and on a shared repository the approved
+    ones are not all this operator's: a PR opened on another session's
+    ``dq1d/*`` branch is landed by *that* session's shipper, and folding it into
+    this train merges it out from under the session that owns it.  The gate
+    cannot catch this — it approves a commit, not a branch, and it approves the
+    other session's commits just as readily as this one's.
+
+    :meth:`split` is a partition, so every PR either enters the batch or gets a
+    ``SKIPPED-NOT-OWNED`` verdict, and the two sets are disjoint: ownership is
+    decided before the cap, so a batch can never be filled with PRs whose branch
+    is a typo's worth away from a real lane.
+
+    A branch whose include list is empty owns nothing: the answer is "match at
+    least one of mine, and none of the excludes", not "match everything when I
+    named no branches", because an operator who listed nothing has said nothing
+    about what they do own.  A PR with no head branch at all matches no prefix
+    and is therefore not owned — an unnamed head is not this operator's claim.
+    """
+
+    #: Prefixes that make a head this train's, e.g. ``("fb/",)``.
+    include: tuple[str, ...] = ("fb/",)
+    #: Prefixes that disqualify a head however well it includes, and win.
+    exclude: tuple[str, ...] = ()
+
+    def owns(self, head_branch: str) -> bool:
+        """True when *head_branch* is one this train may fold, test and merge."""
+        if not head_branch:
+            return False
+        if any(head_branch.startswith(prefix) for prefix in self.exclude if prefix):
+            return False
+        return any(head_branch.startswith(prefix) for prefix in self.include if prefix)
+
+    def split(self, prs: Sequence[TrainPR]) -> tuple[list[TrainPR], list[TrainPR]]:
+        """Split *prs* into ``(owned, not_owned)``, each in PR-number order.
+
+        Ordered so a report is the same run twice: the batch must not depend on
+        the order GitHub or the lane registry happened to hand the PRs over in.
+        """
+        owned = sorted((p for p in prs if self.owns(p.head_branch)), key=lambda p: p.number)
+        rest = sorted((p for p in prs if not self.owns(p.head_branch)), key=lambda p: p.number)
+        return owned, rest
+
+    def describe(self) -> str:
+        """The filter as one clause, for the "not owned" reason on a verdict."""
+        return f"include {list(self.include)}, exclude {list(self.exclude)}"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "include_head_prefixes": list(self.include),
+            "exclude_head_prefixes": list(self.exclude),
+        }
 
 
 @dataclass(frozen=True)
@@ -209,6 +267,18 @@ class TrainResult:
     detail: str = ""
     #: The branch the batch was folded onto, named in every verdict reason.
     base_branch: str = DEFAULT_BASE_BRANCH
+    #: PRs this run declined to land because their head branch is not this
+    #: operator's.  Never folded, tested or merged; kept beside ``verdicts``
+    #: because they are not part of the batch, and the landed / set_aside
+    #: partition is only ever claimed over the batch.
+    not_owned: tuple[TrainPR, ...] = ()
+    #: The filter that decided *not_owned*, carried so the reason on each
+    #: skipped PR names the filter that was actually in force.  A result that
+    #: falls back to ``HeadFilter()`` would attribute a skip caused by an
+    #: operator's ``exclude`` to the built-in ``fb/`` include list, naming a
+    #: filter that was never applied and contradicting ``head_filter`` in the
+    #: same report.
+    head_filter: HeadFilter = HeadFilter()
 
     @property
     def landed(self) -> tuple[int, ...]:
@@ -224,6 +294,33 @@ class TrainResult:
         """Every verdict carrying *status*, so a reader can ask one question."""
         return tuple(v for v in self.verdicts if v.status == status)
 
+    def not_owned_verdicts(self, head_filter: HeadFilter | None = None) -> tuple[PRVerdict, ...]:
+        """One ``SKIPPED-NOT-OWNED`` verdict per PR this train does not own.
+
+        Separate from :meth:`by_status` because these PRs are not in the batch,
+        so they never reach ``verdicts`` and cannot be picked out of it.  The
+        reason names the branch the PR arrived on, which is the fact the
+        operator has to go and check: a PR on ``dq1d/apidocs`` is not owned
+        because that prefix belongs to the session that opened it.
+
+        *head_filter* defaults to the filter this run was configured with, so
+        the reason quotes the filter that declined the PR rather than the
+        built-in default, which is a different filter whenever the operator
+        configured one.
+        """
+        spec = head_filter or self.head_filter
+        return tuple(
+            PRVerdict(
+                pr=pr.number,
+                status=SKIPPED_NOT_OWNED,
+                reason=(
+                    f"head branch {pr.head_branch or '(none)'} is not owned by this train "
+                    f"({spec.describe()})"
+                ),
+            )
+            for pr in self.not_owned
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "event": "merge.train",
@@ -235,18 +332,33 @@ class TrainResult:
             "set_aside": list(self.set_aside),
             "landed_count": len(self.landed),
             "set_aside_count": len(self.set_aside),
+            "not_owned": [p.number for p in self.not_owned],
+            "not_owned_count": len(self.not_owned),
+            # The filter the not-owned reasons below are generated from, so a
+            # reader can check a "not owned" line against the prefixes in force
+            # without looking anywhere else.
+            "head_filter": self.head_filter.to_dict(),
             "test_runs": self.test_runs,
             "candidate_sha": self.candidate_sha,
             "detail": self.detail,
-            "verdicts": [v.to_dict() for v in self.verdicts],
+            "verdicts": [v.to_dict() for v in self.verdicts]
+            + [v.to_dict() for v in self.not_owned_verdicts()],
         }
 
     def render_text(self) -> str:
         """A short operator-facing summary of the run."""
-        if not self.ordered:
+        if not self.ordered and not self.not_owned:
             return f"merge train [{self.repo}]: nothing to run"
+        if not self.ordered:
+            # Named, rather than "nothing to run", because the run did decide
+            # something: an operator who asked to merge and got silence has no
+            # way to tell an empty batch from a filter that ate every PR.
+            return (
+                f"merge train [{self.repo}]: nothing to run, "
+                f"{len(self.not_owned)} PR(s) skipped: not owned"
+            )
         lines = [f"merge train [{self.repo}]: {len(self.ordered)} PR(s) in the batch"]
-        for verdict in self.verdicts:
+        for verdict in (*self.verdicts, *self.not_owned_verdicts()):
             marker = "OK" if verdict.status == LANDED else verdict.status
             reason = f"  {verdict.reason}" if verdict.reason else ""
             lines.append(f"  [{marker}] #{verdict.pr}{reason}")
@@ -254,6 +366,8 @@ class TrainResult:
             f"  {len(self.landed)} landed, {len(self.set_aside)} set aside, "
             f"{self.test_runs} test run(s)"
         )
+        if self.not_owned:
+            lines.append(f"  {len(self.not_owned)} skipped: not owned by this train")
         return "\n".join(lines)
 
 
@@ -404,21 +518,36 @@ class MergeTrain:
     #: Branch the batch is folded onto, named in every verdict reason so a
     #: reader is never told a PR conflicted with a branch it was not folded on.
     base_branch: str = DEFAULT_BASE_BRANCH
+    #: Which head branches this train may land, and the one whose describe() is
+    #: quoted on a not-owned verdict.  A pure field: the CLI applies the filter
+    #: before the hold check and the cap, and this second application is what
+    #: keeps a direct ``MergeTrain(...).run(...)`` caller from folding a PR that
+    #: is not this operator's.
+    head_filter: HeadFilter = HeadFilter()
 
     def run(self, prs: Sequence[TrainPR], *, merger: Merger | None = None) -> TrainResult:
         """Build, test, and land *prs* as one batch.
 
         The order of the run is the order of the risk: drop what is not
-        eligible, fold the rest, test the combination once, and only then
-        decide whether anything may be merged.  Nothing is merged from a red
-        batch until the bisection has named what is safe.
+        eligible, drop what is not this operator's, fold the rest, test the
+        combination once, and only then decide whether anything may be merged.
+        Nothing is merged from a red batch until the bisection has named what is
+        safe.
         """
-        result = TrainResult(repo=self.repo, base_branch=self.base_branch)
-        keep, moved = partition_batch(prs)
+        result = TrainResult(
+            repo=self.repo, base_branch=self.base_branch, head_filter=self.head_filter
+        )
+        owned, not_owned = self.head_filter.split(prs)
+        result.not_owned = tuple(not_owned)
+        keep, moved = partition_batch(owned)
         result.ordered = tuple(order_batch(keep))
         result.verdicts = tuple(_moved_verdicts(moved))
         if not result.ordered:
-            result.detail = "no PR in the batch is eligible"
+            result.detail = (
+                "no PR in the batch is owned by this train"
+                if not_owned
+                else "no PR in the batch is eligible"
+            )
             return result
 
         result.test_runs = 1
@@ -1212,6 +1341,8 @@ def run_train(
     max_batch_size: int = 5,
     report_path: Path | None = None,
     base_branch: str = "",
+    head_filter: HeadFilter | None = None,
+    not_owned: Sequence[TrainPR] = (),
 ) -> TrainResult:
     """Run one train for *repo*, write its JSON report, and return the result.
 
@@ -1227,15 +1358,39 @@ def run_train(
     PRs merge into.  A caller that passes ``base_branch=""`` gets the same
     resolution over its own capped batch, and an empty *prs* is a no-op run
     rather than a fold of nothing.
+
+    *head_filter* defaults to this operator's own ``fb/`` lanes.  The CLI
+    resolves it from fleet.yaml and the flags and hands it in, so the cap, the
+    hold check and the fold are all answered about the same set of PRs; a run
+    that never mentions ownership lands the fleet's branches rather than this
+    operator's, which is the mistake this default exists to stop.
+
+    *not_owned* is the PRs the filter declined.  The CLI splits ownership
+    before the cap so a batch is never filled with a foreign PR, which means
+    *prs* here is already the owned subset and the trainer's own split finds
+    nothing to decline — so the report it writes would claim a run that covered
+    exactly the approved PRs, with no record of the ones left behind.  Handing
+    the declined PRs in is what puts ``not_owned`` and its
+    ``SKIPPED-NOT-OWNED`` verdicts in the persisted report rather than only on
+    the result the CLI prints.  Never overwritten: a trainer that did find some
+    of its own is describing a larger set.
     """
+    spec = head_filter or HeadFilter()
     keep, _moved = partition_batch(prs)
     batch = order_batch(keep)[:max_batch_size]
     base = resolve_base_branch(repo_path, configured=base_branch, prs=batch)
     trainer = GitTrainer(repo_path, command=command, base_branch=base)
-    result = MergeTrain(tester=trainer.evaluate, repo=repo, base_branch=base).run(
+    result = MergeTrain(tester=trainer.evaluate, repo=repo, base_branch=base, head_filter=spec).run(
         batch, merger=GitMerger(repo_path, repo=repo)
     )
     result.candidate_sha = trainer.candidate_sha
+    # Before the payload, not after: the report written here is what the
+    # operator reads, and a caller that already split ownership hands the
+    # declined PRs in rather than leaving the trainer to find none.  Never
+    # overwritten, because a run that reported its own is describing the same
+    # set from a second pass over the same PRs.
+    if not result.not_owned:
+        result.not_owned = tuple(not_owned)
     path = Path(report_path) if report_path else scratch_root(repo) / "train-report.json"
     payload = result.to_dict()
     # The command the trainer built, not the empty-set default it falls back to.
