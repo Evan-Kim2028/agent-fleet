@@ -1946,6 +1946,12 @@ class GatePipeline:
         sha = ""
         converged_metric: gate_metrics.GateMetrics | None = None
         infra_failed = False
+        # Whether *this* run got as far as verifying, and so owns the marker
+        # that _settle_state is about to finish. A run that returns early —
+        # unresolvable ref, pre-review conflict, tier 0, tier0 evidence gap —
+        # never verified anything, and must not speak for a marker it did not
+        # write. See _settle_state.
+        verified_here = False
         try:
             fetch_base(self.repo, self.config.base_branch)
             ref = resolve_pull_request(self.repo, self.pr_number)
@@ -2033,6 +2039,14 @@ class GatePipeline:
                     patch_id=self._pr_patch,
                     outcome="",
                 )
+                # The marker above is this run's own, and it is the only thing
+                # _settle_state may finish on this run's behalf. The reuse
+                # branch above never sets the flag: it stands on an earlier
+                # run's marker, which already carries a finished outcome, and
+                # stamping this run's verdict over it would make a run that
+                # dispatched no reviewer the author of the verdict a later run
+                # reuses.
+                verified_here = True
 
             if not self.evidence.confirmed:
                 sha = ref.head_sha
@@ -2068,7 +2082,9 @@ class GatePipeline:
             reasons.append(f"gate filesystem failure: {exc}"[:300])
         finally:
             remove_worktree(self.repo, worktree)
-            self._settle_state(ref, outcome=outcome, infra_failed=infra_failed)
+            self._settle_state(
+                ref, outcome=outcome, infra_failed=infra_failed, verified_here=verified_here
+            )
 
         return self._finish(outcome, sha, reasons, ref, metric=converged_metric)
 
@@ -2078,6 +2094,7 @@ class GatePipeline:
         *,
         outcome: GateOutcome,
         infra_failed: bool,
+        verified_here: bool,
     ) -> None:
         """Stamp this run's verdict onto its markers, then bound the directory.
 
@@ -2092,9 +2109,21 @@ class GatePipeline:
         outcome. Stamping it here is what turns this run's evidence into
         something the next head may stand on — and a run that died before here
         leaves it unstamped, so the next run redoes the work.
+
+        **Only a run that verified may stamp.** Markers are keyed by head, not
+        by run, so a run that returns before verification — a pre-review
+        conflict, tier 0, a tier0 evidence gap — is looking at whatever the last
+        run at this head left behind. Stamping there would attribute this run's
+        verdict to a marker it never wrote, and the empty outcome that made a
+        crashed run's marker correctly unreusable would be overwritten as if the
+        crashed run had reached a verdict. The next run would then stand on
+        evidence that no run ever produced, and "no confirmed blockers" would
+        read as an approval of a PR nobody reviewed.
         """
-        if ref is not None:
+        if ref is not None and verified_here:
             self.state.stamp_outcome(ref.head_sha, outcome=outcome.value, infra_failed=infra_failed)
+        elif ref is not None:
+            self._log("gate.state.untouched", head=ref.short_sha, reason="no verification this run")
         self.state.prune()
 
     def _finish(

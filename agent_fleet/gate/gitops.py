@@ -565,10 +565,18 @@ def merge_conflict_check(repo: Path, head: str, base: str) -> MergeConflict:
             (completed.stderr or "").strip()[:300],
         )
         return MergeConflict(git_error=True)
-    # The oid is line one; the conflicted paths follow, up to a blank line
-    # that ends the machine-readable section and starts git's prose summary.
-    files = tuple(line.strip() for line in lines[1:] if line.strip())
-    return MergeConflict(conflict_files=files)
+    # The oid is line one; the conflicted paths follow, up to the blank line
+    # that ends git's machine-readable section and starts its prose summary
+    # ("Auto-merging x", "CONFLICT (content): Merge conflict in x"). Dropping
+    # only *blank* lines is not enough: skipping them and reading on would
+    # report that prose as though it were a path, so a one-file conflict
+    # claims three files and the escalation reason quotes git at the user.
+    files: list[str] = []
+    for line in lines[1:]:
+        if not line.strip():
+            break
+        files.append(line.strip())
+    return MergeConflict(conflict_files=tuple(files))
 
 
 def _looks_like_a_tree_oid(line: str) -> bool:
