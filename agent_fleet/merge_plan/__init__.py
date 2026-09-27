@@ -18,6 +18,7 @@ from agent_fleet.merge_plan.batching import plan_batches
 from agent_fleet.merge_plan.config import (
     load_executor_spec,
     load_merge_plan_config,
+    load_merge_train_spec,
     parse_executor_spec,
     resolve_repo_specs,
 )
@@ -41,6 +42,7 @@ from agent_fleet.merge_plan.types import (
     ClusterHold,
     ExecutorSpec,
     MergePlan,
+    MergeTrainSpec,
     RepoSpec,
 )
 
@@ -56,6 +58,7 @@ __all__ = [
     "ExecutorSpec",
     "HoldLedger",
     "MergePlan",
+    "MergeTrainSpec",
     "RepoSpec",
     "TickResult",
     "build_plan",
@@ -63,6 +66,7 @@ __all__ = [
     "emit_plan_event",
     "load_executor_spec",
     "load_merge_plan_config",
+    "load_merge_train_spec",
     "parse_executor_spec",
     "plan_batches",
     "release_hold",

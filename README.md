@@ -14,6 +14,7 @@ Built on **[Cursor SDK](https://github.com/cursor/cursor-sdk)** (`cursor-sdk`). 
 | [Merge plan](docs/MERGE-PLAN.md) | Batch approved PRs into one deploy |
 | [Merge gate](docs/GATE.md) | Evidence-based `gate` pipeline before a PR merges |
 | [Fleet ops](docs/FLEET-OPS.md) | Multi-operator lane manager for the `cmd` swarm |
+| [Fleet serve](docs/FLEET-SERVE.md) | One supervisor for the whole pipeline, with no babysitter |
 
 **Requires:** Python 3.14 · [Cursor API key](https://cursor.com/dashboard/integrations) · git workspace  
 **Default model:** `composer-2.5` (slow / non-fast tier — agent-fleet pins `fast=false` explicitly so you aren't silently routed to the fast variant that Cursor returns as its default for the bare model id).

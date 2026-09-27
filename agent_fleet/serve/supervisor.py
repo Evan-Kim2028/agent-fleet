@@ -58,7 +58,13 @@ from agent_fleet.serve.paths import (
     read_json,
     write_json_atomic,
 )
-from agent_fleet.serve.procs import ProcIdentity, pid_alive, starttime_fingerprint, terminate_group
+from agent_fleet.serve.procs import (
+    ProcIdentity,
+    escalate_kill_group,
+    pid_alive,
+    starttime_fingerprint,
+    terminate_group,
+)
 
 if TYPE_CHECKING:
     from agent_fleet.serve.clock import Clock
@@ -70,6 +76,28 @@ CAUSE_EXIT = "exit"
 CAUSE_REQUESTED = "requested"
 CAUSE_CAPACITY = "capacity"
 
+#: A requested stop announced on a component that then *ignores* the TERM and is
+#: group-KILLed by ``_await_exit``. Distinct from ``CAUSE_REQUESTED`` because the
+#: reaped signal is SIGKILL, and a child killed by a signal did not get to
+#: choose its own exit — so this one never counts as the child asking to stop.
+CAUSE_REQUESTED_KILLED = "requested_killed"
+
+#: Causes that record a stop serve asked for. An exit carrying one of these is
+#: never a crash: the child is being restarted on purpose, so charging it to
+#: the budget would eventually stop restarting a component that never crashed
+#: and hide the real fault behind a crash-loop alert.
+_REQUESTED_CAUSES = frozenset({CAUSE_REQUESTED, CAUSE_REQUESTED_KILLED})
+
+#: The signals serve itself sends. A child killed by SIGKILL never ran its own
+#: exit path, so the signalled/exit-code split is meaningless for it and the
+#: recorded cause is the whole truth.
+_KILLED_BY_SIGNAL = {-signal.SIGKILL, -signal.SIGINT}
+
+#: Serve does not send SIGQUIT or SIGUSR1 to a component, so a child killed by
+#: one of those died on its own. SIGTERM is the exception: ``stop_component``
+#: and every watchdog group TERM go through it, which is the whole point.
+_SIGNALLED_BY_SERVE = {-signal.SIGTERM}
+
 STATE_STOPPED = "stopped"
 STATE_STARTING = "starting"
 STATE_RUNNING = "running"
@@ -79,6 +107,16 @@ STATE_CRASH_LOOPING = "crash_looping"
 #: Cap on remembered crash epochs per component, so a long-lived supervisor's
 #: state file does not grow without bound.
 _MAX_CRASH_HISTORY = 50
+
+#: How often the stop path re-checks whether a TERMed component has actually
+#: exited. Short enough that a component that dies on the TERM costs almost
+#: nothing, long enough that the poll is not the dominant cost of the wait.
+_EXIT_POLL_INTERVAL_S = 0.05
+
+#: How long the stop path gives a group KILL to land before reporting the
+#: process as still present. A SIGKILL is delivered by the kernel, so this only
+#: has to cover the reap; it is bounded so a stop can never hang the watchdog.
+_KILL_SETTLE_S = 2.0
 
 
 def expand_command(
@@ -235,6 +273,16 @@ class Supervisor:
     # ------------------------------------------------------------------ state
 
     @property
+    def stopping(self) -> bool:
+        """True once SIGTERM/SIGINT has been seen, or shutdown has begun.
+
+        The signal handler only sets the flag; the serve loop is what reads it
+        and returns, so the flag is only useful if callers outside this class
+        can see it too.
+        """
+        return self._stopping
+
+    @property
     def state_file(self) -> Path:
         from agent_fleet.serve.paths import state_path
 
@@ -347,6 +395,14 @@ class Supervisor:
 
         log_path = component_log_path(self.operator, name)
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        # Bound before the try, not by the first statement inside it: an
+        # unopenable log (a directory in its place, ENOSPC on a full volume)
+        # raises out of ``open`` itself, and the handler below still has to run
+        # to record the failure. An unbound ``handle`` turned that into an
+        # UnboundLocalError that escaped ``ServeLoop.run``'s finally, so
+        # children were left running, state was never saved and the pid file
+        # was left stale for the next serve to try to adopt.
+        handle: Any = None
         try:
             handle = log_path.open("ab")
             proc = subprocess.Popen(
@@ -360,7 +416,8 @@ class Supervisor:
                 start_new_session=True,
             )
         except (OSError, ValueError) as exc:
-            handle.close()
+            if handle is not None:
+                handle.close()
             self._note_crash(name, cause=CAUSE_CRASH, code=None, message=str(exc))
             emit_serve_event(
                 self.operator,
@@ -447,9 +504,29 @@ class Supervisor:
                     handle.close()
             state = self.children.get(name)
             cause = state.pending_cause if state else CAUSE_CRASH
-            # A non-zero exit is a crash whatever we asked for; a zero exit is
-            # only a crash if nobody asked.
-            effective = CAUSE_CRASH if code != 0 else cause
+            # A death serve asked for is not a crash, whatever the exit code
+            # says. A watchdog group TERM arrives as exit code -15, and reading
+            # it as "non-zero, so crash" charged every one of them against the
+            # crash budget — so a component the watchdog merely restarted was
+            # eventually marked crash_looping and stopped for a fault it never
+            # had, with the real one hidden behind a crash-loop alert.
+            #
+            # The signal is the discriminator, not the tag. ``start`` defaults
+            # its cause to ``requested``, so trusting the label alone would also
+            # excuse a component that fell over on its own between spawns. What
+            # separates the two is whether serve sent the signal: a TERM it
+            # sent is a requested stop, a signal it never sends is a crash, and
+            # a child that exits by itself after being asked to stop chose that
+            # code, so it still counts.
+            if cause in _REQUESTED_CAUSES and code is not None:
+                if code in _KILLED_BY_SIGNAL:
+                    effective = CAUSE_REQUESTED_KILLED
+                elif code == 0 or code in _SIGNALLED_BY_SERVE:
+                    effective = cause
+                else:
+                    effective = CAUSE_CRASH
+            else:
+                effective = CAUSE_CRASH if code != 0 else cause
             self._note_crash(name, cause=effective, code=code)
             exits.append((name, code))
         return exits
@@ -579,19 +656,103 @@ class Supervisor:
         return self.start(name, cause=CAUSE_REQUESTED)
 
     def stop_component(self, name: str, *, cause: str = CAUSE_REQUESTED) -> bool:
-        """TERM a component's group, by recorded fingerprint only."""
+        """Stop a component, by recorded fingerprint only, and wait for it to go.
+
+        Signalling is driven from the *recorded identity*, never from whether a
+        ``Popen`` handle happens to be in :attr:`_procs`. An adopted component
+        — one this supervisor re-attached to at boot rather than spawned — is
+        in exactly that state: it is in :attr:`children` and it is running, but
+        it has no handle here. Gating the TERM on the handle meant an adopted
+        component was never signalled, its pid file was cleared anyway, and the
+        follow-up ``start`` then re-checked :meth:`adopt` against a pid file
+        that no longer existed — so the fingerprint proof never ran and a second
+        process was spawned for the same role. Re-attach, never double-start.
+
+        The wait is what makes the TERM worth sending. ``stop_component`` is
+        followed by an immediate ``start``, so returning while the old process
+        is still alive leaves the wedged one running alongside its replacement:
+        a component that traps SIGTERM would leak one unkillable process per
+        watchdog retry, forever, because nulling the identity here is exactly
+        what makes the TERM impossible to escalate. So the identity is held
+        until the process is confirmed gone, and a group KILL finishes the job
+        when the grace runs out. The grace is spent once, per component, and is
+        bounded by config.
+        """
         state = self.children.get(name)
         if state is None:
             return False
         state.pending_cause = cause
+        identity = state.identity
         proc = self._procs.get(name)
-        if proc is not None and proc.poll() is None:
-            terminate_group(state.identity, proc_root=self.proc_root)
+        if proc is not None and proc.poll() is not None:
+            # Already exited; _reap will account for it. Nothing to signal.
+            identity = None
+        if identity is not None:
+            terminate_group(identity, proc_root=self.proc_root)
+            self._await_exit(name, identity, proc)
         self._clear_pidfile(name)
         state.state = STATE_STOPPED
         state.pid = None
         state.starttime = None
         return True
+
+    def _await_exit(
+        self,
+        name: str,
+        identity: ProcIdentity,
+        proc: subprocess.Popen[bytes] | None,
+    ) -> bool:
+        """Wait out the TERM grace, then group-KILL whatever is still there.
+
+        Returns True when the process is gone by the time this returns, so the
+        caller knows a replacement ``start`` is safe. Polls on a short interval
+        rather than sleeping the whole grace, so a component that exits on the
+        TERM does not cost the caller the full wait.
+        """
+        grace = max(0.0, float(self.config.shutdown_grace_s))
+        deadline = self.clock.monotonic() + grace
+        while self.clock.monotonic() < deadline:
+            if self._exited(identity, proc):
+                return True
+            self.clock.sleep(_EXIT_POLL_INTERVAL_S)
+        if self._exited(identity, proc):
+            return True
+        # Still there after the grace: the TERM was ignored or trapped. The
+        # identity is still intact precisely because stop_component has not
+        # nulled it yet, so the escalation can still prove it owns the pid.
+        killed = escalate_kill_group(identity, proc_root=self.proc_root)
+        if killed.signalled:
+            emit_serve_event(
+                self.operator,
+                "serve.component.kill_escalated",
+                level="warning",
+                data={"component": name, "pid": identity.pid},
+            )
+        # The KILL is not instantaneous; give it a bounded moment to land so
+        # the caller does not spawn a replacement while the corpse is still
+        # holding the group's resources.
+        kill_deadline = self.clock.monotonic() + _KILL_SETTLE_S
+        while self.clock.monotonic() < kill_deadline:
+            if self._exited(identity, proc):
+                return True
+            self.clock.sleep(_EXIT_POLL_INTERVAL_S)
+        return self._exited(identity, proc)
+
+    def _exited(
+        self,
+        identity: ProcIdentity,
+        proc: subprocess.Popen[bytes] | None,
+    ) -> bool:
+        """True once the process is gone, by waitpid or by ``/proc``.
+
+        A process this supervisor spawned can be reaped, and ``proc.poll`` is
+        the authoritative answer for it. An adopted one cannot — it is not our
+        child, so there is nothing to waitpid — and is judged by whether its
+        fingerprint still resolves in ``/proc``.
+        """
+        if proc is not None:
+            return proc.poll() is not None
+        return not identity.matches(proc_root=self.proc_root)
 
     def shutdown(self) -> None:
         """Stop every child, in reverse start order, then persist state.
@@ -688,6 +849,7 @@ __all__ = [
     "CAUSE_CRASH",
     "CAUSE_EXIT",
     "CAUSE_REQUESTED",
+    "CAUSE_REQUESTED_KILLED",
     "STATE_BACKOFF",
     "STATE_CRASH_LOOPING",
     "STATE_RUNNING",

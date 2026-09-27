@@ -124,17 +124,19 @@ class PressureReading:
         }
 
 
-def _parse_psi(text: str) -> CpuPressure:
+def _parse_psi_document(text: str) -> tuple[CpuPressure, bool]:
     """Parse a ``cpu.pressure``/``io.pressure`` document.
 
-    Format is two lines, ``some avg10=N avg60=N avg300=N total=N`` then the
-    same for ``full``. Unparseable input yields all-zero rather than raising:
-    a malformed document is a broken source, and :attr:`PressureReading.ok` is
-    where that fact gets recorded.
+    Returns the parsed values plus whether every field was a number. A field
+    that does not parse is left out and the rest of the line is kept — the
+    counters beside a garbled ``avg60`` are still real — but the document is
+    reported as untrusted, because a kernel spelling we do not understand is
+    exactly the case where a zero must not be mistaken for an idle machine.
     """
     some: dict[str, float] = {}
     full: dict[str, float] = {}
     target: dict[str, float] = {}
+    malformed = False
     for raw in text.splitlines():
         line = raw.strip()
         if not line:
@@ -147,16 +149,32 @@ def _parse_psi(text: str) -> CpuPressure:
             continue
         for token in line.split()[1:]:
             key, _, value = token.partition("=")
-            if value:
+            if not value:
+                continue
+            try:
                 target[key] = float(value)
-    return CpuPressure(
-        some_avg10=some.get("avg10", 0.0),
-        some_avg60=some.get("avg60", 0.0),
-        some_avg300=some.get("avg300", 0.0),
-        some_total_us=int(some.get("total", 0)),
-        full_avg60=full.get("avg60", 0.0),
-        full_total_us=int(full.get("total", 0)),
+            except ValueError:
+                malformed = True
+    return (
+        CpuPressure(
+            some_avg10=some.get("avg10", 0.0),
+            some_avg60=some.get("avg60", 0.0),
+            some_avg300=some.get("avg300", 0.0),
+            some_total_us=int(some.get("total", 0)),
+            full_avg60=full.get("avg60", 0.0),
+            full_total_us=int(full.get("total", 0)),
+        ),
+        malformed,
     )
+
+
+def _parse_psi(text: str) -> CpuPressure:
+    """Unparseable input yields the values that did parse, never an exception:
+    a malformed document is a broken source, and :attr:`PressureReading.ok` is
+    where that fact gets recorded.
+    """
+    parsed, _ = _parse_psi_document(text)
+    return parsed
 
 
 def _read_int(path: Path) -> int | None:
@@ -168,9 +186,12 @@ def _read_int(path: Path) -> int | None:
 
 def _read_optional_psi(path: Path) -> CpuPressure | None:
     try:
-        return _parse_psi(path.read_text(encoding="utf-8"))
-    except OSError:
+        parsed, malformed = _parse_psi_document(path.read_text(encoding="utf-8"))
+    except OSError, ValueError:
         return None
+    if malformed:
+        return None
+    return parsed
 
 
 def detect_hierarchy(root: Path) -> str:

@@ -525,6 +525,7 @@ def call_devin(
     runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     on_progress: Callable[[str | None, dict[str, int]], None] | None = None,
     progress_interval_s: float = _PROGRESS_POLL_INTERVAL_S,
+    env: dict[str, str] | None = None,
 ) -> tuple[str, str | None, dict[str, int] | None, int]:
     """Run ``devin --prompt-file ... -p`` with retry/backoff.
 
@@ -546,6 +547,11 @@ def call_devin(
     usage every *progress_interval_s* seconds for the duration of each
     subprocess attempt and invokes it with ``(session_id, cumulative_usage)``
     — see ``_progress_poll_loop``.
+
+    *env* is the base environment the devin child inherits; the
+    ``DEVIN_*`` keys below are layered on top of it. ``None`` means
+    ``os.environ``. It exists so a lane can put its admission shim on the
+    child's ``PATH`` — a parent's ``PATH`` cannot be changed after the fact.
     """
     run_fn = runner or subprocess.run
     bin_path = devin_bin or _find_devin_bin()
@@ -610,7 +616,7 @@ def call_devin(
                 ]
             )
 
-            env = os.environ.copy()
+            env = dict(os.environ) if env is None else dict(env)
             # Belt-and-suspenders alongside the --model flag: also set
             # DEVIN_MODEL so the model is unambiguous even if argv parsing
             # (e.g. combined with -r on a resume) ever drops the flag.
@@ -892,6 +898,7 @@ class DevinBackend:
         model: str | None = None,
         mode: str | None = None,
         runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+        env: dict[str, str] | None = None,
     ) -> DevinLLMResult:
         del max_tokens, memory_limit
         ok, detail, fix = check_devin_auth()
@@ -927,6 +934,7 @@ class DevinBackend:
                 mode=selected_mode,
                 on_progress=_on_progress if run_log is not None else None,
                 runner=runner,
+                env=env,
             )
             duration_s = time.monotonic() - t0
             ctx = get_run_context()

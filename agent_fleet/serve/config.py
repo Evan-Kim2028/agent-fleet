@@ -351,6 +351,37 @@ def _read_yaml(path: Path) -> dict[str, Any] | None:
     return raw if isinstance(raw, dict) else None
 
 
+def _read_yaml_explicit(path: Path) -> dict[str, Any]:
+    """Read a config file the operator named, failing loudly if it cannot be read.
+
+    :func:`_read_yaml` returns ``None`` both for "there is nothing here" and for
+    "this is unreadable or is not YAML", which is the right answer for an
+    *implicit* source but not for an explicit ``--serve-config``: a typo in that
+    path, or a half-written file, would otherwise leave a long-running supervisor
+    on built-in thresholds the operator believes they configured. So the two
+    failures are separated here, and both raise.
+    """
+    import yaml
+
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ServeConfigError(
+            f"cannot read {path} ({exc.strerror or exc}). "
+            f"Check the --serve-config path, or drop the flag to use the global fleet.yaml."
+        ) from exc
+    try:
+        raw = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise ServeConfigError(
+            f"{path} is not valid YAML ({str(exc).splitlines()[0]}). "
+            f"Fix the file, or drop the flag to use the global fleet.yaml."
+        ) from exc
+    # A file that parses to a scalar or to nothing has no `serve:` section, which
+    # the caller reports the same way it reports a mapping without one.
+    return raw if isinstance(raw, dict) else {}
+
+
 def _repo_sections(raw: dict[str, Any]) -> dict[str, Any] | None:
     """``serve:`` first, then ``fleet_ops.serve`` — both repo-local spellings."""
     top = raw.get("serve")
@@ -372,25 +403,25 @@ def load_serve_config(
 ) -> ServeConfig:
     """Resolve serve configuration from every source, in the documented order.
 
-    An explicitly named *config_path* that has no serve section raises
-    :class:`ServeConfigError`. Implicit sources (the global fleet.yaml, the
-    repo config) fall through to the next source without complaint, because a
-    machine that has never configured serve should still get working defaults.
+    An explicitly named *config_path* that has no serve section — or that cannot
+    be read or parsed at all — raises :class:`ServeConfigError`. Implicit sources
+    (the global fleet.yaml, the repo config) fall through to the next source
+    without complaint, because a machine that has never configured serve should
+    still get working defaults.
     """
     sections: list[tuple[dict[str, Any], Path]] = []
 
     if config_path is not None:
-        raw = _read_yaml(config_path)
-        if raw is not None:
-            section = _repo_sections(raw)
-            if section is not None:
-                sections.append((section, config_path))
-            else:
-                raise ServeConfigError(
-                    f"{config_path} has no `serve:` (or `fleet_ops.serve:`) section. "
-                    f"Point --serve-config at a file that configures serve, or drop the "
-                    f"flag to use the global fleet.yaml."
-                )
+        raw = _read_yaml_explicit(config_path)
+        section = _repo_sections(raw)
+        if section is not None:
+            sections.append((section, config_path))
+        else:
+            raise ServeConfigError(
+                f"{config_path} has no `serve:` (or `fleet_ops.serve:`) section. "
+                f"Point --serve-config at a file that configures serve, or drop the "
+                f"flag to use the global fleet.yaml."
+            )
     else:
         from agent_fleet.fleet_paths import default_fleet_config_path
 

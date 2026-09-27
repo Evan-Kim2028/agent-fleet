@@ -1,6 +1,6 @@
 """A PR approved under two repo spellings must be planned once, not twice.
 
-`build_plan` de-duplicates approvals *before* `_normalize_repo` rewrites a
+`build_plan` de-duplicates approvals *before* `normalize_repo` rewrites a
 repo name onto the key used in `repo_specs`.  So the same PR recorded as
 `owner/name#42` in a status file and as `name` in the lane registry has two
 different raw repo strings, survives `dedupe_approvals` as two entries, and is
@@ -104,7 +104,7 @@ def test_same_pr_under_two_repo_spellings_is_planned_once(tmp_path: Path, fake_g
 
     planned = [(b.repo, p.pr_number) for b in plan.batches for p in b.prs]
     # One approval, one planned merge — the repo name is reconciled by
-    # _normalize_repo, so both records name the same PR.
+    # normalize_repo, so both records name the same PR.
     assert planned == [("lake-of-rage", 42)], f"PR 42 planned more than once: {planned}"
 
     commands = [c for b in plan.batches for c in b.executor_commands]

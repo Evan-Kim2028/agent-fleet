@@ -119,7 +119,10 @@ def _config(**overrides: Any) -> GateConfig:  # noqa: ANN401
         "judge_model": "m",
         "enable_judge": False,
         "enable_fix": True,
-        "agent_timeout_s": 10,
+        "lens_timeout_s": 10,
+        "verify_timeout_s": 10,
+        "judge_timeout_s": 10,
+        "fix_timeout_s": 10,
         "test_timeout_s": 10,
     }
     base.update(overrides)

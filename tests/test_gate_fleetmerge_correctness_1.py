@@ -47,6 +47,7 @@ PR_TRUTH: dict[str, Any] = {
     "state": "OPEN",
     "mergeable": "MERGEABLE",
     "headRefOid": HEAD_SHA,
+    "headRefName": "feat/thing",
     "baseRefName": "main",
     "additions": 10,
     "deletions": 2,

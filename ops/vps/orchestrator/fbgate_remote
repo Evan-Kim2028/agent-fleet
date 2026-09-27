@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# fbgate_remote LANE REPO PR — start the evidence gate for one PR on lor-main (remote gate worker, ~/fleet/fb) and return.
+# The gate runs as transient user service fleet-gate-LANE in fleet.slice (hard 17G cap, frozen first on host memory
+# pressure), with agents on OpenRouter (cmd fallback). remote_sync.sh copies its status lines back into $F/lanes/LANE.status
+# and events.log, so automerge2 and the reconciler treat it like a local gate. Refuses if that lane is already gating there.
+set -uo pipefail
+F=${FLEET_OPS_HOME:-$HOME/fleet/ops}
+LANE=$1; REPO=$2; PR=$3
+[[ "$LANE" =~ ^[a-z0-9][a-z0-9-]*$ && "$PR" =~ ^[0-9]+$ ]] || { echo "fbgate_remote: bad LANE/PR ($LANE $PR)" >&2; exit 64; }
+case "$REPO" in lake-of-rage|silphcoanalytics|agent-fleet) ;; *) echo "fbgate_remote: repo $REPO not served remotely" >&2; exit 64;; esac
+H="${FLEET_VPS_HOST:-lake-vps-lor-main}"; SSH="ssh -o ConnectTimeout=20 -o ServerAliveInterval=15"
+if [ -s $F/prompts/$LANE.task.md ]; then
+  timeout 60 $SSH $H "mkdir -p ~/fleet/fb/prompts && cat > ~/fleet/fb/prompts/$LANE.task.md" < $F/prompts/$LANE.task.md || exit 10
+fi
+out=$(timeout 90 $SSH $H "[ \"\$(cat ~/fleet/state/admission 2>/dev/null)\" = closed ] && { echo CLOSED; exit 0; }
+  systemctl --user is-active --quiet fleet-gate-$LANE.service && { echo ALREADY; exit 0; }
+  systemctl --user reset-failed fleet-gate-$LANE.service 2>/dev/null
+  systemd-run --user --quiet --collect --unit=fleet-gate-$LANE --slice=fleet.slice -p RuntimeMaxSec=21600 \
+    -p StandardOutput=append:\$HOME/fleet/fb/gate-$LANE.log -p StandardError=append:\$HOME/fleet/fb/gate-$LANE.log \
+    /bin/bash -lc '~/fleet/fb/fbgate $LANE $REPO $PR' && echo STARTED" 2>&1); rc=$?
+case "$out" in
+  *STARTED*) echo "$(date +%H:%M:%S) [$LANE] remote gate started on lor-main (PR $REPO#$PR, fleet-gate-$LANE)" >> $F/events.log
+             echo "$LANE" >> $F/remote_live.txt; exit 0;;
+  *CLOSED*) echo "fbgate_remote: lor-main admission closed by the pressure guard" >&2; exit 11;;
+  *ALREADY*) echo "fbgate_remote: $LANE already gating on lor-main" >&2; exit 3;;
+  *) echo "fbgate_remote: start failed rc=$rc: $out" >&2; exit 10;;
+esac

@@ -205,6 +205,7 @@ def test_summary_of_no_runs() -> None:
     assert summarize_rows([]) == {
         "runs": 0,
         "outcomes": {},
+        "by_tier": {},
         "rounds_total": 0,
         "candidates_total": 0,
         "confirmed_total": 0,

@@ -89,7 +89,10 @@ def _pipeline(
         enable_judge=False,
         enable_fix=enable_fix,
         max_fix_rounds=4,
-        agent_timeout_s=10,
+        lens_timeout_s=10,
+        verify_timeout_s=10,
+        judge_timeout_s=10,
+        fix_timeout_s=10,
         test_timeout_s=10,
     )
     return GatePipeline(
@@ -101,6 +104,18 @@ def _pipeline(
         gate_dir=tmp_path / "gate",
         use_systemd=False,
     )
+
+
+def _stub_converge_git(monkeypatch: pytest.MonkeyPatch, *, head: str) -> None:
+    """Let converge() reach a fix round: no real repo, no real pytest, no gh.
+
+    The fixer is scripted to report a push, so the round is scored; the
+    untestable verdict is left to the caller to stub on ``recheck_untestable``.
+    """
+    monkeypatch.setattr("agent_fleet.gate.pipeline.prepare_worktree", lambda *_a, **_k: None)
+    monkeypatch.setattr("agent_fleet.gate.pipeline.remove_worktree", lambda *_a, **_k: None)
+    monkeypatch.setattr("agent_fleet.gate.pipeline.fetch_base", lambda *_a, **_k: None)
+    monkeypatch.setattr("agent_fleet.gate.pipeline.current_pr_head", lambda *_a: head)
 
 
 # ---------------------------------------------------------------------------
@@ -426,42 +441,52 @@ def _with_untestable_blocker(pipe: GatePipeline) -> None:
     )
 
 
-def test_untestable_only_blockers_escalate_without_spending_a_fix_round(
+def test_untestable_only_blockers_get_one_fix_round_not_a_bare_escalation(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """failing==0 with only untestable_real blockers must not say 'cap after 1 round(s)'.
 
     The fixer was dispatched to a PR whose entire test set was green, and the
-    resulting "cap" reason read as "we tried and ran out of rounds".
+    resulting "cap" reason read as "we tried and ran out of rounds". It now gets
+    one round carrying the untestable list, after which the recheck judge — not
+    the failing-set maths — decides.
     """
     from agent_fleet.gate import metrics as gm
 
     backend = _ScriptedBackend()
     pipe = _pipeline(tmp_path, backend, enable_fix=True)
     _with_untestable_blocker(pipe)
+    _stub_converge_git(monkeypatch, head="a" * 40)
+    monkeypatch.setattr(GatePipeline, "recheck_untestable", lambda *_a, **_k: False)
 
     _head, metric = pipe.converge(ref=_ref(), pr_tests=[])
     assert metric.outcome == gm.OUTCOME_UNTESTABLE_NEEDS_REVIEW
-    assert metric.round_count == 1  # baseline only: no fix round was spent
-    assert backend.prompts == [], "a fixer was dispatched for a green test set"
+    assert metric.round_count == 2  # baseline + the one untestable round
+    assert len(backend.prompts) == 1, "the untestable blocker never reached a fixer"
+    assert "reconcile erases a fence" in backend.prompts[0]
     assert metric.untestable_real == 1
 
 
 def test_the_untestable_needs_review_reason_names_the_blockers(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The escalation reason must say a human has to look, and at what."""
+    from agent_fleet.gate import metrics as gm
     from agent_fleet.gate.pipeline import untestable_review_reason
 
     pipe = _pipeline(tmp_path, _ScriptedBackend(), enable_fix=True)
     _with_untestable_blocker(pipe)
+    _stub_converge_git(monkeypatch, head="a" * 40)
+    monkeypatch.setattr(GatePipeline, "recheck_untestable", lambda *_a, **_k: False)
     _head, metric = pipe.converge(ref=_ref(), pr_tests=[])
 
     reason = untestable_review_reason(pipe.evidence.confirmed)
     assert reason is not None
     assert "untestable blocker(s) need human review" in reason
     assert "reconcile erases a fence" in reason
-    assert metric.round_count == 1
+    assert metric.outcome == gm.OUTCOME_UNTESTABLE_NEEDS_REVIEW
 
 
 def test_a_green_pr_with_no_blockers_still_converges(tmp_path: Path) -> None:

@@ -72,6 +72,38 @@ gate:
   max_parallel_lenses: 8
   max_parallel_verifiers: 6
 
+  # -------------------------------------------------------------------------
+  # Review tiering — how many reviewers a PR earns, decided from the diff
+  # before any model is dispatched, and logged as one `gate.tier` line.
+  # -------------------------------------------------------------------------
+  #   tier 0 — every changed file is docs/tests/fixtures, so there is no
+  #            product behaviour to review. Approved on evidence alone: the
+  #            PR's own changed tests green at head, plus the merged-tree
+  #            `gate recheck` that runs before the merge. Any confirmed blocker
+  #            (a failing PR test included) refuses it, and so does an empty
+  #            changed-file list.
+  #   tier 1 — small and nothing production-sensitive: ONE reviewer whose
+  #            prompt covers all four focuses.
+  #   tier 4 — big, or touching anything production-sensitive: the full
+  #            parallel lens set above.
+  tier0: true
+
+  # Size is counted in NON-test changed lines (tests, fixtures, docs, *.snap
+  # and *.json excluded): they inflate a diff without adding review risk.
+  # Over this many, the full lens set runs.
+  big_lines: 1200
+
+  # Any changed path matching one of these keeps the full lens set at any size.
+  # Matched with re.search against the repo-relative path. An empty list is
+  # honoured as "nothing here is production-sensitive".
+  prodsensitive_paths:
+    - '^infra/vps/'
+    - '^\.github/workflows/'
+    - '^scripts/(deploy|lor-api-ship|platform-deploy)'
+    - '(^|/)migrations?/'
+    - '(gold|sales).*(write|publish|restat|backfill|apply)'
+    - 'run_prod'
+
   # Fix rounds continue while the failing set strictly shrinks and no new
   # failures appear. max_fix_rounds is only a safety net against a run that
   # keeps making one-test-at-a-time progress — the stopping rule is
@@ -84,9 +116,15 @@ gate:
   # PR's own head branch.
   base_branch: main
 
-  # Timeouts (seconds) and the deterministic test budget.
-  agent_timeout_s: 1800
-  judge_timeout_s: 7200
+  # Per-stage agent budgets (seconds), and the deterministic test budget. The
+  # stages are split because they do different work: a fixer has to commit,
+  # push and wait on a test suite, which never fits in a reviewer's budget.
+  # A stage that runs out of budget is a dead agent and fails closed — the run
+  # escalates rather than reading the silence as "no findings".
+  lens_timeout_s: 2400
+  verify_timeout_s: 2400
+  judge_timeout_s: 2400
+  fix_timeout_s: 5400
   test_timeout_s: 900
 
   # Every pytest the gate launches is memory-capped: a runaway suite once

@@ -213,7 +213,24 @@ class LockRegistry:
         ``wanting`` is carried over from the acquisition so a held record still
         says what its holder is in there doing — the first thing an operator
         reads when a merge lock has been held for two hours.
+
+        A pending ``waiting_for`` for the *same holder* is carried over too.
+        A component can take one lock while it is still blocked on another, and
+        that is exactly what a two-way deadlock is: both holders own a lock the
+        other is queued for. Dropping the edge here — which writing a fresh
+        record over a pending wait did — left the graph with no closing edge, so
+        the cycle became invisible to :meth:`deadlocks` even though both halves
+        of it were on disk.
         """
+        pending = self.read(name)
+        carried_wait = None
+        if (
+            pending is not None
+            and pending.state == STATE_WAITING
+            and pending.holder == holder
+            and pending.waiting_for
+        ):
+            carried_wait = pending.waiting_for
         record = LockRecord(
             name=name,
             state=STATE_HELD,
@@ -221,6 +238,7 @@ class LockRegistry:
             pid=pid,
             starttime=starttime,
             acquired_epoch=now if now is not None else time.time(),
+            waiting_for=carried_wait,
             wanting=wanting,
         )
         self.write(record)
@@ -345,17 +363,62 @@ class LockRegistry:
                 out.append(record)
         return out
 
+    @staticmethod
+    def _wait_of(records: dict[str, LockRecord], holder: str) -> LockRecord | None:
+        """The record where *holder* is itself waiting, if it is waiting at all.
+
+        There are two shapes a wait is written in, and both are real:
+
+        * the lock a holder is blocked on is a record in its own right, named
+          by the waiter — ``mark_waiting("dispatch-wait", holder=...)``. This is
+          the ordinary case, so the edge out of a held lock is found by asking
+          which record names that holder as a waiter;
+        * the record that *is* the lock the holder wants is itself ``waiting``
+          and carries its own ``waiting_for``, so the holder's edge lives on the
+          record that holds it.
+
+        The first is preferred because it is the explicit one, and the
+        tie-break keeps this deterministic when a holder is queued twice.
+        """
+        if not holder:
+            return None
+        waiting = [
+            r
+            for r in records.values()
+            if r.state == STATE_WAITING and r.holder == holder and r.waiting_for
+        ]
+        if not waiting:
+            return None
+        return min(waiting, key=lambda r: (r.acquired_epoch, r.name))
+
     def deadlocks(self, *, now: float, threshold_minutes: float) -> list[list[LockRecord]]:
         """Cycles among waiters, each edge older than the threshold.
 
         A cycle is ``A waits for L, L held by B, B waits for M, M held by A``.
         Returned oldest-edge-first so the remediation releases the *older* claim,
         which is the one whose owner is least likely to be making progress.
+
+        A cycle is a *closed* walk, so the walk has to come back to where it
+        started. Requiring a non-empty path was not enough: the loop breaks as
+        soon as it reaches a record with no edge of its own, so an ordinary
+        contention edge — ``dispatcher`` waiting for a ``repo-x`` that ``merger``
+        is genuinely holding — produced a two-record path, passed the
+        ``len(path) < 2`` filter and was reported as a deadlock. False findings
+        are charged to ``max_remediations_per_tick`` and the deadlock rule runs
+        before the orphan, stuck-stage and no-progress rules, so enough ordinary
+        contention starved every real finding in the same tick.
+
+        A holder's edge out of a lock it owns is written two ways, and the walk
+        follows both: a separate record naming it as a waiter, or — the shape
+        this module's own tests and the two-way case use — a claim taken while
+        the holder was still blocked, which ``mark_held`` carries forward on the
+        held record itself. What is *not* a cycle is a held lock whose holder has
+        no edge at all: that is a working holder, and the walk simply ends.
         """
         records = self.all_records()
         threshold_s = max(0.0, threshold_minutes) * 60.0
         cycles: list[list[LockRecord]] = []
-        seen: set[tuple[str, ...]] = set()
+        seen: set[tuple[tuple[str, str], ...]] = set()
 
         for start in records.values():
             if start.state != STATE_WAITING or not start.waiting_for:
@@ -363,6 +426,7 @@ class LockRegistry:
             path: list[LockRecord] = [start]
             visited = {start.name}
             current = start
+            closed = False
             while current.waiting_for:
                 target = records.get(current.waiting_for)
                 if target is None:
@@ -370,14 +434,30 @@ class LockRegistry:
                 if target.state == STATE_HELD and target.holder == current.holder:
                     break
                 if target.name in visited:
+                    # Re-entering a node already on this walk is what makes a
+                    # walk a cycle. The node it lands on need not be the one it
+                    # started from: a two-way cycle is written as four records —
+                    # each lock carries both its ``held`` claim and its
+                    # ``waiting`` edge — so the walk re-enters the held record
+                    # it passed earlier, not the wait that began the walk.
+                    closed = True
                     break
                 path.append(target)
                 visited.add(target.name)
-                nxt = records.get(target.holder) if target.holder else None
-                if nxt is None or nxt.state != STATE_WAITING or not nxt.waiting_for:
+                nxt = self._wait_of(records, target.holder)
+                if nxt is None and target.waiting_for:
+                    # No separate record names this holder as a waiter, so the
+                    # edge lives on the record we just reached — either it is a
+                    # wait of its own, or a claim taken while the holder was
+                    # still blocked on another lock (``mark_held`` carries that
+                    # edge forward). Both spellings are real; a plain held lock
+                    # with no edge ends the walk here, which is the contention
+                    # case that is not a cycle.
+                    nxt = target
+                if nxt is None:
                     break
                 current = nxt
-            if len(path) < 2:
+            if not closed or len(path) < 2:
                 continue
             oldest_edge_age = min(
                 (
@@ -389,12 +469,32 @@ class LockRegistry:
             )
             if oldest_edge_age < threshold_s:
                 continue
-            key = tuple(sorted(r.name for r in path))
+            key = self._cycle_key(path)
             if key in seen:
                 continue
             seen.add(key)
             cycles.append(path)
         return cycles
+
+    @staticmethod
+    def _cycle_key(path: list[LockRecord]) -> tuple[tuple[str, str], ...]:
+        """Identify a cycle by the lock-to-holder rotation it walks.
+
+        A cycle is a set of *claimed locks* whose holders each wait on another
+        lock in that set, and that rotation is the same whichever wait opened
+        the walk. A two-way cycle is reachable from both of its waits, so keying
+        on the walk — or on the wait records in it — reported one deadlock as
+        two findings, which is charged to the per-tick budget twice and releases
+        the same claim twice.
+
+        Only claimed locks name the cycle. A wait record is an edge into the
+        cycle, not a participant in it, so including one would make the two
+        walks of a single cycle look like two different cycles. The contention
+        case never reaches here, because its walk never closes.
+        """
+        return tuple(
+            sorted({(r.name, r.holder) for r in path if r.holder and r.state != STATE_WAITING})
+        )
 
 
 __all__ = [
