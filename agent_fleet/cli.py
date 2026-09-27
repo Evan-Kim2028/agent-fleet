@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 from agent_fleet.backends import make_backend, registered_backend_names
 from agent_fleet.cli_core import normalize_argv
@@ -101,6 +102,54 @@ def cmd_review(args: argparse.Namespace) -> int:
         pr_number=args.pr_number or 0,
     )
     return emit(result, fmt=args.format)
+
+
+def cmd_pr_own(args: argparse.Namespace) -> int:
+    """Run one ownership round for a PR, carrying context via the notes file."""
+    from agent_fleet.emit import emit
+    from agent_fleet.pr_owner import run_own
+
+    result = run_own(
+        repo_path=Path(args.repo_path or Path.cwd()),
+        pr_number=int(args.pr),
+        findings_path=args.findings,
+        failing=list(args.failing or ()),
+        task_file=args.task_file,
+    )
+    if result.get("error"):
+        print(f"error: {result['error']}", file=sys.stderr)
+        return 1
+    code = emit(result)
+    if code == 0 and not round_succeeded(result):
+        return 1
+    return code
+
+
+def round_succeeded(result: dict[str, object]) -> bool:
+    """True when a round's work reached the branch with its tests green.
+
+    ``emit`` only knows the status/verdict/outcome tables, and a round carries
+    none of those keys, so it would report success for an engine that died, a
+    push that was rejected, or tests that are still red. A driver gating on the
+    exit code has to stop escalating on exactly those rounds, so they are not 0.
+
+    The verdict is read off ``pushed``, not off the ``detail`` prose. ``_push_head``
+    fails a round in more ways than a prefix list stays ahead of — a rejected
+    non-fast-forward whose refetch or its rebase failed, a retry that failed
+    after rebasing — and every message this function has not learned to
+    recognise reports a round whose fixes never reached the branch as a
+    success. The prefixes are the backstop for a shape that reports a push
+    failure without carrying a ``pushed`` flag of its own.
+    """
+    detail = str(result.get("detail") or "")
+    if detail.startswith(("engine failed", "push failed", "push rejected")):
+        return False
+    if "pushed" in result and not result.get("pushed"):
+        return False
+    tests = result.get("tests")
+    if not isinstance(tests, dict):
+        return True
+    return bool(cast("dict[str, Any]", tests).get("ok", True))
 
 
 def cmd_scope(args: argparse.Namespace) -> int:
@@ -1478,6 +1527,40 @@ def main(argv: list[str] | None = None) -> int:
     from agent_fleet.merge_plan.cli import register_merge_commands
 
     register_merge_commands(sub)
+
+    pr_p = sub.add_parser(
+        "pr",
+        help="PR-scoped fleet operations",
+    )
+    pr_sub = pr_p.add_subparsers(dest="pr_command", required=True)
+
+    pr_own_p = pr_sub.add_parser(
+        "own",
+        help="Run one ownership round on a PR: one agent, one fix prompt, context carried in notes",
+    )
+    pr_own_p.add_argument(
+        "--repo-path",
+        default=None,
+        help="Path to the git repo holding the PR (default: cwd)",
+    )
+    pr_own_p.add_argument("--pr", type=int, required=True, help="PR number to own")
+    pr_own_p.add_argument(
+        "--findings",
+        default=None,
+        help="Findings JSON file (list of {id,file,line,claim,repro}); defaults to none",
+    )
+    pr_own_p.add_argument(
+        "--failing",
+        action="append",
+        default=None,
+        help="A failing test id to re-check this round (repeatable)",
+    )
+    pr_own_p.add_argument(
+        "--task-file",
+        default=None,
+        help="Task spec file, seeded into the notes on the first round",
+    )
+    pr_own_p.set_defaults(func=cmd_pr_own)
 
     summon_p = sub.add_parser(
         "summon",
