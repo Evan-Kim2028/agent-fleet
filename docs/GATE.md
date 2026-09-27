@@ -166,6 +166,69 @@ Deliberately narrow: only the PR's *own* changed tests. Widening to the whole
 suite would turn one slow package into a gate timeout for reasons unrelated to
 the change.
 
+### required checks — the repo's own build
+
+pytest is not every repo's deterministic half. A lake-of-rage PR reviewed clean
+and merged while breaking dbt unit-test compilation, which took out four
+production rebuild jobs afterwards: the gate only knew how to run pytest, and
+that repo's second kind of build was invisible to it.
+
+So the set of commands a diff must survive is a property of the repo, not of the
+gate, and it is configured per repo under `gate.required_checks`:
+
+```yaml
+gate:
+  required_checks:
+    - name: dbt-compile
+      command: uv run dbt compile
+      when_paths: ['^transform/']
+      timeout_s: 900
+      memory: 6G
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `name` | — | how the check is reported, in the blocker claim, the metrics row and the reason line |
+| `command` | — | the command to run, in the worktree at the head under review |
+| `when_paths` | `["."]` | regexes (`re.search`) against repo-relative changed paths; any match selects the check |
+| `timeout_s` | `900` | per-check budget |
+| `memory` | `6G` | the same `MemoryMax` cap every pytest gets, used as given and never raised |
+
+Two placeholders are substituted into `command` before it runs:
+`{changed_files}` (the repo-relative changed paths) and `{changed_models}` (the
+dbt model names, read from the `transform/models/**/<name>.sql|py` convention).
+Nothing else is substituted, so a brace expansion in a repo's own command is
+left alone.
+
+**A non-zero exit is a CONFIRMED blocker**, with the command's own output tail as
+the evidence — recorded in the same shape as a failing step0 test, so the fixer is
+handed both the same way. There is no interpretation step: the command ran, it
+exited non-zero, the change broke it.
+
+**An infra failure is not a verdict.** A command that is not found, a timeout, an
+unparseable argv — none of those say anything about the code, so none of them is
+a finding. They fail the run *closed* with "check could not run", which is an
+escalation and never an approval. The asymmetry is the point: a check the gate
+could not execute must never read as a check that passed.
+
+Each selected check runs twice, in the same worktree discipline as the tests: at
+the head under review, and again on the merged-with-base tree during
+[recheck](#carrying-an-approval-across-a-patch-identical-rebase). A check that is
+green on the PR's own tree and red once the base is merged in is exactly the
+merged-tree regression this exists to catch. A red check on the merged tree
+refuses the carried approval outright.
+
+Selection is by path, so a docs PR does not pay for a dbt compile. An empty diff
+selects nothing, even for an unscoped check — an empty change list is as likely to
+be a failed `git diff` as a PR that touched no file, and running the whole set
+against it would report red checks for code the PR never touched.
+
+Every result is recorded in the run's metrics row under `checks`, and rolled up
+in `agent-fleet gate metrics` as `check_outcomes` (`passed` / `failed` /
+`could-not-run` counted separately, so an infra failure never hides inside the
+red count). The list is empty by default: a repo with no `required_checks` is
+unaffected until someone has said what that repo's build is.
+
 ### find — parallel lens reviewers
 
 N lens reviewers run concurrently, each with exactly one focus. The defaults are
@@ -542,6 +605,7 @@ Machine-wide (`~/.agent-fleet/fleet.yaml`):
 | `gate.big_lines` | `1200` | non-test changed lines above which the full lens set runs |
 | `gate.prodsensitive_paths` | 6 defaults | regexes for changed paths that keep the full lens set at any size |
 | `gate.sensitive_paths` | 9 defaults | regexes for changed paths that force the full evidence gate (SENSITIVE tier) |
+| `gate.required_checks` | `[]` | repo build commands the diff must survive; see [required checks](#required-checks--the-repos-own-build) |
 | `gate.standard_max_passes` | `3` | STANDARD fixer passes before the bar falls back to the full gate |
 | `gate.max_candidates` | `12` | cap on claims carried into verify |
 | `gate.max_parallel_lenses` | `8` | concurrent lens reviewers |

@@ -61,6 +61,7 @@ from agent_fleet.contracts.gate import (
     validate_verify,
 )
 from agent_fleet.fleet_ops.gate import APPROVAL_MARKER
+from agent_fleet.gate import checks as gate_checks
 from agent_fleet.gate import metrics as gate_metrics
 from agent_fleet.gate.config import GateConfig, load_gate_config
 from agent_fleet.gate.gitops import (
@@ -154,6 +155,11 @@ ROLE_FIX = "fix"
 ROLE_JUDGE = "judge"
 
 _NO_TASK_TEXT = "(no task file supplied; judge against the PR description)"
+
+#: What :meth:`GatePipeline.run_required_checks` returns: one row per check it
+#: actually ran. Named here so the pipeline does not repeat the module path on a
+#: signature the callers read often.
+CheckRun = gate_checks.CheckResult
 
 
 class GateInfraError(RuntimeError):
@@ -615,6 +621,11 @@ class GatePipeline:
         #: step0's result, kept for the tier-0 decision. ``None`` means no
         #: changed test was run at all, which is a green run of nothing.
         self._step0_run: TestRun | None = None
+        #: Every REQUIRED CHECK result this run has produced, in order. Kept on
+        #: the pipeline rather than returned so the metrics row carries the same
+        #: list whichever stage wrote it, and so a check that ran at head and was
+        #: re-run on the merged tree is one trace with two rows.
+        self._check_results: list[gate_checks.CheckResult] = []
 
     # -- helpers ---------------------------------------------------------
 
@@ -783,6 +794,76 @@ class GatePipeline:
             packages=run.ran,
         )
         return pr_tests
+
+    # -- repo-configured required checks ----------------------------------
+
+    def run_required_checks(self, worktree: Path, *, stage: str = "head") -> list[CheckRun]:
+        """Run the repo's REQUIRED CHECKS against the tree in *worktree*.
+
+        Selection is by changed path, so a docs PR does not pay for a dbt
+        compile; with nothing selected this returns immediately and no check row
+        is written, which is what keeps the metrics column meaningful (an empty
+        list means "no check was selected", not "a check passed").
+
+        The two outcomes are deliberately not merged:
+
+        - a non-zero exit becomes a **confirmed blocker**, with the command's own
+          output tail as the evidence, in the same shape a step0 failing test
+          produces — the fixer is handed both the same way;
+        - a check that could not run (missing command, timeout, unparseable
+          argv) raises :class:`GateInfraError`, which fails the whole run closed
+          as "check could not run". It is never counted as a pass, and it is
+          never phrased as a finding about the code, because it is not one.
+
+        The blocker is recorded before the raise, so a run that escalates on an
+        unrunnable check still carries its results into the metrics row.
+        """
+        if not self.config.required_checks:
+            return []
+        changed = changed_paths(worktree, self.config.base_branch)
+        # run_checks does the path selection itself, so an empty diff selects
+        # nothing here too rather than running the whole set against a list that
+        # is just as likely to be a failed git call.
+        results = gate_checks.run_checks(
+            self.config.required_checks,
+            worktree=worktree,
+            stage=stage,
+            changed_files=changed,
+            use_systemd=self.use_systemd,
+        )
+        if not results:
+            self._log(
+                "gate.checks",
+                stage=stage,
+                selected=0,
+                configured=len(self.config.required_checks),
+            )
+            return []
+        # Recorded before any raise below, so a run that escalates on an
+        # unrunnable check still carries the result into its metrics row.
+        self._check_results.extend(results)
+        failed = [r for r in results if not r.passed and not r.could_not_run]
+        broken = [r for r in results if r.could_not_run]
+        self._log(
+            "gate.checks",
+            stage=stage,
+            selected=len(results),
+            failed=len(failed),
+            could_not_run=len(broken),
+            names=[r.name for r in failed or broken],
+        )
+
+        for result in failed:
+            self.evidence.confirmed.append(gate_checks.to_evidence(result))
+        if broken:
+            # Fail closed before any reviewer is dispatched: a gate that cannot
+            # run the check a repo asked for has no basis for approving anything,
+            # and the cheapest place to say so is before the model budget.
+            raise GateInfraError(
+                f"fail-closed: {gate_checks.cannot_run_claim(broken[0])}"
+                + (f" (+{len(broken) - 1} more)" if len(broken) > 1 else "")
+            )
+        return results
 
     # -- review tiering ---------------------------------------------------
 
@@ -1513,6 +1594,7 @@ class GatePipeline:
                 gate_metrics.OUTCOME_CONVERGED if outcome is GateOutcome.APPROVED else "recheck"
             ),
             reasons=list(reasons),
+            checks=[r.to_dict() for r in self._check_results],
         )
         # A carried approval is not a gate run. Marking it keeps the metrics
         # table honest about how much review a given approval actually had.
@@ -1556,6 +1638,7 @@ class GatePipeline:
             untestable_real=untestable_real,
             rounds=all_rounds,
             calls=self.recorder.rows(),
+            checks=[r.to_dict() for r in self._check_results],
         )
 
     # -- the STANDARD bar -------------------------------------------------
@@ -1782,6 +1865,10 @@ class GatePipeline:
             prepare_worktree(self.repo, worktree, ref.head_sha)
             self._runner = self._runner_for(worktree)
             pr_tests = self.run_pr_tests(worktree)
+            # The repo's other required checks, at head, before any model is
+            # consulted. A red check is a confirmed blocker the same way a red
+            # test is, so the fixer is dispatched for it like any other finding.
+            self.run_required_checks(worktree)
 
             # Tier 0: a docs/tests-only PR with its own tests green at head has
             # nothing for a model to review. Its approval rests on step0 plus the
@@ -2285,11 +2372,42 @@ def run_gate_recheck(
             pipeline.archive.materialise(worktree, gate_tests)
             test_files = sorted(set(changed) | set(gate_tests))
             run = pipeline._runner_for(worktree).run(test_files)
+            # The repo's required checks, re-run on the merged tree. A check that
+            # is green on the PR's own tree and red once the base is merged in is
+            # exactly the regression this recheck exists to catch, so it runs here
+            # and not only at head. An unrunnable check raises, and the handler
+            # below turns that into the same refusal — the merged tree is never
+            # approved on evidence the gate could not collect.
+            check_results = pipeline.run_required_checks(worktree, stage="merged")
         finally:
             remove_worktree(repo, worktree)
     except (GateError, OSError) as exc:
         reasons.append(f"full gate required: recheck could not run: {str(exc)[:160]}")
         return pipeline._carry_over_result(GateOutcome.NEEDS_ESCALATION, "", reasons)
+    except GateInfraError as exc:
+        # An unrunnable required check is the same refusal as an unrunnable test:
+        # the merged tree is not approved on evidence the gate could not collect.
+        reasons.append(f"full gate required: {str(exc)[:160]}")
+        return pipeline._carry_over_result(GateOutcome.NEEDS_ESCALATION, "", reasons)
+
+    # A red check on the merged tree refuses the carried approval outright. It is
+    # read here rather than folded into the test run above because a check failure
+    # is not a failing test: there is no node id to put in the reason line, and a
+    # recheck that reported "all tests green" while a required check was red would
+    # be describing the tests accurately and the decision wrongly.
+    for result in check_results:
+        if not result.passed:
+            reasons.append(
+                "full gate required: "
+                + (
+                    gate_checks.cannot_run_claim(result)
+                    if result.could_not_run
+                    else gate_checks.blocker_claim(result)
+                )
+            )
+            if result.evidence:
+                reasons.append(result.evidence)
+            return pipeline._carry_over_result(GateOutcome.NEEDS_ESCALATION, "", reasons)
 
     return pipeline.recheck_carry_over(
         approved_sha=approved_sha,
