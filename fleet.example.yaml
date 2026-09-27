@@ -186,9 +186,12 @@ serve:
   # Command templates. Placeholders: {operator} {serve_dir} {capacity_file}
   # {max_lanes} {max_gates} {test_pool} {typecheck_pool} {gates_priority}.
   # Commands are exec'd WITHOUT a shell, so no $VAR expansion and no globs.
+  # Every flag below is one the real parser accepts: a typo here is silent until
+  # the component exits 2 on every tick and the supervisor reports a crash loop
+  # with the real cause only in components/<name>.log.
   components:
     dispatcher:
-      command: "fleet dispatch --operator {operator} --max {max_lanes} --gates {max_gates}"
+      command: "fleet dispatch --operator {operator} --max-lanes {max_lanes} --max-gates {max_gates}"
       backoff_initial_s: 5
       backoff_max_s: 300
       timeouts:
@@ -199,7 +202,10 @@ serve:
           restarts: 2
           window_minutes: 30
     merger:
-      command: "fleet merge run --operator {operator} --capacity {capacity_file}"
+      # `fleet merge run` has no --capacity flag: the capacity file is what
+      # dispatch/gate/admission read, and the merge executor takes its own
+      # --max-batch-size. Cap it from the same placeholder the dispatcher uses.
+      command: "fleet merge run --operator {operator} --max-batch-size {max_lanes}"
     janitor:
       command: "true"
 

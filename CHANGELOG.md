@@ -31,6 +31,24 @@
 
 ### Fixed
 
+- **The shipped `serve:` command templates did not parse, and an unreadable `--serve-config` silently became defaults.**
+  - `fleet.example.yaml` dispatched with `fleet dispatch --max {max_lanes} --gates {max_gates}`, but the
+    parser defines `--max-lanes` / `--max-gates` (and `--max-throttle-ticks`), so argparse aborted with
+    `ambiguous option: --max could match ...` and exit 2. The merger template passed
+    `fleet merge run --capacity {capacity_file}`, and `merge run` has no `--capacity` at all — the capacity
+    file is read by dispatch/gate/admission, and the executor's own cap is `--max-batch-size`. Both
+    components therefore exited 2 on every tick, which the supervisor counts as `cause=crash`, so after
+    `crash_threshold` restarts the component was pinned in `crash_looping` and the real cause survived only
+    in `components/<name>.log`. The templates now use flags the parser accepts, and the same correction is
+    applied to the copies in `docs/FLEET-SERVE.md`.
+  - `load_serve_config` treated "there is nothing at this path" and "this path cannot be read or is not
+    YAML" as the same thing: `_read_yaml` returned `None` for both, and the `if raw is not None` guard made
+    the error branch unreachable. An explicitly named `--serve-config` that was missing (a typo) or malformed
+    therefore fell through to built-in defaults, leaving a long-running supervisor on thresholds the operator
+    believed they had configured — the exact failure the module docstring and `docs/FLEET-SERVE.md` say it
+    exists to prevent. Explicit paths now raise `ServeConfigError`, distinguishing unreadable from
+    unparseable; the implicit global/repo sources keep falling through silently, since a machine that has
+    never configured serve should still get working defaults.
 - **The admission pressure signal measured the wrong cgroup, and `Throttle.saturated` measured nothing at all.**
   - `read_throttle()` built its candidate list as `[explicit path] + fallbacks`, and
     `FALLBACK_PATHS` holds only the *containing* slices, so the documented

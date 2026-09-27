@@ -185,7 +185,7 @@ A command template can also have the values projected into its argv:
 ```yaml
 components:
   dispatcher:
-    command: "fleet dispatch --operator {operator} --max {max_lanes} --gates {max_gates}"
+    command: "fleet dispatch --operator {operator} --max-lanes {max_lanes} --max-gates {max_gates}"
 ```
 
 Placeholders: `{operator}`, `{serve_dir}`, `{capacity_file}`, `{max_lanes}`,
@@ -332,16 +332,16 @@ serve:
 
   components:
     dispatcher:
-      command: "fleet dispatch --operator {operator} --max {max_lanes}"
+      command: "fleet dispatch --operator {operator} --max-lanes {max_lanes}"
       backoff_initial_s: 5
       backoff_max_s: 300
       timeouts:
         crash:       {threshold: 5, window_minutes: 15}
         no_progress: {restarts: 2, window_minutes: 30}
     merger:
-      command: "fleet merge run --operator {operator} --capacity {capacity_file}"
+      command: "fleet merge run --operator {operator} --max-batch-size {max_lanes}"
     janitor:
-      command: "fleet serve janitor --operator {operator} --once"
+      command: "true"
 
   watchdog:
     orphan_minutes: 60
