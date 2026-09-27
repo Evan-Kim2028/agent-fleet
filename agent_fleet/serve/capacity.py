@@ -444,7 +444,7 @@ def read_capacity(path: Path) -> dict[str, Any] | None:
     """Read a capacity file, or ``None`` when absent or unparseable."""
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-    except OSError, json.JSONDecodeError:
+    except (OSError, json.JSONDecodeError):
         return None
     return raw if isinstance(raw, dict) else None
 

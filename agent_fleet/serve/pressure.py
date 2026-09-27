@@ -180,7 +180,7 @@ def _parse_psi(text: str) -> CpuPressure:
 def _read_int(path: Path) -> int | None:
     try:
         return int(path.read_text(encoding="utf-8").strip())
-    except OSError, ValueError:
+    except (OSError, ValueError):
         return None
 
 
