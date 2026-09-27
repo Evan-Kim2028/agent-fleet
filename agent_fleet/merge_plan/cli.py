@@ -378,6 +378,7 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
             report_path=Path(args.report).expanduser() if args.report else None,
             base_branch=base_branch,
             head_filter=head_filter,
+            not_owned=not_owned,
         )
     except subprocess.TimeoutExpired as exc:
         # Every git call the fold makes carries a timeout, and only the test
@@ -405,11 +406,12 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
     # that did fold legitimately drops conflicts and moved heads from ``ordered``.
     if not result.ordered:
         result.ordered = tuple(batch)
-    # The PRs this train declined to land are not in the batch, so the run never
-    # saw them and its report cannot name them.  Stamped on here, from the same
-    # split the batch was built from, so the report says "skipped: not owned"
-    # rather than omitting the reason a run covered fewer PRs than were approved.
-    # Never overwritten: a run that reported its own is describing the same set.
+    # The PRs this train declined to land are not in the batch, so the run's own
+    # split finds none and its report would omit the reason a run covered fewer
+    # PRs than were approved.  They are handed to run_train above, so they reach
+    # the persisted report; this is the same stamp for a caller that hands the
+    # trainer a batch it filtered itself.  Never overwritten: a run that reported
+    # its own is describing the same set.
     if not result.not_owned:
         result.not_owned = tuple(not_owned)
     print(

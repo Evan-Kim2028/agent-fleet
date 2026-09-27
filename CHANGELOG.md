@@ -22,9 +22,12 @@
   and the fold. A PR the train does not own is reported as `SKIPPED-NOT-OWNED`, naming the branch and
   the filter that declined it, and is never folded, tested or merged. A run that owns nothing says so
   and exits 1 rather than reporting "nothing to run". A malformed `merge_train` block is refused rather
-  than falling back to the default list. The JSON report gains `not_owned`, `not_owned_count` and
-  `head_filter`. This changes the default behaviour: a train that previously merged branches outside
-  `fb/` now needs the prefix listed, which is the point.
+  than falling back to the default list. The JSON report — the written `train-report.json`, not just the
+  result the command prints — gains `not_owned`, `not_owned_count` and `head_filter`, and every
+  `SKIPPED-NOT-OWNED` reason quotes the filter that was actually in force, so a skip caused by an
+  operator's `exclude` is not attributed to the built-in `fb/` include list. This changes the default
+  behaviour: a train that previously merged branches outside `fb/` now needs the prefix listed, which is
+  the point.
 
 ### Fixed
 

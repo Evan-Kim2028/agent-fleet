@@ -272,6 +272,13 @@ class TrainResult:
     #: because they are not part of the batch, and the landed / set_aside
     #: partition is only ever claimed over the batch.
     not_owned: tuple[TrainPR, ...] = ()
+    #: The filter that decided *not_owned*, carried so the reason on each
+    #: skipped PR names the filter that was actually in force.  A result that
+    #: falls back to ``HeadFilter()`` would attribute a skip caused by an
+    #: operator's ``exclude`` to the built-in ``fb/`` include list, naming a
+    #: filter that was never applied and contradicting ``head_filter`` in the
+    #: same report.
+    head_filter: HeadFilter = HeadFilter()
 
     @property
     def landed(self) -> tuple[int, ...]:
@@ -295,8 +302,13 @@ class TrainResult:
         reason names the branch the PR arrived on, which is the fact the
         operator has to go and check: a PR on ``dq1d/apidocs`` is not owned
         because that prefix belongs to the session that opened it.
+
+        *head_filter* defaults to the filter this run was configured with, so
+        the reason quotes the filter that declined the PR rather than the
+        built-in default, which is a different filter whenever the operator
+        configured one.
         """
-        spec = head_filter or HeadFilter()
+        spec = head_filter or self.head_filter
         return tuple(
             PRVerdict(
                 pr=pr.number,
@@ -322,6 +334,10 @@ class TrainResult:
             "set_aside_count": len(self.set_aside),
             "not_owned": [p.number for p in self.not_owned],
             "not_owned_count": len(self.not_owned),
+            # The filter the not-owned reasons below are generated from, so a
+            # reader can check a "not owned" line against the prefixes in force
+            # without looking anywhere else.
+            "head_filter": self.head_filter.to_dict(),
             "test_runs": self.test_runs,
             "candidate_sha": self.candidate_sha,
             "detail": self.detail,
@@ -518,7 +534,9 @@ class MergeTrain:
         Nothing is merged from a red batch until the bisection has named what is
         safe.
         """
-        result = TrainResult(repo=self.repo, base_branch=self.base_branch)
+        result = TrainResult(
+            repo=self.repo, base_branch=self.base_branch, head_filter=self.head_filter
+        )
         owned, not_owned = self.head_filter.split(prs)
         result.not_owned = tuple(not_owned)
         keep, moved = partition_batch(owned)
@@ -1324,6 +1342,7 @@ def run_train(
     report_path: Path | None = None,
     base_branch: str = "",
     head_filter: HeadFilter | None = None,
+    not_owned: Sequence[TrainPR] = (),
 ) -> TrainResult:
     """Run one train for *repo*, write its JSON report, and return the result.
 
@@ -1345,6 +1364,16 @@ def run_train(
     hold check and the fold are all answered about the same set of PRs; a run
     that never mentions ownership lands the fleet's branches rather than this
     operator's, which is the mistake this default exists to stop.
+
+    *not_owned* is the PRs the filter declined.  The CLI splits ownership
+    before the cap so a batch is never filled with a foreign PR, which means
+    *prs* here is already the owned subset and the trainer's own split finds
+    nothing to decline — so the report it writes would claim a run that covered
+    exactly the approved PRs, with no record of the ones left behind.  Handing
+    the declined PRs in is what puts ``not_owned`` and its
+    ``SKIPPED-NOT-OWNED`` verdicts in the persisted report rather than only on
+    the result the CLI prints.  Never overwritten: a trainer that did find some
+    of its own is describing a larger set.
     """
     spec = head_filter or HeadFilter()
     keep, _moved = partition_batch(prs)
@@ -1355,12 +1384,15 @@ def run_train(
         batch, merger=GitMerger(repo_path, repo=repo)
     )
     result.candidate_sha = trainer.candidate_sha
+    # Before the payload, not after: the report written here is what the
+    # operator reads, and a caller that already split ownership hands the
+    # declined PRs in rather than leaving the trainer to find none.  Never
+    # overwritten, because a run that reported its own is describing the same
+    # set from a second pass over the same PRs.
+    if not result.not_owned:
+        result.not_owned = tuple(not_owned)
     path = Path(report_path) if report_path else scratch_root(repo) / "train-report.json"
     payload = result.to_dict()
-    # The not-owned verdicts are generated from the filter, which the report
-    # does not otherwise carry; quoting the filter that was actually applied is
-    # what makes a "skipped: not owned" line checkable against fleet.yaml.
-    payload["head_filter"] = spec.to_dict()
     # The command the trainer built, not the empty-set default it falls back to.
     # ``GitTrainer._argv`` narrows a bare ``pytest`` to the tests covering the
     # batch's changed files, so recording ``test_command_for(())`` understated
