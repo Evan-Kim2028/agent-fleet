@@ -151,7 +151,18 @@ def run_jobs(
             outcomes.append(JobOutcome(name, slot, "skipped", "no trigger_command configured"))
             continue
         try:
-            result = run(render_trigger(spec.trigger_command, job=name, slot=slot))
+            argv = render_trigger(spec.trigger_command, job=name, slot=slot)
+        except (KeyError, IndexError, ValueError) as exc:
+            # A template that cannot even be rendered — a typo'd ``{jobn}``, an
+            # unterminated quote — is this job's failure too. It used to abort
+            # the flow before the hand-off note, so the labels already applied
+            # pointed at a rebuild nobody had recorded. 2 is the shell's own
+            # "misuse of the command".
+            detail = f"malformed trigger_command: {exc}".strip()[-300:]
+            outcomes.append(JobOutcome(name, slot, "failed", detail, 2))
+            continue
+        try:
+            result = run(argv)
         except subprocess.TimeoutExpired as exc:
             # A trigger that blows trigger_timeout_seconds is this job's failure,
             # not the batch's. TimeoutExpired derives from SubprocessError, not
