@@ -45,7 +45,10 @@ DEFAULT_CACHE_TTL_S = 24 * 3600
 
 #: Current on-disk format version, stored in every entry. A bump invalidates
 #: every previously written entry instead of replaying it under new semantics.
-_CACHE_VERSION = 1
+#: v2 keys the result on the worktree-relative package and the ignored-file
+#: digest, so v1 entries (keyed on the absolute package dir, blind to ignored
+#: files) are dropped rather than replayed.
+_CACHE_VERSION = 2
 
 # pytest exit codes we act on (see pytest docs, ExitCodes).
 PYTEST_OK = 0
@@ -270,16 +273,21 @@ def run_pytest(
     :attr:`PytestResult.infra_error` to tell "the code is broken" apart from
     "pytest could not run".
 
-    With *cache_dir* set, a run whose worktree tree hash and test list match a
-    stored result is served from disk instead of re-running pytest. A worktree
-    that is not a git repo (or a git that cannot write a tree) simply runs
-    uncached rather than failing.
+    With *cache_dir* set, a run whose worktree tree hash, ignored-file digest and
+    test list match a stored result is served from disk instead of re-running
+    pytest. A worktree that is not a git repo (or a git that cannot write a tree)
+    simply runs uncached rather than failing.
+
+    The key deliberately contains no absolute path, so the gate's own worktrees
+    (``wt``, ``recheck``, ``reN``, ``final``) share entries when they hold the
+    same tree — which is the reuse this cache exists for.
 
     *tree_root* is the directory whose git tree keys the cache. It defaults to
     *package_dir*, which is only correct for a single-package repo: in a nested
     one a test imports code from outside its own package dir, and a key computed
     there cannot see those files change. Pass the worktree root so the key
-    covers everything the test can import.
+    covers everything the test can import. The same root is what makes the
+    package identity comparable across worktrees.
     """
     if not test_files:
         return PytestResult(returncode=PYTEST_OK, stdout="", stderr="")
@@ -287,9 +295,15 @@ def run_pytest(
     cache_root = cache_dir.expanduser() if cache_dir is not None else None
     if cache_root is not None:
         prune_cache(cache_root, cache_ttl_s)
-        tree = worktree_tree_hash(tree_root if tree_root is not None else package_dir)
+        root = tree_root if tree_root is not None else package_dir
+        tree = worktree_tree_hash(root)
         if tree is not None:
-            key = cache_key(tree, test_files, package=str(package_dir))
+            key = cache_key(
+                tree,
+                test_files,
+                package=_relative_package(root, package_dir),
+                ignored=ignored_files_digest(root),
+            )
             cached = cache_load(cache_root, key, ttl_s=cache_ttl_s)
             if cached is not None:
                 logger.info("gate pytest: cache hit %s (%d file(s))", key[:12], len(test_files))
@@ -415,18 +429,184 @@ def worktree_tree_hash(root: Path) -> str | None:
     return tree or None
 
 
-def cache_key(tree_hash: str, test_files: Sequence[str], *, package: str) -> str:
-    """Key a result by worktree tree + the exact test list that produced it.
+def _relative_package(tree_root: Path, package_dir: Path) -> str:
+    """*package_dir* as a path relative to the worktree root, or its name if outside.
+
+    This is the package's identity *within a tree*, not where that tree happens
+    to be checked out. Keying on the absolute directory gave every gate worktree
+    (``.../gate/123/wt``, ``.../recheck``, ``.../re1``, ``.../final``) its own key
+    even when all of them held the identical tree, so the cache missed on exactly
+    the reuse — verify, then each fix round — it exists to provide. Relative to
+    the tree root, those worktrees agree, while a root package (``.``) and a
+    nested one (``api``) still differ, which is the distinction that matters.
+    """
+    try:
+        return package_dir.resolve().relative_to(tree_root.resolve()).as_posix() or "."
+    except ValueError, OSError:
+        # Not under the root (an explicitly configured external package_dir).
+        # Fall back to the final component: stable across the gate's own
+        # worktrees, still distinct for two differently named packages.
+        return package_dir.resolve().name or "."
+
+
+#: An ignored file above this size contributes its path and size but not its
+#: content, so one stray build artifact cannot make every run pay to hash it.
+#: 1 MiB is far above any fixture or config a test reads.
+_IGNORED_CONTENT_MAX_BYTES = 1 << 20
+
+#: Dependency and build directories, skipped when digesting ignored files.
+#:
+#: Their contents are worktree-specific by construction: each gate worktree gets
+#: its own virtualenv, and an editable install writes that worktree's absolute
+#: path into ``.venv/bin/activate``, the site-packages finders and ``RECORD``, at
+#: a moment specific to when the gate built it. Hashing those bytes gives every
+#: worktree a different digest for an identical tree — the very no-reuse the
+#: cache key was fixed to allow. None of it is test input either: a test reads
+#: data and config, not its own dependencies.
+#:
+#: This only ever applies to files git already ignores, so a *tracked* directory
+#: that happens to be called ``build`` or ``dist`` keeps its bytes covered by
+#: the tree hash exactly as before.
+_IGNORED_TREE_DIRS = frozenset(
+    {
+        ".eggs",
+        ".mypy_cache",
+        ".nox",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".tox",
+        ".venv",
+        "__pycache__",
+        "build",
+        "dist",
+        "env",
+        "htmlcov",
+        "node_modules",
+        "target",
+        "venv",
+    }
+)
+
+
+def ignored_files_digest(root: Path, *, max_files: int = 20_000) -> str:
+    """Digest of the worktree's *gitignored* files, or ``""`` when there are none.
+
+    The git tree is the cache key's backbone, and it cannot see an ignored file:
+    ``git add -A`` skips them, so editing one leaves the tree hash untouched and
+    a result cached before the edit is replayed as if nothing had changed. A test
+    that reads a gitignored fixture or config (``secret.env``, a local
+    ``.env``) would then be judged by a verdict produced from different bytes —
+    a stale hit, which is the one thing this cache must never serve.
+
+    What is folded in, and why it is not simply "hash every ignored byte":
+
+    * **Path**, always. Creating, renaming or deleting an ignored file must
+      miss, and a test may reference it by name alone.
+    * **Content**, for ordinary files up to :data:`_IGNORED_CONTENT_MAX_BYTES`.
+      This is what catches the edit to a ``secret.env`` or ``.env`` the tree
+      cannot see.
+    * **Symlink targets** rather than the files they point at, so a link is
+      followed no further than one hop and cannot drag in a whole checkout.
+    * **Size** for large files instead of their content, which keeps the cost
+      bounded regardless of what a build left behind.
+
+    mtime is deliberately *not* folded in: a file copied into two worktrees is
+    identical in content but not in timestamp, and treating that as a change
+    would put a per-worktree value back into a key that must be free of one.
+
+    The digest therefore carries only repo-relative paths and content — never a
+    worktree-specific absolute path or timestamp — so worktrees of one commit
+    agree on it, which is what lets the gate reuse a result across verify and
+    each fix round. ``tests/test_gate_test_cache.py`` pins both halves of that:
+    that two worktrees agree, and that editing an ignored fixture still misses.
+    """
+    try:
+        listed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "-z",
+            ],
+            capture_output=True,
+            timeout=120,
+            check=False,
+        )
+    except OSError, subprocess.SubprocessError:
+        return ""
+    if listed.returncode != 0:
+        logger.debug("gate test cache: git ls-files failed: %s", listed.stderr[:200])
+        return ""
+
+    digest = hashlib.sha256()
+    seen = 0
+    for raw in listed.stdout.split(b"\0"):
+        if not raw:
+            continue
+        if seen >= max_files:
+            break
+        rel = raw.decode("utf-8", "surrogateescape")
+        if rel.split("/")[0] in _IGNORED_TREE_DIRS:
+            continue
+        digest.update(rel.encode("utf-8", "surrogateescape") + b"\0")
+        seen += 1
+        _update_with_ignored_entry(digest, Path(root) / rel)
+    return digest.hexdigest() if seen else ""
+
+
+def _update_with_ignored_entry(digest: hashlib._Hash, path: Path) -> None:
+    """Fold one ignored path (and what it points at) into *digest*; never raise."""
+    try:
+        stat = path.lstat()
+    except OSError:
+        return
+    if path.is_symlink():
+        try:
+            target = path.readlink()
+        except OSError:
+            return
+        digest.update(b"L" + str(target).encode("utf-8", "surrogateescape") + b"\0")
+        return
+    if not path.is_file():
+        # A directory the tree cannot see: the paths beneath it are listed
+        # individually, so record the kind only, never the contents.
+        digest.update(b"D\0")
+        return
+    if stat.st_size > _IGNORED_CONTENT_MAX_BYTES:
+        digest.update(f"F{stat.st_size}\0".encode())
+        return
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda fh=handle: fh.read(1 << 20), b""):
+                digest.update(chunk)
+    except OSError:
+        return
+    digest.update(b"\0")
+
+
+def cache_key(tree_hash: str, test_files: Sequence[str], *, package: str, ignored: str = "") -> str:
+    """Key a result by worktree tree + ignored-file digest + the exact test list.
 
     The test list is sorted so argument order cannot create a second entry for
-    the same run, and the package directory is included because the same relative
-    path means a different file under a different package root.
+    the same run. *package* is the package's path relative to the worktree root,
+    because the same relative path means a different file under a different
+    package root while the same *tree* reached through a different worktree
+    directory means the same run — keying on an absolute directory would have
+    given the gate's own worktrees distinct keys and no reuse at all.
+
+    *ignored* folds in the worktree's gitignored files, which the tree hash
+    cannot see, so editing one misses instead of replaying a stale result.
     """
     payload = json.dumps(
         {
             "v": _CACHE_VERSION,
             "tree": tree_hash,
             "package": package,
+            "ignored": ignored,
             "tests": sorted(test_files),
         },
         sort_keys=True,

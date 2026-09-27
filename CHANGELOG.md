@@ -42,6 +42,32 @@
 
 ### Fixed
 
+- **gate: the pytest result cache never hit across the gate's own worktrees, and replayed a stale
+  result after a gitignored file changed.** The cache key folded in `package=str(package_dir)` — an
+  absolute path — so each of the gate's worktrees (`wt`, `recheck`, `reN`, `final`, all siblings under
+  `.agent-fleet/gate/<pr>/`) got a distinct key even when every one of them held the identical tree.
+  Five worktrees of one commit produced five keys and five pytest launches, defeating the reuse the
+  cache exists to provide: a result is meant to be paid for once per verified claim, then replayed
+  through every fix round. A package is now identified by its path *relative to the worktree root*,
+  so those worktrees share one entry while a root package (`.`) and a nested one (`api`) still key
+  differently. Separately, the key rested solely on the git tree, which cannot see gitignored files:
+  `git add -A` skips them, so editing a gitignored fixture or config that a test reads (`secret.env`,
+  a local `.env`) left the tree hash untouched and replayed a verdict produced from different bytes —
+  contradicting the documented "any file change misses" guarantee. A digest over each ignored file's
+  repo-relative path and content now covers that blind spot, so adding, editing or removing an ignored
+  file all miss. The cache format version is bumped to 2, so v1 entries are dropped rather than
+  replayed under the new key. `docs/GATE.md` states the three-part key it actually uses.
+- **gate: the ignored-file digest must stay free of per-worktree bytes, or it reintroduces the
+  no-reuse it was added to fix.** Hashing *every* ignored file's content is the obvious way to
+  cover what the git tree cannot see, and it is wrong: each gate worktree has its own virtualenv, and
+  an editable install writes that worktree's absolute path into `.venv/bin/activate` and the
+  site-packages finders at a moment specific to when the gate built it. Two worktrees of one commit
+  then disagree and pytest is re-launched for every fix round — the original defect, reached through
+  the new key. The digest therefore skips dependency and build directories (`.venv`,
+  `__pycache__`, `node_modules`, `build`, …), which are not test input, and leaves mtime out for
+  the same reason; a *tracked* directory named `build` or `dist` is unaffected because the tree hash
+  still covers it. Pinned by `tests/test_gate_test_cache.py`.
+
 - **gate: `agent_fleet/gate/pytest_runner.py` uses the PEP 758 unparenthesized `except` tuple, which
   is legal only on Python 3.14+.** The module's `except OSError, subprocess.SubprocessError:` clauses
   parse and import correctly here, because the project pins `requires-python = ">=3.14,<3.15"` and CI

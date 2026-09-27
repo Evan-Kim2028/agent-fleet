@@ -519,17 +519,45 @@ duration. The cap is used exactly as configured; the gate never raises it.
 
 **Test result cache.** A gate run executes the same test set repeatedly — once
 per verified claim, then once per fix round. A result is replayed from
-`test_cache_dir` instead of re-running pytest when two things match:
+`test_cache_dir` instead of re-running pytest when all three of these match:
 
-1. the git tree of the **whole worktree**, and
-2. the exact, sorted list of test files asked for.
+1. the git tree of the **whole worktree**,
+2. a digest of the worktree's **gitignored** files, and
+3. the exact, sorted list of test files asked for.
 
 The tree is computed with `git write-tree` against a **temporary index** (the
 real index is copied first, then `git add -A` runs against the copy), so the key
 covers committed state *and* every uncommitted edit, deletion, and untracked
 file. Keying on the HEAD sha would be cheaper and wrong: it would let the gate
 replay a result for code a fixer has already changed, which is exactly the stale
-evidence the cache must never serve. Any file change misses.
+evidence the cache must never serve.
+
+Gitignored files are the one thing that tree cannot see — `git add -A` skips
+them — so they get their own digest over each ignored file's repo-relative path
+and content. Without it, editing a gitignored fixture or config a test reads
+(`secret.env`, a local `.env`) would leave the tree hash untouched and replay a
+verdict produced from different bytes. Adding, editing or removing an ignored
+file all miss. Any file change misses.
+
+The digest deliberately carries **no worktree-specific value**. Dependency and
+build directories (`.venv`, `__pycache__`, `node_modules`, `build`, …) are
+skipped, because each gate worktree has its own virtualenv and an editable
+install bakes that worktree's absolute path into `.venv/bin/activate` and the
+site-packages finders — hashing those bytes would give every worktree a
+different key for an identical tree, which is the reuse this cache exists to
+provide. They are also not test input: a test reads data and config, not its own
+dependencies. mtime is left out for the same reason; files above 1 MiB contribute
+their size rather than their content, to bound the cost. A *tracked* directory
+happening to be called `build` or `dist` is unaffected — the tree hash still
+covers its bytes.
+
+The key contains **no absolute path**. The gate's own worktrees (`wt`,
+`recheck`, `reN`, `final`) each get a fresh directory, but a package is
+identified by its path *relative to the worktree root*, so worktrees holding the
+same tree share one entry. Keying on the absolute package directory gave each
+worktree a distinct key and defeated the reuse this cache exists for. A root
+package (`.`) and a nested one (`api`) still key differently, which is the
+distinction that actually matters.
 
 Only results that say something real about the code are stored. A pytest exit
 `>= 2` is a collection or infra failure, and replaying one would let a transient

@@ -13,7 +13,7 @@ import os
 import subprocess
 import time
 from collections.abc import Mapping  # noqa: TC003 - annotation only
-from pathlib import Path  # noqa: TC003 - concrete paths are built at runtime
+from pathlib import Path
 
 import pytest
 
@@ -22,9 +22,11 @@ from agent_fleet.gate.pipeline import GateTestRunner
 from agent_fleet.gate.pytest_runner import (
     DEFAULT_CACHE_DIR,
     PytestResult,
+    _relative_package,
     cache_key,
     cache_load,
     cache_store,
+    ignored_files_digest,
     prune_cache,
     worktree_tree_hash,
 )
@@ -447,3 +449,246 @@ def test_runner_misses_the_cache_when_root_code_changes(
         "means the gate replayed evidence for code it never re-ran"
     )
     assert not second.tests_failed and not second.infra_error
+
+
+# ---------------------------------------------------------------------------
+# Cross-worktree reuse — the key must not carry an absolute path
+# ---------------------------------------------------------------------------
+
+
+def test_identical_trees_in_sibling_worktrees_share_one_cache_entry(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate's own worktrees hold the same tree; they must share the entry.
+
+    ``converge()`` runs the same test list in ``<gate>/wt``, ``recheck``,
+    ``reN`` and ``final``. Keying on the absolute package directory gave each
+    one its own key, so pytest was re-launched for a tree that had not changed
+    — the exact reuse the cache exists to provide.
+    """
+    cache = tmp_path / "cache"
+    launches = _fake_pytest(monkeypatch, rcs=0)
+    # A real repo ignores its venv, so it is absent from the tree hash. Without
+    # this the .venv below is merely untracked, and `git add -A` folds it into
+    # the tree — which correctly splits the key and tests nothing.
+    (repo / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-qm", "ignore venv", cwd=repo)
+
+    worktrees = []
+    for name in ("wt", "recheck", "re1", "final"):
+        path = tmp_path / ".agent-fleet" / "gate" / "123" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _git("worktree", "add", "-q", "--detach", str(path), "HEAD", cwd=repo)
+        # Each gate worktree has its own virtualenv, and an editable install
+        # writes that worktree's absolute path into it. Hashing those bytes
+        # would split the key again — through the back door this test guards.
+        venv = path / ".venv"
+        venv.mkdir()
+        (venv / "activate").write_text(f'VIRTUAL_ENV="{path / ".venv"}"\n', encoding="utf-8")
+        (venv / "link").symlink_to("/usr/bin/python3")
+        worktrees.append(path)
+
+    for path in worktrees:
+        pr.run_pytest(path, ["tests/test_a.py"], use_systemd=False, cache_dir=cache)
+
+    assert len(launches) == 1, (
+        f"{len(worktrees)} worktrees holding one identical tree must cost one pytest "
+        f"launch, got {len(launches)}; the key is carrying the absolute package dir "
+        "or worktree-specific ignored-file bytes"
+    )
+
+
+def test_ignored_venv_bytes_do_not_split_the_key_across_worktrees(repo: Path) -> None:
+    """The digest must stay free of per-worktree virtualenv contents.
+
+    This is the failure the first version of the ignored-file digest had: it
+    hashed every ignored byte, and ``.venv/bin/activate`` plus the editable
+    install finders embed the worktree's own absolute path, so two worktrees of
+    one commit disagreed and every fix round re-ran pytest. Dependency and build
+    directories are excluded, so their drift cannot split the key.
+    """
+    digests = set()
+    for name in ("wt", "recheck"):
+        path = repo.parent / "gate" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _git("worktree", "add", "-q", "--detach", str(path), "HEAD", cwd=repo)
+        venv = path / ".venv"
+        venv.mkdir()
+        (venv / "activate").write_text(f'VIRTUAL_ENV="{path / ".venv"}"\n', encoding="utf-8")
+        (venv / "pkgs").mkdir()
+        (venv / "pkgs" / "RECORD").write_text(f"editable install at {path}\n", encoding="utf-8")
+        digests.add(ignored_files_digest(path))
+
+    assert digests == {""}, (
+        f"worktree-specific .venv bytes reached the digest ({digests}); two worktrees "
+        "of one commit must agree, or the cache never reuses across them"
+    )
+
+
+def test_an_ignored_fixture_is_still_covered_with_a_venv_present(repo: Path) -> None:
+    """Excluding build dirs must not blind the digest to real test input."""
+    (repo / ".gitignore").write_text("secret.env\n.venv/\n", encoding="utf-8")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-qm", "ign", cwd=repo)
+    (repo / ".venv").mkdir()
+    (repo / ".venv" / "activate").write_text('VIRTUAL_ENV="/x/.venv"\n', encoding="utf-8")
+    (repo / "secret.env").write_text("TOKEN = first\n", encoding="utf-8")
+    before = ignored_files_digest(repo)
+
+    (repo / "secret.env").write_text("TOKEN = second\n", encoding="utf-8")
+    assert ignored_files_digest(repo) != before
+
+    (repo / "secret.env").write_text("TOKEN = first\n", encoding="utf-8")
+    assert ignored_files_digest(repo) == before, "the digest must not drift on its own"
+
+
+def test_cache_key_is_identical_for_the_same_tree_at_different_paths(repo: Path) -> None:
+    """Pin the root cause directly: same tree, different directories, one key."""
+    trees = set()
+    keys = set()
+    for name in ("wt", "recheck", "final"):
+        path = repo.parent / "gate" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _git("worktree", "add", "-q", "--detach", str(path), "HEAD", cwd=repo)
+        tree = worktree_tree_hash(path)
+        assert tree is not None
+        trees.add(tree)
+        keys.add(
+            cache_key(
+                tree,
+                ["tests/test_a.py"],
+                package=_relative_package(path, path),
+                ignored=ignored_files_digest(path),
+            )
+        )
+
+    assert len(trees) == 1, "fixture must produce worktrees of one identical tree"
+    assert len(keys) == 1, (
+        f"one tree reached through {len(keys)} directories produced {len(keys)} keys; "
+        "an absolute path in the key defeats every cross-worktree reuse"
+    )
+
+
+def test_a_nested_package_still_keys_differently_from_the_root(nested_repo: Path) -> None:
+    """Dropping the absolute path must not merge two genuinely different packages.
+
+    ``.`` and ``api`` name different files; collapsing them into one key would
+    replay a result for one package as if it were the other's.
+    """
+    tree = worktree_tree_hash(nested_repo)
+    assert tree is not None
+    root_pkg = _relative_package(nested_repo, nested_repo)
+    api_pkg = _relative_package(nested_repo, nested_repo / "api")
+    root_key = cache_key(tree, ["tests/test_a.py"], package=root_pkg)
+    api_key = cache_key(tree, ["api/tests/test_a.py"], package=api_pkg)
+
+    assert root_pkg == "."
+    assert api_pkg == "api"
+    assert root_key != api_key
+
+
+# ---------------------------------------------------------------------------
+# Gitignored files — the tree hash cannot see them
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def ignored_repo(repo: Path) -> Path:
+    """*repo* with a gitignored ``secret.env`` that a test reads."""
+    (repo / ".gitignore").write_text("secret.env\n", encoding="utf-8")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-qm", "ignore secret.env", cwd=repo)
+    (repo / "secret.env").write_text("TOKEN = first\n", encoding="utf-8")
+    return repo
+
+
+def test_editing_a_gitignored_file_misses_the_cache(
+    ignored_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The regression: a stale hit after an edit git could not see.
+
+    ``git add -A`` skips ignored files, so the tree hash is identical before and
+    after the edit. Serving the cached result would report a verdict produced
+    from different bytes than the ones the test would now read.
+    """
+    cache = tmp_path / "cache"
+    launches = _fake_pytest(monkeypatch, rcs=0)
+
+    pr.run_pytest(ignored_repo, ["tests/test_a.py"], use_systemd=False, cache_dir=cache)
+    (ignored_repo / "secret.env").write_text("TOKEN = second\n", encoding="utf-8")
+    pr.run_pytest(ignored_repo, ["tests/test_a.py"], use_systemd=False, cache_dir=cache)
+
+    assert len(launches) == 2, (
+        "an edit to a gitignored file must invalidate the cached result; one launch "
+        "means a stale verdict was replayed"
+    )
+
+
+def test_adding_or_removing_a_gitignored_file_misses_the_cache(
+    ignored_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Presence is part of the key, not just content."""
+    cache = tmp_path / "cache"
+    launches = _fake_pytest(monkeypatch, rcs=0)
+
+    pr.run_pytest(ignored_repo, ["tests/test_a.py"], use_systemd=False, cache_dir=cache)
+    (ignored_repo / "secret.env").unlink()
+    pr.run_pytest(ignored_repo, ["tests/test_a.py"], use_systemd=False, cache_dir=cache)
+    assert len(launches) == 2, "removing a gitignored file must miss"
+
+    (ignored_repo / "secret.env").write_text("TOKEN = third\n", encoding="utf-8")
+    pr.run_pytest(ignored_repo, ["tests/test_a.py"], use_systemd=False, cache_dir=cache)
+    assert len(launches) == 3, "re-adding a gitignored file with new content must miss"
+
+
+def test_ignored_digest_is_stable_and_content_sensitive(ignored_repo: Path) -> None:
+    """The digest must not churn on its own, or every run would miss."""
+    assert ignored_files_digest(ignored_repo) == ignored_files_digest(ignored_repo)
+
+    before = ignored_files_digest(ignored_repo)
+    (ignored_repo / "secret.env").write_text("TOKEN = second\n", encoding="utf-8")
+    after = ignored_files_digest(ignored_repo)
+    assert before != after
+
+    (ignored_repo / "secret.env").write_text("TOKEN = first\n", encoding="utf-8")
+    assert ignored_files_digest(ignored_repo) == before
+
+
+def test_ignored_digest_ignores_tracked_files(repo: Path) -> None:
+    """Only ignored files belong in the digest; tracked ones are already in the tree."""
+    before = ignored_files_digest(repo)
+    (repo / "code.py").write_text("VALUE = 7\n", encoding="utf-8")
+    assert ignored_files_digest(repo) == before
+
+
+def test_a_repo_with_no_ignored_files_yields_an_empty_digest(repo: Path) -> None:
+    assert ignored_files_digest(repo) == ""
+
+
+def test_ignored_digest_survives_an_unreadable_ignored_file(
+    ignored_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file that cannot be read must not take the gate down with it.
+
+    The walk falls back to the file's path, so the digest differs from a
+    readable one. That is the fail-safe direction: the content was not proven
+    unchanged, so the key must not claim it was.
+    """
+    readable = ignored_files_digest(ignored_repo)
+    real_open = Path.open
+
+    def exploding_open(self: Path, *args: object, **kwargs: object) -> object:
+        if self.name == "secret.env":
+            raise PermissionError("gone")
+        return real_open(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "open", exploding_open)
+    unreadable = ignored_files_digest(ignored_repo)
+    monkeypatch.undo()
+
+    assert len(unreadable) == 64, "an unreadable file must still yield a digest, not raise"
+    assert unreadable != readable, (
+        "content that could not be read was not proven unchanged, so the key must differ"
+    )
+    assert ignored_files_digest(ignored_repo) == readable, "the failure must not persist"

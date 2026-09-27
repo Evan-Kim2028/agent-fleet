@@ -179,11 +179,13 @@ class GateConfig:
     agent_slots: int = 24
     test_slots: int = 4
     #: Replay a pytest result when the worktree's full git tree (including
-    #: uncommitted and untracked files) and the test list are unchanged, instead
-    #: of paying for the run again. The gate re-runs the same set many times per
-    #: merge: once per verified claim, then every fix round. Set
-    #: ``enable_test_cache: false`` to rule out any replay. The key covers the
-    #: whole worktree, so a real change always misses. See docs/GATE.md.
+    #: uncommitted and untracked files), its gitignored-file digest, and the
+    #: test list are unchanged, instead of paying for the run again. The gate
+    #: re-runs the same set many times per merge: once per verified claim, then
+    #: every fix round. Set ``enable_test_cache: false`` to rule out any replay.
+    #: The key holds no absolute path, so the gate's own worktrees share an
+    #: entry when they carry the same tree; a real change to any file, ignored
+    #: or not, always misses. See docs/GATE.md.
     enable_test_cache: bool = True
     test_cache_dir: str = str(DEFAULT_CACHE_DIR)
     test_cache_ttl_s: int = 24 * 3600
