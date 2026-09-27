@@ -301,6 +301,25 @@ The pipeline then re-runs that test itself:
 A claim the reviewer marked `"testable": false` skips verification entirely and
 goes to the judge.
 
+#### The re-run is batched
+
+Verifiers still run one per claim, in parallel. But once they have all written
+their tests, the pipeline re-runs **every** `CONFIRMED` test file in **one**
+pytest invocation instead of one process per file — a memory-capped pytest
+startup per claim is the slowest part of a gate run.
+
+Batching does not move the bar, because a claim is confirmed only if a test in
+**its own file** failed in that run. That attribution is the point: an exit 1
+from the batch says only that *someone* failed, and without per-file attribution
+one verifier's genuinely failing test would confirm a different, false claim that
+merely shared the invocation.
+
+The one case where the batch is unusable is a pytest exit `>= 2` (collection or
+infra error), which tells us nothing about any individual file. Then the
+pipeline falls back to re-running each file on its own — the same fail-closed
+bar, without the batching. Both paths are logged as
+`gate.verify.batched_rerun` and `gate.verify.batched_rerun_fallback`.
+
 ### judge — one call, and no free passes
 
 At most **one** judge call, on a separately configured backend/model, which does
@@ -498,6 +517,64 @@ machine.
 systemd user scopes are available, and each holds a test-pool slot for its
 duration. The cap is used exactly as configured; the gate never raises it.
 
+**Test result cache.** A gate run executes the same test set repeatedly — once
+per verified claim, then once per fix round. A result is replayed from
+`test_cache_dir` instead of re-running pytest when all three of these match:
+
+1. the git tree of the **whole worktree**,
+2. a digest of the worktree's **gitignored** files, and
+3. the exact, sorted list of test files asked for.
+
+The tree is computed with `git write-tree` against a **temporary index** (the
+real index is copied first, then `git add -A` runs against the copy), so the key
+covers committed state *and* every uncommitted edit, deletion, and untracked
+file. Keying on the HEAD sha would be cheaper and wrong: it would let the gate
+replay a result for code a fixer has already changed, which is exactly the stale
+evidence the cache must never serve.
+
+Gitignored files are the one thing that tree cannot see — `git add -A` skips
+them — so they get their own digest over each ignored file's repo-relative path
+and content. Without it, editing a gitignored fixture or config a test reads
+(`secret.env`, a local `.env`) would leave the tree hash untouched and replay a
+verdict produced from different bytes. Adding, editing or removing an ignored
+file all miss. Any file change misses.
+
+The digest deliberately carries **no worktree-specific value**. Dependency and
+build directories (`.venv`, `__pycache__`, `node_modules`, `build`, …) are
+skipped, because each gate worktree has its own virtualenv and an editable
+install bakes that worktree's absolute path into `.venv/bin/activate` and the
+site-packages finders — hashing those bytes would give every worktree a
+different key for an identical tree, which is the reuse this cache exists to
+provide. They are also not test input: a test reads data and config, not its own
+dependencies. mtime is left out for the same reason; files above 1 MiB contribute
+their size rather than their content, to bound the cost. A *tracked* directory
+happening to be called `build` or `dist` is unaffected — the tree hash still
+covers its bytes.
+
+That skip is per **path component**, not per top-level directory name: a package
+in a subdirectory writes `pkg/__pycache__/mod.cpython-3xx.pyc`, and a CPython
+`.pyc` header embeds the source mtime, which every `git worktree add` sets
+afresh. Matching only the first component left the nested directory to be
+hashed and handed the same per-worktree drift back to `wt`/`recheck`/`reN`/
+`final`, so a package below the root never reused across them.
+
+The key contains **no absolute path**. The gate's own worktrees (`wt`,
+`recheck`, `reN`, `final`) each get a fresh directory, but a package is
+identified by its path *relative to the worktree root*, so worktrees holding the
+same tree share one entry. Keying on the absolute package directory gave each
+worktree a distinct key and defeated the reuse this cache exists for. A root
+package (`.`) and a nested one (`api`) still key differently, which is the
+distinction that actually matters.
+
+Only results that say something real about the code are stored. A pytest exit
+`>= 2` is a collection or infra failure, and replaying one would let a transient
+break — a half-applied patch, a missing venv — masquerade as a settled verdict
+for a day. Entries expire after `test_cache_ttl_s`, and a damaged or
+wrong-version entry is treated as a miss and dropped rather than raised. A
+worktree that is not a git repo simply runs uncached.
+
+Set `enable_test_cache: false` to rule out replay entirely.
+
 ---
 
 ## Model policy
@@ -559,6 +636,9 @@ Machine-wide (`~/.agent-fleet/fleet.yaml`):
 | `gate.agent_timeout_s` | — | **deprecated**; still applied to lens/verify/fix |
 | `gate.test_timeout_s` | `900` | per-pytest timeout |
 | `gate.test_memory` | `6G` | `MemoryMax` for every pytest |
+| `gate.enable_test_cache` | `true` | replay a result when worktree + test list are unchanged |
+| `gate.test_cache_dir` | `~/.agent-fleet/cache/gate-tests` | where cached results live |
+| `gate.test_cache_ttl_s` | `86400` | cached result lifetime |
 | `gate.agent_slots` | `24` | machine-wide agent slot count |
 | `gate.test_slots` | `4` | machine-wide test slot count |
 | `gate.package_dir` | auto | force all tests into one package dir |

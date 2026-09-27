@@ -131,6 +131,17 @@ gate:
   # consumed 36GB. The cap is used as given; the gate never raises it.
   test_memory: 6G
 
+  # Result cache for the gate's deterministic test runs. A gate run executes the
+  # same test set repeatedly — once per verified claim, then every fix round — so
+  # a result is replayed when the worktree's full git tree (uncommitted edits and
+  # untracked files included) AND the test list are both unchanged. Any file
+  # change misses. Only real results are stored: a pytest exit >= 2 is a
+  # collection/infra failure, never cached and never replayed. Set
+  # enable_test_cache: false to rule out any replay.
+  enable_test_cache: true
+  test_cache_dir: ~/.agent-fleet/cache/gate-tests
+  test_cache_ttl_s: 86400
+
   # Machine-wide admission: these size the shared cross-process slot pools
   # under ~/.agent-fleet/slots, so several independent fleet processes on this
   # box share one budget instead of each getting its own. The test pool is
