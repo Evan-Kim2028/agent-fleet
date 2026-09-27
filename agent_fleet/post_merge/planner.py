@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from agent_fleet.post_merge.config import expand_path
 from agent_fleet.post_merge.types import MergedPR, Plan, parse_plan
 
 if TYPE_CHECKING:
@@ -102,9 +103,10 @@ def repo_path(spec: RepoSpec) -> str:
 
     Every other path in this package is expanded, and an unexpanded ``~`` is not
     a directory: passing it through hands subprocess a literal ``~`` and raises
-    FileNotFoundError.
+    FileNotFoundError. The fetcher, the labeler and the trigger runner all
+    resolve their working directory through here, not from the raw string.
     """
-    return str(Path(spec.path).expanduser()) if spec.path else ""
+    return expand_path(spec.path)
 
 
 def plan_argv(spec: RepoSpec) -> list[str]:

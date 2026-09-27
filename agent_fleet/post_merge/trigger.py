@@ -20,6 +20,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from agent_fleet.post_merge.config import expand_path
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
@@ -63,7 +65,7 @@ def make_trigger(spec: RepoSpec) -> TriggerFn:
             list(argv),
             capture_output=True,
             text=True,
-            cwd=spec.path or None,
+            cwd=expand_path(spec.path) or None,
             check=False,
             timeout=spec.trigger_timeout_seconds,
         )
@@ -150,10 +152,19 @@ def run_jobs(
             continue
         try:
             result = run(render_trigger(spec.trigger_command, job=name, slot=slot))
+        except subprocess.TimeoutExpired as exc:
+            # A trigger that blows trigger_timeout_seconds is this job's failure,
+            # not the batch's. TimeoutExpired derives from SubprocessError, not
+            # OSError, so it used to escape run_jobs, abort the flow before the
+            # hand-off note and leave the rebuild silently outstanding.
+            detail = str(exc).strip()[-300:] or exc.__class__.__name__
+            outcomes.append(JobOutcome(name, slot, "failed", detail, 124))
+            continue
         except OSError as exc:
-            # A mistyped or missing binary is this job's failure, not the
-            # batch's: crashing here would lose the hand-off note that records
-            # the outstanding rebuild, and the labels already applied.
+            # A mistyped or missing binary is this job's failure too: crashing
+            # here would lose the hand-off note that records the outstanding
+            # rebuild, and the labels already applied. 127 is the shell's own
+            # "command not found".
             detail = str(exc).strip()[-300:] or exc.__class__.__name__
             outcomes.append(JobOutcome(name, slot, "failed", detail, 127))
             continue

@@ -15,11 +15,13 @@ the whole flow is unit-testable with no network and no subprocess.
 
 from __future__ import annotations
 
+import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from agent_fleet.post_merge.config import expand_path
 from agent_fleet.post_merge.handoff import Batch, write_note
 from agent_fleet.post_merge.labels import apply_labels, gh_labeler
 from agent_fleet.post_merge.planner import dedupe_jobs, plan_for_pr
@@ -83,7 +85,6 @@ PR_FIELDS = "number,title,headRefOid,mergeCommit,mergedAt,files,labels"
 def _fetch_via_gh(pr: int, repo_path: str) -> MergedPR | None:
     """Read one PR's metadata through the ``gh`` CLI."""
     import json
-    import subprocess
 
     result = subprocess.run(
         ["gh", "pr", "view", str(pr), "--json", PR_FIELDS],
@@ -157,7 +158,10 @@ def run_post_merge(
     result = PostMergeResult(repo=spec.name, prs=list(prs))
 
     # fetch=None means "use the gh-backed default", not "everything is missing".
-    fetched, missing = _fetch_prs(prs, repo_path or spec.path, fetch)
+    # The checkout is expanded once here and every step below reuses it: `~` is
+    # not a directory, so the raw form dies in the first subprocess.
+    workdir = expand_path(repo_path or spec.path)
+    fetched, missing = _fetch_prs(prs, workdir, fetch)
     result.missing = missing
 
     # 1. Plan, per PR, tolerating a single planner failure.
@@ -165,14 +169,17 @@ def run_post_merge(
         try:
             kwargs = {"run": run_plan} if run_plan is not None else {}
             result.plans.append(plan_for_pr(spec, pr, **kwargs))
-        except (RuntimeError, ValueError) as exc:
+        except (RuntimeError, ValueError, OSError, subprocess.TimeoutExpired) as exc:
+            # TimeoutExpired is a SubprocessError, not an OSError, so a planner
+            # that blows plan_timeout_seconds used to abort the whole batch
+            # before the hand-off note. One bad plan is one PR's error.
             result.errors.append(f"PR #{pr.number}: {exc}")
     result.errors.extend(f"PR #{n}: could not read from the forge" for n in missing)
 
     # 2. Label each PR to exactly its plan. apply=None means the real gh
     #    labeler — skipping labelling by default would be the silent bug where
     #    a merged PR is planned and rebuilt but never carries its labels.
-    labeler = apply if apply is not None else gh_labeler(repo_path or spec.path)
+    labeler = apply if apply is not None else gh_labeler(workdir)
     for planned in result.plans:
         try:
             delta = apply_labels(

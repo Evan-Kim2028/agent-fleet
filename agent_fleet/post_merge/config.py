@@ -39,6 +39,17 @@ DEFAULT_PLAN_TIMEOUT = 300
 DEFAULT_TRIGGER_TIMEOUT = 3600
 
 
+def expand_path(value: str) -> str:
+    """*value* with ``~`` expanded, or ``""`` when it is unset.
+
+    The documented config form is ``path: ~/code/lake-of-rage`` and neither
+    ``gh`` nor ``subprocess`` expands a tilde: the raw string is handed to the
+    spawn as a working directory and fails with FileNotFoundError. Every
+    working directory in this package goes through here.
+    """
+    return str(Path(value).expanduser()) if value else ""
+
+
 @dataclass(frozen=True)
 class RepoSpec:
     """One repo's post-merge wiring, loaded from ``post_merge.repos[]``."""
