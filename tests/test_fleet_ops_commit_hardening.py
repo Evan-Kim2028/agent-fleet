@@ -174,6 +174,31 @@ def test_fixers_never_touch_scratch(repo: Path) -> None:
     assert seen == ["sed -i s/1/2/ feature.py"]
 
 
+def test_a_rename_reports_both_paths_intact(repo: Path) -> None:
+    """``git status -z`` splits a rename into two entries; neither may be mangled.
+
+    In ``-z`` mode git emits ``R  <new>\\0<old>\\0`` — the source path arrives as
+    its own record with no ``XY `` status columns. Reading every record with a
+    blind ``entry[3:]`` therefore truncated the source (``pkg/module_one.py``
+    became ``st_module.py``), handing a fixer a path that does not exist and
+    silently truncating the list of files the rest of the lane's work lives in.
+    """
+    (repo / "module_one.py").write_text("a = 1\n", encoding="utf-8")
+    (repo / "second.py").write_text("b = 2\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "add modules")
+    _git(repo, "mv", "module_one.py", "module_renamed.py")
+    (repo / "second.py").write_text("b = 3\n", encoding="utf-8")
+
+    files = g.changed_files(repo)
+
+    assert "module_renamed.py" in files, f"rename destination missing from {files}"
+    assert "module_one.py" in files, f"rename source missing or truncated in {files}"
+    assert "second.py" in files, f"a sibling edit was dropped by the rename in {files}"
+    # The source path is a full name, not the tail a blind entry[3:] would leave.
+    assert not any(f.startswith("st_module") for f in files), files
+
+
 # ----------------------------------------------------- scratch exclusion
 
 

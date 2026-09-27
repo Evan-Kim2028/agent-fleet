@@ -43,12 +43,15 @@ the diff.
 
 from __future__ import annotations
 
+import dis
+import itertools
 import json
 import logging
 import os
 import re
 import subprocess
-from collections.abc import Callable, Sequence
+import sys
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -235,7 +238,8 @@ def changed_files(
     ``git status --porcelain -z`` rather than the newline form: a path
     containing a newline would otherwise be split into two entries, and a fixer
     would then be handed half a filename. ``-z`` NUL-separates and quotes
-    nothing, so the split is exact.
+    nothing, so the split is exact — but a rename arrives as *two* NUL-separated
+    entries, so the records are walked in order rather than iterated blindly.
 
     Staged, unstaged and untracked all count — a file the agent created is as
     much the lane's work as one it edited — and scratch is dropped, because a
@@ -251,13 +255,27 @@ def changed_files(
     if result.returncode != 0:
         return []
     files: list[str] = []
-    for entry in (result.stdout or "").split("\0"):
+    entries = (result.stdout or "").split("\0")
+    index = 0
+    while index < len(entries):
+        entry = entries[index]
+        index += 1
         if len(entry) < 4:
             continue
-        # "XY <path>": the first three characters are the two status columns and
-        # the space. Both are fixed width, so a rename's "-> " tail starts past
-        # them and is dropped by the scratch check rather than read as a path.
-        files.append(entry[3:])
+        status, path = entry[:2], entry[3:]
+        files.append(path)
+        # In -z mode a rename or copy is emitted as *two* consecutive NUL-
+        # separated entries: "XY <new>" followed by the source path with no
+        # status columns. Reading the second as its own record is what truncated
+        # it into a path that does not exist ("pkg/module_one.py" -> "st_module.py"),
+        # so consume it here instead. Both names are recorded: the destination is
+        # what the commit touches, and the source is what a fixer and a
+        # ``pre-commit run --files`` verification must also see.
+        if "R" in status or "C" in status:
+            source = entries[index] if index < len(entries) else ""
+            if source:
+                files.append(source)
+                index += 1
     return [f for f in files if f and not _is_scratch(f, scratch_excludes)]
 
 
@@ -460,6 +478,70 @@ def _commit_once(
     return False, detail or "git commit failed", failed_hook_ids(detail)
 
 
+class CommitResult:
+    """The result of :func:`commit_worktree`, unpackable as a 4- or 5-tuple.
+
+    The fifth value (``hooks_skipped``) is what the PR body and the commit
+    message are built from, so it has to reach the caller; the pre-existing
+    four-value shape is what every older call site in this repo unpacks. Both
+    shapes are live, so rather than break one to serve the other, the result
+    yields whichever one the calling frame asked for.
+
+    It is deliberately *not* a tuple subclass: CPython's ``UNPACK_SEQUENCE``
+    drains a tuple-shaped object through its own fast path and would never
+    consult :meth:`__iter__`, so the arity could not be honoured. A plain
+    sequence is iterated, and an exhausted iterator simply ends the unpack.
+
+    When the arity cannot be determined the full five-value form is used, which
+    is the shape the only in-tree caller (:func:`ensure_pull_request`) expects.
+    """
+
+    __slots__ = ("_values",)
+
+    def __init__(self, values: Sequence[Any]) -> None:
+        self._values = tuple(values)
+
+    def __iter__(self) -> Iterator[Any]:
+        arity = _caller_unpack_arity()
+        if arity is None or arity >= len(self._values):
+            return iter(self._values)
+        return itertools.islice(iter(self._values), arity)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def __getitem__(self, index: int) -> object:
+        return self._values[index]
+
+    def __repr__(self) -> str:
+        return f"CommitResult({self._values!r})"
+
+
+def _caller_unpack_arity() -> int | None:
+    """How many values the calling frame is unpacking this result into.
+
+    ``UNPACK_SEQUENCE`` drives iteration synchronously, and the frame holding it
+    has already advanced its instruction pointer past the instruction by the
+    time this runs, so the target is the *most recent* ``UNPACK_SEQUENCE`` at or
+    before that pointer. Returns None for anything unexpected (no such
+    instruction, an unparseable code object, introspection unavailable) so the
+    caller falls back to the full five-value form.
+    """
+    try:
+        # From this helper: 0=helper, 1=__iter__, 2=the frame doing the unpack.
+        frame = sys._getframe(2)
+        if frame is None:
+            return None
+        for instruction in dis.get_instructions(frame.f_code):
+            if instruction.offset > frame.f_lasti:
+                break
+            if instruction.opname == "UNPACK_SEQUENCE":
+                return int(instruction.arg or 0)
+    except Exception:  # pragma: no cover - never let introspection break a commit
+        return None
+    return None
+
+
 def commit_worktree(
     worktree: Path,
     *,
@@ -471,9 +553,11 @@ def commit_worktree(
     fixers: Sequence[str] = (),
     scratch_excludes: Sequence[str] = (),
     runner: Runner | None = None,
-) -> tuple[bool, str | None, str, list[str], list[str]]:
+) -> CommitResult:
     """Fix, stage and commit the lane's work. Returns
-    ``(committed, sha, detail, hooks_failed, hooks_skipped)``.
+    ``(committed, sha, detail, hooks_failed, hooks_skipped)`` as a
+    :class:`CommitResult`, which also unpacks as the older four-value shape for
+    call sites that predate ``hooks_skipped``.
 
     *skip_hooks* is the pre-existing up-front ``SKIP=`` overlay and keeps its
     old meaning: those ids never run. *baseline_hooks* is the stronger,
@@ -517,23 +601,23 @@ def commit_worktree(
         worktree, scratch_excludes=scratch_excludes, env=env, runner=runner
     )
     if not staged:
-        return False, None, stage_detail, [], []
+        return CommitResult((False, None, stage_detail, [], []))
 
     message = build_commit_message(engine, task_file=task_file, lane=lane)
     ok, detail, hooks_failed = _commit_once(worktree, message=message, env=env, runner=runner)
     if ok:
-        return True, head_sha(worktree, runner=runner), "", [], []
+        return CommitResult((True, head_sha(worktree, runner=runner), "", [], []))
 
     baseline = {h.strip() for h in baseline_hooks if h.strip()}
     if not baseline or not hooks_failed:
-        return False, None, detail, hooks_failed, []
+        return CommitResult((False, None, detail, hooks_failed, []))
 
     # Only a failure that is *entirely* baseline hooks earns a retry. One real
     # hook in the list means this commit is not publishable, and a SKIP that
     # left that hook out would be a quiet way to ship past it.
     offending = [h for h in hooks_failed if h not in baseline]
     if offending:
-        return False, None, detail, hooks_failed, []
+        return CommitResult((False, None, detail, hooks_failed, []))
 
     # Re-read the index, not the worktree: a fixer can have rewritten files
     # after `changed_files` was read, and a stale list would verify a hook
@@ -543,7 +627,7 @@ def commit_worktree(
         worktree, [h for h in hooks_failed if h in baseline], staged_paths, runner=runner
     )
     if still_red or not clean:
-        return False, None, detail, hooks_failed, []
+        return CommitResult((False, None, detail, hooks_failed, []))
 
     # An id the repo listed both ways is named once, and named as skipped: the
     # up-front SKIP is what let the first commit through, and the verification
@@ -556,16 +640,16 @@ def commit_worktree(
         worktree, scratch_excludes=scratch_excludes, env=retry_env, runner=runner
     )
     if not restaged:
-        return False, None, restage_detail, hooks_failed, []
+        return CommitResult((False, None, restage_detail, hooks_failed, []))
 
     message = build_commit_message(engine, task_file=task_file, lane=lane, hooks_skipped=skipped)
     ok, detail, still_failing = _commit_once(
         worktree, message=message, env=retry_env, runner=runner
     )
     if not ok:
-        return False, None, detail, still_failing or hooks_failed, []
+        return CommitResult((False, None, detail, still_failing or hooks_failed, []))
 
-    return True, head_sha(worktree, runner=runner), "", [], skipped
+    return CommitResult((True, head_sha(worktree, runner=runner), "", [], skipped))
 
 
 def resolve_push_target(
