@@ -236,6 +236,33 @@ class ClusterHold:
 
 
 @dataclass(frozen=True)
+class MergeTrainSpec:
+    """Which head branches ``fleet merge train`` is allowed to land.
+
+    The train merges PRs, and on a busy repository the approved ones are not
+    all this operator's: a PR opened on another session's ``dq1d/*`` branch is
+    merged by *that* session's own shipper, and folding it into this train
+    lands it out from under the session that owns it.  These two lists are the
+    train's answer to "whose PRs is this".
+
+    Defaults are the fleet's own convention rather than empty: every lane this
+    fleet dispatches opens its head at ``fb/<lane>``, so ``fb/`` is the train's
+    own work and a branch with any other prefix belongs to someone else.
+    """
+
+    #: Head-branch prefixes this train may fold, test and merge.
+    include_head_prefixes: tuple[str, ...] = ("fb/",)
+    #: Prefixes never landed by this train, whatever the include list says.
+    exclude_head_prefixes: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "include_head_prefixes": list(self.include_head_prefixes),
+            "exclude_head_prefixes": list(self.exclude_head_prefixes),
+        }
+
+
+@dataclass(frozen=True)
 class ExecutorSpec:
     """Settings for ``fleet merge run``, loaded from ``merge_plan.executor``.
 

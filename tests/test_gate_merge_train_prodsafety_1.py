@@ -22,8 +22,10 @@ import subprocess
 from typing import TYPE_CHECKING, Any
 
 from agent_fleet.merge_plan.collect import GitHubClient
+from agent_fleet.merge_plan.train import TrainResult
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     import pytest
@@ -109,7 +111,7 @@ class _DbtDetailClient:
         return {
             "state": "OPEN",
             "headRefOid": self.head,
-            "headRefName": "feat/orders",
+            "headRefName": "fb/orders",
             "baseRefName": "main",
             "files": [{"path": "transform/models/orders.sql"}],
         }
@@ -137,7 +139,7 @@ def test_a_deploy_unit_freeze_prevents_merge_train_from_landing(
     monkeypatch.setattr(
         GitHubClient,
         "for_repo",
-        lambda self, repo_path: _DbtDetailClient(head),
+        _for_repo_returning(_DbtDetailClient(head)),
     )
     run_calls: list[dict[str, Any]] = []
     monkeypatch.setattr(
@@ -190,7 +192,7 @@ def test_the_ledger_release_still_lets_a_deploy_unit_frozen_batch_through(
     monkeypatch.setattr(
         GitHubClient,
         "for_repo",
-        lambda self, repo_path: _DbtDetailClient(head),
+        _for_repo_returning(_DbtDetailClient(head)),
     )
     run_calls: list[dict[str, Any]] = []
     monkeypatch.setattr(
@@ -215,7 +217,17 @@ def test_the_ledger_release_still_lets_a_deploy_unit_frozen_batch_through(
     assert len(run_calls) == 1, "a released dbt-freeze must not block the train"
 
 
-def _released_result() -> Any:
-    from agent_fleet.merge_plan.train import TrainResult
-
+def _released_result() -> TrainResult:
     return TrainResult(repo="demo", base_branch="main", detail="nothing landed")
+
+
+def _for_repo_returning(
+    client: _DbtDetailClient,
+) -> Callable[[GitHubClient, Path], _DbtDetailClient]:
+    """A ``GitHubClient.for_repo`` replacement handing back *client*."""
+
+    def _factory(self: GitHubClient, repo_path: Path) -> _DbtDetailClient:
+        del self, repo_path
+        return client
+
+    return _factory

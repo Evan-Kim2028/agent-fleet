@@ -70,11 +70,14 @@ if TYPE_CHECKING:
 
 
 def pr(number: int, *, base: str = "", head: str = "", files: tuple[str, ...] = ()) -> TrainPR:
+    # ``fb/`` is what this operator's train owns by default, so a fixture that
+    # says nothing about branches must land on one this train may merge. Tests
+    # about a foreign head say so explicitly.
     return TrainPR(
         number=number,
         head_sha=f"sha{number}",
         base_ref=base,
-        head_branch=head or f"feat/pr-{number}",
+        head_branch=head or f"fb/pr-{number}",
         files=files,
     )
 
@@ -213,7 +216,7 @@ def test_a_stacked_batch_folds_identically_however_it_was_collected() -> None:
 
 
 def test_partition_splits_a_moved_head_out_of_the_batch() -> None:
-    moved = TrainPR(number=2, head_sha="aaa111", current_head="bbb222")
+    moved = TrainPR(number=2, head_sha="aaa111", head_branch="fb/pr-2", current_head="bbb222")
     keep, dropped = partition_batch([pr(1), moved])
     assert [p.number for p in keep] == [1]
     assert [p.number for p in dropped] == [2]
@@ -229,7 +232,7 @@ def test_a_short_approved_sha_is_not_read_as_a_moved_head() -> None:
 
 def test_a_moved_head_is_never_folded_or_merged() -> None:
     tester = FakeTester()
-    moved = TrainPR(number=2, head_sha="aaa111", current_head="bbb222")
+    moved = TrainPR(number=2, head_sha="aaa111", head_branch="fb/pr-2", current_head="bbb222")
     merger = FakeMerger()
     result = MergeTrain(tester=tester, repo="r").run([pr(1), moved], merger=merger)
     assert tester.called == [(1,)]
@@ -239,7 +242,7 @@ def test_a_moved_head_is_never_folded_or_merged() -> None:
 
 def test_a_batch_of_only_stale_approvals_never_runs_a_test() -> None:
     tester = FakeTester()
-    moved = TrainPR(number=2, head_sha="aaa111", current_head="bbb222")
+    moved = TrainPR(number=2, head_sha="aaa111", head_branch="fb/pr-2", current_head="bbb222")
     result = MergeTrain(tester=tester, repo="r").run([moved])
     assert tester.called == []
     assert result.landed == ()
@@ -544,9 +547,9 @@ class OriginRepo:
 
     def prs(self) -> list[TrainPR]:
         return [
-            TrainPR(number=1, head_sha=self.one),
-            TrainPR(number=2, head_sha=self.two),
-            TrainPR(number=3, head_sha=self.three),
+            TrainPR(number=1, head_sha=self.one, head_branch="fb/one"),
+            TrainPR(number=2, head_sha=self.two, head_branch="fb/two"),
+            TrainPR(number=3, head_sha=self.three, head_branch="fb/conflict"),
         ]
 
 
@@ -592,7 +595,7 @@ def origin_repo(tmp_path: Path) -> OriginRepo:
     # on under it, so it conflicts no matter which PRs the train folds before
     # it.  Branching it from a.txt — a file PR 1 also edits — would make the
     # conflict a function of the batch order instead of the PR's own staleness.
-    _git(upstream, "checkout", "-q", "-b", "feat/conflict", "main")
+    _git(upstream, "checkout", "-q", "-b", "fb/conflict", "main")
     (upstream / "c.txt").write_text("from-pr3\n", encoding="utf-8")
     _git(upstream, "add", ".")
     _git(upstream, "commit", "-q", "-m", "three")
@@ -604,7 +607,7 @@ def origin_repo(tmp_path: Path) -> OriginRepo:
     _git(upstream, "push", "-q", "origin", "main")
 
     # PR 1: a clean, unrelated change.
-    _git(upstream, "checkout", "-q", "-b", "feat/one", "main")
+    _git(upstream, "checkout", "-q", "-b", "fb/one", "main")
     (upstream / "a.txt").write_text("a1\n", encoding="utf-8")
     _git(upstream, "add", ".")
     _git(upstream, "commit", "-q", "-m", "one")
@@ -612,14 +615,14 @@ def origin_repo(tmp_path: Path) -> OriginRepo:
     _git(upstream, "checkout", "-q", "main")
 
     # PR 2: a second clean change, on its own branch.
-    _git(upstream, "checkout", "-q", "-b", "feat/two", "main")
+    _git(upstream, "checkout", "-q", "-b", "fb/two", "main")
     (upstream / "b.txt").write_text("b1\n", encoding="utf-8")
     _git(upstream, "add", ".")
     _git(upstream, "commit", "-q", "-m", "two")
     two = _git(upstream, "rev-parse", "HEAD")
     _git(upstream, "checkout", "-q", "main")
     for branch in ("one", "two", "conflict"):
-        _git(upstream, "push", "-q", "origin", f"feat/{branch}")
+        _git(upstream, "push", "-q", "origin", f"fb/{branch}")
     return OriginRepo(clone=clone, one=one, two=two, three=three)
 
 
@@ -674,7 +677,8 @@ def test_ensure_heads_local_reports_a_head_it_cannot_materialise(
     assert reason == ""
 
     keep, reason = ensure_heads_local(
-        origin_repo.clone, [TrainPR(number=4, head_sha="0" * 40, head_ref="refs/pull/4/head")]
+        origin_repo.clone,
+        [TrainPR(number=4, head_sha="0" * 40, head_branch="fb/4", head_ref="refs/pull/4/head")],
     )
     assert keep == []
     assert reason.startswith("#4 000000000: ")
@@ -782,7 +786,7 @@ def test_a_head_the_remote_will_not_serve_is_reported_not_rebased(
 
     monkeypatch.setattr("agent_fleet.merge_plan.train._run", fake_run)
     result = MergeTrain(tester=GitTrainer(origin_repo.clone).evaluate, repo="demo").run(
-        [TrainPR(number=9, head_sha="0123456789abcdef0123456789abcdef01234567")]
+        [TrainPR(number=9, head_sha="0123456789abcdef0123456789abcdef01234567", head_branch="fb/9")]
     )
 
     assert result.landed == ()
@@ -924,10 +928,10 @@ def test_the_train_lands_a_batch_on_a_repository_whose_branch_is_develop(
 
     monkeypatch.setattr("agent_fleet.merge_plan.train._run", fake_run)
     merger = FakeMerger()
-    base = resolve_base_branch(checkout, prs=[TrainPR(number=1, head_sha=head)])
+    base = resolve_base_branch(checkout, prs=[TrainPR(number=1, head_sha=head, head_branch="fb/1")])
     result = MergeTrain(
         tester=GitTrainer(checkout, base_branch=base).evaluate, repo="demo", base_branch=base
-    ).run([TrainPR(number=1, head_sha=head, base_ref=base)], merger=merger)
+    ).run([TrainPR(number=1, head_sha=head, base_ref=base, head_branch="fb/1")], merger=merger)
     assert base == "develop"
     assert result.landed == (1,)
     assert result.base_branch == "develop"
@@ -1016,12 +1020,12 @@ def _repo_on_branch(root: Path, branch: str, *, with_pr: bool = False) -> tuple[
     _git(clone, "config", "user.name", "T")
     head = ""
     if with_pr:
-        _git(upstream, "checkout", "-q", "-b", "feat/one", branch)
+        _git(upstream, "checkout", "-q", "-b", "fb/one", branch)
         (upstream / "a.txt").write_text("a1\n", encoding="utf-8")
         _git(upstream, "add", ".")
         _git(upstream, "commit", "-q", "-m", "one")
         head = _git(upstream, "rev-parse", "HEAD")
-        _git(upstream, "push", "-q", "origin", "feat/one")
+        _git(upstream, "push", "-q", "origin", "fb/one")
     return clone, head
 
 
@@ -1181,14 +1185,14 @@ def test_a_train_names_the_checkout_it_was_pointed_at(
 
 
 class StubDetailClient:
-    """A ``GitHubClient`` whose every PR is open on ``feat/thing`` over main."""
+    """A ``GitHubClient`` whose every PR is open on ``fb/thing`` over main."""
 
     def pr_detail(self, pr_number: int) -> dict[str, Any]:
         del pr_number
         return {
             "state": "OPEN",
             "headRefOid": "dc91fac7c9233ec3da9e9",
-            "headRefName": "feat/thing",
+            "headRefName": "fb/thing",
             "baseRefName": "main",
             "files": [{"path": "agent_fleet/thing.py"}],
         }
@@ -1352,9 +1356,17 @@ def test_a_lane_whose_head_moved_is_reported_as_moved(
     assert "would test 0 PR(s)" in out
 
 
-def test_a_dq1d_lane_status_file_batches_its_own_branch(
+def test_a_dq1d_lane_status_file_does_not_batch_another_shippers_branch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """A ``dq1d/*`` PR is not this train's to merge, and must say so.
+
+    This used to assert the opposite: that a dq1d lane status file "batches its
+    own branch", which is the behaviour that let a dry run on lor-main pick silph
+    #4257 (``dq1d/apidocs``) and fold it.  documents-1d has its own shipper, so
+    the train must decline it — and name it, because silence is what let the PR
+    into the next run.
+    """
     checkout, head = _repo_on_branch(tmp_path, "main", with_pr=True)
     status = _lane_status_dir(tmp_path, {"dq1d-9-contracts": head})
     _install_lane_client(monkeypatch, {77: "dq1d/9-contracts"}, head_sha=head)
@@ -1363,6 +1375,37 @@ def test_a_dq1d_lane_status_file_batches_its_own_branch(
     args = _train_args(
         checkout, config=tmp_path / "none.yaml", over={"status_dir": str(status), "dry_run": True}
     )
+
+    code = merge_cli.cmd_merge_train(args)
+
+    err = capsys.readouterr().err
+    assert code == 1, f"a dq1d PR was batched by this train (exit {code})"
+    assert "#77" in err, f"the refusal did not name the PR; stderr was {err!r}"
+    assert "dq1d/9-contracts" in err, f"the refusal did not name the branch; stderr was {err!r}"
+
+
+def test_a_train_configured_for_dq1d_branches_batches_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The control: ownership is configuration, not a hard-coded ``fb/``.
+
+    documents-1d's own shipper runs this same command with its own prefixes, so
+    a filter that refused ``dq1d/*`` unconditionally would break the very
+    shipper the refusal is protecting.
+    """
+    from agent_fleet.merge_plan import cli as merge_cli
+
+    checkout, head = _repo_on_branch(tmp_path, "main", with_pr=True)
+    status = _lane_status_dir(tmp_path, {"dq1d-9-contracts": head})
+    _install_lane_client(monkeypatch, {77: "dq1d/9-contracts"}, head_sha=head)
+    _isolate_lane_registry(monkeypatch, tmp_path)
+    config = tmp_path / "fleet.yaml"
+    config.write_text(
+        "merge_plan:\n  merge_train:\n    include_head_prefixes: ['dq1d/']\n", encoding="utf-8"
+    )
+
+    args = _train_args(checkout, config=config, over={"status_dir": str(status), "dry_run": True})
+
     assert merge_cli.cmd_merge_train(args) == 0
     assert "#77" in capsys.readouterr().out
 
@@ -1390,9 +1433,9 @@ def test_the_fold_leaves_no_conflict_behind_for_the_next_pr(
     monkeypatch.setenv("AGENT_FLEET_HOME", str(origin_repo.clone.parent / "home"))
     clean, conflicted, after = pr(1), pr(2), pr(3)
     batch = [
-        TrainPR(number=clean.number, head_sha=origin_repo.one, head_branch="p-one"),
-        TrainPR(number=conflicted.number, head_sha=origin_repo.three, head_branch="p-two"),
-        TrainPR(number=after.number, head_sha=origin_repo.two, head_branch="p-three"),
+        TrainPR(number=clean.number, head_sha=origin_repo.one, head_branch="fb/p-one"),
+        TrainPR(number=conflicted.number, head_sha=origin_repo.three, head_branch="fb/p-two"),
+        TrainPR(number=after.number, head_sha=origin_repo.two, head_branch="fb/p-three"),
     ]
 
     def fake_run(
@@ -1423,8 +1466,8 @@ def test_the_reported_candidate_is_the_tree_that_was_tested(
     monkeypatch.setenv("AGENT_FLEET_HOME", str(origin_repo.clone.parent / "home"))
     # A green pair, so the fold reaches a head and the test run is over it.
     batch = [
-        TrainPR(number=1, head_sha=origin_repo.one),
-        TrainPR(number=2, head_sha=origin_repo.two),
+        TrainPR(number=1, head_sha=origin_repo.one, head_branch="fb/one"),
+        TrainPR(number=2, head_sha=origin_repo.two, head_branch="fb/two"),
     ]
 
     def fake_run(
@@ -1529,9 +1572,12 @@ def test_the_head_fetch_happens_while_the_fold_holds_the_worktree_lock(
 
     monkeypatch.setattr("agent_fleet.merge_plan.train._run", fake_run)
     MergeTrain(tester=GitTrainer(origin_repo.clone).evaluate, repo="demo").run(
-        [TrainPR(number=1, head_sha=origin_repo.one, head_ref="refs/pull/1/head")]
+        [
+            TrainPR(
+                number=1, head_sha=origin_repo.one, head_branch="fb/1", head_ref="refs/pull/1/head"
+            )
+        ]
     )
-
     assert seen, f"no head fetch ran for {origin_repo.one}, so this proves nothing"
     assert all(held for _refspec, held in seen), f"the head fetch ran unlocked: {seen}"
 
@@ -1580,9 +1626,13 @@ def test_one_unfetchable_head_is_reported_while_the_rest_still_land(
 
     monkeypatch.setattr("agent_fleet.merge_plan.train._run", fake_run)
     batch = [
-        TrainPR(number=1, head_sha=origin_repo.one, head_ref="refs/pull/1/head"),
-        TrainPR(number=2, head_sha=origin_repo.two, head_ref="refs/pull/2/head"),
-        TrainPR(number=4, head_sha="0" * 40, head_ref="refs/pull/4/head"),
+        TrainPR(
+            number=1, head_sha=origin_repo.one, head_branch="fb/1", head_ref="refs/pull/1/head"
+        ),
+        TrainPR(
+            number=2, head_sha=origin_repo.two, head_branch="fb/2", head_ref="refs/pull/2/head"
+        ),
+        TrainPR(number=4, head_sha="0" * 40, head_branch="fb/4", head_ref="refs/pull/4/head"),
     ]
     result = MergeTrain(tester=GitTrainer(origin_repo.clone).evaluate, repo="demo").run(batch)
 
@@ -1610,8 +1660,8 @@ def test_a_stacked_batch_resolves_the_base_branch_it_declares_at_its_root() -> N
     handle.
     """
     stack = [
-        TrainPR(number=10, head_sha="a", base_ref="main", head_branch="feat-a"),
-        TrainPR(number=11, head_sha="b", base_ref="feat-a", head_branch="feat-b"),
+        TrainPR(number=10, head_sha="a", base_ref="main", head_branch="fb/feat-a"),
+        TrainPR(number=11, head_sha="b", base_ref="fb/feat-a", head_branch="fb/feat-b"),
     ]
     assert [p.number for p in stack_roots(stack)] == [10]
     assert resolve_base_branch(Path("/nonexistent"), prs=stack) == "main"
@@ -1665,8 +1715,8 @@ def test_a_stacked_batch_folds_and_lands_end_to_end(
     """
     monkeypatch.setenv("AGENT_FLEET_HOME", str(origin_repo.clone.parent / "home"))
     stack = [
-        TrainPR(number=1, head_sha=origin_repo.one, base_ref="main", head_branch="feat/one"),
-        TrainPR(number=2, head_sha=origin_repo.two, base_ref="feat/one", head_branch="feat/two"),
+        TrainPR(number=1, head_sha=origin_repo.one, base_ref="main", head_branch="fb/one"),
+        TrainPR(number=2, head_sha=origin_repo.two, base_ref="fb/one", head_branch="fb/two"),
     ]
     seen: list[tuple[str, ...]] = []
 
@@ -1960,7 +2010,9 @@ class _LaneDetailClient:
         return {
             "state": "OPEN",
             "headRefOid": self.head,
-            "headRefName": lane,
+            # A lane is dispatched onto ``fb/<lane>``, and that is the branch the
+            # train looks at, not the bare lane name.
+            "headRefName": f"fb/{lane}",
             "baseRefName": "main",
             "files": [{"path": "agent_fleet/thing.py"}],
         }

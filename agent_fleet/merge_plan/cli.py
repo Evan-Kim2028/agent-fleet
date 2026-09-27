@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
     from agent_fleet.merge_plan.execute import EventSink, TickResult
-    from agent_fleet.merge_plan.train import TrainPR
+    from agent_fleet.merge_plan.train import HeadFilter, TrainPR
     from agent_fleet.merge_plan.types import ExecutorSpec, RepoSpec
 
 
@@ -307,11 +307,35 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
         print(f"no open approved PRs found for {repo}")
         return 0
 
+    try:
+        head_filter = _head_filter(args, config_path)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    # Ownership is decided before the cap, so a batch is never filled with PRs
+    # that are not this operator's, and before the hold check, so a freeze is
+    # not reported against a PR this train was never going to merge.
+    owned, not_owned = head_filter.split(prs)
+
+    if not owned:
+        # Named and refused, rather than the "no open approved PRs" line above:
+        # the PRs are open and approved, this train just does not own them, and
+        # silence is how another session's PR ends up in the next train.
+        print(
+            f"merge train [{repo}]: nothing to run; "
+            f"{len(not_owned)} approved PR(s) are not owned by this train "
+            f"({head_filter.describe()}): "
+            f"{', '.join(f'#{p.number} {p.head_branch or "(none)"}' for p in not_owned)}",
+            file=sys.stderr,
+        )
+        return 1
+
     # One batch, resolved once: the PRs that survive the staleness filter, in
     # fold order, capped.  The cap belongs here rather than inside run_train so
     # the base branch, the hold check and the run are all answered about the same
     # set of PRs.
-    keep, moved = partition_batch(prs)
+    keep, moved = partition_batch(owned)
     batch = order_batch(keep)[: args.max_batch_size]
 
     if args.dry_run:
@@ -320,6 +344,8 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
             print(f"  #{pr.number} {pr.head_sha[:9]} base={pr.base_ref or '-'}")
         for pr in moved:
             print(f"  #{pr.number} SKIPPED-MOVED head moved to {pr.current_head[:9]}")
+        for pr in not_owned:
+            print(f"  #{pr.number} SKIPPED-NOT-OWNED head {pr.head_branch or '(none)'}")
         return 0
 
     held = _held_batch(batch, lanes=lanes, args=args)
@@ -351,6 +377,7 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
             max_batch_size=args.max_batch_size,
             report_path=Path(args.report).expanduser() if args.report else None,
             base_branch=base_branch,
+            head_filter=head_filter,
         )
     except subprocess.TimeoutExpired as exc:
         # Every git call the fold makes carries a timeout, and only the test
@@ -378,10 +405,47 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
     # that did fold legitimately drops conflicts and moved heads from ``ordered``.
     if not result.ordered:
         result.ordered = tuple(batch)
+    # The PRs this train declined to land are not in the batch, so the run never
+    # saw them and its report cannot name them.  Stamped on here, from the same
+    # split the batch was built from, so the report says "skipped: not owned"
+    # rather than omitting the reason a run covered fewer PRs than were approved.
+    # Never overwritten: a run that reported its own is describing the same set.
+    if not result.not_owned:
+        result.not_owned = tuple(not_owned)
     print(
         json.dumps(result.to_dict(), indent=2, default=str) if args.json else result.render_text()
     )
     return 0 if result.landed else 1
+
+
+def _head_filter(args: argparse.Namespace, config_path: str | None) -> HeadFilter:
+    """The head-branch filter this train runs with, from flags then fleet.yaml.
+
+    Each flag overrides only its own half of ``merge_plan.merge_train``, on
+    ``--base-branch``'s reasoning that a flag is an instruction and the config is
+    a declaration: naming one prefix on the command line is a correction to what
+    fleet.yaml says this train may land, not a statement that it may land
+    everything.  Omitting both leaves fleet.yaml's answer, and a box with no
+    config at all gets ``MergeTrainSpec``'s own ``fb/`` default.
+
+    Raises ``ValueError`` for a malformed ``merge_train`` block, which the caller
+    reports rather than degrading to the default list: the default is a real
+    ownership filter, so a typo in the configured one must not quietly become it.
+
+    ``getattr`` rather than ``args.include_head_prefix`` because the attribute
+    only exists once the flag is registered, and every other reader in this
+    module reads its arguments the same way.
+    """
+    from agent_fleet.merge_plan.config import load_merge_train_spec
+    from agent_fleet.merge_plan.train import HeadFilter
+
+    spec = load_merge_train_spec(Path(config_path) if config_path else None)
+    include = getattr(args, "include_head_prefix", None)
+    exclude = getattr(args, "exclude_head_prefix", None)
+    return HeadFilter(
+        include=tuple(include) if include else spec.include_head_prefixes,
+        exclude=tuple(exclude) if exclude else spec.exclude_head_prefixes,
+    )
 
 
 def _configured_base(args: argparse.Namespace, repo: str, config_path: str | None) -> str:
@@ -634,6 +698,20 @@ def register_merge_commands(sub: argparse._SubParsersAction) -> None:
         type=int,
         default=5,
         help="Cap on PRs per train (default 5)",
+    )
+    train_p.add_argument(
+        "--include-head-prefix",
+        action="append",
+        default=None,
+        help="Head-branch prefix this train may land (repeatable). Overrides "
+        "fleet.yaml merge_train.include_head_prefixes; default 'fb/'",
+    )
+    train_p.add_argument(
+        "--exclude-head-prefix",
+        action="append",
+        default=None,
+        help="Head-branch prefix this train may never land, whatever includes "
+        "match (repeatable). Overrides fleet.yaml merge_train.exclude_head_prefixes",
     )
     train_p.add_argument("--report", help="Where to write the JSON report")
     train_p.add_argument(
