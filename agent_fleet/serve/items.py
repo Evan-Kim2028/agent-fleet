@@ -26,6 +26,7 @@ so the throughput numbers count real work, not retries as if they were new work.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -59,6 +60,12 @@ STAGES: tuple[str, ...] = (
 
 #: Stages from which no further work happens on its own.
 TERMINAL_STAGES = frozenset({STAGE_MERGED, STAGE_ESCALATED})
+
+#: How far back :meth:`ItemBoard.completed_this_tick` looks when the caller
+#: does not say. Generous for a tick that runs every few seconds and short
+#: enough that a completion from a previous tick cannot be re-reported as this
+#: one's work — which is what pins the controller's starvation counter at zero.
+DEFAULT_COMPLETION_WINDOW_S = 30.0
 
 #: Stages a watchdog stage timeout applies to, and the config key for each.
 STAGE_OF_ITEM = "lane"
@@ -263,6 +270,8 @@ class ItemBoard:
     def __init__(self, path: Path, *, clock: Clock | None = None) -> None:
         self.path = path
         self.clock = clock or SystemClock()
+        #: Lower bound of the current completion window, set by ``mark_tick``.
+        self.last_tick: float | None = None
 
     def transitions(self) -> list[Transition]:
         return read_transitions(self.path)
@@ -284,6 +293,7 @@ class ItemBoard:
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(line)
             handle.flush()
+            os.fsync(handle.fileno())
 
     def record(
         self,
@@ -378,18 +388,56 @@ class ItemBoard:
             )
         return out
 
-    def completed_this_tick(self, *, now: float | None = None) -> int:
+    def completed_this_tick(
+        self,
+        *,
+        now: float | None = None,
+        window_s: float | None = None,
+    ) -> int:
         """How many items reached a terminal stage since the last tick.
 
         This is the completion signal the starvation guard consumes. It counts
         *any* terminal transition rather than only ``merged``, because a run
         that ships nothing but escalations is still failing to ship and should
         not be mistaken for progress.
+
+        The window is the one this call closes: ``(lower, now]``, where *lower*
+        is the previous call's ``now`` (:attr:`last_tick`), never further back
+        than *window_s* seconds. It is a delta, not a lifetime total, because
+        the only consumer treats ``completed > 0`` as "the fleet shipped
+        something *this tick*" and resets its starvation counter. A cumulative
+        count reports one merge an hour old on every tick after it, which pins
+        that counter at zero forever and disables the guard for the life of the
+        process.
+
+        The window advances with the call rather than only on an explicit
+        :meth:`mark_tick`, so the invariant holds for a caller that just polls.
+        *window_s* is the cap on how far back one tick may reach, including the
+        very first one: a merge from an hour ago is not this tick's work, and a
+        caller that ticks less often than the merge rate cannot report a
+        backlog as throughput. A caller polling several times per tick must call
+        :meth:`mark_tick` — each call closes the window it was given.
         """
         the_now = now if now is not None else self.clock.time()
-        return sum(
-            1 for t in self.transitions() if t.stage in TERMINAL_STAGES and t.epoch <= the_now
+        span = DEFAULT_COMPLETION_WINDOW_S if window_s is None else window_s
+        lower = self.last_tick
+        if lower is None or lower < the_now - span:
+            lower = the_now - span
+        count = sum(
+            1
+            for t in self.transitions()
+            if t.stage in TERMINAL_STAGES and lower < t.epoch <= the_now
         )
+        self.last_tick = the_now
+        return count
+
+    def mark_tick(self, *, now: float | None = None) -> None:
+        """Close the current completion window; the next one starts here.
+
+        Only needed by a caller that asks :meth:`completed_this_tick` more than
+        once per tick, which already advances the window itself.
+        """
+        self.last_tick = now if now is not None else self.clock.time()
 
 
 def stage_from_status_line(line: str) -> str | None:
@@ -416,6 +464,7 @@ def stage_from_status_line(line: str) -> str | None:
 
 
 __all__ = [
+    "DEFAULT_COMPLETION_WINDOW_S",
     "STAGES",
     "STAGE_APPROVED",
     "STAGE_ESCALATED",

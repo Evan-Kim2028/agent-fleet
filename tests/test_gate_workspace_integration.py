@@ -210,4 +210,13 @@ def test_every_gate_prompt_forbids_pattern_kills() -> None:
 
     assert "NEVER kill processes by name or pattern" in prompts.PROCESS_SAFETY
     src = Path(prompts.__file__).read_text(encoding="utf-8")
-    assert src.count("return PROCESS_SAFETY + (") == 5
+    assert src.count("return AGENT_RULES + (") == 5
+
+
+def test_every_gate_prompt_forbids_blocking_commands() -> None:
+    """A command that never returns makes the stage a dead agent, not a slow one."""
+    from agent_fleet.gate import prompts
+
+    assert "NO BLOCKING COMMANDS" in prompts.NO_BLOCKING_COMMANDS
+    assert prompts.NO_BLOCKING_COMMANDS in prompts.AGENT_RULES
+    assert prompts.PROCESS_SAFETY in prompts.AGENT_RULES

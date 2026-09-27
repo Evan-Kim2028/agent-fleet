@@ -1,0 +1,11 @@
+[Unit]
+Description=Agent fleet (documents-0e): hard-capped, lowest priority, frozen first under host memory pressure
+
+[Slice]
+MemoryHigh=20G
+MemoryMax=22G
+MemorySwapMax=0
+CPUQuota=600%
+CPUWeight=20
+IOWeight=20
+TasksMax=4000

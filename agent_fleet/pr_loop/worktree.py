@@ -1,4 +1,11 @@
-"""Resolve agent worktree paths across legacy and fleet naming conventions."""
+"""Resolve agent worktree paths across legacy and fleet naming conventions.
+
+``remove_worktree`` mutates the repository's shared ``.git/worktrees`` registry,
+so it takes :func:`~agent_fleet.fleet_ops.worktree_lock.repo_worktree_lock` —
+the same per-repository lock the gate, the lane path, the merge probe and
+``LocalGitOps`` take. An unlocked removal here is the other half of the race the
+lock exists to close.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +16,8 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+from agent_fleet.fleet_ops.worktree_lock import repo_worktree_lock
 
 logger = logging.getLogger(__name__)
 
@@ -263,18 +272,22 @@ def remove_worktree(repo_root: Path, worktree_path: Path) -> bool:
     if _worktree_in_use(worktree_path):
         logger.info("Skipping worktree removal — in use: %s", worktree_path)
         return False
-    rm = subprocess.run(
-        ["git", "-C", str(repo_root), "worktree", "remove", "--force", str(worktree_path)],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=30,
-    )
-    if rm.returncode == 0:
-        release_worktree_lock(worktree_path)
-        logger.info("Removed worktree %s", worktree_path)
-        return True
-    logger.warning("Failed to remove worktree %s: %s", worktree_path, rm.stderr.strip())
+    # Same per-repository lock every other worktree mutator takes: this is a
+    # `worktree remove` against the one shared .git/worktrees registry, and an
+    # unlocked one can take a sibling's half-registered entry with it.
+    with repo_worktree_lock(repo_root):
+        rm = subprocess.run(
+            ["git", "-C", str(repo_root), "worktree", "remove", "--force", str(worktree_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        if rm.returncode == 0:
+            release_worktree_lock(worktree_path)
+            logger.info("Removed worktree %s", worktree_path)
+            return True
+        logger.warning("Failed to remove worktree %s: %s", worktree_path, rm.stderr.strip())
     return False
 
 

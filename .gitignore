@@ -19,6 +19,15 @@ htmlcov/
 .worktrees/
 .agent-fleet-state.json
 .codegraph/
+# Per-run transcripts and per-PR ownership notes. The runs dir captured
+# gate-tiers/docs-fleet-index impl output to main; both are machine-local
+# state that changes on every dispatch and must never be committed.
+.agent-fleet/runs/
+.agent-fleet/pr/
+# Un-expanded $HOME: a shell that takes %h/~ literally wrote a gh API cache
+# dump here, headers and all, and an auto-commit staged it.
+/%h/
+/~/
 
 
 # Runtime junk / local experiments (never commit)

@@ -26,6 +26,7 @@ import errno
 import fcntl
 import json
 import os
+import re
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
@@ -38,11 +39,28 @@ if TYPE_CHECKING:
 #: Subdirectories created on first use.
 SUBDIRS = ("components", "locks")
 
+_UNSAFE_SEGMENT = re.compile(r"[^A-Za-z0-9._-]+")
+_FALLBACK_OPERATOR = "default"
+_FALLBACK_COMPONENT = "component"
+
+
+def _safe_segment(value: str, *, fallback: str) -> str:
+    """Reduce *value* to a single path component that cannot traverse.
+
+    Same rule as ``fleet_ops.worktree.sanitize_component``: map every run of
+    unsafe characters to ``-``, then strip leading/trailing ``-`` and ``.`` so
+    ``..``, ``.`` and their mixtures can never survive into a path. Without the
+    strip, a bare ``.`` would land on the ``serve/`` parent and a ``..`` would
+    walk out of the fleet home entirely, which is the clobbering this module's
+    per-operator scoping exists to prevent.
+    """
+    cleaned = _UNSAFE_SEGMENT.sub("-", (value or "").strip()).strip("-.")
+    return cleaned or fallback
+
 
 def serve_dir(operator: str) -> Path:
     """The supervisor's state directory for *operator*."""
-    safe = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in operator) or "default"
-    return agent_fleet_home() / "serve" / safe
+    return agent_fleet_home() / "serve" / _safe_segment(operator, fallback=_FALLBACK_OPERATOR)
 
 
 def pid_path(operator: str) -> Path:
@@ -82,11 +100,22 @@ def component_dir(operator: str) -> Path:
 
 
 def component_log_path(operator: str, name: str) -> Path:
-    return component_dir(operator) / f"{name}.log"
+    return component_dir(operator) / f"{_component_name(name)}.log"
 
 
 def component_pid_path(operator: str, name: str) -> Path:
-    return component_dir(operator) / f"{name}.pid"
+    return component_dir(operator) / f"{_component_name(name)}.pid"
+
+
+def _component_name(name: str) -> str:
+    """Make *name* safe as a single path segment under ``components/``.
+
+    A component name is operator input too, and a traversed pid path is worse
+    than a traversed log path: the supervisor later reads it and signals the pid
+    it names. Sanitizing it here keeps the containment guarantee identical to
+    the one ``serve_dir`` applies to the operator.
+    """
+    return _safe_segment(name, fallback=_FALLBACK_COMPONENT)
 
 
 def locks_dir(operator: str) -> Path:

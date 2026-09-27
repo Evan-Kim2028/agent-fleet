@@ -167,8 +167,13 @@ def _run_gated_dag(disp, width: int, cap: int, *, label: str) -> LoadResult:  # 
             with metrics:
                 denied += 1
             return FleetTaskResult(
-                task_index=task_index, persona=task.persona, goal=task.goal,
-                status="error", summary=None, error=_DENIED, duration_seconds=0.0,
+                task_index=task_index,
+                persona=task.persona,
+                goal=task.goal,
+                status="error",
+                summary=None,
+                error=_DENIED,
+                duration_seconds=0.0,
             )
         try:
             with metrics:
@@ -176,8 +181,13 @@ def _run_gated_dag(disp, width: int, cap: int, *, label: str) -> LoadResult:  # 
                 peak = max(peak, live)
             time.sleep(0.02)
             return FleetTaskResult(
-                task_index=task_index, persona=task.persona, goal=task.goal,
-                status="completed", summary="ok", error=None, duration_seconds=0.02,
+                task_index=task_index,
+                persona=task.persona,
+                goal=task.goal,
+                status="completed",
+                summary="ok",
+                error=None,
+                duration_seconds=0.02,
             )
         finally:
             self._gate.release(token)
@@ -274,14 +284,18 @@ def main() -> int:
         )
     print(f"  raw try_admit probe (denial-visibility floor): denied={raw_denied}\n")
 
-    resume = probe([
-        ("agent_fleet.orchestration.resume", "resume_run"),
-        ("agent_fleet.orchestration.journal", "resume_run"),
-    ])
-    journal_fold = probe([
-        ("agent_fleet.orchestration.journal", "fold"),
-        ("agent_fleet.orchestration.journal", "RunState"),
-    ])
+    resume = probe(
+        [
+            ("agent_fleet.orchestration.resume", "resume_run"),
+            ("agent_fleet.orchestration.journal", "resume_run"),
+        ]
+    )
+    journal_fold = probe(
+        [
+            ("agent_fleet.orchestration.journal", "fold"),
+            ("agent_fleet.orchestration.journal", "RunState"),
+        ]
+    )
     print("[D3] crash-resume")
     print(f"  resume entry point present: {resume.present} ({resume.found or 'absent'})\n")
     print("[D4] queryable event log")
