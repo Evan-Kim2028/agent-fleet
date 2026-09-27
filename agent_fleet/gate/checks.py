@@ -29,10 +29,18 @@ the tree the review is about. When the repo's gate is rechecked against a new
 head, the same checks run again on the merged-with-base tree, because a check
 that passes on the PR's own tree and fails once the base is merged in is the
 merged-tree regression this exists to catch.
+
+**A check is a memory-hungry subprocess, so it holds a test-pool slot.** A dbt
+compile is as capable of eating the machine as a test suite is, and the test
+pool exists to bound exactly that across every independent gate process. Every
+check holds a slot for the duration of its subprocess, the same guarantee pytest
+gets, so a wide fan-out of gate runs queues instead of running every repo build
+at once.
 """
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import shlex
@@ -43,6 +51,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
+
+    from agent_fleet.slots import SlotPool
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +233,7 @@ def run_check(
     changed_files: Sequence[str],
     changed_models: Sequence[str],
     use_systemd: bool = False,
+    pool: SlotPool | None = None,
 ) -> CheckResult:
     """Run *check* in *worktree* and classify the outcome.
 
@@ -231,6 +242,13 @@ def run_check(
     that prevented the command from running at all is ``could_not_run``. A
     malformed command is in the second class — the gate cannot tell a typo in a
     config from a missing tool, and neither is evidence about the PR.
+
+    *pool* is the machine-wide test pool. A check is an arbitrary repo command
+    and exactly as capable of eating the machine as a test suite, so the check
+    holds one slot for the whole of its subprocess — held *while the command
+    runs*, not merely while the argv is built, which is the only window in which
+    the budget means anything. ``None`` means the caller supplied no pool, and
+    the run is then bounded only by the memory cap.
     """
     rendered = _render(check.command, changed_files=changed_files, changed_models=changed_models)
     try:
@@ -258,15 +276,17 @@ def run_check(
 
     argv = _memory_wrapper(argv, check.memory, use_systemd)
     logger.debug("gate check %s (%s): %s", check.name, stage, rendered)
+    guard = pool.slot(timeout_s=None) if pool is not None else contextlib.nullcontext()
     try:
-        completed = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            cwd=worktree,
-            timeout=check.timeout_s,
-            check=False,
-        )
+        with guard:
+            completed = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                cwd=worktree,
+                timeout=check.timeout_s,
+                check=False,
+            )
     except subprocess.TimeoutExpired:
         # A timeout is an infra failure. The check may well be failing, but the
         # gate cannot tell that from a check that hangs, so it does not claim to.
@@ -307,12 +327,16 @@ def run_checks(
     stage: str,
     changed_files: Sequence[str],
     use_systemd: bool = False,
+    pool: SlotPool | None = None,
 ) -> list[CheckResult]:
     """Select by *changed_files*, then run every selected check against one tree.
 
     Selection lives here rather than at the call site so that a caller cannot
     run a check the diff did not select by forgetting to filter — the selection
     and the execution are one decision, and the one that has to be right.
+
+    *pool* is handed to each check in turn, so the whole sequence is bounded by
+    the same machine-wide budget a test suite is.
 
     Sequential rather than parallel: a repo's checks are usually a compile and a
     lint, both of which want the same CPU and the same memory, and the gate has
@@ -329,6 +353,7 @@ def run_checks(
             changed_files=changed_files,
             changed_models=models,
             use_systemd=use_systemd,
+            pool=pool,
         )
         for check in select_checks(checks, changed_files)
     ]

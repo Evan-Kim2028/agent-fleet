@@ -194,6 +194,13 @@ gate:
 | `timeout_s` | `900` | per-check budget |
 | `memory` | `6G` | the same `MemoryMax` cap every pytest gets, used as given and never raised |
 
+A check is a memory-hungry subprocess, so it is bounded like one: each one holds
+a **test-pool slot** for the duration of its subprocess, exactly as pytest does.
+A dbt compile is as capable of eating the machine as a test suite is, and a repo
+that configures checks is running arbitrary build commands under the gate's
+authority — so several concurrent gate runs queue against the same budget rather
+than each running every build at once.
+
 Two placeholders are substituted into `command` before it runs:
 `{changed_files}` (the repo-relative changed paths) and `{changed_models}` (the
 dbt model names, read from the `transform/models/**/<name>.sql|py` convention).

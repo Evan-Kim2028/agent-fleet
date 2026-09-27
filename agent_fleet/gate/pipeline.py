@@ -817,6 +817,13 @@ class GatePipeline:
 
         The blocker is recorded before the raise, so a run that escalates on an
         unrunnable check still carries its results into the metrics row.
+
+        Every selected check holds a slot from the *test* pool for as long as its
+        subprocess lives, the same budget pytest is bounded by. A required check
+        is an arbitrary repo build — a dbt compile is as hungry as a suite — so
+        running it outside that budget is what turns four concurrent gate runs
+        into four uncapped builds, and the pool that exists to prevent exactly
+        that is silently bypassed.
         """
         if not self.config.required_checks:
             return []
@@ -830,6 +837,7 @@ class GatePipeline:
             stage=stage,
             changed_files=changed,
             use_systemd=self.use_systemd,
+            pool=self.test_pool,
         )
         if not results:
             self._log(
