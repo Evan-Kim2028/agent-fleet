@@ -252,10 +252,19 @@ class Watchdog:
     def check_deadlocks(self, report: WatchdogReport) -> None:
         """Cycles of waiting, stable past the threshold.
 
-        The older claim in the cycle is released. Age is the tiebreak because
-        in a two-way deadlock neither party is more wrong; the one that has been
-        waiting longer is the one whose owner has most likely already given up,
-        and releasing its claim is what lets the other side finish.
+        The older claim in the cycle is broken, not just annotated. Age is the
+        tiebreak because in a two-way deadlock neither party is more wrong; the
+        one that has been waiting longer is the one whose owner has most likely
+        already given up, and releasing its claim is what lets the other side
+        finish.
+
+        A real break, not a note in a file: the flock is the authoritative
+        mechanism and the record is metadata beside it, so rewriting the record
+        alone would make the next :meth:`LockRegistry.deadlocks` return nothing
+        while both holders stay mutually blocked — the watchdog would report a
+        resolved deadlock that is still wedged. :meth:`LockRegistry.break_deadlock`
+        terminates the recorded holder so the kernel actually drops its flock,
+        then frees the record.
         """
         now = self.clock.time()
         for cycle in self.locks.deadlocks(
@@ -277,7 +286,10 @@ class Watchdog:
                 self._defer(report, remediation)
                 continue
             if not self.dry_run:
-                self.locks.release(oldest.name, note=f"watchdog deadlock: {names}")
+                _, outcome = self.locks.break_deadlock(
+                    oldest.name, note=f"watchdog deadlock: {names}", proc_root=self.proc_root
+                )
+                remediation = replace(remediation, reason=f"{remediation.reason}; {outcome}")
             self._record(
                 report,
                 remediation,

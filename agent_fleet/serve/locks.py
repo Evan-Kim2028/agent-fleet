@@ -259,6 +259,56 @@ class LockRegistry:
         )
         return previous
 
+    def break_deadlock(
+        self, name: str, *, note: str = "", proc_root: Path | None = None
+    ) -> tuple[LockRecord | None, str]:
+        """Actually break *name*'s lock, not just the record that describes it.
+
+        ``release`` only rewrites the JSON, and the flock is the authoritative
+        mechanism: the file can say "free" while the holder still holds the
+        kernel lock, so a real two-way deadlock is not broken — it is *masked*
+        from the detector. Rewriting the record makes the next
+        :meth:`deadlocks` call return nothing while both processes stay mutually
+        blocked, and the watchdog reports a resolved deadlock that is still
+        wedged. The module docstring promises "the flock guarantees the release
+        is real, not a note in a file"; this is that guarantee.
+
+        The kernel does not let one process force-drop another's flock, so the
+        only way to make the release real is to make the holder let go — and
+        the holder is a fleet process recorded with a start-time fingerprint.
+        We terminate that group (TERM, exactly as the other rules do, by
+        recorded identity and never by name), which drops its flocks on exit,
+        and only then mark the record free. If the holder is already gone the
+        flock is already free and the record is the whole of the problem.
+
+        Returns the released record and a short outcome, so the caller can tell
+        a real break from a record-only cleanup. Failures are reported, never
+        raised: a lock the watchdog cannot break must not stop the other rules.
+        """
+        from agent_fleet.serve.procs import terminate_group
+
+        previous = self.read(name)
+        if previous is None:
+            return None, "no record"
+
+        root = proc_root or self.proc_root
+        identity = previous.identity
+        outcome = "record-only"
+        if identity is not None and previous.state == STATE_HELD:
+            # Fingerprint-verified: this only ever signals a process serve
+            # itself recorded, and only if it is still that process.
+            if not identity.matches(proc_root=root):
+                outcome = "holder already gone"
+            else:
+                term = terminate_group(identity, proc_root=root)
+                outcome = (
+                    "holder terminated"
+                    if term.signalled
+                    else (term.skipped_reason or "holder not signalled")
+                )
+        self.release(name, note=note)
+        return previous, outcome
+
     def forget(self, name: str) -> bool:
         """Delete a record outright. Used when a stale record is unresolvable."""
         try:

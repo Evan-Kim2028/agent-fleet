@@ -4,12 +4,11 @@ This is the process the operator starts and then stops thinking about. Each
 tick is deliberately ordered so that anything a human would want to know about
 happens in the order it happened:
 
-1. **reap and restart** components that exited, before anything reads their
-   state — otherwise a dead dispatcher is reported as running for one tick;
-2. **read pressure** once and reuse it for both the capacity decision and the
+1. **read pressure** once and reuse it for both the capacity decision and the
    status screen, so the two can never disagree;
-3. **publish** the capacity targets, because a component that is about to be
-   restarted needs the fresh numbers in its command template;
+2. **publish** the capacity targets;
+3. **reap and restart** components that exited, before anything reads their
+   state — otherwise a dead dispatcher is reported as running for one tick;
 4. **watchdog**, on its own cadence;
 5. **record** the tick, so a supervisor that is restarted mid-flight resumes
    with an accurate crash budget rather than a blank one.
@@ -87,6 +86,11 @@ class ServeLoop:
     def __post_init__(self) -> None:
         ensure_serve_dir(self.operator)
         self.supervisor = Supervisor(self.operator, self.config, clock=self.clock)
+        # This loop is the pacer, so the supervisor must not sleep a backoff
+        # inside a tick: with the shipped defaults a single crash could freeze
+        # capacity publication and the watchdog for 300s. The wait rides out on
+        # ``_loop``'s own pacing instead.
+        self.supervisor.defer_restarts = True
         self.board = ItemBoard(items_path(self.operator), clock=self.clock)
         self.controller = CapacityController(self.config.capacity, clock=self.clock)
         self._resume_capacity()
@@ -136,15 +140,19 @@ class ServeLoop:
         self._tick_index += 1
         result = TickResult(index=self._tick_index)
 
-        # 1. Reap and restart first: everything below reads component state.
-        self.supervisor.tick()
-        self.supervisor.save()
-
-        # 2. One pressure read, shared by the controller and the status screen.
+        # 1. One pressure read, shared by the controller and the status screen.
         reading = read_pressure(self.config.cgroup, root=self.cgroup_root)
         result.degraded = not reading.ok
 
-        # 3. Publish targets before any restart can interpolate them.
+        # 2. Publish targets BEFORE anything can spawn, because a component's
+        # command template is expanded at spawn time by reading this file back
+        # (``Supervisor._targets_for``). Reaping first meant a cold supervisor
+        # spawned its first component against an absent file: ``expand_command``
+        # got ``targets=None``, rendered every numeric placeholder as an empty
+        # string, and dropped the argument — so ``--max-lanes {max_lanes}
+        # --max-gates {max_gates}`` became ``--max-lanes --max-gates``, argparse
+        # read the flag as the *value* of --max-lanes and exited 2 on every cold
+        # start. The exit was then booked as a crash against the crash budget.
         completed = self._completions_since_last_tick()
         targets = self.controller.tick(reading, completed=completed)
         write_capacity(
@@ -164,6 +172,10 @@ class ServeLoop:
                 "serve.pressure.recovered",
                 data={"cgroup": reading.path},
             )
+
+        # 3. Reap and restart, now that the fresh targets are already on disk.
+        self.supervisor.tick()
+        self.supervisor.save()
 
         # 4. Watchdog, on its own cadence.
         depths = self.board.depth()

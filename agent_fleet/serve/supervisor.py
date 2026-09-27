@@ -187,6 +187,10 @@ class ChildState:
     pending_cause: str = CAUSE_REQUESTED
     adopted: bool = False
     last_event_epoch: float = 0.0
+    #: Monotonic instant before which this component must not be restarted.
+    #: ``0.0`` means "not waiting". Set by a deferred backoff so the wait is
+    #: carried by the serve loop's own pacing rather than by a sleep inside it.
+    restart_at: float = 0.0
     #: Restart epochs triggered by the no-progress rule, for its own budget.
     no_progress_restarts: list[float] = field(default_factory=list)
     message: str = ""
@@ -268,6 +272,14 @@ class Supervisor:
         self._procs: dict[str, subprocess.Popen[bytes]] = {}
         self._handles: dict[str, Any] = {}
         self._stopping = False
+        #: When true, a crash backoff is *scheduled* rather than slept through.
+        #: ``ServeLoop`` sets it: the backoff then rides out on the serve loop's
+        #: own ``tick_seconds`` pacing, so a component waiting out a 300s backoff
+        #: no longer freezes capacity publication and the watchdog behind it. A
+        #: supervisor driven directly (``Supervisor`` used as a library, or a
+        #: test) leaves it false and paces itself, so nothing waits on a loop
+        #: that is not there to release it.
+        self.defer_restarts = False
         self._restore()
 
     # ------------------------------------------------------------------ state
@@ -555,7 +567,21 @@ class Supervisor:
         return min(ceiling, initial * (2**attempts))
 
     def tick(self) -> None:
-        """One supervisor pass: reap, evaluate, restart what owes a restart."""
+        """One supervisor pass: reap, evaluate, restart what owes a restart.
+
+        Never blocks on a backoff. A component that owes a restart is given a
+        monotonic ``restart_at`` and left in ``backoff``; a later tick — paced by
+        the serve loop — picks it up once the deadline has passed. Sleeping the
+        delay here instead froze the *whole* serve loop for its full length, so
+        with the shipped defaults (5s growing to 300s) a crash-looping component
+        stopped capacity publication and every watchdog rule behind it: targets
+        went unpublished, so a command template spawned against a stale file, and
+        remediations simply did not run.
+
+        :meth:`pending_restarts` is the bound on how much time is still owed,
+        so a caller that paces itself can sleep the residual instead of
+        hard-coding a tick.
+        """
         if self._stopping:
             return
         for name, code in self._reap():
@@ -600,10 +626,24 @@ class Supervisor:
             delay = self.backoff_for(name)
             state.state = STATE_BACKOFF
             state.message = f"restarting in {delay:.0f}s (cause {state.last_exit_cause})"
-            if delay > 0:
+            state.restart_at = self.clock.monotonic() + delay
+            if delay > 0 and not self.defer_restarts:
+                # Self-paced: nothing outside this call is going to bring the
+                # next tick, so the wait is taken here. ``FakeClock`` makes this
+                # free, and the restart is then due within this same pass.
                 self.clock.sleep(delay)
             if self._stopping:
                 return
+
+        for name in list(self.children):
+            if self._stopping:
+                return
+            state = self.children[name]
+            if state.state != STATE_BACKOFF or self._crash_looping(name):
+                continue
+            if self.clock.monotonic() < state.restart_at:
+                continue
+            state.restart_at = 0.0
             self.start(name, cause=state.last_exit_cause or CAUSE_EXIT)
 
         for spec in self.config.enabled_components:
@@ -612,9 +652,28 @@ class Supervisor:
                 proc_root=self.proc_root,
             ):
                 state = self.children.get(spec.name)
-                if state is not None and state.state in (STATE_CRASH_LOOPING,):
+                if state is not None and state.state in (
+                    STATE_CRASH_LOOPING,
+                    STATE_BACKOFF,
+                ):
+                    # A component already serving its crash backoff is owed a
+                    # restart by the deadline loop above, not by this one —
+                    # starting it here would restart it immediately and turn the
+                    # exponential schedule into a hot loop.
                     continue
                 self.start(spec.name)
+
+    def pending_restarts(self) -> float:
+        """Seconds still owed to components serving a crash backoff.
+
+        The residual, so a caller that paces itself can sleep what is left
+        instead of guessing at the largest configured backoff.
+        """
+        now = self.clock.monotonic()
+        return max(
+            (max(0.0, s.restart_at - now) for s in self.children.values() if s.restart_at > 0.0),
+            default=0.0,
+        )
 
     def request_restart(self, name: str, *, reason: str) -> bool:
         """The watchdog's "this component is wedged" path.
