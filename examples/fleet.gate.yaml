@@ -112,8 +112,11 @@ gate:
   enable_fix: true
   enable_judge: true
 
-  # Base branch for the diff the reviewers read; push_branch defaults to the
-  # PR's own head branch.
+  # Base branch for the diff the reviewers read. A PR cut against another
+  # branch (a release line, say) is judged and conflict-checked against its
+  # own baseRefName when the forge reports one, and against this otherwise.
+  # The gate has no push_branch knob: a fixer always pushes to the PR's own
+  # head branch, never to a branch derived from the lane.
   base_branch: main
 
   # Per-stage agent budgets (seconds), and the deterministic test budget. The

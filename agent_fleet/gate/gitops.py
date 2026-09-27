@@ -548,6 +548,114 @@ def patch_id(repo: Path, sha: str, base: str) -> str:
     return (completed.stdout or "").split()[0] if completed.stdout.split() else ""
 
 
+@dataclass(frozen=True)
+class MergeConflict:
+    """Whether *base* merges into *head* cleanly, without touching a worktree."""
+
+    conflict_files: tuple[str, ...] = ()
+    """Paths git could not auto-merge. Empty when the merge is clean."""
+    git_error: bool = False
+    """True when git could not run the check at all (bad ref, git too old for
+    ``--write-tree``, a missing binary).
+
+    Callers must NOT read this as a conflict. The distinction is the whole
+    reason this is a dataclass rather than a bool: a conflict means "send this
+    to a rebase agent", and a git error means "we could not check", and routing
+    the second as the first would send every healthy PR to a rebase agent for
+    ever.
+    """
+
+
+def merge_conflict_check(repo: Path, head: str, base: str) -> MergeConflict:
+    """Dry-run ``git merge-tree`` of *base* into *head*; report real conflicts.
+
+    A merge conflict between a PR and its base is a fact about the diff, knowable
+    in milliseconds, and finding it after a full review is pure waste. This
+    answers it before any agent is dispatched, so the orchestrator can hand the
+    PR to a rebase agent instead.
+
+    **The exit code does not distinguish a conflict from a broken check.**
+    ``git merge-tree --write-tree`` exits ``1`` both when the merge conflicts
+    *and* when a ref does not resolve — verified here, and the reason this
+    function parses stdout rather than trusting the code:
+
+    ==============  ====  ==========================================
+    outcome         rc    stdout
+    ==============  ====  ==========================================
+    clean           0     the merged tree oid
+    conflict        1     the tree oid, then one path per line, then a
+                          blank line, then a human-readable message
+    unresolvable    1     *empty*
+    ==============  ====  ==========================================
+
+    So the discriminator is whether a tree oid came back. Empty stdout on a
+    non-zero exit means git could not run the check, and that must never be
+    reported as a conflict.
+
+    Run raw rather than through :func:`_run_git` because that helper returns
+    stdout only and raises on non-zero, which cannot express "exit 1 with
+    output means conflict, exit 1 without means failure". Same escape hatch
+    :func:`merge_base_into` and :func:`patch_id` already use.
+    """
+    try:
+        completed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "merge-tree",
+                "--write-tree",
+                "--name-only",
+                head,
+                base,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+    except OSError, subprocess.SubprocessError:
+        return MergeConflict(git_error=True)
+
+    lines = (completed.stdout or "").splitlines()
+    if completed.returncode == 0:
+        return MergeConflict()
+    if not lines or not _looks_like_a_tree_oid(lines[0]):
+        # No merged tree was produced, so nothing was checked. A bad ref, a
+        # git without --write-tree, an unreadable repository: all "we could
+        # not check", and none of them a conflict.
+        logger.warning(
+            "merge-tree exited %d with no merged tree (git error, not a conflict): %s",
+            completed.returncode,
+            (completed.stderr or "").strip()[:300],
+        )
+        return MergeConflict(git_error=True)
+    # The oid is line one; the conflicted paths follow, up to the blank line
+    # that ends git's machine-readable section and starts its prose summary
+    # ("Auto-merging x", "CONFLICT (content): Merge conflict in x"). Dropping
+    # only *blank* lines is not enough: skipping them and reading on would
+    # report that prose as though it were a path, so a one-file conflict
+    # claims three files and the escalation reason quotes git at the user.
+    files: list[str] = []
+    for line in lines[1:]:
+        if not line.strip():
+            break
+        files.append(line.strip())
+    return MergeConflict(conflict_files=tuple(files))
+
+
+def _looks_like_a_tree_oid(line: str) -> bool:
+    """True when *line* is a 40/64-hex sha — the merged tree git wrote.
+
+    Used to tell "git checked the merge and it conflicted" apart from "git
+    could not check", since both exit 1. A sha is the one thing a real
+    ``--write-tree`` run always prints first, and the one thing a failed run
+    never prints.
+    """
+    candidate = line.strip()
+    return len(candidate) in (40, 64) and all(c in "0123456789abcdef" for c in candidate)
+
+
 def has_approval_line(status_file: Path, sha: str) -> bool:
     """Whether *status_file* records a ``PREMERGE-APPROVED`` line for *sha*.
 
