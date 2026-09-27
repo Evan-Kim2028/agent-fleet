@@ -76,6 +76,28 @@ CAUSE_EXIT = "exit"
 CAUSE_REQUESTED = "requested"
 CAUSE_CAPACITY = "capacity"
 
+#: A requested stop announced on a component that then *ignores* the TERM and is
+#: group-KILLed by ``_await_exit``. Distinct from ``CAUSE_REQUESTED`` because the
+#: reaped signal is SIGKILL, and a child killed by a signal did not get to
+#: choose its own exit — so this one never counts as the child asking to stop.
+CAUSE_REQUESTED_KILLED = "requested_killed"
+
+#: Causes that record a stop serve asked for. An exit carrying one of these is
+#: never a crash: the child is being restarted on purpose, so charging it to
+#: the budget would eventually stop restarting a component that never crashed
+#: and hide the real fault behind a crash-loop alert.
+_REQUESTED_CAUSES = frozenset({CAUSE_REQUESTED, CAUSE_REQUESTED_KILLED})
+
+#: The signals serve itself sends. A child killed by SIGKILL never ran its own
+#: exit path, so the signalled/exit-code split is meaningless for it and the
+#: recorded cause is the whole truth.
+_KILLED_BY_SIGNAL = {-signal.SIGKILL, -signal.SIGINT}
+
+#: Serve does not send SIGQUIT or SIGUSR1 to a component, so a child killed by
+#: one of those died on its own. SIGTERM is the exception: ``stop_component``
+#: and every watchdog group TERM go through it, which is the whole point.
+_SIGNALLED_BY_SERVE = {-signal.SIGTERM}
+
 STATE_STOPPED = "stopped"
 STATE_STARTING = "starting"
 STATE_RUNNING = "running"
@@ -373,6 +395,14 @@ class Supervisor:
 
         log_path = component_log_path(self.operator, name)
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        # Bound before the try, not by the first statement inside it: an
+        # unopenable log (a directory in its place, ENOSPC on a full volume)
+        # raises out of ``open`` itself, and the handler below still has to run
+        # to record the failure. An unbound ``handle`` turned that into an
+        # UnboundLocalError that escaped ``ServeLoop.run``'s finally, so
+        # children were left running, state was never saved and the pid file
+        # was left stale for the next serve to try to adopt.
+        handle: Any = None
         try:
             handle = log_path.open("ab")
             proc = subprocess.Popen(
@@ -386,7 +416,8 @@ class Supervisor:
                 start_new_session=True,
             )
         except (OSError, ValueError) as exc:
-            handle.close()
+            if handle is not None:
+                handle.close()
             self._note_crash(name, cause=CAUSE_CRASH, code=None, message=str(exc))
             emit_serve_event(
                 self.operator,
@@ -473,9 +504,29 @@ class Supervisor:
                     handle.close()
             state = self.children.get(name)
             cause = state.pending_cause if state else CAUSE_CRASH
-            # A non-zero exit is a crash whatever we asked for; a zero exit is
-            # only a crash if nobody asked.
-            effective = CAUSE_CRASH if code != 0 else cause
+            # A death serve asked for is not a crash, whatever the exit code
+            # says. A watchdog group TERM arrives as exit code -15, and reading
+            # it as "non-zero, so crash" charged every one of them against the
+            # crash budget — so a component the watchdog merely restarted was
+            # eventually marked crash_looping and stopped for a fault it never
+            # had, with the real one hidden behind a crash-loop alert.
+            #
+            # The signal is the discriminator, not the tag. ``start`` defaults
+            # its cause to ``requested``, so trusting the label alone would also
+            # excuse a component that fell over on its own between spawns. What
+            # separates the two is whether serve sent the signal: a TERM it
+            # sent is a requested stop, a signal it never sends is a crash, and
+            # a child that exits by itself after being asked to stop chose that
+            # code, so it still counts.
+            if cause in _REQUESTED_CAUSES and code is not None:
+                if code in _KILLED_BY_SIGNAL:
+                    effective = CAUSE_REQUESTED_KILLED
+                elif code == 0 or code in _SIGNALLED_BY_SERVE:
+                    effective = cause
+                else:
+                    effective = CAUSE_CRASH
+            else:
+                effective = CAUSE_CRASH if code != 0 else cause
             self._note_crash(name, cause=effective, code=code)
             exits.append((name, code))
         return exits
@@ -781,6 +832,7 @@ __all__ = [
     "CAUSE_CRASH",
     "CAUSE_EXIT",
     "CAUSE_REQUESTED",
+    "CAUSE_REQUESTED_KILLED",
     "STATE_BACKOFF",
     "STATE_CRASH_LOOPING",
     "STATE_RUNNING",
