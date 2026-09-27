@@ -36,6 +36,18 @@ against the lane's own files keeps the two apart, and the ids that were bypassed
 are recorded in the commit message and the PR body, because a hook that never
 ran leaves no other trace.
 
+"Verifying against the lane's own files" means two different things, because
+``pre-commit run <id> --files …`` only narrows a hook that actually consumes
+filenames. A whole-tree hook (``always_run``/``pass_filenames: false``) is handed
+no filenames at all and scans the tree itself, so ``--files`` cannot exclude the
+base branch's debt from it — running it that way just reproduces the whole tree
+and it stays red forever. Those hooks are instead attributed by *which files they
+flag*: a hook that names a file the lane changed is red on this diff and fails
+the lane, and only a hook whose flagged files are all outside the diff is
+inherited debt worth bypassing. A whole-tree hook that names no file at all falls
+back to being run against the base tree itself, and is refused when that cannot
+be established. See :func:`verify_hook_on_files`.
+
 If a non-baseline hook fails, the commit fails and the lane escalates with the
 hook output attached, which is the correct outcome: that is a real problem with
 the diff.
@@ -55,6 +67,8 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from agent_fleet.fleet_ops.config import DEFAULT_FIXER_TIMEOUT_S, FIXER_PLACEHOLDER
 
@@ -178,6 +192,38 @@ def is_dirty(worktree: Path, *, runner: Runner | None = None) -> bool:
         ["git", "status", "--porcelain", "-uall"], cwd=worktree, runner=runner, timeout=60
     )
     return bool(result.stdout.strip())
+
+
+def has_committable_work(
+    worktree: Path,
+    *,
+    scratch_excludes: Sequence[str] = (),
+    runner: Runner | None = None,
+) -> bool:
+    """True when the worktree holds work a commit would actually carry.
+
+    :func:`is_dirty` answers "does git see a change", which is the wrong question
+    for the guarantee's precondition because it is *broader* than what staging
+    keeps. The agent's scratch and the run logs are unstaged before every commit
+    (:func:`_stage_lane_work`), so a worktree whose only change is one of those
+    is dirty by :func:`is_dirty`'s answer but has nothing for ``git commit`` to
+    pick up. Attaching the commit to the raw dirty check then walks into a
+    guaranteed "nothing added to commit" failure and escalates the lane as
+    ``commit_failed`` for a worktree that simply has no lane work in it — the
+    wrong diagnostic, pointing an operator at the hooks and the commit path when
+    the real answer is that the implementer produced nothing publishable.
+
+    So the precondition is the same population staging will keep: the changed
+    paths, minus the run logs and the configured scratch.
+    """
+    return bool(
+        changed_files(worktree, scratch_excludes=_never_committed(scratch_excludes), runner=runner)
+    )
+
+
+def _never_committed(scratch_excludes: Sequence[str]) -> tuple[str, ...]:
+    """Every path the guarantee takes back out of the index before committing."""
+    return (RUN_DIR_LOGS, *(p.strip("/ ") for p in scratch_excludes if p.strip()))
 
 
 def head_sha(worktree: Path, *, runner: Runner | None = None, short: int = 0) -> str | None:
@@ -389,38 +435,60 @@ def verify_hook_on_files(
     hook_ids: Sequence[str],
     files: Sequence[str],
     *,
+    base: str | None = None,
     runner: Runner | None = None,
 ) -> tuple[list[str], list[str]]:
     """Re-run named pre-commit hooks over *files* only: ``(clean, still_red)``.
 
     This is the check that makes a baseline skip safe. A repo-wide hook fails on
     the base branch's own debt; the question before bypassing one is whether it
-    would *also* have failed on this lane's files. ``pre-commit run <id> --files
-    ...`` answers exactly that, because the hooks framework applies each hook's
-    own ``files``/``types``/``exclude`` filters to the paths it is given.
+    would *also* have failed on this lane's files. A hook that is still red on
+    the lane's own files is returned in *still_red* and is never skipped: that is
+    a real problem with the diff, which is the one thing a baseline allowance
+    must not paper over. A hook id the repo has no config for is also *still_red*
+    — there is nothing to verify it against, and an unverifiable hook is not a
+    clean one.
 
-    ``--all-files`` is deliberately never used. It would re-run the hook over
-    the whole tree and reproduce the baseline debt this is measuring around.
+    The check splits by what the hook actually consumes, because the two kinds
+    answer the question by different means:
 
-    A hook that is still red on the lane's own files is returned in *still_red*
-    and is never skipped: that is a real problem with the diff, which is the one
-    thing a baseline allowance must not paper over. A hook id the repo has no
-    config for is also *still_red* — there is nothing to verify it against, and
-    an unverifiable hook is not a clean one.
+    * A **per-file** hook takes the filenames it is handed and applies its own
+      ``files``/``types``/``exclude`` filters, so ``pre-commit run <id> --files
+      <lane's files>`` is authoritative: green there means the lane's files are
+      clean by the hook's own standard. ``--all-files`` is deliberately never
+      used — it would re-run the hook over the whole tree and reproduce the very
+      baseline debt this measures around.
+
+    * A **whole-tree** hook (``always_run``/``pass_filenames: false``) ignores
+      the file list entirely and scans the tree itself, so ``--files`` is a
+      no-op for it. Re-running it with ``--files`` therefore reproduces the
+      whole-tree scan and it stays red on the base branch's debt *forever*,
+      which made the verified skip inoperative for exactly the hooks it exists
+      for. For those, ``--files`` is dropped and the failure is attributed by
+      *which paths the hook names*: every analyzer of this kind (pyright, ruff,
+      eslint, the comment checker) prints the offending file per diagnostic, and
+      the hook is inherited debt exactly when none of the files it flags are
+      among the lane's changed files. If the hook flags any lane file it is red
+      on this diff and is refused. An opaque whole-tree hook that names no file
+      cannot be attributed that way; it falls back to a base-tree comparison when
+      a *base* is supplied (green on base ⇒ the lane caused it ⇒ refuse), and is
+      refused outright when there is no base to compare against.
     """
     targets = [f for f in files if f]
     if not targets:
         return list(hook_ids), []
+    whole_tree = _whole_tree_hook_ids(worktree, hook_ids)
+    lane_files = set(targets)
     clean: list[str] = []
     still_red: list[str] = []
     for hook_id in hook_ids:
-        result = _git(
-            ["pre-commit", "run", hook_id, "--files", *targets],
-            cwd=worktree,
-            runner=runner,
-            timeout=DEFAULT_FIXER_TIMEOUT_S,
-        )
-        if result.returncode == 0:
+        if hook_id in whole_tree:
+            clean_here = _whole_tree_is_inherited(
+                worktree, hook_id, lane_files, base=base, runner=runner
+            )
+        else:
+            clean_here = _per_file_is_clean(worktree, hook_id, targets, runner=runner)
+        if clean_here:
             clean.append(hook_id)
         else:
             logger.info(
@@ -429,6 +497,218 @@ def verify_hook_on_files(
             )
             still_red.append(hook_id)
     return clean, still_red
+
+
+#: The repo's pre-commit config. A hook's behaviour is declared there, and the
+#: distinction between a per-file hook and a whole-tree one has to come from
+#: somewhere real — guessing wrong would either skip a hook that is red on this
+#: diff or refuse one that is merely inheriting debt.
+PRE_COMMIT_CONFIG = ".pre-commit-config.yaml"
+
+
+def _whole_tree_hook_ids(worktree: Path, hook_ids: Sequence[str]) -> set[str]:
+    """Which of *hook_ids* ignore their file list and scan the whole tree.
+
+    A pre-commit hook is whole-tree when it says ``pass_filenames: false`` or
+    ``always_run: true``: pre-commit then hands it no filenames and it decides
+    for itself what to look at. Those are the hooks ``--files`` cannot narrow —
+    the repo-wide analyzers (pyright, the whole-repo comment check, the timer
+    inventory) that go red on the base branch's own debt and would otherwise
+    block every lane in the repo.
+
+    A hook that is *not* declared whole-tree is left on the ``--files`` path, so
+    an unparseable or absent config simply keeps the previous, per-file
+    behaviour rather than guessing. The config is read from the worktree on disk
+    because that is the tree the commit will actually be measured against; the
+    *runner* is not threaded through because this reads a file, it does not run
+    a subprocess.
+    """
+    path = worktree / PRE_COMMIT_CONFIG
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return set()
+    try:
+        config = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return set()
+    if not isinstance(config, dict):
+        return set()
+
+    wanted = {h.strip() for h in hook_ids if h.strip()}
+    whole: set[str] = set()
+    for repo in config.get("repos") or []:
+        if not isinstance(repo, dict):
+            continue
+        for hook in repo.get("hooks") or []:
+            if not isinstance(hook, dict):
+                continue
+            hook_id = str(hook.get("id", "")).strip()
+            if hook_id not in wanted:
+                continue
+            if hook.get("pass_filenames") is False or hook.get("always_run") is True:
+                whole.add(hook_id)
+    return whole
+
+
+def _per_file_is_clean(
+    worktree: Path, hook_id: str, targets: Sequence[str], *, runner: Runner | None = None
+) -> bool:
+    """Whether a per-file *hook_id* passes on *targets* under ``--files``.
+
+    pre-commit applies the hook's own path filters to the list it is given, so a
+    zero exit here is the hook agreeing that the lane's own files are clean. A
+    hook id the repo has no config for exits non-zero ("No hook with id ..."),
+    which is the correct answer: an unverifiable hook is not a clean one.
+    """
+    result = _git(
+        ["pre-commit", "run", hook_id, "--files", *targets],
+        cwd=worktree,
+        runner=runner,
+        timeout=DEFAULT_FIXER_TIMEOUT_S,
+    )
+    return result.returncode == 0
+
+
+def _whole_tree_is_inherited(
+    worktree: Path,
+    hook_id: str,
+    lane_files: set[str],
+    *,
+    base: str | None = None,
+    runner: Runner | None = None,
+) -> bool:
+    """Whether a whole-tree *hook_id*'s failure is inherited debt, not this diff.
+
+    The hook is run over the lane's tree (no ``--files``: a whole-tree hook
+    ignores it and would only re-scan everything). Two independent signals say
+    "inherited" and both must not say "your fault":
+
+    1. **Attribution** — the run names the files it flagged. If *any* flagged
+       path is one the lane changed, the hook is red about this diff and the
+       answer is False. If it named files and none are the lane's, the redness
+       is inherited and the answer is True.
+    2. **Base comparison** — used only when the run named no file at all (an
+       opaque analyzer). The hook is re-run in a throwaway detached worktree at
+       *base*. Green there means the base was fine and the lane introduced the
+       failure, so the answer is False; red there means the debt predates the
+       lane, so the answer is True. With no base to compare against an opaque
+       hook is refused, because nothing about it can be shown to be inherited.
+    """
+    result = _git(
+        ["pre-commit", "run", hook_id],
+        cwd=worktree,
+        runner=runner,
+        timeout=DEFAULT_FIXER_TIMEOUT_S,
+    )
+    if result.returncode == 0:
+        return True
+    output = "\n".join(p for p in (result.stdout, result.stderr) if p)
+    flagged = _flagged_paths(output)
+    if flagged:
+        if flagged & lane_files:
+            logger.info("whole-tree hook %s flags a file the lane changed", hook_id)
+            return False
+        return True
+    # Opaque: no file was named, so fall back to asking the base.
+    if base is None:
+        logger.info(
+            "whole-tree hook %s named no file and no base was given; not skipping it",
+            hook_id,
+        )
+        return False
+    return _hook_red_on_base(worktree, hook_id, base, runner=runner)
+
+
+#: A diagnostic names its file as the leading token of a line, optionally
+#: ``./``-prefixed and followed by ``:line:col:``. This is the shape pyright,
+#: ruff, flake8, eslint and the comment checkers all print. A token is only
+#: believed to be a path when it carries a file extension or a directory
+#: separator; ordinary prose and pre-commit's own status lines never do, so a
+#: hook's human-readable message is not mistaken for a file reference.
+_PATHY = re.compile(r"^[\w./@+-]*[^\s]*\.[A-Za-z0-9]+$|[\w-]+/[\w./-]+$")
+
+
+def _flagged_paths(output: str) -> set[str]:
+    """The worktree-relative file paths a whole-tree hook's output names.
+
+    A whole-tree analyzer is what makes the verified skip useful, and virtually
+    all of them print one diagnostic per offending file. Recovering those names
+    is what lets the guarantee tell "red on the base branch's debt" from "red on
+    this diff" for a hook that ignores ``--files``. The leading token of each
+    line is kept only when it looks like a worktree-relative file path, so
+    neither a hook's prose message nor an absolute or escaping reference is
+    mistaken for a lane file. An *empty* result is not a failure — it routes the
+    caller to the base-tree comparison — but a wrong path here would be worse
+    than none, hence both the shape check and the containment check.
+    """
+    paths: set[str] = set()
+    for line in (output or "").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("-", "[", "=", "Hook", "hook id", "exit code")):
+            continue
+        # The leading token is the path, but a diagnostic prints it with a
+        # `:line:col:` suffix glued on ("legacy.py:1:1: error: …"). Peel that
+        # off, or the whole-tree attribution below would find no paths at all and
+        # silently fall through to the base comparison.
+        token = stripped.split()[0]
+        token = re.split(r"(?::\d+)+:?$", token)[0] or token
+        token = token.rstrip(":,;").removeprefix("./")
+        if not token or not _PATHY.match(token) or token.startswith("/") or ".." in token:
+            continue
+        paths.add(token)
+    return paths
+
+
+def _hook_red_on_base(
+    worktree: Path, hook_id: str, base: str, *, runner: Runner | None = None
+) -> bool:
+    """Whether *hook_id* is already red on *base*, run in a throwaway worktree.
+
+    This is the only fallback for a whole-tree hook that names no file: the
+    question "was this already broken before the lane touched anything?" can only
+    be answered by running the hook against the base tree itself. A detached
+    worktree is used so the lane's own index and working tree — the very things
+    the in-flight commit depends on — are never touched, and it is always removed
+    again in a ``finally``.
+
+    Any failure to *run* the comparison — no merge base, no worktree, an
+    unusable ref — returns False, meaning "not shown to be inherited". That is
+    deliberate: a hook whose debt could not be demonstrated is not skipped, so a
+    broken environment narrows what the manager will bypass rather than widening
+    it.
+    """
+    merge_base = _run(["git", "merge-base", base, "HEAD"], cwd=worktree, timeout=60, runner=runner)
+    if merge_base.returncode != 0 or not merge_base.stdout.strip():
+        logger.info("no merge-base for %s; cannot attribute whole-tree hook %s", base, hook_id)
+        return False
+    commit = merge_base.stdout.strip()
+
+    scratch = worktree / f".fleet-baseline-{hook_id}"
+    add = _git(
+        ["git", "worktree", "add", "--detach", "--force", str(scratch), commit],
+        cwd=worktree,
+        runner=runner,
+        timeout=300,
+    )
+    if add.returncode != 0:
+        logger.info("could not stage a base worktree for %s: %s", hook_id, add.stderr.strip()[:200])
+        return False
+    try:
+        result = _git(
+            ["pre-commit", "run", hook_id],
+            cwd=scratch,
+            runner=runner,
+            timeout=DEFAULT_FIXER_TIMEOUT_S,
+        )
+        return result.returncode != 0
+    finally:
+        _git(
+            ["git", "worktree", "remove", "--force", str(scratch)],
+            cwd=worktree,
+            runner=runner,
+            timeout=300,
+        )
 
 
 def _stage_lane_work(
@@ -480,7 +760,7 @@ def _stage_lane_work(
     # `git reset` (not `rm --cached`) so an *edit* to a tracked scratch file is
     # unstaged back to HEAD rather than turned into a deletion. A path that is
     # not in the index is a no-op here, so this never fails on a clean lane.
-    for path in (RUN_DIR_LOGS, *(p.strip("/ ") for p in scratch_excludes if p.strip())):
+    for path in _never_committed(scratch_excludes):
         unstage = _git(
             ["git", "reset", "-q", "--", path],
             cwd=worktree,
@@ -599,6 +879,7 @@ def commit_worktree(
     baseline_hooks: Sequence[str] = (),
     fixers: Sequence[str] = (),
     scratch_excludes: Sequence[str] = (),
+    base: str | None = None,
     runner: Runner | None = None,
 ) -> CommitResult:
     """Fix, stage and commit the lane's work. Returns
@@ -676,7 +957,11 @@ def commit_worktree(
     # hook must be asked to run for real.
     staged_paths = changed_files(worktree, scratch_excludes=scratch_excludes, runner=runner)
     clean, still_red = verify_hook_on_files(
-        worktree, [h for h in hooks_failed if h in baseline], staged_paths, runner=runner
+        worktree,
+        [h for h in hooks_failed if h in baseline],
+        staged_paths,
+        base=base,
+        runner=runner,
     )
     if still_red or not clean:
         return CommitResult((False, None, detail, hooks_failed, []))
@@ -960,7 +1245,7 @@ def ensure_pull_request(
     committed = False
     commit_sha: str | None = None
     hooks_skipped: list[str] = []
-    if is_dirty(worktree, runner=runner):
+    if has_committable_work(worktree, scratch_excludes=scratch_excludes, runner=runner):
         ok, sha, detail, hooks_failed, hooks_skipped = commit_worktree(
             worktree,
             engine=engine,
@@ -970,6 +1255,7 @@ def ensure_pull_request(
             baseline_hooks=baseline_hooks,
             fixers=fixers,
             scratch_excludes=scratch_excludes,
+            base=base,
             runner=runner,
         )
         if not ok:
@@ -1003,8 +1289,8 @@ def ensure_pull_request(
 
     if _commits_ahead(worktree, branch, base, runner=runner) <= 0:
         summary = (
-            f"{branch} has no commits ahead of {base} and the worktree is clean — "
-            "the implementer produced no publishable work"
+            f"{branch} has no commits ahead of {base} and the worktree holds no "
+            "publishable work — the implementer produced none"
         )
         return GuaranteeResult(
             pr=None,
