@@ -216,6 +216,40 @@ def cmd_merge_release(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parent_pull_merged(repo: str, branch: str, cwd: Path) -> bool:
+    """True when some merged pull request has *branch* as its head."""
+    proc = subprocess.run(
+        [
+            "gh", "pr", "list", "--repo", repo, "--head", branch,
+            "--state", "merged", "--json", "number", "--limit", "1",
+        ],
+        cwd=cwd, capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        return False
+    try:
+        found = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError:
+        return False
+    return bool(found)
+
+
+def _retarget_pr(repo: str, pr: TrainPR, base: str, cwd: Path) -> bool:
+    """Move *pr* onto *base*. False when GitHub refuses, leaving the old base."""
+    proc = subprocess.run(
+        ["gh", "pr", "edit", str(pr.number), "--repo", repo, "--base", base],
+        cwd=cwd, capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        print(
+            f"merge train [{repo}]: could not retarget #{pr.number} onto {base}: "
+            f"{proc.stderr.strip()}",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
 def cmd_merge_train(args: argparse.Namespace) -> int:
     """Run one merge train: test the approved batch combined, land it once.
 
@@ -251,6 +285,7 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
     from agent_fleet.merge_plan.train import (
         TrainPR,
         _default_branch,
+        adopt_merged_parents,
         narrow_mixed_base,
         order_batch,
         partition_batch,
@@ -332,6 +367,25 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+
+    # A child whose parent pull is already on the default branch still targets
+    # the old parent, so the train holds it and then has nothing to land.
+    # Point it at the default branch before the batch is chosen. Dry-run does
+    # not edit the pull.
+    if not args.dry_run:
+        trunk = _default_branch(repo_path) or "main"
+        owned, adopted = adopt_merged_parents(
+            owned,
+            default=trunk,
+            parent_is_merged=lambda branch: _parent_pull_merged(repo, branch, repo_path),
+            retarget=lambda pr, base: _retarget_pr(repo, pr, base, repo_path),
+        )
+        if adopted:
+            print(
+                f"merge train [{repo}]: retargeted "
+                + ", ".join(f"#{pr.number}" for pr in adopted)
+                + f" onto {trunk}"
+            )
 
     # One batch, resolved once: the PRs that survive the staleness filter, in
     # fold order, capped.  The cap belongs here rather than inside run_train so
