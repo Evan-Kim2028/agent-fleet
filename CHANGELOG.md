@@ -67,6 +67,15 @@
   `__pycache__`, `node_modules`, `build`, …), which are not test input, and leaves mtime out for
   the same reason; a *tracked* directory named `build` or `dist` is unaffected because the tree hash
   still covers it. Pinned by `tests/test_gate_test_cache.py`.
+- **gate: that skip only looked at the *first* path component, so a package in a subdirectory never
+  reused the cache across the gate's worktrees.** `pkg/__pycache__/mod.cpython-3xx.pyc` is not a
+  top-level `__pycache__` entry, and a CPython `.pyc` header embeds the source mtime, which every
+  `git worktree add` sets afresh. So `wt`, `recheck`, `reN` and `final` disagreed on the ignored-file
+  digest — same tree, different key — and each fix round paid for a full memory-capped pytest while
+  still paying the per-run `git add -A` and digest. The skip now matches *any* component of the path
+  (`.venv` was excluded at the root while `pkg/.venv` was not), which restores the documented
+  "worktrees holding the same tree share one entry" and "the key contains no absolute path" for a
+  package below the root.
 
 - **gate: `agent_fleet/gate/pytest_runner.py` uses the PEP 758 unparenthesized `except` tuple, which
   is legal only on Python 3.14+.** The module's `except OSError, subprocess.SubprocessError:` clauses

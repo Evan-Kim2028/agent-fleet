@@ -551,6 +551,13 @@ their size rather than their content, to bound the cost. A *tracked* directory
 happening to be called `build` or `dist` is unaffected — the tree hash still
 covers its bytes.
 
+That skip is per **path component**, not per top-level directory name: a package
+in a subdirectory writes `pkg/__pycache__/mod.cpython-3xx.pyc`, and a CPython
+`.pyc` header embeds the source mtime, which every `git worktree add` sets
+afresh. Matching only the first component left the nested directory to be
+hashed and handed the same per-worktree drift back to `wt`/`recheck`/`reN`/
+`final`, so a package below the root never reused across them.
+
 The key contains **no absolute path**. The gate's own worktrees (`wt`,
 `recheck`, `reN`, `final`) each get a fresh directory, but a package is
 identified by its path *relative to the worktree root*, so worktrees holding the

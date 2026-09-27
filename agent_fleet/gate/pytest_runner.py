@@ -464,6 +464,14 @@ _IGNORED_CONTENT_MAX_BYTES = 1 << 20
 #: cache key was fixed to allow. None of it is test input either: a test reads
 #: data and config, not its own dependencies.
 #:
+#: A match on *any* path component is a match, not just the first: a package
+#: sitting in a subdirectory writes ``pkg/__pycache__/mod.cpython-3xx.pyc``, and
+#: a CPython ``.pyc`` header embeds the source mtime, which every
+#: ``git worktree add`` sets afresh. Testing only the top component left the
+#: nested directory to be hashed and handed the same drift back to every
+#: worktree of one commit — ``.venv`` was excluded at the root while
+#: ``pkg/.venv`` was not.
+#:
 #: This only ever applies to files git already ignores, so a *tracked* directory
 #: that happens to be called ``build`` or ``dist`` keeps its bytes covered by
 #: the tree hash exactly as before.
@@ -550,7 +558,7 @@ def ignored_files_digest(root: Path, *, max_files: int = 20_000) -> str:
         if seen >= max_files:
             break
         rel = raw.decode("utf-8", "surrogateescape")
-        if rel.split("/")[0] in _IGNORED_TREE_DIRS:
+        if any(part in _IGNORED_TREE_DIRS for part in rel.split("/")):
             continue
         digest.update(rel.encode("utf-8", "surrogateescape") + b"\0")
         seen += 1
