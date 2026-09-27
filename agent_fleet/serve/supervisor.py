@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import signal
 import subprocess
+import time
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -437,6 +438,17 @@ class Supervisor:
                 level="error",
                 data={"component": name, "error": str(exc), "argv": argv},
             )
+            # A command that cannot be exec'd never becomes a running child, so
+            # there is nothing for the reap loop to charge a backoff to: the exit
+            # path sets STATE_BACKOFF and the ensure-running loop then leaves the
+            # component alone until its deadline. Leaving the state as
+            # STATE_STOPPED put it straight back in that loop, which re-attempted
+            # the exec on *every* tick — ~60 Popen attempts a second and the same
+            # again in appended event-log growth, with the crash-loop detector
+            # never consulted because it is only consulted on the exit path. A
+            # missing binary is a fault, and a fault that repeats forever at full
+            # speed is exactly what the crash budget exists to stop.
+            self._schedule_spawn_retry(name, message=str(exc))
             return False
 
         fingerprint = starttime_fingerprint(proc.pid, proc_root=self.proc_root)
@@ -456,6 +468,49 @@ class Supervisor:
             data={"component": name, "pid": proc.pid, "restarts": state.restarts, "cause": cause},
         )
         return True
+
+    def _schedule_spawn_retry(self, name: str, *, message: str) -> None:
+        """Charge a spawn that never became a process to the backoff schedule.
+
+        The exit path already does this, by way of the reap loop: a child that
+        ran and died is booked, put in ``backoff`` and left there until
+        ``restart_at``. A command that could not be exec'd never reaches that
+        loop, so it needs the booking done for it — the attempt still counts
+        against the backoff schedule and the crash budget, otherwise a typo in
+        a command template reads as a component that is merely not running yet
+        and is retried at the tick rate forever.
+
+        Once the crash budget is spent the component is marked
+        ``crash_looping`` and alerted, exactly as a child that kept dying would
+        be. A command that does not exist is a fault a human has to fix, and it
+        must not be a fault serve tries to fix by spinning.
+        """
+        state = self.children.setdefault(name, ChildState(name=name))
+        spec = self.config.component(name)
+        # The failed exec counts as an attempt so ``backoff_for`` grows instead
+        # of returning the same initial delay forever.
+        state.restarts += 1
+        if self._crash_looping(name):
+            state.state = STATE_CRASH_LOOPING
+            state.message = (
+                f"{len(state.crash_epochs)} crashes in "
+                f"{spec.crash_window_minutes}m (threshold {spec.crash_threshold}); "
+                f"not restarting: {message}"
+            )
+            alert(
+                self.operator,
+                "serve.component.crash_loop",
+                state.message,
+                component=name,
+                restarts=state.restarts,
+                crash_threshold=spec.crash_threshold,
+                crash_window_minutes=spec.crash_window_minutes,
+            )
+            return
+        delay = self.backoff_for(name)
+        state.state = STATE_BACKOFF
+        state.message = f"spawn failed, retrying in {delay:.0f}s: {message}"
+        state.restart_at = self.clock.monotonic() + delay
 
     def _serve_dir(self) -> Path:
         from agent_fleet.serve.paths import serve_dir
@@ -683,6 +738,14 @@ class Supervisor:
         progress three times has a real problem, but it is not crash-looping,
         and treating the two the same would stop restarting it and hide the
         real problem behind a crash-loop alert.
+
+        The ``start`` is conditional on the stop having actually worked, which
+        is what keeps this a *restart* rather than a second spawn. When the old
+        process survives — it trapped the TERM and outlived the escalation — the
+        replacement would be a rival for a role that is still occupied, and the
+        original would be unreachable from here, so there is nothing to gain and
+        a duplicate dispatcher to show for it. Reporting the failure instead
+        leaves the component tracked and lets the operator see it.
         """
         state = self.children.setdefault(name, ChildState(name=name))
         if state.state == STATE_CRASH_LOOPING:
@@ -693,7 +756,8 @@ class Supervisor:
             level="warning",
             data={"component": name, "reason": reason},
         )
-        self.stop_component(name, cause=CAUSE_REQUESTED)
+        if not self.stop_component(name, cause=CAUSE_REQUESTED):
+            return False
         state.no_progress_restarts.append(self.clock.time())
         return self.start(name, cause=CAUSE_REQUESTED)
 
@@ -719,6 +783,22 @@ class Supervisor:
         until the process is confirmed gone, and a group KILL finishes the job
         when the grace runs out. The grace is spent once, per component, and is
         bounded by config.
+
+        ``_await_exit``'s verdict is what decides that, and discarding it is how
+        the leak came back. A group KILL is delivered by the kernel but nothing
+        waits for the corpse to be reaped, so a component that ignores the TERM
+        *and* is unreachable to the escalation — its group signal was refused
+        because it is not a group leader, or the pid is already gone from here —
+        can still be alive when this returns. Reporting it as stopped and
+        clearing the pid file is then a lie with teeth: the follow-up ``start``
+        re-checks :meth:`adopt` against a pid file that no longer existed, found
+        no proof, and spawned a second process for a role that was still
+        occupied — two dispatchers racing for the same work, invisible to the
+        crash budget because the exit was booked as ``requested``. So an
+        unconfirmed exit keeps the identity, the pid file and the handle: the
+        component stays running as far as serve is concerned, the next ``start``
+        adopts the process that is actually there instead of adding a rival to
+        it, and the handle is still there to reap the child once it really dies.
         """
         state = self.children.get(name)
         if state is None:
@@ -731,7 +811,32 @@ class Supervisor:
             identity = None
         if identity is not None:
             terminate_group(identity, proc_root=self.proc_root)
-            self._await_exit(name, identity, proc)
+            if not self._await_exit(name, identity, proc):
+                emit_serve_event(
+                    self.operator,
+                    "serve.component.stop_unconfirmed",
+                    level="error",
+                    data={
+                        "component": name,
+                        "pid": identity.pid,
+                        "cause": cause,
+                    },
+                )
+                # Still there, as far as anything can tell. Re-assert the pid file
+                # so the identity stays recoverable and keep ``state.pid`` so the
+                # component is not reported as stopped while it is still here. The
+                # handle stays in :attr:`_procs` precisely because it is the only
+                # thing that can still reap this child — dropping it would turn an
+                # unconfirmed stop into an unreapable zombie, and a zombie answers
+                # ``/proc`` queries as a live process, so the next ``start`` would
+                # spawn its replacement on top of a corpse it can no longer reap.
+                self._write_pidfile(name, state)
+                state.state = STATE_RUNNING
+                state.message = (
+                    f"pid {identity.pid} survived the stop request; still tracked, "
+                    f"not double-starting"
+                )
+                return False
         self._clear_pidfile(name)
         state.state = STATE_STOPPED
         state.pid = None
@@ -773,11 +878,24 @@ class Supervisor:
         # The KILL is not instantaneous; give it a bounded moment to land so
         # the caller does not spawn a replacement while the corpse is still
         # holding the group's resources.
-        kill_deadline = self.clock.monotonic() + _KILL_SETTLE_S
-        while self.clock.monotonic() < kill_deadline:
+        #
+        # This one wait is on the *real* clock, not the injected one, and that is
+        # not a shortcut. The grace loop above can be driven by a ``FakeClock``,
+        # whose ``sleep`` advances time without blocking, so it can run out its
+        # whole budget in microseconds — before the kernel has delivered
+        # anything. A component that died promptly on the TERM would then be
+        # reported as having survived it, kept "running" with a pid whose
+        # process is gone, and its watchdog restart would be refused over a
+        # corpse. The KILL is delivered by the kernel immediately and the reap
+        # is the only thing outstanding, so a short real sleep is what this
+        # check actually needs: it costs a couple of milliseconds once, and it
+        # is the difference between "the process outlived the stop" and "the
+        # clock ran out before we looked".
+        settle_deadline = time.monotonic() + _KILL_SETTLE_S
+        while time.monotonic() < settle_deadline:
             if self._exited(identity, proc):
                 return True
-            self.clock.sleep(_EXIT_POLL_INTERVAL_S)
+            time.sleep(_EXIT_POLL_INTERVAL_S)
         return self._exited(identity, proc)
 
     def _exited(

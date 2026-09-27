@@ -26,6 +26,7 @@ import os
 import subprocess
 import sys
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -35,7 +36,7 @@ from agent_fleet.serve.clock import FakeClock
 from agent_fleet.serve.config import ComponentSpec, ServeConfig, WatchdogConfig
 from agent_fleet.serve.events import read_serve_events
 from agent_fleet.serve.paths import component_pid_path, ensure_serve_dir
-from agent_fleet.serve.procs import starttime_fingerprint
+from agent_fleet.serve.procs import TerminationResult, starttime_fingerprint
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -109,6 +110,11 @@ def _wait_until(predicate: Callable[[], bool], timeout: float = 5.0) -> bool:
             return True
         time.sleep(0.02)
     return False
+
+
+def spawn_failures(operator: str) -> list[dict[str, object]]:
+    """Every ``spawn_failed`` event recorded for *operator*, oldest first."""
+    return [e for e in read_serve_events(operator) if e["event"] == "serve.component.spawn_failed"]
 
 
 # ------------------------------------------------------------------- templates
@@ -229,6 +235,90 @@ def test_an_empty_command_is_an_error_event_not_a_spawn() -> None:
     clock = FakeClock()
     sup = _supervisor(_config(dispatcher="   "), clock)
     assert sup.start("dispatcher") is False
+
+
+def test_a_command_that_cannot_be_exec_is_retried_on_a_backoff_not_every_tick() -> None:
+    """A spawn that never became a process still owes the backoff schedule.
+
+    ``Popen`` raising means there is no child, so the reap loop — the only thing
+    that used to book a backoff — never sees it. The component was left
+    ``stopped``, which is the state ``tick``'s ensure-running loop re-attempts
+    immediately, so a command that is simply not on PATH was exec'd again on
+    every single tick: one failed ``Popen`` and one appended ``spawn_failed``
+    event per tick, forever, with the crash-loop detector never consulted.
+    """
+    clock = FakeClock()
+    sup = _supervisor(
+        _config(dispatcher="definitely-not-a-real-binary-xyz", backoff_initial_s=5.0),
+        clock,
+    )
+    try:
+        for _ in range(50):
+            sup.tick()
+
+        state = sup.children["dispatcher"]
+        assert state.state == STATE_BACKOFF, (
+            f"a component whose command cannot be exec'd must wait out a backoff, "
+            f"not sit in {state.state!r} where every tick re-attempts the exec"
+        )
+        assert state.restart_at > 0, "the retry has to carry a deadline, or it is now"
+        assert state.restarts >= 1, "the failed attempt must count against the schedule"
+
+        # The same fault, repeated, still has to reach the crash budget — the
+        # defect was never that it retried, it was that nothing bounded it.
+        assert len(spawn_failures("op")) <= 3, (
+            f"{len(spawn_failures('op'))} failed execs across 50 ticks "
+            "(crash_threshold is 3). One "
+            "failed exec per tick is unbounded: the serve loop ticks ~60 times a "
+            "second, so a typo in a command template became ~60 failed Popen calls "
+            "and a matching amount of appended event-log growth every second"
+        )
+    finally:
+        sup.shutdown()
+
+
+def test_a_command_that_cannot_be_exec_eventually_declares_crash_looping() -> None:
+    """The budget is consulted on the spawn path too, not only on the exit path.
+
+    Without this a component that could never be started looked infinitely
+    retryable: no backoff was charged, so the detector — which only ever ran on
+    the reap path — never saw the crashes, and the documented
+    ``serve.component.crash_loop`` alert was never emitted for the one fault
+    that most needs an operator to look at it.
+    """
+    clock = FakeClock()
+    sup = _supervisor(
+        _config(dispatcher="definitely-not-a-real-binary-xyz", crash_threshold=3),
+        clock,
+    )
+    try:
+        for _ in range(200):
+            sup.tick()
+            # A real serve loop paces itself; release each backoff as it falls due.
+            clock.advance(sup.pending_restarts() + 0.01)
+
+        state = sup.children["dispatcher"]
+        assert state.state == STATE_CRASH_LOOPING, (
+            f"after 200 ticks of a command that cannot be exec'd the component is "
+            f"{state.state!r}, not crash_looping: the spawn failure never consulted "
+            "the crash budget, so the fault repeats forever instead of being "
+            "handed to a human"
+        )
+        alerts = [e for e in read_serve_events("op") if e["event"] == "serve.component.crash_loop"]
+        assert alerts, "a component that will not start must raise the crash-loop alert"
+        assert alerts[-1]["level"] == "error"
+        assert alerts[-1]["data"]["component"] == "dispatcher"
+
+        # And it must stay down: a spent budget is what stops the spin.
+        attempts = len(spawn_failures("op"))
+        for _ in range(50):
+            clock.advance(600.0)
+            sup.tick()
+        assert len(spawn_failures("op")) == attempts, (
+            "a crash-looping component must not be re-exec'd; the budget is spent"
+        )
+    finally:
+        sup.shutdown()
 
 
 # -------------------------------------------------------------------- adoption
@@ -355,6 +445,111 @@ def test_a_requested_restart_still_restarts_the_component() -> None:
         assert sup.children["dispatcher"].pid != first
     finally:
         sup.shutdown()
+
+
+#: Ignores the TERM outright, so only the group KILL can stop it.
+TRAPPER = (
+    f"{sys.executable} -c 'import signal, time; "
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(300)'"
+)
+
+#: Generous enough that a loaded box is not what makes the trap late.
+_TRAPPER_READY_S = 1.0
+
+
+def live_component_pids(sup: Supervisor) -> list[int]:
+    """Every live process the supervisor still believes is running a component.
+
+    Read from ``/proc`` rather than from the supervisor's own ledger: the ledger
+    is the thing under test here, and a duplicate is invisible to whichever copy
+    of the bookkeeping forgot about it.
+    """
+    from agent_fleet.serve.procs import pid_alive
+
+    return [
+        pid for pid in (s.pid for s in sup.children.values()) if pid is not None and pid_alive(pid)
+    ]
+
+
+def test_a_component_that_survives_a_stop_is_not_double_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A restart must never add a rival to a process that is still alive.
+
+    ``stop_component`` escalates a trapped TERM to a group KILL, but a KILL the
+    escalation cannot deliver — refused because the pid is no longer a group
+    leader, or already gone from under us — leaves the component running.
+    ``_await_exit`` reports exactly that, and the verdict was being thrown away:
+    the pid file was cleared and ``state.pid`` nulled regardless, so the
+    follow-up ``start`` re-ran its adoption check against a pid file that no
+    longer existed, found no proof, and spawned a *second* process for a role
+    that was still occupied. The original was no longer in the children ledger,
+    so nothing could ever reach it again.
+
+    Asserted on a real process, and on the live set rather than on a return
+    value, because "one live process per role" is the property that broke. The
+    escalation is disabled with ``monkeypatch`` because the escape hatch has to
+    be genuinely unreachable: a real SIGKILL lands, and a test that depends on
+    the kernel declining to kill a process proves nothing.
+    """
+    clock = FakeClock()
+    sup = _supervisor(_config(dispatcher=TRAPPER), clock)
+    skipped = TerminationResult(signalled=False, skipped_reason="pid is not a group leader")
+
+    monkeypatch.setattr(
+        "agent_fleet.serve.supervisor.escalate_kill_group",
+        lambda *_args, **_kwargs: skipped,
+    )
+
+    proc: subprocess.Popen[bytes] | None = None
+    try:
+        sup.start("dispatcher")
+        original = sup.children["dispatcher"].pid
+        assert original is not None
+        proc = sup._procs["dispatcher"]
+        # The component has to be *up* before it is asked to stop. Under a
+        # ``FakeClock`` the TERM grace burns out in microseconds of real time,
+        # so a stop issued during interpreter startup arrives before the trap is
+        # installed and kills the child outright — which would make this test
+        # pass for the wrong reason. Bounded and real, because the thing being
+        # waited for is the kernel, not the injected clock.
+        assert _wait_until(lambda: proc.poll() is None, 5.0)
+        time.sleep(_TRAPPER_READY_S)
+
+        assert sup.request_restart("dispatcher", reason="no progress") is False, (
+            "a restart whose stop did not confirm the exit must not report success: "
+            "the component it could not stop is still the one running"
+        )
+
+        state = sup.children["dispatcher"]
+        assert state.pid == original, (
+            f"the surviving component's identity was discarded (pid is now {state.pid}, "
+            f"was {original}); nothing can signal a process serve no longer tracks"
+        )
+        assert state.state == STATE_RUNNING, (
+            f"a process that is still alive is reported as {state.state!r}"
+        )
+        assert component_pid_path("op", "dispatcher").exists(), (
+            "the pid file was cleared while its process is alive, so the next start "
+            "cannot prove adoption and spawns a rival"
+        )
+
+        # The follow-up start is the call that actually doubled the process.
+        assert sup.start("dispatcher", cause="requested") is True
+        assert sup.children["dispatcher"].pid == original, (
+            "start() spawned a replacement for a role that is still occupied; the "
+            "adoption check had no pid file left to prove otherwise"
+        )
+        assert sup.children["dispatcher"].adopted is True
+        assert live_component_pids(sup) == [original], (
+            "exactly one live process must exist for the role, so a restart cannot "
+            f"put a second dispatcher on the same work; found {live_component_pids(sup)}"
+        )
+    finally:
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            with suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=10)
 
 
 # ----------------------------------------------------------------- crash loops
