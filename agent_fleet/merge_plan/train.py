@@ -773,6 +773,52 @@ def stack_roots(prs: Sequence[TrainPR]) -> list[TrainPR]:
     return roots
 
 
+def prs_on_base(prs: Sequence[TrainPR], base: str) -> tuple[list[TrainPR], list[TrainPR]]:
+    """PRs that fold onto *base*, and PRs waiting on a parent that is not here.
+
+    A PR whose base is *base* is in this train. A PR whose base is the head
+    branch of a PR already in is in too: that is a stack, and it folds onto the
+    candidate after its parent. Anything else is waiting. Its parent is not in
+    this batch, so treating it as a second root makes the train refuse to land
+    the pulls that do target *base*.
+    """
+    included: list[TrainPR] = []
+    rest = list(prs)
+    changed = True
+    while changed:
+        changed = False
+        heads = {base}
+        heads.update(pr.head_branch for pr in included if pr.head_branch)
+        still: list[TrainPR] = []
+        for pr in rest:
+            if pr.base_ref in heads:
+                included.append(pr)
+                changed = True
+            else:
+                still.append(pr)
+        rest = still
+    return included, rest
+
+
+def narrow_mixed_base(
+    prs: Sequence[TrainPR],
+    *,
+    configured: str,
+    default: str,
+) -> tuple[list[TrainPR], list[TrainPR]]:
+    """Drop roots that do not share the branch this train folds onto.
+
+    A stack whose parent is in the batch stays. A PR opened against some other
+    branch, with that parent not approved in this batch, is held back so the
+    pulls that do target the train base can still land.
+    """
+    roots = {pr.base_ref for pr in stack_roots(prs) if pr.base_ref.strip()}
+    if len(roots) <= 1:
+        return list(prs), []
+    base = configured.strip() or default
+    return prs_on_base(prs, base)
+
+
 def resolve_base_branch(
     repo_path: Path,
     *,
