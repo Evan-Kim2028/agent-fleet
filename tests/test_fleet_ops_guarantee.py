@@ -10,7 +10,9 @@ leftover change really is committed, that the commit really runs hooks, and that
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -23,7 +25,7 @@ from agent_fleet.fleet_ops.guarantee import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
 
@@ -305,6 +307,133 @@ def test_named_baseline_hook_is_skipped_but_others_still_run(repo: Path) -> None
     assert blocked.escalated is True
     assert blocked.reason == "commit_failed"
     assert "baseline-red hook" in blocked.detail
+
+
+def test_declared_baseline_hook_is_skipped_only_after_it_passes_on_lane_files(repo: Path) -> None:
+    """The gate before a baseline bypass: the hook must be clean on the lane's own files.
+
+    A pre-commit shim that is green on the changed files and red elsewhere is
+    exactly the baseline-debt shape, so the retry with SKIP= is allowed and the
+    bypass is recorded. The permissive hook is not asked to prove anything: the
+    first commit already told us it passed.
+    """
+    branch = "fb/lane"
+    _git(repo, "checkout", "-b", branch)
+    bindir = _install_permissive_precommit(repo)
+    (repo / "feature.py").write_text("x = 1\n", encoding="utf-8")
+
+    with _path_with(bindir):
+        result = ensure_pull_request(
+            repo,
+            branch=branch,
+            base="main",
+            engine="cmd",
+            lane="lane",
+            baseline_hooks=("pre-commit",),
+            runner=_fake_gh(),
+        )
+    assert result.committed is True
+    assert result.hooks_skipped == ["pre-commit"]
+    # The first commit runs the hook live; only the retry carries SKIP=.
+    assert result.skip_env == {}
+
+
+def test_baseline_hook_still_red_on_lane_files_is_never_skipped(repo: Path) -> None:
+    """A hook that fails on the lane's own diff stays a failure, baseline label or not."""
+    branch = "fb/lane"
+    _git(repo, "checkout", "-b", branch)
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_text(
+        "#!/bin/sh\necho 'bad diff' >&2\nprintf '[hook]\\n- hook id: pre-commit\\n'\nexit 1\n",
+        encoding="utf-8",
+    )
+    hook.chmod(0o755)
+    (repo / "feature.py").write_text("x = 1\n", encoding="utf-8")
+
+    result = ensure_pull_request(
+        repo,
+        branch=branch,
+        base="main",
+        engine="cmd",
+        lane="lane",
+        baseline_hooks=("pre-commit",),
+        runner=_fake_gh(),
+    )
+    assert result.escalated is True
+    assert result.reason == "commit_failed"
+    assert result.hooks_failed == ["pre-commit"]
+    assert result.hooks_skipped == []
+
+
+def test_a_non_baseline_failure_blocks_the_retry_entirely(repo: Path) -> None:
+    """One real hook in the failure list means the commit is not publishable."""
+    branch = "fb/lane"
+    _git(repo, "checkout", "-b", branch)
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_text(
+        "#!/bin/sh\nprintf '[hook]\\n- hook id: pre-commit\\n- hook id: real-lint\\n'\nexit 1\n",
+        encoding="utf-8",
+    )
+    hook.chmod(0o755)
+    (repo / "feature.py").write_text("x = 1\n", encoding="utf-8")
+
+    result = ensure_pull_request(
+        repo,
+        branch=branch,
+        base="main",
+        engine="cmd",
+        lane="lane",
+        baseline_hooks=("pre-commit",),
+        runner=_fake_gh(),
+    )
+    assert result.escalated is True
+    assert "real-lint" in result.hooks_failed
+    assert result.hooks_skipped == []
+
+
+@contextmanager
+def _path_with(*dirs: Path) -> Iterator[None]:
+    """Temporarily prepend *dirs* to ``PATH`` for the duration of the block."""
+    original = os.environ.get("PATH", "")
+    os.environ["PATH"] = os.pathsep.join([*(str(d) for d in dirs), original])
+    try:
+        yield
+    finally:
+        os.environ["PATH"] = original
+
+
+def _install_permissive_precommit(repo: Path) -> Path:
+    """A ``pre-commit`` shim that honours SKIP and is green on any given file set.
+
+    It fails unless ``SKIP`` names it, and its ``pre-commit run --files`` form
+    exits 0 — the shape of a hook whose only problem is debt it finds outside
+    the lane's diff. It reports the failure in pre-commit's own format, because
+    the ``- hook id:`` line is the only thing that tells the manager which hook
+    refused, and a shim that printed plain text would be testing a different
+    path than the one production takes.
+
+    Returns the directory to put on ``PATH``; the verification step shells out
+    to a real ``pre-commit`` command, so the name has to resolve.
+    """
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_text(
+        "#!/bin/sh\n"
+        'case ",${SKIP}," in *,pre-commit,*) exit 0;; esac\n'
+        "echo 'baseline debt outside the diff' >&2\n"
+        "printf '[hook]\\n- hook id: pre-commit\\n'\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    hook.chmod(0o755)
+    bindir = repo / ".fakebin"
+    bindir.mkdir(exist_ok=True)
+    shim = bindir / "pre-commit"
+    shim.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    shim.chmod(0o755)
+    return bindir
 
 
 def test_skip_env_is_reported_on_the_result(repo: Path) -> None:

@@ -139,7 +139,7 @@ def test_the_guarantee_never_stages_the_run_dir(repo: Path) -> None:
     (repo / "feature.py").write_text("x = 1\n", encoding="utf-8")
     _git(repo, "checkout", "-b", "fb/movers")
 
-    ok, sha, detail, _hooks = g.commit_worktree(repo, engine="cmd", lane="movers")
+    ok, sha, detail, _hooks, _skipped = g.commit_worktree(repo, engine="cmd", lane="movers")
 
     assert ok, detail
     assert sha is not None
