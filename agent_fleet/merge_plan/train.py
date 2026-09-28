@@ -776,6 +776,27 @@ def test_command_for(test_files: Sequence[str]) -> str:
     return f"pytest {files}" if files else "pytest"
 
 
+def pytest_argv(
+    test_files: Sequence[str],
+    *,
+    rootdir: Path,
+    python: Path | None = None,
+) -> list[str]:
+    """Pytest argv that collects against the folded tree, not a package subdirectory.
+
+    Passing a test path makes pytest pick that package's config as rootdir, so a
+    workspace ``pythonpath`` (identity, lakestore, infra) never applies and the
+    run dies with ``ModuleNotFoundError``. ``--rootdir`` is the worktree root.
+    The repo venv's Python is what has those packages installed; a bare
+    ``pytest`` on ``PATH`` is often a different interpreter.
+    """
+    files = sorted(set(test_files))
+    cmd = ["pytest", "--rootdir", str(rootdir), *files]
+    if python is not None:
+        return [str(python), "-m", *cmd]
+    return cmd
+
+
 def scratch_root(repo: str) -> Path:
     """Where candidate worktrees live.
 
@@ -1277,11 +1298,13 @@ class GitTrainer:
     def _argv(self, prs: Sequence[TrainPR], fold: GitFold) -> list[str]:
         if self.command:
             argv = shlex.split(self.command)
-        else:
-            argv = shlex.split(test_command_for(select_test_files(prs, tree=fold.worktree)))
-        # A configured command may want to know where the tree is; {tree} keeps
-        # it from hardcoding a path it cannot know.
-        return [a.replace("{tree}", str(fold.worktree)) for a in argv]
+            return [a.replace("{tree}", str(fold.worktree)) for a in argv]
+        venv_python = self.repo_path / ".venv" / "bin" / "python"
+        return pytest_argv(
+            select_test_files(prs, tree=fold.worktree),
+            rootdir=fold.worktree,
+            python=venv_python if venv_python.is_file() else None,
+        )
 
 
 def _fold_incomplete(fold: GitFold, prefix: str) -> TestResult | None:
