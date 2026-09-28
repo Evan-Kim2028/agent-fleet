@@ -92,34 +92,31 @@ echo $n > $S/stall_ticks
 if { [ "$stall" -eq 1 ] && gt "$full" 60; } || [ "$n" -ge 2 ]; then
   echo closed > $S/admission
   shed_gate
-  # Review gates and vision stop first. The single dbt job is the work
-  # that has to finish. Stop it only when no gate is left and the stall remains.
-  gleft=$(newest_unit 'fleet-gate-*.service')
-  # 60 sheds review gates. A single dbt job sits near that while it spills.
-  # Kill it only in the range that locked SSH out last time, about 80 and up.
-  if [ -z "$gleft" ] && { gt "$full" 80 || gt "$avg10" 90; }; then
-    d=$(newest_unit 'lor-dagster-run-*.scope')
-    if [ -n "$d" ]; then
-      systemctl --user stop "$d" && log "shed dagster $d (host psi60=$full psi10=$avg10 ticks=$n)"
+  # 2026-09-28 shed-order fix: fleet sheds first, prod is last-resort. Dagster
+  # run scopes are NEVER stopped here — their own MemoryMax fails them fast
+  # (OOM inside the slice), and a mid-run SIGTERM loses the same work plus an
+  # automatic run_retries retry. Vision + the five schedulers move to the
+  # ~80-and-up tier that used to shed dagster scopes; at 60-80 a fleet gate is
+  # the only thing that stops, which is correct since it is delay-tolerant.
+  if gt "$full" 80 || gt "$avg10" 90; then
+    v=$(newest_unit "vision-*.service")
+    [ -n "$v" ] || v=$(newest_unit "ebay-image-analysis.service")
+    if [ -n "$v" ]; then
+      systemctl --user stop "$v" && log "shed $v (host psi60=$full psi10=$avg10)"
     fi
+    # The box has five schedulers that do not read this guard: the hourly health
+    # sweep, table maintenance, lakestore maintenance, vision runs, and anything
+    # an ssh session left running. They are what pushed load to 67 with 40 GB
+    # free. Shed the newest of those, newest first, but never the API, storage,
+    # the catalog, or the dagster daemon.
+    for pat in 'lake-run-*.scope' 'lake-health-sweep.service' 'pokemon-lor-table-maintenance@*.service'; do
+      u=$(newest_unit "$pat")
+      [ -n "$u" ] || continue
+      systemctl --user stop "$u" && log "shed $u (host psi60=$full)"
+      break
+    done
   fi
-  v=$(newest_unit "vision-*.service")
-  [ -n "$v" ] || v=$(newest_unit "ebay-image-analysis.service")
-  if [ -n "$v" ]; then
-    systemctl --user stop "$v" && log "shed $v (host psi60=$full)"
-  fi
-  # The box has five schedulers that do not read this guard: the hourly health
-  # sweep, table maintenance, lakestore maintenance, vision runs, and anything
-  # an ssh session left running. They are what pushed load to 67 with 40 GB
-  # free. Shed the newest of those, newest first, but never the API, storage,
-  # the catalog, or the dagster daemon.
-  for pat in 'lake-run-*.scope' 'lake-health-sweep.service' 'pokemon-lor-table-maintenance@*.service'; do
-    u=$(newest_unit "$pat")
-    [ -n "$u" ] || continue
-    systemctl --user stop "$u" && log "shed $u (host psi60=$full)"
-    break
-  done
-  log "host stall: admission closed, shed one gate, one dagster scope, one vision unit"
+  log "host stall: admission closed, shed one gate; prod sheds only past psi 80"
 fi
 
 # janitor: every ~10 min, remove idle agent scratch dirs from /tmp (tmpfs = RAM)
