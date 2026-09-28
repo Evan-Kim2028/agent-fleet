@@ -41,7 +41,9 @@ def read_mem_available(path: Path = Path("/proc/meminfo")) -> int | None:
         for line in path.read_text().splitlines():
             if line.startswith("MemAvailable:"):
                 return int(line.split()[1]) * 1024
-    except OSError, ValueError:
+    except OSError:
+        return None
+    except ValueError:
         return None
     return None
 
@@ -50,7 +52,9 @@ def read_cgroup_value(path: Path) -> int | None:
     try:
         value = path.read_text().strip()
         return None if value == "max" else int(value)
-    except OSError, ValueError:
+    except OSError:
+        return None
+    except ValueError:
         return None
 
 

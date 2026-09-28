@@ -84,6 +84,22 @@ def test_fleet_headroom_closes_admission_despite_host_memory(tmp_path: Path) -> 
     assert decision["reason"] == "fleet_headroom"
 
 
+def test_capacity_helper_compiles_with_system_python() -> None:
+    result = subprocess.run(
+        [
+            "python3",
+            "-c",
+            "import pathlib, sys; p=pathlib.Path(sys.argv[1]); compile(p.read_text(), str(p), 'exec')",
+            str(HELPER),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_unknown_cgroup_limit_fails_closed(tmp_path: Path) -> None:
     rc, decision = _run_capacity(tmp_path, 39, 2, "max")
     assert rc == 1
