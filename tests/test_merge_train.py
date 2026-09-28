@@ -498,6 +498,24 @@ def test_the_default_command_quotes_its_test_files() -> None:
     assert _test_command_for(["tests/a b.py"]) == "pytest 'tests/a b.py'"
 
 
+def test_pytest_argv_uses_the_repo_venv_and_the_worktree_root() -> None:
+    from agent_fleet.merge_plan.train import pytest_argv
+
+    argv = pytest_argv(
+        ["packages/lakestore/tests/test_pyiceberg_patch.py"],
+        rootdir=Path("/tmp/candidate"),
+        python=Path("/repo/.venv/bin/python"),
+    )
+    assert argv == [
+        "/repo/.venv/bin/python",
+        "-m",
+        "pytest",
+        "--rootdir",
+        "/tmp/candidate",
+        "packages/lakestore/tests/test_pyiceberg_patch.py",
+    ]
+
+
 def test_the_report_is_json_and_names_the_command(tmp_path: Path) -> None:
     import json
 
