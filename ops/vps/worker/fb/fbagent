@@ -5,6 +5,7 @@
 # NAME.meta gets "route": "openrouter" | "cmd-fallback". The OpenRouter key is never printed.
 set -uo pipefail
 source ~/fleet/env.sh
+export FLEET_CAPACITY_HELPER="${FLEET_CAPACITY_HELPER:-$HOME/fleet/bin/fleet_admission.py}"
 F=$HOME/fleet/fb; R=${FB_RUNS:-$F/runs}; export FB_RUNS=$R; mkdir -p $R
 name=$1; cwd=$2; pf=$(realpath -e "$3" 2>/dev/null) && [ -s "$pf" ] || { echo "fbagent: prompt file $3 missing or empty" > "$R/$1.err"; echo 95 > "$R/$1.exit"; exit 95; }
 turns=${4:-300}

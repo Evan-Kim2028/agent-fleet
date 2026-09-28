@@ -7,6 +7,7 @@
 #                                    pyright hook, stalling 57 commits for up to 3h on 2026-09-25)
 # Nested calls under an admitted command (FLEET_ADMITTED=1) are never gated again.
 REAL=$HOME/.local/bin/uv
+CAPACITY=${FLEET_CAPACITY_HELPER:-$HOME/fleet/bin/fleet_admission.py}
 [ -n "$FLEET_ADMITTED" ] && exec $REAL "$@"
 case " $* " in
   *" run "*pre-commit*) exec $REAL "$@";;
@@ -32,11 +33,16 @@ while :; do
   for i in $(seq $START $((START+N-1))); do
     exec 207>"$S/$PREFIX.$i"
     if flock -n 207; then
+      if [ "$POOL" = test ] && [ -x "$CAPACITY" ] && ! python3 "$CAPACITY" --check --fleet-headroom-gib 6; then
+        flock -u 207
+        continue
+      fi
       export FLEET_ADMITTED=1
       if [ "$POOL" = test ]; then exec nice -n 5 timeout --signal=TERM --kill-after=10s "${TEST_TIMEOUT_S:-1800}" "$REAL" "$@"; fi
       exec nice -n 5 "$REAL" "$@"
     fi
   done
   waited=$((waited+3)); [ $waited = 600 ] && echo "uv shim: waiting >10 min for a $POOL slot" >&2
+  if [ "$POOL" = test ] && [ "$waited" -ge "${TEST_ADMISSION_WAIT_S:-3600}" ]; then echo "uv shim: no fleet headroom for tests after ${waited}s" >&2; exit 2; fi
   sleep 3
 done

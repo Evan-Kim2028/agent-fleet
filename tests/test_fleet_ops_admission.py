@@ -166,6 +166,8 @@ def test_the_shim_renders_the_live_classification_table(tmp_path: Path) -> None:
         assert f"{tool!r}: {pool!r}" in source
     assert "TEST_TIMEOUT_S = 1800" in source
     assert "os.execv(TIMEOUT" in source
+    assert "def acquire_test(pool, size):" in source
+    assert "fleet-headroom-gib" in source
 
 
 def test_default_lane_tests_share_the_gate_slot_root() -> None:
@@ -254,6 +256,29 @@ def test_test_timeout_releases_the_shared_slot(tmp_path: Path) -> None:
     )
     assert proc.returncode == 124
     assert (tmp_path / "running").exists()
+    slot = SlotPool(admission.TEST_POOL, root=config.slots_dir(), size=1).acquire(timeout_s=1)
+    slot.release()
+
+
+def test_test_capacity_gate_releases_slot_while_waiting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = tmp_path / "closed_capacity.py"
+    helper.write_text("raise SystemExit(1)\n", encoding="utf-8")
+    monkeypatch.setenv("FLEET_CAPACITY_HELPER", str(helper))
+    config = AdmissionConfig(shared_dir=tmp_path, tests=1, nice=0, wait_s=0.1)
+    stub = _write_stub_uv(tmp_path)
+    shim = write_shim(tmp_path / "shim", real=str(stub), config=config)
+    proc = subprocess.run(
+        [str(shim), "run", "pytest", "-q", "tests/test_case.py"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=5,
+    )
+    assert proc.returncode == 1
+    assert "no fleet headroom" in proc.stderr
+    assert not (tmp_path / "running").exists()
     slot = SlotPool(admission.TEST_POOL, root=config.slots_dir(), size=1).acquire(timeout_s=1)
     slot.release()
 
