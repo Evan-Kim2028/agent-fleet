@@ -43,20 +43,19 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from agent_fleet.fleet_paths import agent_fleet_home
-from agent_fleet.slots import SlotPool
+from agent_fleet.slots import SlotPool, default_slots_root
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
 logger = logging.getLogger(__name__)
 
-#: Admission pools. Distinct names from the gate's own ``agent``/``test`` pools:
-#: lane admission and gate admission are separate budgets, and a lane must not
-#: be able to consume the gate's reviewer slots.
-TEST_POOL = "lane-tests"
+#: All pytest callers use the same machine-wide test pool; typecheck work has
+#: its own pool.
+TEST_POOL = "test"
 TYPECHECK_POOL = "lane-typecheck"
 
-DEFAULT_TEST_SLOTS = 12
+DEFAULT_TEST_SLOTS = 1
 DEFAULT_TYPECHECK_SLOTS = 4
 
 #: Admitted work runs niced, so a lane's test suite yields to a lane that is
@@ -98,13 +97,14 @@ class AdmissionConfig:
     typecheck: int = DEFAULT_TYPECHECK_SLOTS
     nice: int = DEFAULT_NICE
     wait_s: float = DEFAULT_WAIT_S
+    test_timeout_s: int = 1800
 
     @property
     def root(self) -> Path:
         return Path(self.shared_dir).expanduser() if self.shared_dir else default_admission_dir()
 
     def slots_dir(self) -> Path:
-        return self.root / "slots"
+        return default_slots_root() if self.shared_dir is None else self.root / "slots"
 
     def locks_dir(self) -> Path:
         return self.root / "locks"
@@ -194,6 +194,8 @@ POOLS = {{{table}}}
 ROOT = {str(config.slots_dir())!r}
 REAL = {real!r}
 WAIT_S = {config.wait_s!r}
+TEST_TIMEOUT_S = {config.test_timeout_s!r}
+TIMEOUT = {shutil.which("timeout")!r}
 NICE = {config.nice!r}
 
 #: Must match agent_fleet.slots._POLL_INTERVAL_S so both implementations poll
@@ -256,6 +258,10 @@ def main():
 
     # exec, not fork: no window in which the slot is held but the real uv is not
     # yet running.
+    if pool == {TEST_POOL!r}:
+        if TIMEOUT is None:
+            sys.exit("agent-fleet admission: GNU timeout is required for test runs")
+        os.execv(TIMEOUT, [TIMEOUT, "--signal=TERM", "--kill-after=10s", f"{{TEST_TIMEOUT_S}}s", REAL, *argv])
     os.execv(REAL, [REAL, *argv])
 
 

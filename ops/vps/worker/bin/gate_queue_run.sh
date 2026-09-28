@@ -1,166 +1,159 @@
 #!/usr/bin/env bash
-# gate_queue_run.sh v3 — gate driver + escalation router + rebase/doom plumbing
-# (on-box substitute for the off-box orchestrator: fbgate_remote +
-# fleet_reconcile + rebase_regate, quiet since ~09:00).
-#
-# Parallelism: serialised by TEST BURST not by gate (fm_pytest flocks sem/test.*,
-# TEST_SLOTS=1). MAX_GATES=3 lanes in flight: ~1.5G idle agents + one 6G burst
-# inside the 10G fleet.slice.
-#
-# Escalation routing per tick over lanes/*.status:
-#   INFRA   shed/fail-closed/died/could-not-run/refused -> re-queue (cap 3/head)
-#   REWORK  no-push/stalled/merged-tree/untestable -> one INFORMED gate per head:
-#           synthesize prompts/<lane>.task.md from the last gate's evidence
-#           (confirmed blockers + fixer history) so the retry starts from the
-#           diagnosis instead of re-deriving it (cap 1/head)
-#   REBASE  NEEDS-REBASE -> lane_rebase.sh (fbagent conflict resolution), which
-#           re-queues the lane itself after pushing (bounded: 1 rebase in flight)
-#   VERDICT-quality lanes that exhaust rework -> quarantine.txt: the informed
-#           retry already had the diagnosis; looping is the doom.
-#
-# Doom protection: total fire count per lane from gate_queue_done.txt (cap 6 ->
-# quarantine.txt, skipped everywhere). Circuit breaker: last 4 done-file gates
-# all infra-class within 45 min -> hold fires for 30 min (systemic problem, not
-# lane problems).
 set -uo pipefail
-F=$HOME/fleet/fb; S=$HOME/fleet/state; Q=$F/gate_queue.txt; DONE=$F/gate_queue_done.txt
-RQ=$F/.requeue_counts; QFILE=$F/quarantine.txt; touch $RQ $QFILE $DONE
+F=$HOME/fleet/fb
+S=$HOME/fleet/state
+Q=$F/gate_queue.txt
+DONE=$F/gate_queue_done.txt
+RQ=$F/.requeue_counts
+QFILE=$F/quarantine.txt
+PRCACHE=$F/.pr_cache
 MAXG=${MAX_GATES:-3}
-DGRH=/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/lor.slice/lor-dagster.slice/lor-dagster-run.slice/lor-dagster-run-heavy.slice/memory.current
-log(){ logger -t gate-queue "$*"; echo "$(date +%T) $*" >> $F/gate_queue.log; }
-gate_units(){ systemctl --user list-units --no-legend --plain "fleet-gate-*.service" --state=running,activating 2>/dev/null | awk "{print \$1}" | grep -v fleet-gate-queue.service; }
-live_gates(){ { gate_units; pgrep -f "fleet/fb/fbgate " | sed "s/^/pg:/"; } | grep -v "^$" | sort -u; }
-queued(){ grep -v "^#" $Q 2>/dev/null | awk "{print \$1}"; }
-requeues(){ awk -v l="$1" '$1==l{c++} END{print c+0}' $RQ 2>/dev/null; }
-attempts(){ awk -v l="$1" '$1==l{c++} END{print c+0}' $DONE 2>/dev/null; }
-rebase_tries(){ awk -v l="$1" '$1==l && $3=="rebase"{c++} END{print c+0}' $RQ 2>/dev/null; }
-PRCACHE=$F/.pr_cache; # refreshed once per scan — find_pr is O(1) after that
+CAPACITY=$HOME/fleet/bin/fleet_admission.py
+mkdir -p "$F/locks"
+touch "$RQ" "$QFILE" "$DONE"
+exec 9>"$F/.gate_queue.lock"
+flock -n 9 || exit 0
+
+log(){ logger -t gate-queue "$*"; printf '%s %s\n' "$(date +%T)" "$*" >> "$F/gate_queue.log"; }
+gate_units(){ systemctl --user list-units --no-legend --plain 'fleet-gate-*.service' --state=running,activating 2>/dev/null | awk '{print $1}' | grep -v fleet-gate-queue.service; }
+gate_processes(){
+  ps -eo args= | awk '{for(i=1;i<NF;i++){t=$i; sub(/^.*\//,"",t); if(t=="fbgate") print $(i+1)}}' | sort -u
+}
+live_gates(){
+  { gate_units | sed -E 's/^fleet-gate-//; s/\.service$//'; gate_processes; } | grep -v '^$' | sort -u
+}
+queued(){ awk 'NF >= 3 && $1 !~ /^#/{print $1}' "$Q" 2>/dev/null; }
+requeues(){ awk -v l="$1" -v h="$2" '$1==l && $4==h && $3!="rebase"{c++} END{print c+0}' "$RQ" 2>/dev/null; }
+attempts(){ awk -v l="$1" -v h="$2" '$1==l && $4==h{c++} END{print c+0}' "$DONE" 2>/dev/null; }
+rebase_tries(){ awk -v l="$1" -v h="$2" '$1==l && $3=="rebase" && $4==h{c++} END{print c+0}' "$RQ" 2>/dev/null; }
+is_quarantined(){ awk -v l="$1" -v h="$2" '$1==l && $2==h{found=1} END{exit !found}' "$QFILE" 2>/dev/null; }
+quarantine(){
+  local lane=$1 sha=$2 reason=$3
+  is_quarantined "$lane" "$sha" || { printf '%s %s %s %s\n' "$lane" "$sha" "$(date +%s)" "$reason" >> "$QFILE"; log "QUARANTINE $lane@$sha ($reason)"; }
+}
 refresh_prs(){
-  : > $PRCACHE.tmp
-  for r in lake-of-rage silphcoanalytics agent-fleet; do
-    timeout 30 gh pr list -R Evan-Kim2028/$r --limit 100 --state open \
-      --json number,headRefName --jq ".[] | \"$r \" + (.number|tostring) + \" \" + .headRefName" \
-      >> $PRCACHE.tmp 2>/dev/null
+  local tmp ok=1 repo
+  tmp=$(mktemp "$F/.pr_cache.XXXXXX") || return 1
+  for repo in lake-of-rage silphcoanalytics agent-fleet; do
+    timeout 30 gh pr list -R "Evan-Kim2028/$repo" --limit 100 --state open \
+      --json number,headRefName,headRefOid \
+      --jq ".[] | \"$repo \" + (.number|tostring) + \" \" + .headRefName + \" \" + .headRefOid" \
+      >> "$tmp" 2>/dev/null || ok=0
   done
-  mv $PRCACHE.tmp $PRCACHE
+  if [ "$ok" -eq 1 ]; then mv "$tmp" "$PRCACHE"; else rm -f "$tmp"; [ -f "$PRCACHE" ] || : > "$PRCACHE"; fi
 }
-find_pr(){ # find_pr LANE -> "REPO PR" or empty
-  awk -v fb="fb/$1" -v dq="dq1d/${1#dq1d-}" '$3==fb || $3==dq {print $1, $2; exit}' $PRCACHE 2>/dev/null
+find_pr(){
+  awk -v fb="fb/$1" -v dq="dq1d/${1#dq1d-}" '$3==fb || $3==dq{print $1, $2, $4; exit}' "$PRCACHE" 2>/dev/null
 }
-# informed-rework briefing: last gate's verified blockers + fixer history -> task file
-write_brief(){ # write_brief LANE
-  local l=$1 g=$F/gate/$1 p=$F/prompts/$1.task.md
-  [ -f "$p" ] && return 0            # an authored task file always wins
-  [ -s "$g/candidates.jsonl" ] || return 0
+pr_head(){ awk -v r="$1" -v p="$2" '$1==r && $2==p{print $4; exit}' "$PRCACHE" 2>/dev/null; }
+remove_queue(){
+  local lane=$1 repo=$2 pr=$3 tmp
+  tmp=$(mktemp "$F/.gate_queue.XXXXXX") || return 1
+  awk -v l="$lane" -v r="$repo" -v p="$pr" '!(NF>=3 && $1==l && $2==r && $3==p)' "$Q" > "$tmp"
+  mv "$tmp" "$Q"
+}
+write_brief(){
+  local lane=$1 gate=$F/gate/$1 prompt=$F/prompts/$1.task.md
+  [ -f "$prompt" ] && return 0
+  [ -s "$gate/candidates.jsonl" ] || return 0
   {
-    echo "# Re-gate briefing for $l (auto-generated by gate-queue)"
-    echo "The previous gate failed. Do NOT re-derive the diagnosis — start from"
-    echo "the verified findings below; the fix stage should address them directly."
-    echo
-    echo "## Verified/candidate blockers (candidates.jsonl)"
-    head -20 "$g/candidates.jsonl" | while read -r l2; do echo "- $l2"; done | cut -c1-400
-    [ -s "$g/confirmed.jsonl" ] && { echo; echo "## Confirmed claims"; head -15 "$g/confirmed.jsonl" | cut -c1-400; }
-    [ -s "$g/confirmed_untestable.jsonl" ] && { echo; echo "## Untestable claims (write the missing test or prove non-defect)"; head -10 "$g/confirmed_untestable.jsonl" | cut -c1-400; }
-    [ -s "$g/rounds.tsv" ] && { echo; echo "## Fixer history (what was tried)"; tail -10 "$g/rounds.tsv" | cut -c1-300; }
-    [ -s "$g/judge1.md" ] && { echo; echo "## Judge rationale"; tail -30 "$g/judge1.md" | cut -c1-400; }
-  } > "$p"
-  log "wrote informed brief $p"
-}
-quarantine(){ # quarantine LANE REASON
-  grep -q "^$1 " $QFILE || { echo "$1 $(date +%s) $2" >> $QFILE; log "QUARANTINE $1 ($2)"; }
+    printf '# Re-gate briefing for %s\n' "$lane"
+    printf 'The previous gate failed. Start from these prior findings and fix the confirmed issue.\n\n'
+    printf '## Candidate blockers\n'
+    head -20 "$gate/candidates.jsonl" | cut -c1-400
+    [ -s "$gate/confirmed.jsonl" ] && { printf '\n## Confirmed claims\n'; head -15 "$gate/confirmed.jsonl" | cut -c1-400; }
+    [ -s "$gate/confirmed_untestable.jsonl" ] && { printf '\n## Untestable claims\n'; head -10 "$gate/confirmed_untestable.jsonl" | cut -c1-400; }
+    [ -s "$gate/rounds.tsv" ] && { printf '\n## Fixer history\n'; tail -10 "$gate/rounds.tsv" | cut -c1-300; }
+    [ -s "$gate/judge1.md" ] && { printf '\n## Judge rationale\n'; tail -30 "$gate/judge1.md" | cut -c1-400; }
+  } > "$prompt"
+  log "wrote informed brief $prompt"
 }
 scan_escalations(){
-  local l last cls n lim repo pr
-  # cache per-scan state once — per-lane systemctl/grep calls on a loaded box
-  # turned a scan into ~20min (60 lanes x ~20s of forked calls). 2026-09-28.
-  local GATES QD QL
-  refresh_prs
-  GATES=$(gate_units); QD=$(queued); QL=$(awk "{print \$1}" $QFILE 2>/dev/null)
-  for s in $F/lanes/*.status; do
-    l=$(basename $s .status); last=$(tail -1 $s 2>/dev/null)
-    grep -qx "fleet-gate-$l.service" <<< "$GATES" && continue
-    grep -qx "$l" <<< "$QD" && continue
-    grep -qx "$l" <<< "$QL" && continue
-    case "$last" in *"start @"*|*PREMERGE-APPROVED*) continue;; esac
+  local lane last cls n repo pr sha age
+  local gates queued_lanes rebasing
+  refresh_prs || return 0
+  gates=$(gate_units)
+  queued_lanes=$(queued)
+  rebasing=$(systemctl --user list-units --no-legend --plain 'fleet-rebase-*.service' --state=running,activating 2>/dev/null | awk '{print $1}')
+  for status in "$F"/lanes/*.status; do
+    [ -f "$status" ] || continue
+    lane=$(basename "$status" .status)
+    grep -qx "fleet-gate-$lane.service" <<< "$gates" && continue
+    grep -qx "$lane" <<< "$queued_lanes" && continue
+    last=$(tail -1 "$status" 2>/dev/null)
+    cls=
     case "$last" in
-      *NEEDS-REBASE*|*"NEEDS-ESCALATION rebase:"*|*"rebase agent starting"*)
-        # "rebase agent starting" = orphaned wrapper (driver restart killed it;
-        # its agent may still have pushed — lane_rebase's already-rebased
-        # early-exit resolves that case by queueing without a new agent).
-        # Spawn as its own unit so driver restarts can't kill the wrapper.
-        grep -q "^fleet-rebase-" <<< "$GATES" && continue
-        rb=$(rebase_tries $l)
-        if [ "$rb" -ge 2 ]; then quarantine "$l" "rebase attempts exhausted"; continue; fi
-        read -r repo pr < <(find_pr $l); [ -n "${pr:-}" ] || continue
-        echo "$l $(date +%s) rebase" >> $RQ
-        systemd-run --user --quiet --collect --unit=fleet-rebase-$l --slice=fleet.slice \
-          $HOME/fleet/bin/lane_rebase.sh "$l" "$repo" "$pr" && \
-          log "rebase $l ($repo#$pr) spawned (${rb} prior)" || log "rebase spawn failed $l"
-        continue;;
-      *"shed by fleet pressure"*|*"fail-closed"*|*"died"*|*"could not run"*|*"gate refused"*|*"gate stuck"*) cls=infra;;
-      *"no-push"*|*"stalled after"*|*"merged-tree regression"*|*"untestable"*|*"fix round pushed nothing"*) cls=rework;;
+      *NEEDS-REBASE*|*'NEEDS-ESCALATION rebase:'*|*'rebase agent starting'*) cls=rebase;;
+      *'start @'*)
+        age=$(( $(date +%s) - $(stat -c %Y "$status" 2>/dev/null || echo 0) ))
+        [ "$age" -ge 1800 ] && cls=infra || continue;;
+      *'PREMERGE-APPROVED'*) continue;;
+      *'shed by fleet pressure'*|*fail-closed*|*died*|*'could not run'*|*'gate refused'*|*'gate stuck'*) cls=infra;;
+      *no-push*|*'stalled after'*|*'merged-tree regression'*|*untestable*|*'fix round pushed nothing'*) cls=rework;;
       *) continue;;
     esac
-    lim=3; [ "$cls" = rework ] && lim=1
-    n=$(requeues $l)
-    if [ "$n" -ge "$lim" ]; then
-      [ "$cls" = rework ] && quarantine "$l" "rework exhausted ($n)"
+    repo= pr= sha=
+    read -r repo pr sha < <(find_pr "$lane")
+    [ -n "${sha:-}" ] || continue
+    is_quarantined "$lane" "$sha" && continue
+    if [ "$cls" = rebase ]; then
+      grep -qx "fleet-rebase-$lane.service" <<< "$rebasing" && continue
+      [ -z "$rebasing" ] || continue
+      n=$(rebase_tries "$lane" "$sha")
+      if [ "$n" -ge 2 ]; then quarantine "$lane" "$sha" 'rebase attempts exhausted'; continue; fi
+      printf '%s %s rebase %s\n' "$lane" "$(date +%s)" "$sha" >> "$RQ"
+      if systemd-run --user --quiet --collect --unit="fleet-rebase-$lane" --slice=fleet.slice \
+        "$HOME/fleet/bin/lane_rebase.sh" "$lane" "$repo" "$pr"; then
+        log "rebase $lane ($repo#$pr) spawned ($n prior for $sha)"
+      else
+        log "rebase spawn failed $lane"
+      fi
       continue
     fi
-    a=$(attempts $l); [ "$a" -ge 6 ] && { quarantine "$l" "attempt cap ($a)"; continue; }
-    read -r repo pr < <(find_pr $l); [ -n "${pr:-}" ] || continue
-    [ "$cls" = rework ] && write_brief $l
-    echo "$l $repo $pr" >> $Q; echo "$l $(date +%s) $cls" >> $RQ
-    log "re-queue $l ($repo#$pr) class=$cls (${n} prior)"
+    lim=3; [ "$cls" = rework ] && lim=1
+    n=$(requeues "$lane" "$sha")
+    if [ "$n" -ge "$lim" ]; then quarantine "$lane" "$sha" "$cls attempts exhausted"; continue; fi
+    n=$(attempts "$lane" "$sha")
+    if [ "$n" -ge 6 ]; then quarantine "$lane" "$sha" 'attempt cap'; continue; fi
+    [ "$cls" = rework ] && write_brief "$lane"
+    printf '%s %s %s\n' "$lane" "$repo" "$pr" >> "$Q"
+    printf '%s %s %s %s\n' "$lane" "$(date +%s)" "$cls" "$sha" >> "$RQ"
+    log "re-queue $lane ($repo#$pr) class=$cls ($((n)) prior for $sha)"
   done
 }
-circuit(){ # 0 ok, 1 held
-  local f=$S/.circuit_hold_until now=$(date +%s)
-  [ -f "$f" ] && [ "$now" -lt "$(cat $f)" ] && return 1
-  # last 4 gate completions all infra-class inside 45min -> hold 30min
-  local bad
-  bad=$(tail -4 $DONE | while read -r l _ _ t; do tail -1 $F/lanes/$l.status 2>/dev/null; done | grep -cE "shed|fail-closed|died|could not run|stuck")
-  if [ "$bad" -ge 4 ]; then echo $(( now + 1800 )) > $f; log "circuit breaker: last 4 gates infra-failed; hold 30min"; return 1; fi
-  return 0
-}
+
 while :; do
-  line=""
-  while read -r l; do [ -n "${l%%#*}" ] || continue; ln=${l%%#*}; read -r _l _r _p <<EOF2
-$ln
-EOF2
-    grep -q "^${_l:-x} " $QFILE && { sed -i "/^$_l $_r $_p\$/d" $Q; continue; }
-    line=$ln; break
-  done < $Q 2>/dev/null
-  live=$(live_gates); nl=$(echo "$live" | grep -c . || true)
   scan_escalations
-  if [ -z "$line" ]; then
-    idle_n=$(cat $S/.gq_idle 2>/dev/null || echo 0); idle_n=$((idle_n+1)); echo $idle_n > $S/.gq_idle
-    [ $idle_n -gt 200 ] && { log "nothing actionable for ~5h; exit"; exit 0; }
-    sleep 90; continue
+  line=$(awk 'NF>=3 && $1 !~ /^#/{print $1, $2, $3; exit}' "$Q" 2>/dev/null)
+  if [ -z "$line" ]; then sleep 90; continue; fi
+  read -r lane repo pr <<< "$line"
+  sha=$(pr_head "$repo" "$pr")
+  if [ -z "$sha" ]; then
+    remove_queue "$lane" "$repo" "$pr"
+    log "dropped stale queue entry $lane ($repo#$pr is not open)"
+    continue
   fi
-  echo 0 > $S/.gq_idle
-  adm=$(cat $S/admission 2>/dev/null || echo closed)
-  dgr=$(cat $DGRH 2>/dev/null || echo 0)
-  if circuit; then circ=0; else circ=1; fi
-  if [ "$adm" = open ] && [ "$nl" -lt "$MAXG" ] && [ "${dgr:-0}" -lt 104857600 ] && [ $circ = 0 ]; then
-    read -r LANE REPO PR <<EOF2
-$line
-EOF2
-    if [ -n "${LANE:-}" ]; then
-      systemctl --user reset-failed fleet-gate-$LANE.service 2>/dev/null
-      if systemd-run --user --quiet --collect --unit=fleet-gate-$LANE --slice=fleet.slice -p RuntimeMaxSec=21600 \
-        -p StandardOutput=append:$F/gate-$LANE.log -p StandardError=append:$F/gate-$LANE.log \
-        /bin/bash -lc "~/fleet/fb/fbgate $LANE $REPO $PR"; then
-        sed -i "/^$LANE $REPO $PR\$/d" $Q
-        echo "$LANE $REPO $PR $(date +%F\ %T)" >> $DONE
-        log "fired gate $LANE ($REPO#$PR) [$nl in flight]"
-        sleep 10
-      else
-        log "fire failed $LANE; retrying next tick"
-      fi
-    else
-      sed -i "1d" $Q
-    fi
+  if is_quarantined "$lane" "$sha"; then
+    remove_queue "$lane" "$repo" "$pr"
+    continue
+  fi
+  n=$(live_gates | grep -c . || true)
+  if [ "$n" -ge "$MAXG" ] || ! python3 "$CAPACITY" --check; then sleep 90; continue; fi
+  if [ "$(attempts "$lane" "$sha")" -ge 6 ]; then
+    quarantine "$lane" "$sha" 'attempt cap'
+    remove_queue "$lane" "$repo" "$pr"
+    continue
+  fi
+  systemctl --user reset-failed "fleet-gate-$lane.service" 2>/dev/null
+  if systemd-run --user --quiet --collect --unit="fleet-gate-$lane" --slice=fleet.slice \
+    -p RuntimeMaxSec=21600 \
+    -p "StandardOutput=append:$F/gate-$lane.log" -p "StandardError=append:$F/gate-$lane.log" \
+    /bin/bash -c "~/fleet/fb/fbgate $lane $repo $pr"; then
+    remove_queue "$lane" "$repo" "$pr"
+    printf '%s %s %s %s %s\n' "$lane" "$repo" "$pr" "$sha" "$(date +%s)" >> "$DONE"
+    log "fired gate $lane ($repo#$pr @$sha) [$n in flight]"
+  else
+    log "fire failed $lane; retrying next tick"
   fi
   sleep 90
 done

@@ -1,0 +1,10 @@
+[Unit]
+Description=Keep the fleet gate queue driver active
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=30s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

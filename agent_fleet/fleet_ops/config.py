@@ -17,10 +17,11 @@ repo that omits ``fleet_ops:`` is unaffected::
           push_branch: fb/{lane}
           on_approved: "cp $STATUS $REPO/reviews/$PR-$SHA9.md"
       admission:
-        shared_dir: ~/.agent-fleet/admission
-        tests: 12
+        shared_dir: null
+        tests: 1
         typecheck: 4
         nice: 5
+        test_timeout_s: 1800
 
 ``admission:`` is the lane subprocess budget — the shared ``uv run pytest`` /
 ``pyright`` slot pools every operator contends for. Every key is optional and
@@ -228,6 +229,7 @@ def _parse_admission(raw: Any) -> AdmissionConfig:  # noqa: ANN401
         typecheck=_positive_int(raw.get("typecheck"), defaults.typecheck),
         nice=_non_negative_int(raw.get("nice"), defaults.nice),
         wait_s=_positive_float(raw.get("wait_s"), defaults.wait_s),
+        test_timeout_s=_positive_int(raw.get("test_timeout_s"), defaults.test_timeout_s),
     )
 
 

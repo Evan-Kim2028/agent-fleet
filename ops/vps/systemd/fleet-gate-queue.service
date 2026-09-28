@@ -1,5 +1,5 @@
 [Unit]
-Description=Serial lane gate queue driver (on-box substitute for remote orchestrator)
+Description=Resource-aware lane gate queue driver
 After=network-online.target
 
 [Service]
@@ -7,9 +7,10 @@ Type=simple
 Slice=fleet.slice
 MemoryHigh=256M
 MemoryMax=384M
-ExecStart=/bin/bash -c "/home/evan/fleet/bin/gate_queue_run.sh"
+ExecStart=%h/fleet/bin/gate_queue_run.sh
 Restart=on-failure
-RestartSec=30
+RestartSec=10
+TimeoutStopSec=30
 
 [Install]
 WantedBy=default.target

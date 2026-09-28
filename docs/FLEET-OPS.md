@@ -223,9 +223,10 @@ fleet_ops:
     psi_path: /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/agents.slice/cpu.pressure
     cluster_order: [C0, C1, C2] # launch order; unknown clusters sort last
   admission:
-    tests: 12                   # shared pytest slots (both operators)
+    tests: 1                    # same machine-wide pytest slot as gates
+    test_timeout_s: 1800        # stop an overlong pytest run and release the slot
     typecheck: 4                # shared pyright / pre-commit slots
-    shared_dir: null            # null -> ~/.agent-fleet/admission
+    shared_dir: null            # null uses ~/.agent-fleet/slots
     nice: 5                     # admitted runs yield to a committing lane
 ```
 

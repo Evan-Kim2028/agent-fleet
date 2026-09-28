@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_POOL_NAME = "agent"
 DEFAULT_POOL_SIZE = 24
 DEFAULT_TEST_POOL_NAME = "test"
-DEFAULT_TEST_POOL_SIZE = 4
+DEFAULT_TEST_POOL_SIZE = 1
 
 _POLL_INTERVAL_S = 0.25
 _LOCK_NB = fcntl.LOCK_EX | fcntl.LOCK_NB
