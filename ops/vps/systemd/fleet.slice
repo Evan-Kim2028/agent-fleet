@@ -2,15 +2,15 @@
 Description=Agent fleet (documents-0e): hard-capped, lowest priority, frozen first under host memory pressure
 # 2026-09-28 rebalance: was 20G/22G unpinned. Fleet is a scavenger class —
 # agents are LLM-call-bound and pytest bursts are per-scope capped (6G), so
-# 10G is generous; the old 22G envelope over-subscribed the box (~130G of
+# 15G is generous; the old 22G envelope over-subscribed the box (~130G of
 # caps vs 62G RAM) and unpinned CPUs let agent pytest wander onto lor-api
-# cores 0-7. Now: 8G/10G, pinned to cores 8-15 which it shares with
+# cores 0-7. Now: 12G/15G, pinned to cores 8-15 which it shares with
 # lake/dagster at CPUWeight 20 (vs their 50) — ~1/6 of shared cores under
 # contention, near-full bandwidth when prod is idle.
 
 [Slice]
-MemoryHigh=8G
-MemoryMax=10G
+MemoryHigh=12G
+MemoryMax=15G
 MemorySwapMax=0
 AllowedCPUs=8-15
 CPUQuota=600%

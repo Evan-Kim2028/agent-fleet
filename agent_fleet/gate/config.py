@@ -174,7 +174,7 @@ class GateConfig:
     # keeps making microscopic progress. See docs/GATE.md.
     max_fix_rounds: int = 4
     agent_slots: int = 24
-    test_slots: int = 4
+    test_slots: int = 1
     #: Approve a docs/tests-only PR on deterministic evidence alone (its own
     #: changed tests green at head plus the merged-tree check), skipping the
     #: model review entirely. See docs/GATE.md.

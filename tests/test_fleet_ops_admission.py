@@ -33,7 +33,7 @@ from agent_fleet.fleet_ops.admission import (
 )
 from agent_fleet.fleet_ops.config import FleetOpsConfig, load_fleet_ops_config
 from agent_fleet.fleet_ops.engines import _spawn_capture
-from agent_fleet.slots import SlotPool
+from agent_fleet.slots import SlotPool, default_slots_root
 
 
 @pytest.fixture(autouse=True)
@@ -89,9 +89,9 @@ def test_an_absolute_path_to_pytest_is_still_classified() -> None:
     assert classify(["run", "/venv/bin/pytest", "-q"]) == admission.TEST_POOL
 
 
-def test_the_pools_are_distinct_from_the_gate_pools() -> None:
-    """A lane must not be able to consume the gate's reviewer slots."""
-    assert admission.TEST_POOL not in ("agent", "test")
+def test_lane_and_gate_pytest_share_one_pool() -> None:
+    assert admission.TEST_POOL == "test"
+    assert AdmissionConfig().tests == 1
     assert admission.TYPECHECK_POOL not in ("agent", "test")
 
 
@@ -164,6 +164,15 @@ def test_the_shim_renders_the_live_classification_table(tmp_path: Path) -> None:
     source = path.read_text(encoding="utf-8")
     for tool, pool in admission._POOL_FOR_TOOL.items():
         assert f"{tool!r}: {pool!r}" in source
+    assert "TEST_TIMEOUT_S = 1800" in source
+    assert "os.execv(TIMEOUT" in source
+
+
+def test_default_lane_tests_share_the_gate_slot_root() -> None:
+    config = AdmissionConfig()
+    assert admission.TEST_POOL == "test"
+    assert config.slots_dir() == default_slots_root()
+    assert config.pool_size(admission.TEST_POOL) == 1
 
 
 def test_the_shim_agrees_with_classify_on_real_argv(tmp_path: Path) -> None:
@@ -232,6 +241,23 @@ def test_the_shim_holds_its_slot_while_the_real_tool_runs(tmp_path: Path) -> Non
     assert second.wait(timeout=60) == 0, "the blocked caller runs once the slot frees"
 
 
+def test_test_timeout_releases_the_shared_slot(tmp_path: Path) -> None:
+    config = AdmissionConfig(shared_dir=tmp_path, tests=1, nice=0, test_timeout_s=1)
+    stub = _write_stub_uv(tmp_path)
+    shim = write_shim(tmp_path / "shim", real=str(stub), config=config)
+    proc = subprocess.run(
+        [str(shim), "run", "pytest", "-q", "tests/test_case.py"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert proc.returncode == 124
+    assert (tmp_path / "running").exists()
+    slot = SlotPool(admission.TEST_POOL, root=config.slots_dir(), size=1).acquire(timeout_s=1)
+    slot.release()
+
+
 def test_two_slots_admit_two_and_block_a_third(tmp_path: Path) -> None:
     config = AdmissionConfig(shared_dir=tmp_path, tests=2, typecheck=1, wait_s=30.0)
     stub = _write_stub_uv(tmp_path)
@@ -293,6 +319,7 @@ def test_the_admission_section_sets_every_knob(tmp_path: Path) -> None:
                     "typecheck": 2,
                     "nice": 3,
                     "wait_s": 12.5,
+                    "test_timeout_s": 900,
                 }
             }
         }
@@ -303,6 +330,7 @@ def test_the_admission_section_sets_every_knob(tmp_path: Path) -> None:
     assert config.admission.typecheck == 2
     assert config.admission.nice == 3
     assert config.admission.wait_s == 12.5
+    assert config.admission.test_timeout_s == 900
 
 
 @pytest.mark.parametrize("section", [None, {}, "nonsense", {"tests": 0, "nice": -1}])
