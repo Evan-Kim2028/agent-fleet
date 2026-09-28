@@ -34,11 +34,18 @@ queued(){ grep -v "^#" $Q 2>/dev/null | awk "{print \$1}"; }
 requeues(){ awk -v l="$1" '$1==l{c++} END{print c+0}' $RQ 2>/dev/null; }
 attempts(){ awk -v l="$1" '$1==l{c++} END{print c+0}' $DONE 2>/dev/null; }
 rebase_tries(){ awk -v l="$1" '$1==l && $3=="rebase"{c++} END{print c+0}' $RQ 2>/dev/null; }
-find_pr(){ # find_pr LANE -> "REPO PR" or empty
+PRCACHE=$F/.pr_cache; # refreshed once per scan — find_pr is O(1) after that
+refresh_prs(){
+  : > $PRCACHE.tmp
   for r in lake-of-rage silphcoanalytics agent-fleet; do
-    pr=$(gh pr list -R Evan-Kim2028/$r --limit 100 --state open --json number,headRefName --jq ".[] | select(.headRefName==\"fb/$1\" or .headRefName==\"dq1d/${1#dq1d-}\") | .number" 2>/dev/null | head -1)
-    [ -n "$pr" ] && { echo "$r $pr"; return; }
+    timeout 30 gh pr list -R Evan-Kim2028/$r --limit 100 --state open \
+      --json number,headRefName --jq ".[] | \"$r \" + (.number|tostring) + \" \" + .headRefName" \
+      >> $PRCACHE.tmp 2>/dev/null
   done
+  mv $PRCACHE.tmp $PRCACHE
+}
+find_pr(){ # find_pr LANE -> "REPO PR" or empty
+  awk -v fb="fb/$1" -v dq="dq1d/${1#dq1d-}" '$3==fb || $3==dq {print $1, $2; exit}' $PRCACHE 2>/dev/null
 }
 # informed-rework briefing: last gate's verified blockers + fixer history -> task file
 write_brief(){ # write_brief LANE
@@ -60,27 +67,36 @@ write_brief(){ # write_brief LANE
   log "wrote informed brief $p"
 }
 quarantine(){ # quarantine LANE REASON
-  grep -qx "$1" $QFILE || { echo "$1 $(date +%s) $2" >> $QFILE; log "QUARANTINE $1 ($2)"; }
+  grep -q "^$1 " $QFILE || { echo "$1 $(date +%s) $2" >> $QFILE; log "QUARANTINE $1 ($2)"; }
 }
 scan_escalations(){
   local l last cls n lim repo pr
+  # cache per-scan state once — per-lane systemctl/grep calls on a loaded box
+  # turned a scan into ~20min (60 lanes x ~20s of forked calls). 2026-09-28.
+  local GATES QD QL
+  refresh_prs
+  GATES=$(gate_units); QD=$(queued); QL=$(awk "{print \$1}" $QFILE 2>/dev/null)
   for s in $F/lanes/*.status; do
     l=$(basename $s .status); last=$(tail -1 $s 2>/dev/null)
-    gate_units | grep -qx "fleet-gate-$l.service" && continue
-    queued | grep -qx "$l" && continue
-    grep -q "^$l " $QFILE && continue
+    grep -qx "fleet-gate-$l.service" <<< "$GATES" && continue
+    grep -qx "$l" <<< "$QD" && continue
+    grep -qx "$l" <<< "$QL" && continue
     case "$last" in *"start @"*|*PREMERGE-APPROVED*) continue;; esac
     case "$last" in
-      *NEEDS-REBASE*|*"NEEDS-ESCALATION rebase:"*)
-        # spawn at most one rebase at a time, cap 2 spawns per lane;
-        # lane_rebase re-queues the lane itself after a successful push
-        pgrep -f "lane_rebase.sh" >/dev/null && continue
+      *NEEDS-REBASE*|*"NEEDS-ESCALATION rebase:"*|*"rebase agent starting"*)
+        # "rebase agent starting" = orphaned wrapper (driver restart killed it;
+        # its agent may still have pushed — lane_rebase's already-rebased
+        # early-exit resolves that case by queueing without a new agent).
+        # Spawn as its own unit so driver restarts can't kill the wrapper.
+        grep -q "^fleet-rebase-" <<< "$GATES" && continue
         rb=$(rebase_tries $l)
         if [ "$rb" -ge 2 ]; then quarantine "$l" "rebase attempts exhausted"; continue; fi
         read -r repo pr < <(find_pr $l); [ -n "${pr:-}" ] || continue
         echo "$l $(date +%s) rebase" >> $RQ
-        nohup $HOME/fleet/bin/lane_rebase.sh "$l" "$repo" "$pr" >/dev/null 2>&1 &
-        log "rebase $l ($repo#$pr) spawned (${rb} prior)"; continue;;
+        systemd-run --user --quiet --collect --unit=fleet-rebase-$l --slice=fleet.slice \
+          $HOME/fleet/bin/lane_rebase.sh "$l" "$repo" "$pr" && \
+          log "rebase $l ($repo#$pr) spawned (${rb} prior)" || log "rebase spawn failed $l"
+        continue;;
       *"shed by fleet pressure"*|*"fail-closed"*|*"died"*|*"could not run"*|*"gate refused"*|*"gate stuck"*) cls=infra;;
       *"no-push"*|*"stalled after"*|*"merged-tree regression"*|*"untestable"*|*"fix round pushed nothing"*) cls=rework;;
       *) continue;;
