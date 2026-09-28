@@ -36,6 +36,15 @@ if git -C $W status --porcelain | grep -q .; then
 fi
 git -C $W reset -q --hard origin/$BR
 before=$(git -C $B rev-parse origin/$BR)
+# already rebased? If origin/main's tip is the merge base of the branch, a prior
+# run (or a dead wrapper whose agent finished anyway) already rebased it —
+# don't burn an agent, just re-queue.
+mb=$(git -C $B merge-base origin/main origin/$BR)
+if [ "$mb" = "$(git -C $B rev-parse origin/main)" ]; then
+  ST "branch already based on current main; queueing re-gate"
+  printf "%s %s %s\n" "$LANE" "$REPO" "$PR" >> $F/gate_queue.txt
+  exit 0
+fi
 P=$F/prompts; mkdir -p $P
 sed -e "s#@W@#$W#g; s#@L@#$LANE#g; s#@PR@#$PR#g; s#@REPO@#$REPO#g; s#@BR@#$BR#g; s#@OWNER@#Evan-Kim2028#g" > $P/rebase-$LANE.md <<'P'
 In the worktree @W@ (branch @BR@, PR #@PR@ in @OWNER@/@REPO@): the PR conflicts with main.
