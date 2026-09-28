@@ -16,7 +16,8 @@ while :; do
   if [ -z "$line" ]; then idle=$((idle+1)); [ $idle -gt 40 ] && { log "queue drained; exit"; exit 0; }; sleep 90; continue; fi
   idle=0
   adm=$(cat $S/admission 2>/dev/null || echo closed)
-  gate=$(systemctl --user list-units --no-legend --plain "fleet-gate-*.service" --state=running,activating 2>/dev/null | awk "{print $1}" | grep -v fleet-gate-queue.service | head -1)
+  gate=$(systemctl --user list-units --no-legend --plain "fleet-gate-*.service" --state=running,activating 2>/dev/null | awk "{print \$1}" | grep -v fleet-gate-queue.service | head -1)
+  [ -z "$gate" ] && gate=$(pgrep -f "fleet/fb/fbgate " | head -1)
   dgr=$(cat $DGRH 2>/dev/null || echo 0)
   if [ "$adm" = open ] && [ -z "$gate" ] && [ "${dgr:-0}" -lt 104857600 ]; then
     read -r LANE REPO PR <<EOF2
@@ -30,6 +31,7 @@ EOF2
         sed -i "/^$LANE $REPO $PR$/d" $Q
         echo "$LANE $REPO $PR $(date +%F\ %T)" >> $DONE
         log "fired gate $LANE ($REPO#$PR)"
+        sleep 10
       else
         log "fire failed $LANE; retrying next tick"
       fi
