@@ -627,7 +627,8 @@ class MergeTrain:
 
         if outcome.passed:
             result.verdicts += tuple(self._land(batch, merger, "combined tree passed"))
-            result.detail = f"batch of {len(batch)} landed after one test run"
+            landed_now = sum(1 for v in result.verdicts if v.status == LANDED)
+            result.detail = f"batch of {landed_now} landed after one test run"
             return result
 
         landable: list[TrainPR] = []
@@ -644,7 +645,8 @@ class MergeTrain:
         result.verdicts += tuple(self._land(landable, merger, "survived the red batch"))
         result.verdicts += tuple(culprits)
         names = ", ".join(f"#{c.pr}" for c in culprits)
-        result.detail = f"combined tree failed; set aside {names} and landed the rest"
+        landed_now = sum(1 for v in result.verdicts if v.status == LANDED)
+        result.detail = f"combined tree failed; set aside {names} and landed {landed_now}"
         return result
 
     def _land(self, prs: Sequence[TrainPR], merger: Merger | None, reason: str) -> list[PRVerdict]:
@@ -659,19 +661,25 @@ class MergeTrain:
             return []
         if merger is None:
             return [PRVerdict(pr=p.number, status=LANDED, reason=reason) for p in prs]
-        merged = set(merger.land(prs))
-        return [
-            PRVerdict(
-                pr=p.number,
-                status=LANDED if p.number in merged else SKIPPED_MOVED,
-                reason=(
-                    reason
-                    if p.number in merged
-                    else "head moved between the test run and the merge; not merged"
-                ),
-            )
-            for p in prs
-        ]
+        statuses = merger.land(prs) if merger else {}
+        verdicts = []
+        for p in prs:
+            status = statuses.get(p.number, "skipped")
+            if status == "landed":
+                verdicts.append(PRVerdict(pr=p.number, status=LANDED, reason=reason))
+            elif status == "merge_failed":
+                verdicts.append(PRVerdict(
+                    pr=p.number,
+                    status=SKIPPED_MOVED,
+                    reason="merge refused by GitHub; check train logs for the actual error",
+                ))
+            else:
+                verdicts.append(PRVerdict(
+                    pr=p.number,
+                    status=SKIPPED_MOVED,
+                    reason="head moved between the test run and the merge; not merged",
+                ))
+        return verdicts
 
 
 def _moved_verdicts(moved: Sequence[TrainPR]) -> list[PRVerdict]:
@@ -1146,7 +1154,7 @@ class GitFold:
         # the registration for a path that was never fully created.
         try:
             self._git(["git", "worktree", "remove", "--force", str(worktree)])
-        except OSError, subprocess.SubprocessError:
+        except (OSError, subprocess.SubprocessError):
             self._git(["git", "worktree", "prune"])
         shutil.rmtree(worktree, ignore_errors=True)
 
@@ -1396,16 +1404,16 @@ class GitMerger:
         self.repo_path = Path(repo_path)
         self.repo = repo or _repo_slug(self.repo_path)
 
-    def land(self, prs: Sequence[TrainPR]) -> list[int]:
-        landed: list[int] = []
+    def land(self, prs: Sequence[TrainPR]) -> dict[int, str]:
+        statuses: dict[int, str] = {}
         for pr in prs:
             full_oid, draft = self._head_unchanged(pr)
             if full_oid is None:
+                statuses[pr.number] = "skipped"
                 continue
             if draft:
                 ready = _run(
-                    ["gh", "pr", "ready", str(pr.number)]
-                    + (["--repo", self.repo] if self.repo else []),
+                    ["gh", "pr", "ready", str(pr.number)],
                     cwd=self.repo_path,
                 )
                 if ready.returncode != 0:
@@ -1414,6 +1422,8 @@ class GitMerger:
                         pr.number,
                         ready.stderr.strip(),
                     )
+                    statuses[pr.number] = "draft_ready_failed"
+                    continue
             merged = _run(
                 [
                     "gh",
@@ -1427,15 +1437,15 @@ class GitMerger:
                     # the report cannot tell from a moved head.
                     "--match-head-commit",
                     full_oid,
-                ]
-                + (["--repo", self.repo] if self.repo else []),
+                ],
                 cwd=self.repo_path,
             )
             if merged.returncode == 0:
-                landed.append(pr.number)
+                statuses[pr.number] = "landed"
             else:
                 logger.info("train: gh pr merge #%s failed: %s", pr.number, merged.stderr.strip())
-        return landed
+                statuses[pr.number] = "merge_failed"
+        return statuses
 
     def _head_unchanged(self, pr: TrainPR) -> tuple[str | None, bool]:
         """Full OID for the merge pin, and whether the pull is still a draft.
@@ -1443,8 +1453,7 @@ class GitMerger:
         ``None`` means do not merge: unreadable, closed, or the head moved.
         """
         view = _run(
-            ["gh", "pr", "view", str(pr.number), "--json", "headRefOid,state,isDraft"]
-            + (["--repo", self.repo] if self.repo else []),
+            ["gh", "pr", "view", str(pr.number), "--json", "headRefOid,state,isDraft"],
             cwd=self.repo_path,
         )
         if view.returncode != 0:
