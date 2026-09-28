@@ -30,11 +30,11 @@ for d in "${!grp[@]}"; do
     sleep 3; test_waited=$((test_waited+3))
     [ "$test_waited" -lt "${TEST_ADMISSION_WAIT_S:-3600}" ] || { echo "INFRA: no fleet headroom for pytest after ${test_waited}s"; exit 2; }
   done
-  out=$(cd "$d" && systemd-run --user --scope -q --slice=fleet.slice -p MemoryMax=6G -p MemorySwapMax=0 timeout 1800 uv run $ap pytest -q -rfE -p no:cacheprovider ${grp[$d]} 2>&1); rc=$?
-  if [ $rc -ge 2 ] && grep -q 'Failed to spawn: `pytest`' <<< "$out"; then
+  out=$(cd "$d" && systemd-run --user --scope -q --slice=fleet.slice -p MemoryMax=6G -p MemorySwapMax=0 env PYTHONPATH="$d:$ROOT${PYTHONPATH:+:$PYTHONPATH}" timeout 1800 uv run $ap python -m pytest -q -rfE -p no:cacheprovider ${grp[$d]} 2>&1); rc=$?
+  if [ $rc -ge 1 ] && grep -qE 'Failed to spawn: `pytest`|No module named pytest' <<< "$out"; then
     # a package dir whose env has no pytest (e.g. the silph repo root that an importer search reached) failed 4 of 10
     # merged-tree checks at 11:00-15:00 as "could not run": run it with pytest added instead of failing the gate
-    out=$(cd "$d" && systemd-run --user --scope -q --slice=fleet.slice -p MemoryMax=6G -p MemorySwapMax=0 timeout 1800 uv run $ap --with pytest pytest -q -rfE -p no:cacheprovider ${grp[$d]} 2>&1); rc=$?
+    out=$(cd "$d" && systemd-run --user --scope -q --slice=fleet.slice -p MemoryMax=6G -p MemorySwapMax=0 env PYTHONPATH="$d:$ROOT${PYTHONPATH:+:$PYTHONPATH}" timeout 1800 uv run $ap --with pytest python -m pytest -q -rfE -p no:cacheprovider ${grp[$d]} 2>&1); rc=$?
   fi
   exec 8>&-
   echo "$out" | grep -oE "^(FAILED|ERROR) [^ ]+" | awk -v p="${rel:+$rel/}" '{print "FAILED " p $2}'

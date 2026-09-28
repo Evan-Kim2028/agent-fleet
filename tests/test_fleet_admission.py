@@ -39,7 +39,7 @@ def _run_capacity(
 
 
 def test_every_pytest_entrypoint_uses_the_one_shared_slot() -> None:
-    from agent_fleet.fleet_ops.admission import AdmissionConfig, TEST_POOL
+    from agent_fleet.fleet_ops.admission import TEST_POOL, AdmissionConfig
     from agent_fleet.gate.config import GateConfig
     from agent_fleet.slots import DEFAULT_TEST_POOL_SIZE
 
@@ -50,14 +50,20 @@ def test_every_pytest_entrypoint_uses_the_one_shared_slot() -> None:
     orchestrator_shim = (OPS_VPS / "orchestrator" / "shim" / "uv").read_text()
     gate_pytest = (OPS_VPS / "orchestrator" / "fm_pytest.sh").read_text()
     driver = (OPS_VPS / "worker" / "bin" / "gate_queue_run.sh").read_text()
+    lane_runner = (OPS_VPS / "worker" / "bin" / "lane_impl.sh").read_text()
     service = (OPS_VPS / "systemd" / "fleet-gate-queue.service").read_text()
     timer = (OPS_VPS / "systemd" / "fleet-gate-queue.timer").read_text()
     for source in (worker_shim, orchestrator_shim):
         assert "POOL=test; N=1" in source
         assert "/slots/test" in source
         assert "timeout --signal=TERM --kill-after=10s" in source
+        assert "--fleet-headroom-gib 6" in source
     assert "/slots/test" in gate_pytest
     assert "slot.$i" in gate_pytest
+    assert "--fleet-headroom-gib 6" in gate_pytest
+    assert "python -m pytest" in gate_pytest
+    assert 'PYTHONPATH="$d:$ROOT' in gate_pytest
+    assert "FLEET_CAPACITY_HELPER" in lane_runner
     assert "--check" in driver and "gate_processes" in driver and "sort -u" in driver
     assert "DGRH" not in driver and "circuit(){" not in driver
     assert "Restart=on-failure" in service and "%h/fleet/bin/gate_queue_run.sh" in service
@@ -89,7 +95,8 @@ def test_capacity_helper_compiles_with_system_python() -> None:
         [
             "python3",
             "-c",
-            "import pathlib, sys; p=pathlib.Path(sys.argv[1]); compile(p.read_text(), str(p), 'exec')",
+            "import pathlib, sys; "
+            "p=pathlib.Path(sys.argv[1]); compile(p.read_text(), str(p), 'exec')",
             str(HELPER),
         ],
         capture_output=True,
