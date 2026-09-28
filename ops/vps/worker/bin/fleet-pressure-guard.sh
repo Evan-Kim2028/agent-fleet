@@ -40,8 +40,10 @@ if [ $new -ge 2 ] && [ $cur -lt 2 ]; then
 elif [ $new -lt 2 ] && [ $cur -ge 2 ]; then
   systemctl --user set-property --runtime $U CPUQuota=600%; log "unthrottle: CPUQuota 600%"
 fi
+# fleet-gate-queue.service is the gate DRIVER, not a gate — exclude it
+# from every glob so a stall-shed never kills the driver (2026-09-28).
 newest_unit(){
-  systemctl --user list-units --full --no-legend --plain --no-pager "$1" 2>/dev/null | awk '{print $1}' | while read -r u; do
+  systemctl --user list-units --full --no-legend --plain --no-pager "$1" 2>/dev/null | awk '{print $1}' | grep -v fleet-gate-queue.service | while read -r u; do
     [ -n "$u" ] || continue
     echo "$(systemctl --user show "$u" -p ActiveEnterTimestampMonotonic --value) $u"
   done | sort -rn | head -1 | awk '{print $2}'
