@@ -13,7 +13,7 @@ LANE=$1; REPO=$2; PR=$3; DROPNOTE=""
 F=$HOME/fleet/fb; P=$F/prompts; R=$F/runs
 # Remote gate worker (lor-main): agents via fbagent (OpenRouter primary, cmd fallback); everything in fleet.slice.
 source ~/fleet/env.sh; export FB_RUNS=$R; mkdir -p $R $F/lanes $F/locks
-OWNER=${FLEET_GH_OWNER:-Evan-Kim2028}; SLUG=$OWNER/$REPO; S=$F/lanes/$LANE.status; G=$F/gate/$LANE; AGENT_SLOTS=${GATE_AGENT_SLOTS:-124}
+OWNER=${FLEET_GH_OWNER:-Evan-Kim2028}; SLUG=$OWNER/$REPO; S=$F/lanes/$LANE.status; G=$F/gate/$LANE; AGENT_SLOTS=${GATE_AGENT_SLOTS:-8}
 mkdir -p $G $F/sem; : > $G/log; rm -f $G/dead
 st(){ echo "$(date +%H:%M:%S) $*" >> $S; echo "$(date +%H:%M:%S) [$LANE] gate: $*" >> $F/events.log; echo "$(date +%H:%M:%S) $*" >> $G/log; }
 unset FB_MODEL
