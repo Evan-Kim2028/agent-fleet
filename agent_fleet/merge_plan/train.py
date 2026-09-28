@@ -1399,8 +1399,21 @@ class GitMerger:
     def land(self, prs: Sequence[TrainPR]) -> list[int]:
         landed: list[int] = []
         for pr in prs:
-            if not self._head_unchanged(pr):
+            full_oid, draft = self._head_unchanged(pr)
+            if full_oid is None:
                 continue
+            if draft:
+                ready = _run(
+                    ["gh", "pr", "ready", str(pr.number)]
+                    + (["--repo", self.repo] if self.repo else []),
+                    cwd=self.repo_path,
+                )
+                if ready.returncode != 0:
+                    logger.info(
+                        "train: gh pr ready #%s failed: %s",
+                        pr.number,
+                        ready.stderr.strip(),
+                    )
             merged = _run(
                 [
                     "gh",
@@ -1408,8 +1421,12 @@ class GitMerger:
                     "merge",
                     str(pr.number),
                     "--merge",
+                    # The full 40-character OID. A short approved SHA is a
+                    # valid prefix for the re-read but GraphQL rejects it as a
+                    # GitObjectID, which turns a clean merge into a failure
+                    # the report cannot tell from a moved head.
                     "--match-head-commit",
-                    pr.head_sha,
+                    full_oid,
                 ]
                 + (["--repo", self.repo] if self.repo else []),
                 cwd=self.repo_path,
@@ -1420,25 +1437,31 @@ class GitMerger:
                 logger.info("train: gh pr merge #%s failed: %s", pr.number, merged.stderr.strip())
         return landed
 
-    def _head_unchanged(self, pr: TrainPR) -> bool:
+    def _head_unchanged(self, pr: TrainPR) -> tuple[str | None, bool]:
+        """Full OID for the merge pin, and whether the pull is still a draft.
+
+        ``None`` means do not merge: unreadable, closed, or the head moved.
+        """
         view = _run(
-            ["gh", "pr", "view", str(pr.number), "--json", "headRefOid,state"]
+            ["gh", "pr", "view", str(pr.number), "--json", "headRefOid,state,isDraft"]
             + (["--repo", self.repo] if self.repo else []),
             cwd=self.repo_path,
         )
         if view.returncode != 0:
             logger.info("train: cannot re-read #%s, not merging", pr.number)
-            return False
+            return None, False
         try:
             detail = json.loads(view.stdout)
         except json.JSONDecodeError:
-            return False
+            return None, False
         if detail.get("state") != "OPEN":
-            return False
+            return None, False
         # Prefix comparison for the same reason as ``TrainPR.moved``: the
         # approved SHA is short, GitHub's headRefOid is full.
         head = str(detail.get("headRefOid") or "")
-        return bool(head) and head.startswith(pr.head_sha)
+        if not (head and head.startswith(pr.head_sha)):
+            return None, False
+        return head, bool(detail.get("isDraft"))
 
 
 def run_train(
