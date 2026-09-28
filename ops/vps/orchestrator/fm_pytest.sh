@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 source ~/fleet/env.sh
 # fm_pytest.sh ROOT TEST_PATH... — run tests grouped by nearest pyproject.toml package dir; prints "FAILED <root-relative id>" lines; exit 0 ok, 1 test failures only, 2 infra/collection problem.
-ROOT=$1; shift; declare -A grp; SEM=${FLEET_TEST_SLOT_DIR:-${AGENT_FLEET_HOME:-$HOME/.agent-fleet}/slots/test}; mkdir -p "$SEM"
+ROOT=$1; shift; declare -A grp; SEM=${FLEET_TEST_SLOT_DIR:-${AGENT_FLEET_HOME:-$HOME/.agent-fleet}/slots/test}; CAPACITY=${FLEET_CAPACITY_HELPER:-$HOME/fleet/bin/fleet_admission.py}; mkdir -p "$SEM"
 # Result cache (owner 2026-09-26: batch/avoid repeated test runs). Key = git tree of the WHOLE worktree including
 # uncommitted and untracked files (temp index) + the test list; any code change gives a new key. TTL 24 h.
 TC=$HOME/fleet/cache/fmtest; mkdir -p $TC; find $TC -maxdepth 1 -type f -mmin +1440 -delete 2>/dev/null
@@ -18,7 +18,18 @@ for d in "${!grp[@]}"; do
   rel=${d#$ROOT}; rel=${rel#/}
   ap=""; grep -q "^\[tool\.uv\.workspace\]" "$d/pyproject.toml" 2>/dev/null && ap="--all-packages"
   # Machine-wide test admission: one pytest run across gate, lane, and direct-agent paths.
-  exec 8>/dev/null; while :; do for i in $(seq 0 $((${TEST_SLOTS:-1} - 1))); do exec 8>"$SEM/slot.$i"; flock -n 8 && break 2; done; sleep 3; done
+  exec 8>/dev/null; test_waited=0
+  while :; do
+    for i in $(seq 0 $((${TEST_SLOTS:-1} - 1))); do
+      exec 8>"$SEM/slot.$i"
+      if flock -n 8; then
+        if [ ! -x "$CAPACITY" ] || python3 "$CAPACITY" --check --fleet-headroom-gib 6; then break 2; fi
+        exec 8>&-
+      fi
+    done
+    sleep 3; test_waited=$((test_waited+3))
+    [ "$test_waited" -lt "${TEST_ADMISSION_WAIT_S:-3600}" ] || { echo "INFRA: no fleet headroom for pytest after ${test_waited}s"; exit 2; }
+  done
   out=$(cd "$d" && systemd-run --user --scope -q --slice=fleet.slice -p MemoryMax=6G -p MemorySwapMax=0 timeout 1800 uv run $ap pytest -q -rfE -p no:cacheprovider ${grp[$d]} 2>&1); rc=$?
   if [ $rc -ge 2 ] && grep -q 'Failed to spawn: `pytest`' <<< "$out"; then
     # a package dir whose env has no pytest (e.g. the silph repo root that an importer search reached) failed 4 of 10

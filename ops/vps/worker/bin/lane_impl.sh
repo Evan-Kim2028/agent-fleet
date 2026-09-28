@@ -7,6 +7,7 @@ F=$HOME/fleet/fb
 LOG=$F/lane-impl-$LANE.log
 cd ~/fleet/src/agent-fleet || exit 65
 source ~/fleet/env.sh 2>/dev/null || true
+export FLEET_CAPACITY_HELPER="${FLEET_CAPACITY_HELPER:-$HOME/fleet/bin/fleet_admission.py}"
 ~/fleet/src/agent-fleet/.venv/bin/agent-fleet lane run \
   --operator devin-0 --lane "$LANE" --repo-path "$HOME/$REPO" \
   --task-file "$F/prompts/$LANE.task.md" --engine cmd \

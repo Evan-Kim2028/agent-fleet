@@ -181,6 +181,7 @@ The slots are flock files under {config.slots_dir()}, shared by every operator.
 
 import fcntl
 import os
+import subprocess
 import sys
 import time
 
@@ -196,6 +197,7 @@ REAL = {real!r}
 WAIT_S = {config.wait_s!r}
 TEST_TIMEOUT_S = {config.test_timeout_s!r}
 TIMEOUT = {shutil.which("timeout")!r}
+CAPACITY_HELPER = {os.environ.get("FLEET_CAPACITY_HELPER", "")!r}
 NICE = {config.nice!r}
 
 #: Must match agent_fleet.slots._POLL_INTERVAL_S so both implementations poll
@@ -238,6 +240,31 @@ def acquire(pool, size):
         time.sleep(POLL_S)
 
 
+def acquire_test(pool, size):
+    deadline = time.monotonic() + WAIT_S
+    while True:
+        fd = acquire(pool, size)
+        try:
+            result = subprocess.run(
+                [sys.executable, CAPACITY_HELPER, "--check", "--fleet-headroom-gib", "6"],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+            admitted = result.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            admitted = False
+        if admitted:
+            return fd
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+        if time.monotonic() >= deadline:
+            sys.exit(
+                "agent-fleet admission: no fleet headroom for pytest after " + str(WAIT_S) + "s"
+            )
+        time.sleep(POLL_S)
+
+
 def main():
     argv = sys.argv[1:]
     pool = classify(argv)
@@ -246,7 +273,10 @@ def main():
         # takes no slot, so `uv sync` and `uv --version` never queue.
         os.execv(REAL, [REAL, *argv])
 
-    fd = acquire(pool, SIZES[pool])
+    if pool == {TEST_POOL!r} and CAPACITY_HELPER:
+        fd = acquire_test(pool, SIZES[pool])
+    else:
+        fd = acquire(pool, SIZES[pool])
 
     # The flock lives on this fd. os.execv keeps fds open, but Python opens them
     # O_CLOEXEC by default -- without this the kernel drops the lock the moment
@@ -261,7 +291,15 @@ def main():
     if pool == {TEST_POOL!r}:
         if TIMEOUT is None:
             sys.exit("agent-fleet admission: GNU timeout is required for test runs")
-        os.execv(TIMEOUT, [TIMEOUT, "--signal=TERM", "--kill-after=10s", f"{{TEST_TIMEOUT_S}}s", REAL, *argv])
+        command = [
+            TIMEOUT,
+            "--signal=TERM",
+            "--kill-after=10s",
+            f"{{TEST_TIMEOUT_S}}s",
+            REAL,
+            *argv,
+        ]
+        os.execv(TIMEOUT, command)
     os.execv(REAL, [REAL, *argv])
 
 
