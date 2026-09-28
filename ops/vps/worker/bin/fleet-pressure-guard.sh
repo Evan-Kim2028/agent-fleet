@@ -93,7 +93,14 @@ echo $n > $S/stall_ticks
 # A 10-second spike has to repeat once before it counts.
 if { [ "$stall" -eq 1 ] && gt "$full" 60; } || [ "$n" -ge 2 ]; then
   echo closed > $S/admission
-  shed_gate
+  # 2026-09-28 scarcity gate: shed a gate only when memory is actually scarce
+  # (avail < 8G) or the fleet.slice itself is reclaim-stalling (ffull > 60 —
+  # fleet is part of the problem). A host PSI spike with 27G+ available is
+  # prod's reclaim churn; shedding a ~1G gate frees nothing and just burns
+  # the gate's work. fleet.slice's 10G envelope IS the apportionment.
+  if [ $avail -lt 8 ] || gt "$ffull" 60 || gt "$avg10" 90; then
+    shed_gate
+  fi
   # 2026-09-28 shed-order fix: fleet sheds first, prod is last-resort. Dagster
   # run scopes are NEVER stopped here — their own MemoryMax fails them fast
   # (OOM inside the slice), and a mid-run SIGTERM loses the same work plus an
@@ -118,7 +125,7 @@ if { [ "$stall" -eq 1 ] && gt "$full" 60; } || [ "$n" -ge 2 ]; then
       break
     done
   fi
-  log "host stall: admission closed, shed one gate; prod sheds only past psi 80"
+  log "host stall: admission closed (avail=${avail}G fleet_psi=$ffull); gate shed only on scarcity, prod sheds past psi 80"
 fi
 
 # janitor: every ~10 min, remove idle agent scratch dirs from /tmp (tmpfs = RAM)
