@@ -325,6 +325,7 @@ def call_grok(
     mode: str | None = None,
     session_id: str | None = None,
     resume: bool = False,
+    max_turns: int | None = None,
 ) -> str:
     """Run ``grok`` headless with a prompt file. Returns plain-text stdout.
 
@@ -358,6 +359,9 @@ def call_grok(
             cmd.extend(["--permission-mode", "plan"])
         else:
             cmd.append("--yolo")
+
+        if max_turns and max_turns > 0:
+            cmd.extend(["--max-turns", str(int(max_turns))])
 
         if session_id:
             if resume:
@@ -557,6 +561,7 @@ class GrokBackend:
         cwd: Path | None = None,
         model: str | None = None,
         mode: str | None = None,
+        max_turns: int | None = None,
     ) -> GrokLLMResult:
         del max_tokens, memory_limit
 
@@ -594,6 +599,7 @@ class GrokBackend:
                 model=selected_model,
                 grok_bin=self.grok_bin,
                 mode=selected_mode,
+                max_turns=max_turns,
             )
             duration_s = time.monotonic() - t0
             ctx = get_run_context()

@@ -151,8 +151,9 @@ class KimiBackend:
         cwd: Path | None = None,
         model: str | None = None,
         mode: str | None = None,
+        max_turns: int | None = None,
     ) -> KimiLLMResult:
-        del max_tokens, memory_limit, mode
+        del max_tokens, memory_limit, mode, max_turns
 
         if not self.api_key:
             return KimiLLMResult(

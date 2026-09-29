@@ -425,6 +425,7 @@ class CmdBackend:
         cwd: Path | None = None,
         model: str | None = None,
         mode: str | None = None,
+        max_turns: int | None = None,
     ) -> CmdLLMResult:
         del max_tokens, memory_limit
         ok, detail, fix = check_cmd_auth()
@@ -456,6 +457,7 @@ class CmdBackend:
                 cmd_bin=self.cmd_bin,
                 mode=selected_mode,
                 taste_src=self.cmd_taste,
+                max_turns=max_turns or DEFAULT_MAX_TURNS,
             )
             return CmdLLMResult(
                 stdout=stdout,

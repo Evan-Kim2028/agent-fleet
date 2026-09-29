@@ -31,6 +31,8 @@ import json
 import re
 from typing import TYPE_CHECKING
 
+from agent_fleet.gate.gitops import DIFF_CONTEXT_LINES, DIFF_NOT_COMPUTED
+
 if TYPE_CHECKING:
     from agent_fleet.contracts.gate import Finding
 
@@ -153,6 +155,13 @@ ALL_FOCUS = (
     "missing or implemented differently from what was asked."
 )
 
+#: The tool budget a reviewer is told to aim for. Not a hard cap — the turn cap
+#: in the config is — but a stated target does most of the work: a reviewer
+#: exploring "while I'm here" stops itself, while a reviewer told only to be
+#: fast has nothing to measure itself against. A gate fan-out pays twice for
+#: every reviewer turn: once to run it, once to re-upload the context it grew.
+REVIEWER_TOOL_BUDGET = "~30 tool calls"
+
 
 def find_prompt(
     *,
@@ -164,8 +173,19 @@ def find_prompt(
     pr_number: int,
     task_text: str,
     prior_claims: str = "",
+    change: str = "",
+    change_note: str = "",
 ) -> str:
-    """Prompt for one lens reviewer: BLOCKERS ONLY, with a repro per claim."""
+    """Prompt for one lens reviewer: BLOCKERS ONLY, with a repro per claim.
+
+    *change* is the PR's diff, already computed, and *change_note* says whether
+    that is all of it. Handing the reviewer the change is what keeps it from
+    re-deriving it: pointed at ``git diff`` it explored the repository itself,
+    ~44 model calls per reviewer on a fleet uplink that every one of those calls
+    re-uploaded in full. The command is still named, for the two cases the
+    inline change cannot serve — a truncated diff, and a claim about a file the
+    diff does not show.
+    """
     prior_block = ""
     if prior_claims.strip():
         prior_block = (
@@ -174,12 +194,36 @@ def find_prompt(
             f"the current code):\n----- PRIOR CLAIMS -----\n{prior_claims}\n"
             "----- END PRIOR -----\n"
         )
+    change_block = (
+        "THE CHANGE (non-test code, "
+        f"{DIFF_CONTEXT_LINES} lines of context) {change_note} — review THIS; "
+        "do not re-run git diff for it:\n```diff\n"
+        f"{change}\n```\n"
+        if change
+        # An empty change with a *failed* diff note is not a diff that came back
+        # blank: `git diff <base>...HEAD` cannot succeed, so naming it again
+        # would spend the reviewer's whole budget re-deriving a diff that does
+        # not exist, and it would come back clean having reviewed nothing.
+        else (
+            f"{change_note}\nDo NOT run `git diff {base_branch}...HEAD` — it cannot "
+            "succeed here. Resolve the PR's base branch (it may have been deleted, "
+            "renamed, or never fetched), then review the change you get from it. "
+            "If you cannot obtain the change at all, say so instead of returning "
+            "an empty findings list: an unreviewable change is not a clean one.\n"
+            if DIFF_NOT_COMPUTED in change_note
+            else f"Review ONLY the change: `git diff {base_branch}...HEAD` (run it). "
+        )
+    )
     return AGENT_RULES + (
         f"You are a pre-merge reviewer with ONE focus: **{lens}** — {focus}\n"
         f"Repository worktree (read-only for you; do NOT edit, commit or push): "
-        f"{worktree}, detached at PR #{pr_number} head {head_sha}. Review ONLY the "
-        f"change: `git diff {base_branch}...HEAD` (run it). Read surrounding code "
-        "as needed.\n\n"
+        f"{worktree}, detached at PR #{pr_number} head {head_sha}. Read surrounding "
+        f"code as needed; the change is `git diff {base_branch}...HEAD`.\n\n"
+        f"{change_block}"
+        f"BUDGET: aim for at most {REVIEWER_TOOL_BUDGET}. Open other files ONLY to "
+        "confirm or reject a specific suspected blocker (e.g. a caller or a "
+        "contract), never to browse. If the change is correct, answer with an "
+        "empty list quickly.\n\n"
         f"{_blockers_only()}\n"
         "Each blocker MUST name the exact file/line and a concrete repro: the "
         "input/state and the observable wrong outcome, precise enough that someone "

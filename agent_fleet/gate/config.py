@@ -103,6 +103,9 @@ _SCALARS: tuple[str, ...] = (
     "agent_slots",
     "test_slots",
     "standard_max_passes",
+    "diff_chars",
+    "review_turns",
+    "fix_turns",
 )
 
 #: Stages the legacy ``agent_timeout_s`` used to drive, in the order the fixer
@@ -190,6 +193,21 @@ class GateConfig:
     #: Consecutive STANDARD fixer passes before the bar falls back to the full
     #: evidence gate. Zero findings and green tests approve without a pass.
     standard_max_passes: int = _STD_MAX_PASSES
+    #: Characters of the change embedded in every reviewer prompt. Reviewers
+    #: that are only pointed at ``git diff`` re-derived it themselves, ~44 model
+    #: calls per reviewer at ~72k tokens re-sent on every one; handing them the
+    #: change removes the whole loop. The cap bounds the prompt when the change
+    #: is larger than a context, and the prompt says so explicitly when it bites
+    #: rather than letting a reviewer read a partial diff as the whole one.
+    diff_chars: int = 150000
+    #: Turn caps for the reviewing and fixing agents. A time budget alone cannot
+    #: stop a reviewer from exploring the repo turn after turn, and the run pays
+    #: for every one of those turns twice: once to run it, once to re-upload the
+    #: context it grew. The reviewer cap is well under the fixer's because the
+    #: fixer has real work to finish (edit, test, commit, push) while a reviewer
+    #: that has not concluded in this many turns has stopped finding blockers.
+    review_turns: int = 60
+    fix_turns: int = 120
 
     def is_prodsensitive(self, path: str) -> bool:
         """Whether *path* matches a configured production-sensitive pattern."""

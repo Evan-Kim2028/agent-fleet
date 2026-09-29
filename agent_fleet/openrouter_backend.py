@@ -1888,8 +1888,9 @@ class OpenRouterBackend:
         cwd: Path | None = None,
         model: str | None = None,
         mode: str | None = None,
+        max_turns: int | None = None,
     ) -> OpenRouterLLMResult:
-        del memory_limit, mode
+        del memory_limit, mode, max_turns
 
         if not self.api_key:
             return OpenRouterLLMResult(

@@ -47,6 +47,7 @@ class LLMBackend(Protocol):
         cwd: Path | None = None,
         model: str | None = None,
         mode: AgentMode | None = None,
+        max_turns: int | None = None,
     ) -> LLMResult: ...
 
 

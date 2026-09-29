@@ -112,9 +112,19 @@ gate:
   enable_fix: true
   enable_judge: true
 
-  # Base branch for the diff the reviewers read; push_branch defaults to the
-  # PR's own head branch.
+  # Default base branch for the diffs the gate takes. The gate overrides it with
+  # the PR's OWN base branch when the forge reports one, so a stacked PR is
+  # reviewed against the branch it will actually merge into rather than against
+  # main. Set this only to pin a gate that must never follow the PR (or to pass
+  # an explicit `origin/<branch>`).
   base_branch: main
+
+  # Token efficiency. The change is diffed once and embedded in every reviewer
+  # prompt (25 lines of context, tests and markdown excluded), so reviewers do
+  # not spend ~44 tool calls re-deriving what the prompt already carries. When
+  # a change is larger than diff_chars the prompt says so explicitly rather than
+  # handing a reviewer a silently clipped diff it would read as the whole PR.
+  diff_chars: 150000
 
   # Per-stage agent budgets (seconds), and the deterministic test budget. The
   # stages are split because they do different work: a fixer has to commit,
@@ -126,6 +136,14 @@ gate:
   judge_timeout_s: 2400
   fix_timeout_s: 5400
   test_timeout_s: 900
+
+  # Per-stage turn caps, for backends that support one. A wall-clock budget
+  # cannot stop a reviewer from exploring the repo turn after turn, and every
+  # turn re-uploads the whole context it has grown. A reviewer that has not
+  # concluded within review_turns has stopped finding blockers; the fixer gets
+  # more because it still has to run tests, commit and push.
+  review_turns: 60
+  fix_turns: 120
 
   # Every pytest the gate launches is memory-capped: a runaway suite once
   # consumed 36GB. The cap is used as given; the gate never raises it.
