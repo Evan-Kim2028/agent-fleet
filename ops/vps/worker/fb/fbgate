@@ -15,6 +15,22 @@ F=$HOME/fleet/fb; P=$F/prompts; R=$F/runs
 source ~/fleet/env.sh; export FB_RUNS=$R; mkdir -p $R $F/lanes $F/locks
 OWNER=${FLEET_GH_OWNER:-Evan-Kim2028}; SLUG=$OWNER/$REPO; S=$F/lanes/$LANE.status; G=$F/gate/$LANE; AGENT_SLOTS=${GATE_AGENT_SLOTS:-8}
 mkdir -p $G $F/sem; : > $G/log; rm -f $G/dead
+GATE_WIP=${MAX_GATES:-${GATE_SLOTS:-3}}
+exec 8>$F/locks/gate-$LANE.lock
+flock 8
+gate_live(){
+  ps -eo args= | awk '{for(i=1;i<NF;i++){t=$i; sub(/^.*\//,"",t); if(t=="fbgate") print $(i+1)}}' | sort -u | grep -c .
+}
+while [ "$(gate_live)" -gt "$GATE_WIP" ]; do sleep 15; done
+GATE_SLOTS_DIR=${AGENT_FLEET_HOME:-$HOME/.agent-fleet}/slots/gate
+mkdir -p $GATE_SLOTS_DIR
+while :; do
+  for i in $(seq 1 $GATE_WIP); do
+    exec 11>$GATE_SLOTS_DIR/slot.$i
+    flock -n 11 && break 2
+  done
+  sleep 15
+done
 st(){ echo "$(date +%H:%M:%S) $*" >> $S; echo "$(date +%H:%M:%S) [$LANE] gate: $*" >> $F/events.log; echo "$(date +%H:%M:%S) $*" >> $G/log; }
 unset FB_MODEL
 agent(){ # agent NAME CWD PROMPTFILE TURNS — space-bunny via fbrun under a global slot

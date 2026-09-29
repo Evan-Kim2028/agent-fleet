@@ -5,9 +5,19 @@
 # pushes with --force-with-lease, then appends the lane back to the gate
 # queue so the driver re-gates the new head in order.
 set -uo pipefail
-F=$HOME/fleet/fb; S=$F/lanes; W_ROOT=$HOME/fleet/wt
+F=$HOME/fleet/fb; W_ROOT=$HOME/fleet/wt
 LANE=$1; REPO=$2; PR=$3
-case "$LANE" in dq1d-*) BR="dq1d/${LANE#dq1d-}";; *) BR="fb/$LANE";; esac
+REF=""
+for _try in 1 2 3; do
+  REF=$(timeout 20 gh pr view "$PR" -R "${FLEET_GH_OWNER:-Evan-Kim2028}/$REPO" --json headRefName --jq .headRefName 2>/dev/null) && break
+  sleep $((_try*5))
+done
+case "$REF" in
+  fb/*) BR=$REF; LANE=${REF#fb/};;
+  dq1d/*) BR=$REF; LANE="dq1d-${REF#dq1d/}";;
+  *) case "$LANE" in dq1d-*) BR="dq1d/${LANE#dq1d-}";; *) BR="fb/$LANE";; esac;;
+esac
+S=$F/lanes
 ST(){ echo "$(date +%H:%M:%S) $*" >> $S/$LANE.status; echo "$(date +%H:%M:%S) [$LANE] $*" >> $F/events.log; }
 mkdir -p $F/locks
 exec 9>$F/locks/rebase-$LANE.lock
@@ -17,8 +27,27 @@ W=$W_ROOT/$REPO-wt-rebase-$LANE
 git -C $B fetch -q origin
 held=$(git -C $B worktree list --porcelain | awk -v b="branch refs/heads/$BR" '/^worktree /{w=$2} $0==b{print w}')
 [ -n "$held" ] && W=$held
-if [ ! -d $W ]; then
-  git -C $B worktree add -q -B $BR $W origin/$BR || { ST "NEEDS-ESCALATION rebase: cannot create worktree"; exit 2; }
+park_worktree(){
+  local target="$W.leftover.$(date +%s)"
+  if git -C "$B" worktree move "$W" "$target" 2>/dev/null; then
+    git -C "$target" checkout -q --detach 2>/dev/null || return 1
+  else
+    mv "$W" "$target" || return 1
+  fi
+  git -C "$B" worktree prune
+  W=$W_ROOT/$REPO-wt-rebase-$LANE
+  [ -e "$W" ] && W="$W.replacement.$(date +%s)"
+}
+if [ -d "$W" ]; then
+  _cur=$(git -C "$W" symbolic-ref --short -q HEAD 2>/dev/null || true)
+  [ "$_cur" = "$BR" ] || { ST "rebase: parking stale worktree $W"; park_worktree || { ST "NEEDS-ESCALATION rebase: cannot park stale worktree $W"; exit 3; }; }
+fi
+if [ ! -d "$W" ]; then
+  git -C $B worktree add -q -B $BR $W origin/$BR || {
+    ST "rebase: first worktree add failed; parking $W and retrying"
+    park_worktree || true
+    git -C $B worktree add -q -B $BR $W origin/$BR || { ST "NEEDS-ESCALATION rebase: cannot create worktree"; exit 2; }
+  }
 fi
 git -C $W fetch -q origin
 if git -C $W status --porcelain | grep -q .; then
@@ -31,7 +60,9 @@ if git -C $W status --porcelain | grep -q .; then
   if git -C $W stash push -u -q -m "lane_rebase leftover $(date +%F_%T)"; then
     ST "rebase: stashed leftover dirty state in $W (see git stash list)"
   else
-    ST "NEEDS-ESCALATION rebase: could not stash dirty worktree $W"; exit 3
+    ST "rebase: stash failed; parking dirty worktree $W and starting clean"
+    park_worktree || { ST "NEEDS-ESCALATION rebase: could not park dirty worktree $W"; exit 3; }
+    git -C $B worktree add -q -B $BR $W origin/$BR || { ST "NEEDS-ESCALATION rebase: cannot create worktree"; exit 2; }
   fi
 fi
 git -C $W reset -q --hard origin/$BR
@@ -61,6 +92,15 @@ P
 ST "rebase agent starting on $W"
 $F/fbagent rebase-$LANE $W $P/rebase-$LANE.md 300
 git -C $B fetch -q origin; after=$(git -C $B rev-parse origin/$BR)
+if [ "$after" = "$before" ]; then
+  _local=$(git -C "$W" rev-parse HEAD 2>/dev/null || true)
+  if [ -n "$_local" ] && [ "$_local" != "$before" ] && git -C "$W" merge-base --is-ancestor origin/main "$_local"; then
+    if git -C "$W" push -q --force-with-lease origin "HEAD:$BR"; then
+      git -C $B fetch -q origin; after=$(git -C $B rev-parse origin/$BR)
+      ST "rebase agent left a rebased local head; pushed ${after:0:9}"
+    fi
+  fi
+fi
 if [ "$after" = "$before" ]; then
   ST "NEEDS-ESCALATION rebase agent pushed nothing"; exit 5
 fi

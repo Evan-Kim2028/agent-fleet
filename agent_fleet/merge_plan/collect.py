@@ -88,13 +88,13 @@ _PR_REF_RE = re.compile(r"(?P<repo>[\w.-]+/[\w.-]+)#(?P<pr>\d+)")
 #: marker — ``NEEDS-ESCALATION reviewer said "needs PREMERGE-APPROVED"`` must
 #: stay an escalation — and what tells the reference lines apart from verdicts.
 _STATUS_LINE_RE = re.compile(r"^(?:\d{2}:\d{2}:\d{2}\s+)?(\S+)")
-_VERDICT_TOKEN_RE = re.compile(r"^(?:[\w.-]+/[\w.-]+#\d+\s+)?([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+)")
+_VERDICT_TOKEN_RE = re.compile(r"^(?:[\w.-]+/[\w.-]+#\d+\s+)?([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*)")
 
 #: The gate writes one token per verdict (``fleet_ops.gate``), so a token the
 #: gate has never written is the status file's own note — the lane manager
 #: annotating a verdict, or an implementer echoing a marker as prose.  Neither
 #: is a new decision by the gate, so neither may outvote the verdict it follows.
-_GATE_VERDICT_TOKENS = frozenset({"NEEDS-ESCALATION", "NEEDS-REBASE", "GATE-SKIPPED"})
+_GATE_VERDICT_TOKENS = frozenset({"NEEDS-ESCALATION", "NEEDS-REBASE", "GATE-SKIPPED", "MERGED"})
 
 
 # ---------------------------------------------------------------------------

@@ -8,6 +8,7 @@ RQ=$F/.requeue_counts
 QFILE=$F/quarantine.txt
 PRCACHE=$F/.pr_cache
 MAXG=${MAX_GATES:-3}
+SCAN_ONCE=${QUEUE_SCAN_ONCE:-0}
 CAPACITY=$HOME/fleet/bin/fleet_admission.py
 mkdir -p "$F/locks"
 touch "$RQ" "$QFILE" "$DONE"
@@ -43,9 +44,44 @@ refresh_prs(){
   if [ "$ok" -eq 1 ]; then mv "$tmp" "$PRCACHE"; else rm -f "$tmp"; [ -f "$PRCACHE" ] || : > "$PRCACHE"; fi
 }
 find_pr(){
-  awk -v fb="fb/$1" -v dq="dq1d/${1#dq1d-}" '$3==fb || $3==dq{print $1, $2, $4; exit}' "$PRCACHE" 2>/dev/null
+  awk -v fb="fb/$1" -v dq="dq1d/${1#dq1d-}" '$3==fb || $3==dq{print $1, $2, $4, $3; exit}' "$PRCACHE" 2>/dev/null
 }
+pr_ref(){ awk -v r="$1" -v p="$2" '$1==r && $2==p{print $3; exit}' "$PRCACHE" 2>/dev/null; }
 pr_head(){ awk -v r="$1" -v p="$2" '$1==r && $2==p{print $4; exit}' "$PRCACHE" 2>/dev/null; }
+canonical_lane(){
+  case "$1" in fb/*) printf '%s' "${1#fb/}";; dq1d/*) printf 'dq1d-%s' "${1#dq1d/}";; *) printf '%s' "$1";; esac
+}
+latest_verdict(){ grep -E 'PREMERGE-APPROVED|NEEDS-ESCALATION|NEEDS-REBASE|MERGED' "$1" 2>/dev/null | tail -1; }
+normalize_queue(){
+  local tmp raw lane repo pr ref sha cl key last approved live
+  local -A seen=()
+  tmp=$(mktemp "$F/.gate_queue.XXXXXX") || return 1
+  live=$(live_gates)
+  while IFS= read -r raw || [ -n "$raw" ]; do
+    case "$raw" in ''|'#'*) printf '%s\n' "$raw" >> "$tmp"; continue;; esac
+    set -- $raw
+    [ "$#" -ge 3 ] || { printf '%s\n' "$raw" >> "$tmp"; continue; }
+    lane=$1; repo=$2; pr=$3
+    ref=$(pr_ref "$repo" "$pr"); sha=$(pr_head "$repo" "$pr")
+    if [ -z "$sha" ]; then log "dropped stale queue entry $lane ($repo#$pr is not open)"; continue; fi
+    cl=$(canonical_lane "$ref")
+    [ "$lane" = "$cl" ] || log "canonicalized queue lane $lane -> $cl ($repo#$pr)"
+    key="$repo:$pr"
+    if [ -n "${seen[$key]:-}" ]; then log "dropped duplicate queue entry $lane ($repo#$pr)"; continue; fi
+    seen[$key]=1
+    if grep -qx "$cl" <<< "$live"; then log "dropped queued $cl ($repo#$pr is already gating)"; continue; fi
+    if is_quarantined "$cl" "$sha"; then log "dropped queued $cl ($repo#$pr quarantined at $sha)"; continue; fi
+    last=$(latest_verdict "$F/lanes/$cl.status")
+    case "$last" in
+      *'PREMERGE-APPROVED'*)
+        approved=${last##* }
+        if [[ "$sha" == "$approved"* ]]; then log "dropped queued $cl ($repo#$pr already approved at $approved)"; continue; fi;;
+      *'MERGED '*) log "dropped queued $cl ($repo#$pr already landed)"; continue;;
+    esac
+    printf '%s %s %s\n' "$cl" "$repo" "$pr" >> "$tmp"
+  done < "$Q"
+  mv "$tmp" "$Q"
+}
 remove_queue(){
   local lane=$1 repo=$2 pr=$3 tmp
   tmp=$(mktemp "$F/.gate_queue.XXXXXX") || return 1
@@ -53,7 +89,7 @@ remove_queue(){
   mv "$tmp" "$Q"
 }
 write_brief(){
-  local lane=$1 gate=$F/gate/$1 prompt=$F/prompts/$1.task.md
+  local lane=$1 source=${2:-$1} gate=$F/gate/${2:-$1} prompt=$F/prompts/$1.task.md
   [ -f "$prompt" ] && return 0
   [ -s "$gate/candidates.jsonl" ] || return 0
   {
@@ -69,23 +105,39 @@ write_brief(){
   log "wrote informed brief $prompt"
 }
 scan_escalations(){
-  local lane last cls n repo pr sha age
-  local gates queued_lanes rebasing
+  local lane last cls n repo pr sha ref qlane age status_path
+  local gates live queued_lanes rebasing
   refresh_prs || return 0
+  normalize_queue
   gates=$(gate_units)
+  live=$(live_gates)
   queued_lanes=$(queued)
   rebasing=$(systemctl --user list-units --no-legend --plain 'fleet-rebase-*.service' --state=running,activating 2>/dev/null | awk '{print $1}')
   for status in "$F"/lanes/*.status; do
     [ -f "$status" ] || continue
     lane=$(basename "$status" .status)
-    grep -qx "fleet-gate-$lane.service" <<< "$gates" && continue
     last=$(tail -1 "$status" 2>/dev/null)
-    if grep -qx "$lane" <<< "$queued_lanes"; then
+    repo= pr= sha= ref=
+    read -r repo pr sha ref < <(find_pr "$lane")
+    qlane=$lane
+    [ -n "${ref:-}" ] && qlane=$(canonical_lane "$ref")
+    status_path="$status"
+    [ -f "$F/lanes/$qlane.status" ] && status_path="$F/lanes/$qlane.status"
+    if grep -qx "$qlane" <<< "$live" || grep -qx "$lane" <<< "$live"; then
+      age=$(( $(date +%s) - $(stat -c %Y "$status_path" 2>/dev/null || echo 0) ))
+      if [ "$age" -ge ${STUCK_GATE_S:-5400} ]; then
+        systemctl --user stop "fleet-gate-$qlane.service" 2>/dev/null || true
+        printf '%s NEEDS-ESCALATION fail-closed: gate stuck %ss without progress; re-gate\n' "$(date +%T)" "$age" >> "$status_path"
+        log "stopped stale gate $qlane (no status write for ${age}s)"
+      fi
+      continue
+    fi
+    if grep -qx "$qlane" <<< "$queued_lanes"; then
       case "$last" in
-        *'merge conflict'*)
-          read -r queued_repo queued_pr < <(awk -v l="$lane" '$1==l{print $2, $3; exit}' "$Q")
-          [ -n "${queued_pr:-}" ] && remove_queue "$lane" "$queued_repo" "$queued_pr"
-          log "reroute queued merge-conflict $lane to rebase"
+        *'merge conflict'*|*'conflict with main'*)
+          read -r queued_repo queued_pr < <(awk -v l="$qlane" '$1==l{print $2, $3; exit}' "$Q")
+          [ -n "${queued_pr:-}" ] && remove_queue "$qlane" "$queued_repo" "$queued_pr"
+          log "reroute queued merge-conflict $qlane to rebase"
           ;;
         *) continue;;
       esac
@@ -96,44 +148,43 @@ scan_escalations(){
       *'start @'*)
         age=$(( $(date +%s) - $(stat -c %Y "$status" 2>/dev/null || echo 0) ))
         [ "$age" -ge 1800 ] && cls=infra || continue;;
-      *'PREMERGE-APPROVED'*) continue;;
-      *'shed by fleet pressure'*|*fail-closed*|*died*|*'could not run'*|*'gate refused'*|*'gate stuck'*) cls=infra;;
-      *no-push*|*'stalled after'*|*'merged-tree regression'*|*untestable*|*'fix round pushed nothing'*) cls=rework;;
+      *'PREMERGE-APPROVED'*|*'MERGED '*) continue;;
+      *'shed by fleet pressure'*|*fail-closed*|*died*|*'could not run'*|*'gate refused'*|*'gate stuck'*|*'step0 pytest could not run'*) cls=infra;;
+      *no-push*|*'stalled after'*|*'merged-tree regression'*|*'merge-train regression'*|*untestable*|*'fix round pushed nothing'*|*'tests-broken'*|*'full evidence gate required'*) cls=rework;;
       *) continue;;
     esac
-    repo= pr= sha=
-    read -r repo pr sha < <(find_pr "$lane")
     [ -n "${sha:-}" ] || continue
-    is_quarantined "$lane" "$sha" && continue
+    is_quarantined "$qlane" "$sha" && continue
     if [ "$cls" = rebase ]; then
-      grep -qx "fleet-rebase-$lane.service" <<< "$rebasing" && continue
+      grep -qx "fleet-rebase-$qlane.service" <<< "$rebasing" && continue
       [ -z "$rebasing" ] || continue
-      n=$(rebase_tries "$lane" "$sha")
-      if [ "$n" -ge 2 ]; then quarantine "$lane" "$sha" 'rebase attempts exhausted'; continue; fi
-      printf '%s %s rebase %s\n' "$lane" "$(date +%s)" "$sha" >> "$RQ"
-      if systemd-run --user --quiet --collect --unit="fleet-rebase-$lane" --slice=fleet.slice \
-        "$HOME/fleet/bin/lane_rebase.sh" "$lane" "$repo" "$pr"; then
-        rebasing="${rebasing}"$'\n'"fleet-rebase-$lane.service"
-        log "rebase $lane ($repo#$pr) spawned ($n prior for $sha)"
+      n=$(rebase_tries "$qlane" "$sha")
+      if [ "$n" -ge 2 ]; then quarantine "$qlane" "$sha" 'rebase attempts exhausted'; continue; fi
+      printf '%s %s rebase %s\n' "$qlane" "$(date +%s)" "$sha" >> "$RQ"
+      if systemd-run --user --quiet --collect --unit="fleet-rebase-$qlane" --slice=fleet.slice \
+        "$HOME/fleet/bin/lane_rebase.sh" "$qlane" "$repo" "$pr"; then
+        rebasing="${rebasing}"$'\n'"fleet-rebase-$qlane.service"
+        log "rebase $qlane ($repo#$pr) spawned ($n prior for $sha)"
       else
-        log "rebase spawn failed $lane"
+        log "rebase spawn failed $qlane"
       fi
       continue
     fi
     lim=3; [ "$cls" = rework ] && lim=1
-    n=$(requeues "$lane" "$sha")
-    if [ "$n" -ge "$lim" ]; then quarantine "$lane" "$sha" "$cls attempts exhausted"; continue; fi
-    n=$(attempts "$lane" "$sha")
-    if [ "$n" -ge 6 ]; then quarantine "$lane" "$sha" 'attempt cap'; continue; fi
-    [ "$cls" = rework ] && write_brief "$lane"
-    printf '%s %s %s\n' "$lane" "$repo" "$pr" >> "$Q"
-    printf '%s %s %s %s\n' "$lane" "$(date +%s)" "$cls" "$sha" >> "$RQ"
-    log "re-queue $lane ($repo#$pr) class=$cls ($((n)) prior for $sha)"
+    n=$(requeues "$qlane" "$sha")
+    if [ "$n" -ge "$lim" ]; then quarantine "$qlane" "$sha" "$cls attempts exhausted"; continue; fi
+    n=$(attempts "$qlane" "$sha")
+    if [ "$n" -ge 6 ]; then quarantine "$qlane" "$sha" 'attempt cap'; continue; fi
+    [ "$cls" = rework ] && write_brief "$qlane" "$lane"
+    printf '%s %s %s\n' "$qlane" "$repo" "$pr" >> "$Q"
+    printf '%s %s %s %s\n' "$qlane" "$(date +%s)" "$cls" "$sha" >> "$RQ"
+    log "re-queue $qlane ($repo#$pr) class=$cls ($((n)) prior for $sha)"
   done
 }
 
 while :; do
   scan_escalations
+  [ "$SCAN_ONCE" = 1 ] && exit 0
   line=$(awk 'NF>=3 && $1 !~ /^#/{print $1, $2, $3; exit}' "$Q" 2>/dev/null)
   if [ -z "$line" ]; then sleep 90; continue; fi
   read -r lane repo pr <<< "$line"

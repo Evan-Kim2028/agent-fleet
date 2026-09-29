@@ -55,9 +55,8 @@ import logging
 import shlex
 import shutil
 import subprocess
-from dataclasses import replace
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -539,9 +538,9 @@ def adopt_merged_parents(
 
 
 class Merger(Protocol):
-    """Lands PRs on GitHub, in order.  Returns the PR numbers merged."""
+    """Lands PRs on GitHub, in order.  Returns each PR's merge outcome."""
 
-    def land(self, prs: Sequence[TrainPR]) -> list[int]: ...
+    def land(self, prs: Sequence[TrainPR]) -> dict[int, str]: ...
 
 
 @dataclass
