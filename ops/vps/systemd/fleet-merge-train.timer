@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the agent-fleet merge train every 10 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+AccuracySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

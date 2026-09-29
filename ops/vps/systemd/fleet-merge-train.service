@@ -1,0 +1,15 @@
+[Unit]
+Description=Land gate-approved pulls with agent-fleet merge train
+After=network-online.target
+
+[Service]
+SuccessExitStatus=1
+Type=oneshot
+Slice=fleet.slice
+MemoryHigh=6G
+MemoryMax=8G
+Environment=PATH=%h/lake-of-rage/.venv/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/fleet/bin/merge_train_sweep.sh
+
+[Install]
+WantedBy=default.target
