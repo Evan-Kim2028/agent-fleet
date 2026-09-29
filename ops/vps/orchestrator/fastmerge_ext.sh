@@ -10,7 +10,22 @@ cd $T || { ev "STOP cannot enter worktree $T"; exit 65; }; files=$(git diff --na
 echo "$files" | grep -qE "print_identity\.py|interpret_stamps\.py|build_card_rollup_full\.py|run_prod\.sh|\.github/workflows" && { ev "STOP fenced file in diff"; exit 3; }
 git -c user.name=fastmerge -c user.email=fastmerge@local merge -q --no-ff --no-commit origin/main >/dev/null 2>&1 || { c=$(git diff --name-only --diff-filter=U | tr "\n" " "); git merge --abort 2>/dev/null; ev "STOP merge conflict with main: ${c:-unknown}"; exit 4; }
 mods=$(echo "$files" | grep '\.py$' | grep -v '/tests\?/' | sed 's#.*/src/##;s#\.py$##;s#/#.#g' | grep -v '^$')
-tests=$(for m in $mods; do grep -rlE "(from|import) ${m}( |$|\.)" --include='test_*.py' . 2>/dev/null; done; echo "$files" | grep -E 'test_.*\.py$')
+changed_tests=$(echo "$files" | grep -E '(^|/)test_.*\.py$' | while read -r t; do [ -f "$t" ] && echo "$t"; done)
+tests=$(
+  for m in $mods; do
+    covered=0
+    while IFS= read -r t; do
+      [ -f "$t" ] || continue
+      if grep -Eq "(from|import) ${m}( |$|\.)" "$t"; then
+        covered=1
+        break
+      fi
+    done <<< "$changed_tests"
+    [ "$covered" -eq 1 ] && continue
+    grep -rlE "(from|import) ${m}( |$|\.)" --include='test_*.py' . 2>/dev/null
+  done
+  echo "$changed_tests"
+)
 tests=$(echo "$tests" | sort -u | grep -v '^$' | head -60)
 if [ -n "$tests" ]; then
   pkgdir=$( [ $REPO = silphcoanalytics ] && echo api || echo . )
