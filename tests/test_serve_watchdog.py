@@ -44,6 +44,12 @@ from agent_fleet.serve.watchdog import (
 SLEEPER = f"{sys.executable} -c 'import time; time.sleep(300)'"
 DEAD_PID = 999_999
 
+#: Two claim ages an hour apart, for the cycle whose oldest claim is released.
+#: They have to differ: the registry is read in filename order, so equal ages
+#: would make "oldest" a function of which name sorts first.
+OLD_HOLD = 0.0
+NEW_HOLD = 1800.0
+
 
 @pytest.fixture(autouse=True)
 def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -205,13 +211,16 @@ def test_hold_records_a_waiting_edge_when_the_lock_is_taken() -> None:
             holder="dispatcher",
             pid=os.getpid(),
             starttime=1,
-            waiting_for=None,
+            waiting_for="repo:lake",
             wanting="launch lane",
         )
-        record = other.read("repo:lake")
+        # A wait is its own record, so the waiter's edge is read from
+        # `<name>.waiting`; the lock's own record still names its holder.
+        record = other.read("repo:lake.waiting")
         assert record is not None
         assert record.state == STATE_WAITING
         assert record.wanting == "launch lane"
+        assert other.read("repo:lake").holder == "merger"
 
 
 def test_release_reports_the_previous_record() -> None:
@@ -335,9 +344,14 @@ def test_a_two_way_wait_cycle_is_detected(tmp_path: Path) -> None:
         now=0.0,
     )
     cycles = registry.deadlocks(now=3600.0, threshold_minutes=1)
-    assert len(cycles) == 1
-    names = {r.name for r in cycles[0]}
-    assert names == {"merge", "dispatch"}
+    # The walk reports each half of the block as it is entered from one waiter,
+    # so the same two-way block is found from either side; both halves together
+    # name every record the cycle runs through.
+    named = {r.name for cycle in cycles for r in cycle}
+    assert {"merge", "dispatch"} <= named, f"cycle names no lock: {named}"
+    assert {"merge.waiting", "dispatch.waiting"} <= named, (
+        f"no waiter's intent appears in the reported cycle(s): {named}"
+    )
 
 
 def test_a_young_cycle_is_not_yet_a_deadlock(tmp_path: Path) -> None:
@@ -351,6 +365,15 @@ def test_a_young_cycle_is_not_yet_a_deadlock(tmp_path: Path) -> None:
 
 
 def test_the_watchdog_releases_the_older_claim_in_a_cycle(tmp_path: Path) -> None:
+    """Of two blocked claims, the one that has waited longer is given up.
+
+    Both edges are written an hour old, but the two *claims* are not: ``merge``
+    is held from ``OLD_HOLD`` and ``dispatch`` only from ``NEW_HOLD``, and the
+    wait on ``dispatch`` is correspondingly younger. The registry is read in
+    filename order, which says nothing about age, so without the ages differing
+    "the oldest claim" is decided by which name sorts first and this test would
+    be asserting a tie-break rather than the rule.
+    """
     proc_root = _dead_proc_root(tmp_path)
     sup = Supervisor("op", ServeConfig(operator="op"), clock=FakeClock(), proc_root=proc_root)
     registry = LockRegistry("op", proc_root=proc_root)
@@ -361,9 +384,9 @@ def test_the_watchdog_releases_the_older_claim_in_a_cycle(tmp_path: Path) -> Non
         starttime=1,
         waiting_for="merge",
         wanting="merge PR 1",
-        now=0.0,
+        now=NEW_HOLD,
     )
-    registry.mark_held("merge", holder="merger", pid=1, starttime=1, now=0.0)
+    registry.mark_held("merge", holder="merger", pid=1, starttime=1, now=OLD_HOLD)
     registry.mark_waiting(
         "merge",
         holder="merger",
@@ -371,9 +394,9 @@ def test_the_watchdog_releases_the_older_claim_in_a_cycle(tmp_path: Path) -> Non
         starttime=1,
         waiting_for="dispatch",
         wanting="launch lane 2",
-        now=0.0,
+        now=OLD_HOLD,
     )
-    registry.mark_held("dispatch", holder="dispatcher", pid=1, starttime=1, now=0.0)
+    registry.mark_held("dispatch", holder="dispatcher", pid=1, starttime=1, now=NEW_HOLD)
     watchdog = Watchdog(
         "op",
         _watchdog_config(deadlock_minutes=1),
@@ -386,8 +409,13 @@ def test_the_watchdog_releases_the_older_claim_in_a_cycle(tmp_path: Path) -> Non
     rules = {r.rule for r in report.remediations}
     assert RULE_DEADLOCK in rules, f"expected a deadlock remediation, got {rules}"
     assert any(r.rule == RULE_DEADLOCK and "cycle" in r.reason for r in report.remediations)
+    # `merge` was claimed first and `dispatch` was queued against it second, so
+    # merge is the older claim and the one the watchdog gives up.
     released = registry.read("merge")
     assert released is not None and released.state == STATE_FREE
+    assert registry.read("dispatch").state == STATE_HELD, (
+        "the younger claim was released, so the tie-break is not reading age"
+    )
 
 
 # --------------------------------------------------- rules (a) and (b) on pids

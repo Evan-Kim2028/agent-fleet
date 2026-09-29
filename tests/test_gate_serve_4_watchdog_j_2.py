@@ -30,7 +30,6 @@ from __future__ import annotations
 import inspect
 import os
 from contextlib import contextmanager, suppress
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -43,6 +42,7 @@ from agent_fleet.serve.watchdog import RULE_DEADLOCK, Watchdog
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from pathlib import Path
 
 #: The threshold the detector is asked to use, in minutes. Every acquisition
 #: below is stamped an hour in the past, so any cycle that exists is far past it.
@@ -83,7 +83,8 @@ def _failed(registry: LockRegistry, name: str, *, holder: str) -> None:
         assert acquired is False, f"precondition: {name!r} really was contended"
 
 
-def _build_two_way_block() -> None:
+@contextmanager
+def _build_two_way_block() -> Iterator[LockRegistry]:
     """A symmetric two-way block, built only through the public acquisition API.
 
     merger holds ``merge`` and blocks on ``dispatch``; dispatcher holds
@@ -91,17 +92,23 @@ def _build_two_way_block() -> None:
     cycle is far past ``deadlock_minutes``. The kernel is enforcing both halves
     of this while the calls run.
 
-    The two ``hold()`` blocks that remain open afterwards are deliberate: their
-    ``finally`` clause writes the record back to ``free``, so a block that has
-    already unwound leaves nothing to detect. A deadlock is a condition that
-    persists, and this keeps the real thing alive while the detector looks at it.
+    This is a context manager rather than a plain function because the two
+    ``hold()`` blocks must still be **open** when the caller inspects the
+    registry: their ``finally`` clause writes each holder's record back to
+    ``free``, and a free record names no holder, so a block that has already
+    unwound leaves a wait with nothing to be waiting *on* and no cycle for the
+    walk to close. A deadlock is a condition that persists, and this keeps the
+    real thing alive for as long as the caller is looking at it.
     """
     merger = LockRegistry("op")
     dispatcher = LockRegistry("op")
-    with _holds(merger, "merge", holder="merger"):
-        with _holds(dispatcher, "dispatch", holder="dispatcher"):
-            _failed(merger, "dispatch", holder="merger")
-            _failed(dispatcher, "merge", holder="dispatcher")
+    with (
+        _holds(merger, "merge", holder="merger"),
+        _holds(dispatcher, "dispatch", holder="dispatcher"),
+    ):
+        _failed(merger, "dispatch", holder="merger")
+        _failed(dispatcher, "merge", holder="dispatcher")
+        yield merger
 
 
 def _records(registry: LockRegistry) -> dict[str, tuple[str, str, str | None]]:
@@ -123,10 +130,18 @@ def test_a_failed_acquisition_records_the_lock_it_is_waiting_for() -> None:
     with _holds(registry, "merge", holder="merger"):
         _failed(registry, "merge", holder="dispatcher")
 
-        record = registry.read("merge")
+        # A wait gets its own record file, so the waiter's edge is read from
+        # `<name>.waiting`; `read("merge")` still names merger, the holder, which
+        # is the whole point of the split -- a contender cannot overwrite the
+        # holder's claim and so cannot hide a stale one.
+        record = registry.read("merge.waiting")
         assert record is not None
         assert record.state == STATE_WAITING
         assert record.holder == "dispatcher"
+        assert registry.read("merge").holder == "merger", (
+            "the waiter overwrote the holder's record, which is what the separate "
+            f"intent file exists to prevent. Records: {_records(registry)}"
+        )
         # This is the edge the detector needs and hold() has no way to express.
         assert record.waiting_for == "merge", (
             f"hold() wrote a waiting record with waiting_for={record.waiting_for!r}. "
@@ -138,39 +153,42 @@ def test_a_failed_acquisition_records_the_lock_it_is_waiting_for() -> None:
 
 def test_a_real_two_way_block_is_detected_as_a_deadlock() -> None:
     """Two components each blocked on the other, built only through ``hold()``."""
-    registry = LockRegistry("op")
-    _build_two_way_block()
-
-    cycles = registry.deadlocks(now=NOW, threshold_minutes=DEADLOCK_MINUTES)
-    assert cycles, (
-        "a two-way block an hour old — merger holds 'merge' and is blocked on "
-        "'dispatch', dispatcher holds 'dispatch' and is blocked on 'merge' — is a "
-        "textbook deadlock that the kernel is enforcing right now, but "
-        f"deadlocks() returned nothing. Records as written: {_records(registry)}. "
-        "Every waiting record carries waiting_for=None, so the walk skips all of "
-        "them at its first condition."
-    )
-    assert {r.name for r in cycles[0]} == {"merge", "dispatch"}
+    with _build_two_way_block() as registry:
+        cycles = registry.deadlocks(now=NOW, threshold_minutes=DEADLOCK_MINUTES)
+        assert cycles, (
+            "a two-way block an hour old — merger holds 'merge' and is blocked on "
+            "'dispatch', dispatcher holds 'dispatch' and is blocked on 'merge' — is a "
+            "textbook deadlock that the kernel is enforcing right now, but "
+            f"deadlocks() returned nothing. Records as written: {_records(registry)}. "
+            "Every waiting record carries waiting_for=None, so the walk skips all of "
+            "them at its first condition."
+        )
+        # The walk alternates a waiter's intent with the lock it is blocked
+        # behind, so the two reported cycles are the two halves of one block and
+        # together they name both claims and both edges that close it.
+        named = {r.name for cycle in cycles for r in cycle}
+        assert {"merge", "dispatch"} <= named, f"cycle names no lock: {named}"
+        assert {"merge.waiting", "dispatch.waiting"} <= named, (
+            f"no waiter's intent appears in the reported cycle(s): {named}"
+        )
 
 
 def test_the_watchdog_releases_a_real_deadlock() -> None:
     """Rule (d) must fire on a deadlock built the way components build one."""
-    registry = LockRegistry("op")
-    _build_two_way_block()
-
-    config = _config()
-    sup = Supervisor("op", config, clock=FakeClock())
-    try:
-        watchdog = Watchdog("op", config, sup, clock=FakeClock(), locks=registry)
-        report = watchdog.tick()
-        assert RULE_DEADLOCK in report.by_rule(), (
-            f"the watchdog saw no deadlock in a two-way block an hour old. "
-            f"remediations={report.remediations} "
-            f"records={_records(registry)}"
-        )
-    finally:
-        with suppress(Exception):
-            sup.shutdown()
+    with _build_two_way_block() as registry:
+        config = _config()
+        sup = Supervisor("op", config, clock=FakeClock())
+        try:
+            watchdog = Watchdog("op", config, sup, clock=FakeClock(), locks=registry)
+            report = watchdog.tick()
+            assert RULE_DEADLOCK in report.by_rule(), (
+                f"the watchdog saw no deadlock in a two-way block an hour old. "
+                f"remediations={report.remediations} "
+                f"records={_records(registry)}"
+            )
+        finally:
+            with suppress(Exception):
+                sup.shutdown()
 
 
 def test_hold_offers_no_way_to_declare_the_edge() -> None:
@@ -199,7 +217,11 @@ def test_hold_fails_while_a_foreign_component_holds_the_lock() -> None:
     registry = LockRegistry("op")
     with _holds(registry, "dispatch", holder="dispatcher"):
         _failed(registry, "dispatch", holder="merger")
-        record = registry.read("dispatch")
+        record = registry.read("dispatch.waiting")
         assert record is not None and record.state == STATE_WAITING
         assert record.holder == "merger"
         assert os.getpid() == record.pid
+        assert registry.read("dispatch").holder == "dispatcher", (
+            "the refused waiter displaced the live holder's record, so this "
+            "precondition test would be reading back its own failure"
+        )
