@@ -144,6 +144,7 @@ scan_escalations(){
     fi
     cls=
     case "$last" in
+      *'rebase agent did not push'*|*'rebase agent pushed nothing'*) cls=rework;;
       *NEEDS-REBASE*|*'NEEDS-ESCALATION rebase:'*|*'rebase agent starting'*|*'merge conflict'*|*'conflict with main'*) cls=rebase;;
       *'start @'*)
         age=$(( $(date +%s) - $(stat -c %Y "$status" 2>/dev/null || echo 0) ))
@@ -156,7 +157,18 @@ scan_escalations(){
     [ -n "${sha:-}" ] || continue
     is_quarantined "$qlane" "$sha" && continue
     if [ "$cls" = rebase ]; then
-      grep -qx "fleet-rebase-$qlane.service" <<< "$rebasing" && continue
+      if grep -qx "fleet-rebase-$qlane.service" <<< "$rebasing"; then
+        runlog="$F/runs/rebase-$qlane.jsonl"
+        [ -f "$runlog" ] || runlog="$F/runs/rebase-$lane.jsonl"
+        [ -f "$runlog" ] || runlog="$status_path"
+        age=$(( $(date +%s) - $(stat -c %Y "$runlog" 2>/dev/null || echo 0) ))
+        if [ "$age" -ge ${STUCK_REBASE_S:-3600} ]; then
+          systemctl --user stop "fleet-rebase-$qlane.service" 2>/dev/null || true
+          printf '%s NEEDS-REBASE rebase stalled %ss without output; retry\n' "$(date +%T)" "$age" >> "$status_path"
+          log "stopped stale rebase $qlane (no output for ${age}s)"
+        fi
+        continue
+      fi
       [ -z "$rebasing" ] || continue
       n=$(rebase_tries "$qlane" "$sha")
       if [ "$n" -ge 2 ]; then quarantine "$qlane" "$sha" 'rebase attempts exhausted'; continue; fi
