@@ -817,8 +817,8 @@ class GatePipeline:
         where step0's result is already known — a docs/tests-only PR whose own
         tests failed has blockers, whatever its diff looks like.
         """
-        lines = diff_line_stats(worktree, self.config.base_branch)
-        risky = prodsensitive_paths(worktree, self.config.base_branch, self.config)
+        lines = diff_line_stats(worktree, self.base_ref)
+        risky = prodsensitive_paths(worktree, self.base_ref, self.config)
         if lines > self.config.big_lines or risky:
             lenses = self.config.lenses[: self.config.max_parallel_lenses]
             return ReviewTier(tier=len(lenses), lenses=lenses, lines=lines, risky=risky)
@@ -861,7 +861,7 @@ class GatePipeline:
         """
         if not self.config.tier0:
             return []
-        changed = changed_paths(worktree, self.config.base_branch)
+        changed = changed_paths(worktree, self.base_ref)
         if not changed or any(not is_docs_or_test(path) for path in changed):
             return []
         if self._step0_run is not None and self._step0_run.infra_error:
@@ -896,14 +896,14 @@ class GatePipeline:
         evidence that never existed.
         """
         reasons: list[str] = []
-        deleted = deleted_test_paths(worktree, self.config.base_branch)
+        deleted = deleted_test_paths(worktree, self.base_ref)
         if deleted:
             reasons.append(
                 f"the PR deletes {len(deleted)} of its own test file(s) "
                 f"({', '.join(deleted[:3])}), so step0 ran none of them: "
                 "removing a test removes the evidence that approves it"
             )
-        config_paths = changed_test_config_paths(worktree, self.config.base_branch)
+        config_paths = changed_test_config_paths(worktree, self.base_ref)
         if config_paths:
             reasons.append(
                 f"the PR changes suite-level test config ({', '.join(config_paths[:3])}), "
@@ -1863,7 +1863,7 @@ class GatePipeline:
             # pass, then re-gate); anything sensitive keeps today's full evidence
             # pipeline below, unchanged. Decided after step0 so a red PR test is
             # already a confirmed blocker the STANDARD state machine can act on.
-            changed = changed_paths(worktree, self.config.base_branch)
+            changed = changed_paths(worktree, self.base_ref)
             if standard_select_tier(self.config, changed) == STANDARD_TIER:
                 return self.run_standard(ref, worktree, pr_tests)
 
@@ -2341,7 +2341,7 @@ def run_gate_recheck(
             # to restore them into, so the archived test lands where the rebase
             # actually broke it.
             archived = pipeline.archive.stored_tests()
-            changed = changed_test_files(worktree, gate_cfg.base_branch)
+            changed = changed_test_files(worktree, pipeline.base_ref)
             gate_tests = [f"{_test_dir_of(changed)}/{p.name}" for p in archived]
             pipeline.archive.materialise(worktree, gate_tests)
             test_files = sorted(set(changed) | set(gate_tests))
