@@ -79,11 +79,18 @@ BASE=$HOME/fleet/wt/$REPO-base
 git -C $BASE fetch -q origin
 # An empty gh answer is a network failure (DNS outage 2026-09-26), not a wrong PR: retry after the link recovers.
 for _try in 1 2 3 4 5; do
-  read -r HREF HEAD0 PSTATE < <(gh pr view $PR -R $SLUG --json headRefName,headRefOid,state --jq '"\(.headRefName) \(.headRefOid) \(.state)"')
+  read -r HREF HEAD0 PBASE PSTATE < <(gh pr view $PR -R $SLUG --json headRefName,headRefOid,baseRefName,state --jq '"\(.headRefName) \(.headRefOid) \(.baseRefName) \(.state)"')
   [ -n "$HREF" ] && break; $F/wait_net.sh; sleep $((_try*10))
 done
 [ -n "$HREF" ] || { st "NEEDS-ESCALATION infra: github unreachable (empty gh answer after 5 tries); retryable"; exit 10; }
-[ "$HREF" = "fb/$LANE" ] && [ "$PSTATE" = OPEN ] || { st "NEEDS-ESCALATION gate refused: $SLUG#$PR is '$HREF' ($PSTATE), expected open fb/$LANE (wrong repo/PR?)"; exit 9; }
+PBASE=${PBASE:-main}
+git -C $BASE fetch -q origin "$PBASE:refs/remotes/origin/$PBASE" 2>/dev/null || true
+HLANE=
+case "$HREF" in
+  fb/*) HLANE=${HREF#fb/};;
+  dq1d/*) HLANE=dq1d-${HREF#dq1d/};;
+esac
+[ "$HLANE" = "$LANE" ] && [ "$PSTATE" = OPEN ] || { st "NEEDS-ESCALATION gate refused: $SLUG#$PR is '$HREF' ($PSTATE), expected open lane $LANE (wrong repo/PR?)"; exit 9; }
 H9=${HEAD0:0:9}
 LSLUG=$(echo "$LANE" | tr -c 'a-zA-Z0-9\n' '_')  # lane in gate test names: fixed names collided add/add across PRs
 # Worktree setup is serialized per repo: concurrent gates each ran `worktree prune`, which deleted a
@@ -98,11 +105,11 @@ PRIOR=$(ls -t $R/rev-pm*-$LANE.out $R/rev-pm*-$LANE-adv.out 2>/dev/null | head -
 : > $G/confirmed.jsonl; : > $G/untestable.jsonl
 
 # ---- 0 deterministic: the PR's own changed tests at head
-ptests=$(git -C $WT diff --name-only origin/main...HEAD | grep -E '(^|/)test_[^/]*\.py$' | while read t; do [ -f $WT/$t ] && echo $t; done | head -40)
+ptests=$(git -C $WT diff --name-only origin/$PBASE...HEAD | grep -E '(^|/)test_[^/]*\.py$' | while read t; do [ -f $WT/$t ] && echo $t; done | head -40)
 if [ -n "$ptests" ]; then
   out=$($F/fm_pytest.sh $WT $ptests); prc=$?; echo "$out" > $G/step0.txt
   if [ $prc -ge 2 ]; then st "step0 PR tests could not run: $(echo "$out" | grep -E '^(INFRA|SUMMARY)' | tr '\n' ' ' | cut -c1-200)"
-  else MB=$F/gate/_main-$REPO; git -C $MB fetch -q origin 2>/dev/null; git -C $MB checkout -q --detach origin/main 2>/dev/null
+  else MB=$F/gate/_base-$REPO; git -C $MB fetch -q origin 2>/dev/null; git -C $MB checkout -q --detach origin/$PBASE 2>/dev/null
     f0=$(echo "$out" | awk '/^FAILED /{print $2}' | sort -u); bf=""
     [ -n "$f0" ] && [ -d $MB ] && bf=$($F/fm_pytest.sh $MB $(echo "$f0" | sed 's/::.*//' | sort -u | while read t; do [ -f $MB/$t ] && echo $t; done) | awk '/^FAILED /{print $2}' | sort -u)
     [ -n "$bf" ] && st "step0: $(echo "$bf" | wc -l) failure(s) also fail on main (baseline, ignored)"
@@ -114,7 +121,7 @@ mergedcheck(){ local full; full=$(gh pr view $PR -R $SLUG --json headRefOid --jq
   case "$REPO" in
     lake-of-rage|silphcoanalytics) TEST_ONLY=1 $F/fastmerge_ext.sh $REPO $PR $full > $G/mergedcheck.log 2>&1 ;;
     agent-fleet) local M=$G/merged; wtadd $M $full >/dev/null 2>&1 || return 2
-      ( cd $M && git -c user.name=gate -c user.email=gate@local merge -q --no-ff --no-commit origin/main >/dev/null 2>&1 || exit 3
+      ( cd $M && git -c user.name=gate -c user.email=gate@local merge -q --no-ff --no-commit origin/$PBASE >/dev/null 2>&1 || exit 3
         uv sync -q --frozen --group dev >/dev/null 2>&1; systemd-run --user --scope -q --slice=fleet.slice -p MemoryMax=6G -p MemorySwapMax=0 timeout 1500 uv run pytest -q -p no:randomly ) > $G/mergedcheck.log 2>&1; local rc=$?
       ( flock 200; git -C $BASE worktree remove --force $M 2>/dev/null ) 200>$F/locks/wt-$REPO.lock; return $rc ;;
     *) return 0 ;;
@@ -126,7 +133,7 @@ approve(){ local sha; sha=$(gh pr view $PR -R $SLUG --json headRefOid --jq '.hea
 # (*.md, docs/, tests/, test_*.py, *_test.py, fixtures/) is approved on evidence alone: its own changed tests passed at
 # head (step 0, no confirmed failures) and the merged-tree check (mergedcheck, run inside approve) passes.
 # Anything touching other files goes to model review. GATE_TIER0=0 disables.
-_nonmech=$(git -C $WT diff --name-only origin/main...HEAD | grep -vE '(\.md$|(^|/)docs?/|(^|/)tests?/|(^|/)test_[^/]*\.py$|_test\.py$|(^|/)fixtures?/)' | head -1)
+_nonmech=$(git -C $WT diff --name-only origin/$PBASE...HEAD | grep -vE '(\.md$|(^|/)docs?/|(^|/)tests?/|(^|/)test_[^/]*\.py$|_test\.py$|(^|/)fixtures?/)' | head -1)
 if [ "${GATE_TIER0:-1}" = 1 ] && [ -z "$_nonmech" ] && [ ! -s $G/confirmed.jsonl ] && ! grep -q 'step0 PR tests could not run' $G/log 2>/dev/null; then
   st "review tier: 0 (docs/tests only; approving on step-0 tests + merged-tree check, no model review)"
   approve
@@ -145,8 +152,8 @@ spec:Conformance to the task specification below: required items missing or impl
 if [ -z "${GATE_LENSES:-}" ]; then
   # size = non-test code lines only (tests/fixtures/docs inflate diffs without adding review risk; 6 of 7 gates hit the
   # 4-lens tier at 10:17 on 2026-09-26 because test files counted)
-  _lines=$(git -C $WT diff --numstat origin/main...HEAD | awk '$3 !~ /(^|\/)(tests?|fixtures?|docs?)\/|(^|\/)test_[^\/]*\.py$|_test\.py$|\.md$|\.snap$|\.json$/ {a+=$1+$2} END{print a+0}')
-  _risky=$(git -C $WT diff --name-only origin/main...HEAD | grep -cE '^(infra/vps/|\.github/workflows/|scripts/(deploy|lor-api-ship|platform-deploy)|.*migrations?/|.*(gold|sales).*(write|publish|restat|backfill|apply)|.*run_prod)' )
+  _lines=$(git -C $WT diff --numstat origin/$PBASE...HEAD | awk '$3 !~ /(^|\/)(tests?|fixtures?|docs?)\/|(^|\/)test_[^\/]*\.py$|_test\.py$|\.md$|\.snap$|\.json$/ {a+=$1+$2} END{print a+0}')
+  _risky=$(git -C $WT diff --name-only origin/$PBASE...HEAD | grep -cE '^(infra/vps/|\.github/workflows/|scripts/(deploy|lor-api-ship|platform-deploy)|.*migrations?/|.*(gold|sales).*(write|publish|restat|backfill|apply)|.*run_prod)' )
   if [ "${_lines:-0}" -gt ${GATE_BIG_LINES:-600} ] || [ "${_risky:-0}" -gt 0 ]; then GATE_LENSES=4; else GATE_LENSES=1; fi
   st "review tier: $GATE_LENSES lens(es) (non-test diff ${_lines} lines, ${_risky} production-sensitive files)"
 fi
@@ -157,7 +164,7 @@ LENS_NAMES=$(echo "$LENSES" | cut -d: -f1 | tr '\n' ' ')
 i=0; while IFS=: read -r lens focus; do i=$((i+1)); pf=$G/find-$lens.md
 cat > $pf <<EOF
 You are a pre-merge reviewer with ONE focus: **$lens** — $focus
-Repository worktree (read-only for you; do NOT edit, commit or push): $WT, detached at PR #$PR head $H9. Review ONLY the change: \`git diff origin/main...HEAD\` (run it). Read surrounding code as needed.
+Repository worktree (read-only for you; do NOT edit, commit or push): $WT, detached at PR #$PR head $H9. Review ONLY the change: \`git diff origin/$PBASE...HEAD\` (run it). Read surrounding code as needed.
 
 Report ONLY BLOCKERS: defects that would make merging wrong — incorrect results, data loss, contract breaks, crashes, security, or production risk — within your focus. Style, naming, docs polish, refactors, "could be cleaner", missing nice-to-haves and speculative risks are NOT blockers: omit them entirely. If you find no blockers, return an empty list; that is a normal, good outcome.
 Each blocker MUST name the exact file/line and a concrete repro: the input/state and the observable wrong outcome, precise enough that someone can write a failing test for it.
@@ -207,7 +214,7 @@ verify(){ # verify CANDIDATE_JSON TAG
   local c=$1 tag=$2 id; id=$(echo "$c" | python3 -c "import json,sys,re; print(re.sub(r'\W','_',json.load(sys.stdin).get('id','x'))[:30])")
   local pf=$G/verify-$tag-$id.md
   cat > $pf <<EOF
-You verify ONE claimed defect in worktree $WT (detached at PR #$PR head $H9; the change is \`git diff origin/main...HEAD\`).
+You verify ONE claimed defect in worktree $WT (detached at PR #$PR head $H9; the change is \`git diff origin/$PBASE...HEAD\`).
 Claim (JSON): $c
 
 Your job: PROVE or DISPROVE it with a test. Create exactly ONE new test file named test_gate_${LSLUG}_${id}.py in the existing test directory that fits (e.g. api/tests/ for silphcoanalytics, the owning package's tests/ for lake-of-rage). Do not modify ANY other file. The test must exercise the real code path and FAIL at the current head because of the claimed defect (an assertion failure on the wrong behaviour) — not because of import errors, missing fixtures, network or environment. Run it (memory-capped): \`systemd-run --user --scope -q --slice=fleet.slice -p MemoryMax=6G -p MemorySwapMax=0 uv run pytest -q <file>\` from the package directory that owns pyproject.toml.
@@ -236,7 +243,7 @@ verify_batch(){ # verify_batch CANDIDATES_FILE TAG — one agent writes one test
   if [ "${GATE_VERIFY_BATCH:-1}" != 1 ]; then while read -r c; do [ -n "$c" ] && verify "$c" $tag & done < $cf; wait; return; fi
   local pf=$G/verify-$tag-batch.md n=rev-gate-$LANE-v$tag-batch claims
   claims=$(python3 $F/lean_gate_claims.py $cf "$LSLUG")
-  { echo "You verify SEVERAL claimed defects in worktree $WT (detached at PR #$PR head $H9; the change is \`git diff origin/main...HEAD\`)."
+  { echo "You verify SEVERAL claimed defects in worktree $WT (detached at PR #$PR head $H9; the change is \`git diff origin/$PBASE...HEAD\`)."
     echo "Claims (one per line):"; echo "$claims"; echo
     cat $F/prompts/lean_verify_batch.md; } > $pf
   agent $n $WT $pf 250 >/dev/null 2>&1
@@ -256,7 +263,7 @@ st "verify: confirmed=$(wc -l < $G/confirmed.jsonl) untestable=$(wc -l < $G/unte
 # ---- 3 judge: ONE step-5-preview call
 jpf=$G/judge1.md
 cat > $jpf <<EOF
-You are the final pre-merge judge for PR #$PR ($SLUG) in worktree $WT (detached at $H9). Read-only: do not edit, commit or push. The change is \`git diff origin/main...HEAD\`.
+You are the final pre-merge judge for PR #$PR ($SLUG) in worktree $WT (detached at $H9). Read-only: do not edit, commit or push. The change is \`git diff origin/$PBASE...HEAD\`.
 Evidence so far — confirmed blockers (each has a failing test): $(cat $G/confirmed.jsonl | head -c 6000)
 Claims a test could not show (rule on each: is it a real merge blocker in the current code?): $(cat $G/untestable.jsonl | head -c 6000)
 Also do ONE pass of your own for BLOCKERS ONLY (wrong results, data loss, contract breaks, crashes, security, production risk). No style/nits. Each new blocker needs file/line and a concrete repro.

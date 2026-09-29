@@ -83,6 +83,8 @@ def test_every_pytest_entrypoint_uses_the_one_shared_slot() -> None:
     assert "slots/gate" in worker_gate and "slots/gate" in orchestrator_gate
     assert "gate-$LANE.lock" in worker_gate and "gate-$LANE.lock" in orchestrator_gate
     assert "gate-$LANE.pid" in worker_gate and "gate-$LANE.pid" in orchestrator_gate
+    assert "baseRefName" in worker_gate and "baseRefName" in orchestrator_gate
+    assert "origin/$PBASE" in worker_gate and "origin/$PBASE" in orchestrator_gate
     assert "waiting for shared gate slot" in worker_gate and "waiting for shared gate slot" in orchestrator_gate
     sweep = (OPS_VPS / "worker" / "bin" / "merge_train_sweep.sh").read_text()
     assert all(repo in sweep for repo in ("lake-of-rage", "silphcoanalytics", "agent-fleet"))
