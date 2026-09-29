@@ -79,11 +79,20 @@ scan_escalations(){
     [ -f "$status" ] || continue
     lane=$(basename "$status" .status)
     grep -qx "fleet-gate-$lane.service" <<< "$gates" && continue
-    grep -qx "$lane" <<< "$queued_lanes" && continue
     last=$(tail -1 "$status" 2>/dev/null)
+    if grep -qx "$lane" <<< "$queued_lanes"; then
+      case "$last" in
+        *'merge conflict'*)
+          read -r queued_repo queued_pr < <(awk -v l="$lane" '$1==l{print $2, $3; exit}' "$Q")
+          [ -n "${queued_pr:-}" ] && remove_queue "$lane" "$queued_repo" "$queued_pr"
+          log "reroute queued merge-conflict $lane to rebase"
+          ;;
+        *) continue;;
+      esac
+    fi
     cls=
     case "$last" in
-      *NEEDS-REBASE*|*'NEEDS-ESCALATION rebase:'*|*'rebase agent starting'*) cls=rebase;;
+      *NEEDS-REBASE*|*'NEEDS-ESCALATION rebase:'*|*'rebase agent starting'*|*'merge conflict'*|*'conflict with main'*) cls=rebase;;
       *'start @'*)
         age=$(( $(date +%s) - $(stat -c %Y "$status" 2>/dev/null || echo 0) ))
         [ "$age" -ge 1800 ] && cls=infra || continue;;
@@ -104,6 +113,7 @@ scan_escalations(){
       printf '%s %s rebase %s\n' "$lane" "$(date +%s)" "$sha" >> "$RQ"
       if systemd-run --user --quiet --collect --unit="fleet-rebase-$lane" --slice=fleet.slice \
         "$HOME/fleet/bin/lane_rebase.sh" "$lane" "$repo" "$pr"; then
+        rebasing="${rebasing}"$'\n'"fleet-rebase-$lane.service"
         log "rebase $lane ($repo#$pr) spawned ($n prior for $sha)"
       else
         log "rebase spawn failed $lane"

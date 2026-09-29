@@ -67,6 +67,7 @@ def test_every_pytest_entrypoint_uses_the_one_shared_slot() -> None:
     assert all("FLEET_TEST_SLOT_DIR" not in source for source in (worker_shim, orchestrator_shim))
     assert "FLEET_CAPACITY_HELPER" in lane_runner
     assert "--check" in driver and "gate_processes" in driver and "sort -u" in driver
+    assert "*'merge conflict'*" in driver and "*'conflict with main'*" in driver
     assert "DGRH" not in driver and "circuit(){" not in driver
     assert "Restart=on-failure" in service and "%h/fleet/bin/gate_queue_run.sh" in service
     assert "OnUnitInactiveSec=30s" in timer
