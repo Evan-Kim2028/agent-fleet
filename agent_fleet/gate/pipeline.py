@@ -959,6 +959,7 @@ class GatePipeline:
             base=diff_ref,
             chars=len(change.text),
             truncated=change.truncated,
+            failed=change.failed,
         )
 
         def _one(lens: str) -> list[Finding]:

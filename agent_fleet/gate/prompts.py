@@ -31,7 +31,7 @@ import json
 import re
 from typing import TYPE_CHECKING
 
-from agent_fleet.gate.gitops import DIFF_CONTEXT_LINES
+from agent_fleet.gate.gitops import DIFF_CONTEXT_LINES, DIFF_NOT_COMPUTED
 
 if TYPE_CHECKING:
     from agent_fleet.contracts.gate import Finding
@@ -200,7 +200,19 @@ def find_prompt(
         "do not re-run git diff for it:\n```diff\n"
         f"{change}\n```\n"
         if change
-        else f"Review ONLY the change: `git diff {base_branch}...HEAD` (run it). "
+        # An empty change with a *failed* diff note is not a diff that came back
+        # blank: `git diff <base>...HEAD` cannot succeed, so naming it again
+        # would spend the reviewer's whole budget re-deriving a diff that does
+        # not exist, and it would come back clean having reviewed nothing.
+        else (
+            f"{change_note}\nDo NOT run `git diff {base_branch}...HEAD` — it cannot "
+            "succeed here. Resolve the PR's base branch (it may have been deleted, "
+            "renamed, or never fetched), then review the change you get from it. "
+            "If you cannot obtain the change at all, say so instead of returning "
+            "an empty findings list: an unreviewable change is not a clean one.\n"
+            if DIFF_NOT_COMPUTED in change_note
+            else f"Review ONLY the change: `git diff {base_branch}...HEAD` (run it). "
+        )
     )
     return AGENT_RULES + (
         f"You are a pre-merge reviewer with ONE focus: **{lens}** — {focus}\n"

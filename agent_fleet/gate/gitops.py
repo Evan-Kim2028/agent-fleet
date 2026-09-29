@@ -80,10 +80,17 @@ class PullRequestRef:
         return self.state.upper() == "OPEN"
 
 
-def _run_git(repo: Path, *args: str, check: bool = True) -> str:
-    """Run a git command in *repo*; raise :class:`GateError` on failure."""
+def _run_git_completed(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run a git command in *repo*; raise :class:`GateError` if it cannot launch.
+
+    The *completed* process is returned rather than its stdout so that a caller
+    can tell a command that ran and failed from one that produced no output:
+    ``git diff`` against a base ref that cannot be resolved exits non-zero with
+    empty stdout, and reading only stdout makes that identical to a diff that is
+    genuinely empty.
+    """
     try:
-        completed = subprocess.run(
+        return subprocess.run(
             ["git", "-C", str(repo), *args],
             capture_output=True,
             text=True,
@@ -92,6 +99,11 @@ def _run_git(repo: Path, *args: str, check: bool = True) -> str:
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise GateError(f"git {' '.join(args)} failed to launch: {exc}") from exc
+
+
+def _run_git(repo: Path, *args: str, check: bool = True) -> str:
+    """Run a git command in *repo*; raise :class:`GateError` on failure."""
+    completed = _run_git_completed(repo, *args)
     if check and completed.returncode != 0:
         raise GateError(
             f"git {' '.join(args)} exited {completed.returncode}: "
@@ -473,12 +485,30 @@ DIFF_CONTEXT_LINES = 25
 #:   ever matches the repository's root ``tests`` — never ``api/tests``. The
 #:   ``**/`` prefix is what makes the sub-package case work, and it is what the
 #:   equivalent gate test directory rules elsewhere in this module already use.
+#:
+#: ``.agent-fleet/`` is machine-local run state — the same transcripts and
+#: per-PR notes that .gitignore says must never be committed. A run transcript is
+#: megabytes of raw model thinking deltas, tool inputs and outputs, and it
+#: grows on every dispatch, so one of them landing in a diff does not merely
+#: add noise: at the 150k cap it fills the whole brief and evicts every line of
+#: the actual code change, leaving the reviewers to review a JSON event log and
+#: return no blockers. It is excluded rather than only ignored because .gitignore
+#: is advisory — a tracked file stays tracked — while this is the gate's own
+#: guarantee about what a reviewer is ever handed.
 _DIFF_EXCLUDES: tuple[str, ...] = (
     ":(exclude)**/test_*.py",
     ":(exclude)**/*_test.py",
     ":(exclude)**/tests/**",
     ":(exclude)*.md",
+    ":(exclude).agent-fleet/**",
+    ":(exclude).agent-fleet-state.json",
 )
+
+
+#: Marker at the head of the note :attr:`InlineDiff.note` produces when the diff
+#: could not be computed. Exported so the prompt can branch on the note without
+#: re-deriving the wording, and so the two halves cannot drift apart.
+DIFF_NOT_COMPUTED = "(NOT COMPUTED"
 
 
 @dataclass(frozen=True)
@@ -487,6 +517,11 @@ class InlineDiff:
 
     text: str
     truncated: bool
+    #: The diff could not be computed at all — an unresolvable base ref, a
+    #: repository state git refuses. Distinct from an empty change, which is a
+    #: real answer: "this PR changes nothing". Both carry no text, so without
+    #: this flag the reviewer is handed nothing and told it is the whole change.
+    failed: bool = False
 
     @property
     def note(self) -> str:
@@ -496,7 +531,16 @@ class InlineDiff:
         reads as the complete change and the half that was dropped is never
         reviewed. The prompt therefore always says which of the two it got, so a
         reviewer can spend a tool call on the remainder when the cap bit.
+
+        A diff that could not be computed says so rather than reporting a
+        complete empty one: it is not the same answer, and the difference is the
+        whole verdict — a clean review of nothing is not a clean review.
         """
+        if self.failed:
+            return (
+                "(NOT COMPUTED: git diff against this base failed — the change is "
+                "NOT empty and NOT reviewed; do not report this as a clean review)"
+            )
         if not self.truncated:
             return "(complete)"
         return f"(TRUNCATED at {len(self.text)} chars: run git diff for the rest)"
@@ -513,9 +557,17 @@ def inline_change(worktree: Path, base_branch: str, *, max_chars: int) -> Inline
     inside a hunk is acceptable, and it is recorded in :attr:`InlineDiff.note`
     so the reviewer knows the change is partial rather than quietly reviewing
     half a PR.
+
+    A diff git *refuses* to produce is reported as :attr:`InlineDiff.failed`, not
+    as an empty change. The forge reports a base branch that may since have been
+    deleted, renamed, or never fetched; every one of those exits non-zero with
+    empty stdout, exactly what a PR with no changes produces. Reporting the
+    second as the first is the failure the note exists to prevent: the reviewer
+    is pointed at a diff that cannot exist, spends its whole budget re-deriving
+    it, and returns no findings — a clean review of nothing.
     """
     base = resolve_diff_base(worktree, base_branch)
-    diff = _run_git(
+    completed = _run_git_completed(
         worktree,
         "diff",
         f"-U{DIFF_CONTEXT_LINES}",
@@ -523,11 +575,11 @@ def inline_change(worktree: Path, base_branch: str, *, max_chars: int) -> Inline
         "--",
         ".",
         *_DIFF_EXCLUDES,
-        check=False,
     )
+    if completed.returncode != 0:
+        return InlineDiff(text="", truncated=False, failed=True)
+    diff = completed.stdout or ""
     if not diff:
-        # An empty diff and a failed one are not the same thing: the second means
-        # the reviewer would be handed no change and told it is the whole one.
         return InlineDiff(text="", truncated=False)
     cap = max(int(max_chars), 0)
     if cap and len(diff) > cap:
