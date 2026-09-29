@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # lane_rebase.sh LANE REPO PR — on-box rebase path (port of ops-side
 # rebase_regate.sh for the gate_queue driver). Rebases fb/LANE (or
-# dq1d/<x> for dq1d-<x> lanes) onto origin/main via an fbagent cmd call,
+# dq1d/<x> for dq1d-<x> lanes) onto origin/$BASE_REF via an fbagent cmd call,
 # pushes with --force-with-lease, then appends the lane back to the gate
 # queue so the driver re-gates the new head in order.
 set -uo pipefail
@@ -9,7 +9,7 @@ F=$HOME/fleet/fb; W_ROOT=$HOME/fleet/wt
 LANE=$1; REPO=$2; PR=$3
 REF=""
 for _try in 1 2 3; do
-  REF=$(timeout 20 gh pr view "$PR" -R "${FLEET_GH_OWNER:-Evan-Kim2028}/$REPO" --json headRefName --jq .headRefName 2>/dev/null) && break
+  read -r REF BASE_REF < <(timeout 20 gh pr view "$PR" -R "${FLEET_GH_OWNER:-Evan-Kim2028}/$REPO" --json headRefName,baseRefName --jq '"\(.headRefName) \(.baseRefName)"' 2>/dev/null) && break
   sleep $((_try*5))
 done
 case "$REF" in
@@ -17,6 +17,7 @@ case "$REF" in
   dq1d/*) BR=$REF; LANE="dq1d-${REF#dq1d/}";;
   *) case "$LANE" in dq1d-*) BR="dq1d/${LANE#dq1d-}";; *) BR="fb/$LANE";; esac;;
 esac
+BASE_REF=${BASE_REF:-main}
 S=$F/lanes
 ST(){ echo "$(date +%H:%M:%S) $*" >> $S/$LANE.status; echo "$(date +%H:%M:%S) [$LANE] $*" >> $F/events.log; }
 mkdir -p $F/locks
@@ -69,20 +70,20 @@ if git -C $W status --porcelain | grep -q .; then
 fi
 git -C $W reset -q --hard origin/$BR
 before=$(git -C $B rev-parse origin/$BR)
-# already rebased? If origin/main's tip is the merge base of the branch, a prior
+# already rebased? If origin/$BASE_REF's tip is the merge base of the branch, a prior
 # run (or a dead wrapper whose agent finished anyway) already rebased it —
 # don't burn an agent, just re-queue.
-mb=$(git -C $B merge-base origin/main origin/$BR)
-if [ "$mb" = "$(git -C $B rev-parse origin/main)" ]; then
-  ST "branch already based on current main; queueing re-gate"
+mb=$(git -C $B merge-base origin/$BASE_REF origin/$BR)
+if [ "$mb" = "$(git -C $B rev-parse origin/$BASE_REF)" ]; then
+  ST "branch already based on current $BASE_REF; queueing re-gate"
   printf "%s %s %s\n" "$LANE" "$REPO" "$PR" >> $F/gate_queue.txt
   exit 0
 fi
 P=$F/prompts; mkdir -p $P
-sed -e "s#@W@#$W#g; s#@L@#$LANE#g; s#@PR@#$PR#g; s#@REPO@#$REPO#g; s#@BR@#$BR#g; s#@OWNER@#Evan-Kim2028#g" > $P/rebase-$LANE.md <<'P'
-In the worktree @W@ (branch @BR@, PR #@PR@ in @OWNER@/@REPO@): the PR conflicts with main.
-Run `git fetch origin && git rebase origin/main` (or merge origin/main if the rebase is unmanageable),
-resolve every conflict preserving BOTH main's changes and this PR's intent, run the targeted tests
+sed -e "s#@W@#$W#g; s#@L@#$LANE#g; s#@PR@#$PR#g; s#@REPO@#$REPO#g; s#@BR@#$BR#g; s#@BASE@#$BASE_REF#g; s#@OWNER@#Evan-Kim2028#g" > $P/rebase-$LANE.md <<'P'
+In the worktree @W@ (branch @BR@, PR #@PR@ in @OWNER@/@REPO@): the PR conflicts with @BASE@.
+Run `git fetch origin && git rebase origin/@BASE@` (or merge origin/@BASE@ if the rebase is unmanageable),
+resolve every conflict preserving BOTH @BASE@'s changes and this PR's intent, run the targeted tests
 for the touched files (memory-capped: `systemd-run --user --scope -q --slice=fleet.slice -p MemoryMax=6G -p MemorySwapMax=0 uv run pytest -q <files>`,
 never the full suite), commit (never --no-verify), and push with `git push --force-with-lease`.
 Do not change behaviour beyond conflict resolution. If a conflict is add/add on a gate test file
@@ -96,7 +97,7 @@ $F/fbagent rebase-$LANE $W $P/rebase-$LANE.md 300
 git -C $B fetch -q origin; after=$(git -C $B rev-parse origin/$BR)
 if [ "$after" = "$before" ]; then
   _local=$(git -C "$W" rev-parse HEAD 2>/dev/null || true)
-  if [ -n "$_local" ] && [ "$_local" != "$before" ] && git -C "$W" merge-base --is-ancestor origin/main "$_local"; then
+  if [ -n "$_local" ] && [ "$_local" != "$before" ] && git -C "$W" merge-base --is-ancestor origin/$BASE_REF "$_local"; then
     if git -C "$W" push -q --force-with-lease origin "HEAD:$BR"; then
       git -C $B fetch -q origin; after=$(git -C $B rev-parse origin/$BR)
       ST "rebase agent left a rebased local head; pushed ${after:0:9}"
@@ -106,6 +107,6 @@ fi
 if [ "$after" = "$before" ]; then
   ST "NEEDS-ESCALATION rebase agent pushed nothing"; exit 5
 fi
-ST "rebased onto main -> ${after:0:9}; queueing re-gate"
+ST "rebased onto $BASE_REF -> ${after:0:9}; queueing re-gate"
 printf "%s %s %s\n" "$LANE" "$REPO" "$PR" >> $F/gate_queue.txt
 exit 0
