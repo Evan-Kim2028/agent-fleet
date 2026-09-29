@@ -19,14 +19,6 @@ exec 8>$F/locks/gate-$LANE.lock
 flock 8
 printf '%s\n' $$ > $F/locks/gate-$LANE.pid
 trap 'rm -f $F/locks/gate-$LANE.pid' EXIT
-gate_live(){
-  ps -eo args= | awk '{for(i=1;i<NF;i++){t=$i; sub(/^.*\//,"",t); if(t=="fbgate") print $(i+1)}}' | sort -u | grep -c .
-}
-_gate_wait=0
-while [ "$(gate_live)" -gt "$GATE_WIP" ]; do
-  [ $((_gate_wait++ % 20)) -eq 0 ] && st "waiting for gate WIP ($(gate_live)/$GATE_WIP live)"
-  sleep 15
-done
 GATE_SLOTS_DIR=${AGENT_FLEET_HOME:-$HOME/.agent-fleet}/slots/gate
 mkdir -p $GATE_SLOTS_DIR
 _gate_wait=0

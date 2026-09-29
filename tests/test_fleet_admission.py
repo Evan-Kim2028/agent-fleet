@@ -80,11 +80,10 @@ def test_every_pytest_entrypoint_uses_the_one_shared_slot() -> None:
     assert "gate exited without verdict" in driver
     assert "gate_lane_pids" in driver and "kill -- -" in driver
     assert "STUCK_REBASE_S" in driver and "rebase agent did not push" in driver
-    assert "slots/gate" in worker_gate and "gate_live" in worker_gate
-    assert "slots/gate" in orchestrator_gate and "gate_live" in orchestrator_gate
+    assert "slots/gate" in worker_gate and "slots/gate" in orchestrator_gate
     assert "gate-$LANE.lock" in worker_gate and "gate-$LANE.lock" in orchestrator_gate
     assert "gate-$LANE.pid" in worker_gate and "gate-$LANE.pid" in orchestrator_gate
-    assert "waiting for gate WIP" in worker_gate and "waiting for shared gate slot" in orchestrator_gate
+    assert "waiting for shared gate slot" in worker_gate and "waiting for shared gate slot" in orchestrator_gate
     sweep = (OPS_VPS / "worker" / "bin" / "merge_train_sweep.sh").read_text()
     assert all(repo in sweep for repo in ("lake-of-rage", "silphcoanalytics", "agent-fleet"))
     assert "--status-dir" in sweep and "--include-head-prefix" in sweep
