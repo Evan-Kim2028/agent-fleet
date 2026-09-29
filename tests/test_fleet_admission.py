@@ -85,7 +85,7 @@ def test_every_pytest_entrypoint_uses_the_one_shared_slot() -> None:
     assert all(repo in sweep for repo in ("lake-of-rage", "silphcoanalytics", "agent-fleet"))
     assert "--status-dir" in sweep and "--include-head-prefix" in sweep
     assert "headRefName" in rebase and "park_worktree" in rebase
-    assert "symbolic-ref -d HEAD" in rebase
+    assert "update-ref --no-deref HEAD" in rebase
     assert "--force-with-lease" in rebase
     assert "DGRH" not in driver and "circuit(){" not in driver
     assert "Restart=on-failure" in service and "%h/fleet/bin/gate_queue_run.sh" in service
