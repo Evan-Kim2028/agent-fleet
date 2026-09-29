@@ -41,7 +41,7 @@ import pytest
 # fixtures.  They are imported under underscore aliases instead; the library
 # should not have to know it is sometimes under pytest.
 from agent_fleet.merge_plan import cli as merge_cli
-from agent_fleet.merge_plan.collect import GitHubClient
+from agent_fleet.merge_plan.collect import GitHubClient, parse_approval
 from agent_fleet.merge_plan.train import (
     LANDED,
     NEEDS_REBASE,
@@ -51,12 +51,13 @@ from agent_fleet.merge_plan.train import (
     GitFold,
     GitTrainer,
     MergeTrain,
+    PRVerdict,
     TrainPR,
     TrainResult,
-    bisect,
-    ensure_heads_local,
     _culprit,
     adopt_merged_parents,
+    bisect,
+    ensure_heads_local,
     narrow_mixed_base,
     order_batch,
     partition_batch,
@@ -133,10 +134,10 @@ class FakeMerger:
     landed: list[int] = field(default_factory=list)
     decline: frozenset[int] = frozenset()
 
-    def land(self, prs: Sequence[TrainPR]) -> list[int]:
+    def land(self, prs: Sequence[TrainPR]) -> dict[int, str]:
         merged = [p.number for p in prs if p.number not in self.decline]
         self.landed.extend(merged)
-        return merged
+        return {p.number: ("landed" if p.number in merged else "skipped") for p in prs}
 
 
 # ---------------------------------------------------------------------------
@@ -1336,6 +1337,63 @@ def test_train_batches_a_lane_status_file_that_names_no_pr(
     assert "would test 1 PR(s) combined" in out
     assert "#126" in out
     assert client.list_calls == 1
+
+
+def test_train_verdicts_retract_the_approval_and_route_repair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A set-aside must stop looking approved and give the queue its next action.
+
+    Before the status writeback, an approved PR that failed the combined train
+    stayed a ``PREMERGE-APPROVED`` verdict, so the next timer retried the same
+    merge instead of sending it to the gate/rebase path.
+    """
+    checkout, head = _repo_on_branch(tmp_path, "main", with_pr=True)
+    status = _lane_status_dir(
+        tmp_path, {"train-regression": head, "train-conflict": head, "train-landed": head}
+    )
+    _install_lane_client(
+        monkeypatch,
+        {126: "fb/train-regression", 127: "fb/train-conflict", 128: "fb/train-landed"},
+        head_sha=head,
+    )
+    _isolate_lane_registry(monkeypatch, tmp_path)
+    result = TrainResult(
+        repo="demo",
+        base_branch="main",
+        ordered=(
+            pr(126, head=head),
+            pr(127, head=head),
+            pr(128, head=head),
+        ),
+        verdicts=(
+            PRVerdict(
+                pr=126,
+                status=REGRESSION,
+                reason="fails combined",
+                failing_tests=("tests/test_x.py::test_y",),
+            ),
+            PRVerdict(pr=127, status=NEEDS_REBASE, reason="conflicts with the batch"),
+            PRVerdict(pr=128, status=LANDED, reason="survived"),
+        ),
+    )
+    monkeypatch.setattr("agent_fleet.merge_plan.train.run_train", lambda **_kwargs: result)
+
+    args = _train_args(
+        checkout,
+        config=tmp_path / "none.yaml",
+        over={"status_dir": str(status), "dry_run": False},
+    )
+    assert merge_cli.cmd_merge_train(args) == 0
+    capsys.readouterr()
+
+    regression = (status / "train-regression.status").read_text()
+    conflict = (status / "train-conflict.status").read_text()
+    landed = (status / "train-landed.status").read_text()
+    assert "NEEDS-ESCALATION merge-train regression" in regression
+    assert "NEEDS-REBASE merge train: conflicts" in conflict
+    assert f"MERGED {head[:9]}" in landed
+    assert parse_approval(regression) == parse_approval(conflict) == parse_approval(landed) == ""
 
 
 def test_a_lane_escalated_after_approval_is_not_batched(

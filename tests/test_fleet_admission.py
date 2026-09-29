@@ -50,7 +50,10 @@ def test_every_pytest_entrypoint_uses_the_one_shared_slot() -> None:
     orchestrator_shim = (OPS_VPS / "orchestrator" / "shim" / "uv").read_text()
     gate_pytest = (OPS_VPS / "orchestrator" / "fm_pytest.sh").read_text()
     driver = (OPS_VPS / "worker" / "bin" / "gate_queue_run.sh").read_text()
+    rebase = (OPS_VPS / "worker" / "bin" / "lane_rebase.sh").read_text()
     fastmerge = (OPS_VPS / "orchestrator" / "fastmerge_ext.sh").read_text()
+    worker_gate = (OPS_VPS / "worker" / "fb" / "fbgate").read_text()
+    orchestrator_gate = (OPS_VPS / "orchestrator" / "fbgate").read_text()
     lane_runner = (OPS_VPS / "worker" / "bin" / "lane_impl.sh").read_text()
     service = (OPS_VPS / "systemd" / "fleet-gate-queue.service").read_text()
     timer = (OPS_VPS / "systemd" / "fleet-gate-queue.timer").read_text()
@@ -70,6 +73,14 @@ def test_every_pytest_entrypoint_uses_the_one_shared_slot() -> None:
     assert "--check" in driver and "gate_processes" in driver and "sort -u" in driver
     assert "changed_tests=" in fastmerge and "covered=1" in fastmerge
     assert "*'merge conflict'*" in driver and "*'conflict with main'*" in driver
+    assert "normalize_queue" in driver and "canonical_lane" in driver
+    assert "QUEUE_SCAN_ONCE" in driver
+    assert "merge-train regression" in driver and "STUCK_GATE_S" in driver
+    assert "slots/gate" in worker_gate and "gate_live" in worker_gate
+    assert "slots/gate" in orchestrator_gate and "gate_live" in orchestrator_gate
+    assert "gate-$LANE.lock" in worker_gate and "gate-$LANE.lock" in orchestrator_gate
+    assert "headRefName" in rebase and "park_worktree" in rebase
+    assert "--force-with-lease" in rebase
     assert "DGRH" not in driver and "circuit(){" not in driver
     assert "Restart=on-failure" in service and "%h/fleet/bin/gate_queue_run.sh" in service
     assert "OnUnitInactiveSec=30s" in timer

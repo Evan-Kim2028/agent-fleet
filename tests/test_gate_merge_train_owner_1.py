@@ -254,9 +254,9 @@ class RecordingMerger:
 
     landed: list[tuple[int, ...]] = field(default_factory=list)
 
-    def land(self, prs: Sequence[TrainPR]) -> list[int]:
+    def land(self, prs: Sequence[TrainPR]) -> dict[int, str]:
         self.landed.append(tuple(p.number for p in prs))
-        return [p.number for p in prs]
+        return {p.number: "landed" for p in prs}
 
 
 def test_a_foreign_pr_is_never_folded_tested_or_merged() -> None:

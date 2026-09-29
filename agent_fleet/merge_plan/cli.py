@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
     from agent_fleet.merge_plan.execute import EventSink, TickResult
-    from agent_fleet.merge_plan.train import HeadFilter, TrainPR
+    from agent_fleet.merge_plan.train import HeadFilter, TrainPR, TrainResult
     from agent_fleet.merge_plan.types import ExecutorSpec, RepoSpec
 
 
@@ -250,6 +250,56 @@ def _retarget_pr(repo: str, pr: TrainPR, base: str, cwd: Path) -> bool:
     return True
 
 
+def _record_train_verdicts(
+    status_dir: Path | None,
+    *,
+    lanes: Mapping[int, str],
+    heads: Mapping[int, str],
+    result: TrainResult,
+) -> None:
+    """Write the train's terminal verdicts back to the gate status files.
+
+    The status file is the queue driver's only durable signal.  Without this,
+    a PR the train set aside for a conflict or regression still looks approved
+    forever, so the next train retries it and the gate queue never learns it
+    needs a rebase or another fixer round.  Writes are best-effort: merge
+    reporting must never make the train fail after it has already landed work.
+    """
+    if status_dir is None:
+        return
+    from agent_fleet.merge_plan.train import (
+        LANDED,
+        NEEDS_REBASE,
+        REGRESSION,
+        SKIPPED_MOVED,
+        UNFETCHABLE,
+    )
+
+    stamp = time.strftime("%H:%M:%S")
+    for verdict in result.verdicts:
+        lane = lanes.get(verdict.pr)
+        if not lane:
+            continue
+        sha = heads.get(verdict.pr, "")
+        if verdict.status == LANDED:
+            line = f"MERGED {sha[:9] or '-'}"
+        elif verdict.status == NEEDS_REBASE:
+            line = f"NEEDS-REBASE merge train: {verdict.reason}"
+        elif verdict.status == REGRESSION:
+            failing = ",".join(verdict.failing_tests[:5])
+            detail = verdict.reason + (f"; failing={failing}" if failing else "")
+            line = f"NEEDS-ESCALATION merge-train regression: {detail[:500]}"
+        elif verdict.status in (SKIPPED_MOVED, UNFETCHABLE):
+            line = f"NEEDS-ESCALATION fail-closed: {verdict.reason}; re-gate"
+        else:
+            continue
+        try:
+            with (status_dir / f"{lane}.status").open("a", encoding="utf-8") as fh:
+                fh.write(f"{stamp} {line}\n")
+        except OSError:
+            continue
+
+
 def cmd_merge_train(args: argparse.Namespace) -> int:
     """Run one merge train: test the approved batch combined, land it once.
 
@@ -285,6 +335,7 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
     from agent_fleet.merge_plan.train import (
         TrainPR,
         _default_branch,
+        _moved_verdicts,
         adopt_merged_parents,
         narrow_mixed_base,
         order_batch,
@@ -490,6 +541,15 @@ def cmd_merge_train(args: argparse.Namespace) -> int:
     # its own is describing the same set.
     if not result.not_owned:
         result.not_owned = tuple(not_owned)
+    if moved:
+        result.verdicts += tuple(_moved_verdicts(moved))
+    if args.status_dir:
+        _record_train_verdicts(
+            Path(args.status_dir).expanduser(),
+            lanes=lanes,
+            heads={p.number: p.head_sha for p in (*batch, *moved)},
+            result=result,
+        )
     print(
         json.dumps(result.to_dict(), indent=2, default=str) if args.json else result.render_text()
     )
