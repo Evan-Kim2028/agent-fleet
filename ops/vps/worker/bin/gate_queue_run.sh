@@ -152,7 +152,16 @@ scan_escalations(){
       *'PREMERGE-APPROVED'*|*'MERGED '*) continue;;
       *'shed by fleet pressure'*|*fail-closed*|*died*|*'could not run'*|*'gate refused'*|*'gate stuck'*|*'step0 pytest could not run'*) cls=infra;;
       *no-push*|*'stalled after'*|*'merged-tree regression'*|*'merge-train regression'*|*untestable*|*'fix round pushed nothing'*|*'tests-broken'*|*'full evidence gate required'*) cls=rework;;
-      *) continue;;
+      *)
+        if ! grep -qx "$qlane" <<< "$live" && ! grep -qx "fleet-rebase-$qlane.service" <<< "$rebasing"; then
+          printf '%s NEEDS-ESCALATION fail-closed: gate exited without verdict; re-gate
+' "$(date +%T)" >> "$status_path"
+          last=$(tail -1 "$status_path" 2>/dev/null)
+          cls=infra
+        else
+          continue
+        fi
+        ;;
     esac
     [ -n "${sha:-}" ] || continue
     is_quarantined "$qlane" "$sha" && continue
