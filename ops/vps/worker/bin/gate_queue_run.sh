@@ -20,6 +20,9 @@ gate_units(){ systemctl --user list-units --no-legend --plain 'fleet-gate-*.serv
 gate_processes(){
   ps -eo args= | awk '{for(i=1;i<NF;i++){t=$i; sub(/^.*\//,"",t); if(t=="fbgate") print $(i+1)}}' | sort -u
 }
+gate_lane_pids(){
+  ps -eo pid=,args= | awk -v lane="$1" '{for(i=2;i<NF;i++){t=$i; sub(/^.*\//,"",t); if(t=="fbgate" && $(i+1)==lane){print $1; break}}}'
+}
 live_gates(){
   { gate_units | sed -E 's/^fleet-gate-//; s/\.service$//'; gate_processes; } | grep -v '^$' | sort -u
 }
@@ -127,6 +130,14 @@ scan_escalations(){
       age=$(( $(date +%s) - $(stat -c %Y "$status_path" 2>/dev/null || echo 0) ))
       if [ "$age" -ge ${STUCK_GATE_S:-5400} ]; then
         systemctl --user stop "fleet-gate-$qlane.service" 2>/dev/null || true
+        _killed=""
+        for _pid in $(gate_lane_pids "$qlane"); do
+          _pgid=$(ps -o pgid= -p "$_pid" 2>/dev/null | tr -d ' ' || true)
+          [ -n "$_pgid" ] || continue
+          case " $_killed " in *" $_pgid "*) continue;; esac
+          kill -- -"$_pgid" 2>/dev/null || true
+          _killed="$_killed $_pgid"
+        done
         printf '%s NEEDS-ESCALATION fail-closed: gate stuck %ss without progress; re-gate\n' "$(date +%T)" "$age" >> "$status_path"
         log "stopped stale gate $qlane (no status write for ${age}s)"
       fi
