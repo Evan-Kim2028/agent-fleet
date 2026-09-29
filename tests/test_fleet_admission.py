@@ -57,6 +57,7 @@ def test_every_pytest_entrypoint_uses_the_one_shared_slot() -> None:
     lane_runner = (OPS_VPS / "worker" / "bin" / "lane_impl.sh").read_text()
     service = (OPS_VPS / "systemd" / "fleet-gate-queue.service").read_text()
     timer = (OPS_VPS / "systemd" / "fleet-gate-queue.timer").read_text()
+    train_service = (OPS_VPS / "systemd" / "fleet-merge-train.service").read_text()
     for source in (worker_shim, orchestrator_shim):
         assert "POOL=test; N=1" in source
         assert "/slots/test" in source
@@ -80,10 +81,14 @@ def test_every_pytest_entrypoint_uses_the_one_shared_slot() -> None:
     assert "slots/gate" in worker_gate and "gate_live" in worker_gate
     assert "slots/gate" in orchestrator_gate and "gate_live" in orchestrator_gate
     assert "gate-$LANE.lock" in worker_gate and "gate-$LANE.lock" in orchestrator_gate
+    sweep = (OPS_VPS / "worker" / "bin" / "merge_train_sweep.sh").read_text()
+    assert all(repo in sweep for repo in ("lake-of-rage", "silphcoanalytics", "agent-fleet"))
+    assert "--status-dir" in sweep and "--include-head-prefix" in sweep
     assert "headRefName" in rebase and "park_worktree" in rebase
     assert "--force-with-lease" in rebase
     assert "DGRH" not in driver and "circuit(){" not in driver
     assert "Restart=on-failure" in service and "%h/fleet/bin/gate_queue_run.sh" in service
+    assert "%h/fleet/bin/merge_train_sweep.sh" in train_service
     assert "OnUnitInactiveSec=30s" in timer
 
 
