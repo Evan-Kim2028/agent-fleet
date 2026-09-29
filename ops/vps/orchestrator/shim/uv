@@ -22,7 +22,7 @@ if [ "$POOL" = test ] && [ -z "$ALLOW_FULL_SUITE" ]; then
   if [ -n "$targets" ] && [ -z "$files" ]; then echo "uv shim: refusing whole-suite pytest ($targets). Run the targeted test files for your change (TEST SCOPE RULE), or set ALLOW_FULL_SUITE=1 if a full run is truly required." >&2; exit 2; fi
 fi
 if [ "$POOL" = test ]; then
-  S=${FLEET_TEST_SLOT_DIR:-${AGENT_FLEET_HOME:-$HOME/.agent-fleet}/slots/test}
+  S=${AGENT_FLEET_HOME:-$HOME/.agent-fleet}/slots/test
   START=0; PREFIX=slot
 else
   S=$HOME/fleet/fb/sem

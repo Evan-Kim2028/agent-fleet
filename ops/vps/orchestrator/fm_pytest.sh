@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 source ~/fleet/env.sh
 # fm_pytest.sh ROOT TEST_PATH... — run tests grouped by nearest pyproject.toml package dir; prints "FAILED <root-relative id>" lines; exit 0 ok, 1 test failures only, 2 infra/collection problem.
-ROOT=$1; shift; declare -A grp; SEM=${FLEET_TEST_SLOT_DIR:-${AGENT_FLEET_HOME:-$HOME/.agent-fleet}/slots/test}; CAPACITY=${FLEET_CAPACITY_HELPER:-$HOME/fleet/bin/fleet_admission.py}; mkdir -p "$SEM"
+ROOT=$1; shift; declare -A grp; SEM=${AGENT_FLEET_HOME:-$HOME/.agent-fleet}/slots/test; CAPACITY=${FLEET_CAPACITY_HELPER:-$HOME/fleet/bin/fleet_admission.py}; mkdir -p "$SEM"
 # Result cache (owner 2026-09-26: batch/avoid repeated test runs). Key = git tree of the WHOLE worktree including
 # uncommitted and untracked files (temp index) + the test list; any code change gives a new key. TTL 24 h.
 TC=$HOME/fleet/cache/fmtest; mkdir -p $TC; find $TC -maxdepth 1 -type f -mmin +1440 -delete 2>/dev/null

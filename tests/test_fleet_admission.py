@@ -60,9 +60,11 @@ def test_every_pytest_entrypoint_uses_the_one_shared_slot() -> None:
         assert "--fleet-headroom-gib 6" in source
     assert "/slots/test" in gate_pytest
     assert "slot.$i" in gate_pytest
+    assert "FLEET_TEST_SLOT_DIR" not in gate_pytest
     assert "--fleet-headroom-gib 6" in gate_pytest
     assert "python -m pytest" in gate_pytest
     assert 'PYTHONPATH="$d:$ROOT' in gate_pytest
+    assert all("FLEET_TEST_SLOT_DIR" not in source for source in (worker_shim, orchestrator_shim))
     assert "FLEET_CAPACITY_HELPER" in lane_runner
     assert "--check" in driver and "gate_processes" in driver and "sort -u" in driver
     assert "DGRH" not in driver and "circuit(){" not in driver

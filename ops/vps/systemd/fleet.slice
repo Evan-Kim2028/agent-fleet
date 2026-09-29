@@ -4,12 +4,12 @@ Description=Agent fleet (documents-0e): hard-capped, lowest priority, frozen fir
 # agents are LLM-call-bound and pytest bursts are per-scope capped (6G), so
 # 15G is generous; the old 22G envelope over-subscribed the box (~130G of
 # caps vs 62G RAM) and unpinned CPUs let agent pytest wander onto lor-api
-# cores 0-7. Now: 12G/15G, pinned to cores 8-15 which it shares with
+# cores 0-7. Now: 15G/15G, pinned to cores 8-15 which it shares with
 # lake/dagster at CPUWeight 20 (vs their 50) — ~1/6 of shared cores under
 # contention, near-full bandwidth when prod is idle.
 
 [Slice]
-MemoryHigh=12G
+MemoryHigh=15G
 MemoryMax=15G
 MemorySwapMax=0
 AllowedCPUs=8-15
