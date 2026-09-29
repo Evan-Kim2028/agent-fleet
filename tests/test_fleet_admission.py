@@ -78,6 +78,7 @@ def test_every_pytest_entrypoint_uses_the_one_shared_slot() -> None:
     assert "QUEUE_SCAN_ONCE" in driver
     assert "merge-train regression" in driver and "STUCK_GATE_S" in driver
     assert "gate exited without verdict" in driver
+    assert "gate_lane_pids" in driver and "kill -- -" in driver
     assert "STUCK_REBASE_S" in driver and "rebase agent did not push" in driver
     assert "slots/gate" in worker_gate and "gate_live" in worker_gate
     assert "slots/gate" in orchestrator_gate and "gate_live" in orchestrator_gate
