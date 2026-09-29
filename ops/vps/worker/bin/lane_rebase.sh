@@ -30,7 +30,9 @@ held=$(git -C $B worktree list --porcelain | awk -v b="branch refs/heads/$BR" '/
 park_worktree(){
   local target="$W.leftover.$(date +%s)"
   if git -C "$B" worktree move "$W" "$target" 2>/dev/null; then
-    git -C "$target" checkout -q --detach 2>/dev/null || return 1
+    if git -C "$target" symbolic-ref -q HEAD >/dev/null 2>&1; then
+      git -C "$target" symbolic-ref -d HEAD || return 1
+    fi
   else
     mv "$W" "$target" || return 1
   fi
