@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### Fixed
+
+- **gate: the pytest result cache can no longer replay a verdict across changed gitignored bytes.**
+  The ignored-file digest is the only part of the cache key that sees a gitignored file, since
+  `git add -A` skips them, so the three ways it could miss one all served a result measured from
+  input the test no longer reads. A failed `git ls-files` answered `""` — the same value as a
+  repository with no ignored files at all — so a transient git failure keyed the run like a
+  clean repo; it now answers `None` and the run degrades to *uncached*, the same way a git that
+  cannot write a tree does. A `max_files` cap stopped the walk at 20,000 paths, leaving every
+  ignored file past that cutoff invisible to the key; there is no cutoff now, and every ignored
+  file is folded in by path and content. Finally, the skip that keeps per-worktree virtualenv and
+  build bytes out of the key matched *any* path component by bare name, so a gitignored test
+  fixture under a directory named `env`, `build`, `dist` or `target` — ordinary words, and just as
+  likely to hold a fixture as an artifact — was dropped from the digest, which then collapsed to
+  `""` and replayed a stale verdict. Those four names are now skipped only when the directory
+  really is a build or dependency tree; unambiguous names (`.venv`, `node_modules`,
+  `__pycache__`, the tool caches) still skip on sight, so two worktrees of one commit still agree.
+- **gate: a verifier that names its test by absolute path no longer loses it.** The `test_file`
+  answer is typed only as `string`, so an absolute path is a legitimate response, but the path
+  was trimmed of `./` and never of its worktree prefix. The leftover absolute prefix then matched
+  no repo-relative node id, so a genuinely failing claim was rejected, its blocker never reached
+  judge or converge, and the pipeline deleted the verifier's test file — the only evidence — on the
+  way out. An absolute path inside the worktree is now made relative before attribution.
+
 ### Added
 
 - **ops/vps: operational scripts that run the fleet (reconciler, tiered evidence gate, remote VPS gate worker, graduated memory guard, batch-window automerge, issue closer, no-model PR triage).** The scripts that

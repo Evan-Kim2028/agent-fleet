@@ -1091,7 +1091,7 @@ class GatePipeline:
             self.evidence.reject(finding, f"verifier: {report.verdict.value}: {report.reason}")
             self._log("gate.verify.rejected", finding=finding.id, reason=report.reason[:160])
             return None
-        rel = _normalise_repo_path(report.test_file)
+        rel = _normalise_repo_path(report.test_file, worktree)
         test_path = worktree / rel
         if not test_path.is_file():
             self.evidence.reject(finding, "verifier named a test file that does not exist")
@@ -2168,14 +2168,27 @@ def _dedupe_findings(findings: list[Finding]) -> list[Finding]:
     return out
 
 
-def _normalise_repo_path(path: str) -> str:
+def _normalise_repo_path(path: str, worktree: Path | None = None) -> str:
     """Trim an agent-supplied path to a repo-relative posix path.
 
-    Agents frequently answer with an absolute path or a ``./`` prefix. Anything
-    that still escapes the worktree after this normalisation is rejected by the
-    caller's ``is_file()`` check on the joined path.
+    Agents frequently answer with an absolute path or a ``./`` prefix, and the
+    ``test_file`` schema only types the answer as ``string``, so an absolute path
+    is a legitimate response. When it points inside *worktree* the worktree
+    prefix is stripped, which matters for more than the ``is_file()`` check: the
+    result is compared against the repo-relative node ids pytest reports, so a
+    leftover absolute prefix would match nothing, the claim's own failing test
+    would credit it not at all, and the only evidence of a real blocker would be
+    discarded.
+
+    Anything that still escapes the worktree after this normalisation is rejected
+    by the caller's ``is_file()`` check on the joined path.
     """
     text = str(path).strip().replace("\\", "/")
+    if worktree is not None:
+        try:
+            text = Path(text).resolve().relative_to(worktree.resolve()).as_posix()
+        except ValueError, OSError:
+            text = str(path).strip().replace("\\", "/")
     if text.startswith("./"):
         text = text[2:]
     return text

@@ -298,16 +298,24 @@ def run_pytest(
         root = tree_root if tree_root is not None else package_dir
         tree = worktree_tree_hash(root)
         if tree is not None:
-            key = cache_key(
-                tree,
-                test_files,
-                package=_relative_package(root, package_dir),
-                ignored=ignored_files_digest(root),
-            )
-            cached = cache_load(cache_root, key, ttl_s=cache_ttl_s)
-            if cached is not None:
-                logger.info("gate pytest: cache hit %s (%d file(s))", key[:12], len(test_files))
-                return cached
+            # A failed ignored-file listing degrades the run to uncached rather
+            # than to a confident key: the digest is the only part of the key
+            # that sees a gitignored file, so a key minted from "could not list
+            # them" would replay a verdict produced from bytes nobody re-read.
+            digest = ignored_files_digest(root)
+            if digest is not None:
+                key = cache_key(
+                    tree,
+                    test_files,
+                    package=_relative_package(root, package_dir),
+                    ignored=digest,
+                )
+                cached = cache_load(cache_root, key, ttl_s=cache_ttl_s)
+                if cached is not None:
+                    logger.info("gate pytest: cache hit %s (%d file(s))", key[:12], len(test_files))
+                    return cached
+            else:
+                logger.debug("gate pytest: ignored-file listing failed; running uncached")
     cmd = build_pytest_command(
         test_files, memory=memory, use_systemd=use_systemd, package_dir=package_dir
     )
@@ -454,7 +462,8 @@ def _relative_package(tree_root: Path, package_dir: Path) -> str:
 #: 1 MiB is far above any fixture or config a test reads.
 _IGNORED_CONTENT_MAX_BYTES = 1 << 20
 
-#: Dependency and build directories, skipped when digesting ignored files.
+#: Dependency and build directories whose *name alone* is proof they hold
+#: machine-local artifacts rather than test input.
 #:
 #: Their contents are worktree-specific by construction: each gate worktree gets
 #: its own virtualenv, and an editable install writes that worktree's absolute
@@ -472,10 +481,10 @@ _IGNORED_CONTENT_MAX_BYTES = 1 << 20
 #: worktree of one commit — ``.venv`` was excluded at the root while
 #: ``pkg/.venv`` was not.
 #:
-#: This only ever applies to files git already ignores, so a *tracked* directory
-#: that happens to be called ``build`` or ``dist`` keeps its bytes covered by
-#: the tree hash exactly as before.
-_IGNORED_TREE_DIRS = frozenset(
+#: Every name here is a machine-local artifact by any reasonable reading: none is
+#: a name a test would keep its fixtures or configuration under. The ambiguous
+#: ones are deliberately NOT here — see :data:`_IGNORED_TREE_DIRS_AMBIGUOUS`.
+_IGNORED_TREE_DIRS_UNAMBIGUOUS = frozenset(
     {
         ".eggs",
         ".mypy_cache",
@@ -485,19 +494,98 @@ _IGNORED_TREE_DIRS = frozenset(
         ".tox",
         ".venv",
         "__pycache__",
-        "build",
-        "dist",
-        "env",
         "htmlcov",
         "node_modules",
-        "target",
         "venv",
     }
 )
 
+#: Names that are just as likely to hold test input as a build artifact.
+#:
+#: ``env``, ``build``, ``dist`` and ``target`` are ordinary words: ``env/`` is
+#: the natural name of a directory holding a test fixture, and nothing in a path
+#: can tell that venv from one. Matching the bare name therefore dropped a real
+#: fixture from the digest entirely; with every ignored file excluded the digest
+#: collapsed to ``""`` — byte-identical to a repository that has none — so an
+#: edit to the fixture moved nothing in the cache key and a stale verdict was
+#: replayed. Skipping these by name reopens the exact hole the digest exists to
+#: close, in a path the name-only rule could not see.
+#:
+#: They are skipped only when the directory actually *is* a dependency or build
+#: tree — see :func:`_is_dependency_tree_dir` — so a real ``env/`` fixture is
+#: covered while a real virtualenv still cannot split the key across worktrees.
+_IGNORED_TREE_DIRS_AMBIGUOUS = frozenset({"build", "dist", "env", "target"})
 
-def ignored_files_digest(root: Path, *, max_files: int = 20_000) -> str:
-    """Digest of the worktree's *gitignored* files, or ``""`` when there are none.
+#: Markers that make an ambiguous directory a genuine build/dependency tree.
+_IGNORED_TREE_DIR_MARKERS = (
+    "pyvenv.cfg",
+    "node_modules",
+    "package-lock.json",
+    "CMakeCache.txt",
+    ".gitignore",
+    "setup.py",
+    "meson.build",
+    "MANIFEST",
+)
+
+#: Retained for callers that only need the name set; membership means "skip on
+#: sight OR verify it looks like a build tree".
+_IGNORED_TREE_DIRS = _IGNORED_TREE_DIRS_UNAMBIGUOUS | _IGNORED_TREE_DIRS_AMBIGUOUS
+
+
+def _is_dependency_tree_dir(root: Path, rel_dir: str) -> bool:
+    """True when the directory *rel_dir* really is a build/dependency tree.
+
+    A bare name is not enough for the ambiguous members of
+    :data:`_IGNORED_TREE_DIRS_AMBIGUOUS`, so the directory is inspected for a
+    marker: a virtualenv's ``pyvenv.cfg``/``bin/activate``, a Rust or C build
+    tree's ``Cargo.toml``/``CMakeCache.txt``, a Python build tree's
+    ``setup.py``. A directory that holds none of them is a fixture directory that
+    happens to share a common name, and its bytes belong in the digest.
+    """
+    directory = Path(root) / rel_dir
+    if not directory.is_dir():
+        return False
+    if (directory / "pyvenv.cfg").exists() or (directory / "bin" / "activate").exists():
+        return True
+    if any((directory / marker).exists() for marker in _IGNORED_TREE_DIR_MARKERS):
+        return True
+    return any(directory.glob("*.egg-info")) or any(directory.glob("*.dist-info"))
+
+
+def _is_skipped_ignored_path(root: Path, rel: str) -> bool:
+    """True when *rel* lies inside a directory the digest must not cover.
+
+    An unambiguous name is enough on its own; an ambiguous one (``env``,
+    ``build``, ``dist``, ``target``) is only skipped when the directory really
+    holds a build or dependency tree, so a gitignored fixture that merely shares
+    one of those common names keeps its bytes in the key.
+    """
+    parts = rel.split("/")
+    for index, part in enumerate(parts[:-1]):
+        if part in _IGNORED_TREE_DIRS_UNAMBIGUOUS:
+            return True
+        if part in _IGNORED_TREE_DIRS_AMBIGUOUS:
+            parent = "/".join(parts[: index + 1])
+            if _is_dependency_tree_dir(root, parent):
+                return True
+    return False
+
+
+def ignored_files_digest(root: Path) -> str | None:
+    """Digest of the worktree's *gitignored* files, ``""`` when there are none.
+
+    Returns ``None`` when the listing itself failed. That is deliberately not
+    ``""``: ``""`` is the value a repository with no ignored files produces, so
+    answering ``""`` for a *failure* would key the run identically to such a repo
+    and a stored verdict produced from different gitignored bytes would be
+    replayed. A caller that cannot tell "no ignored files" from "could not list
+    them" cannot keep that promise, and the failure is realistic:
+    :func:`worktree_tree_hash` and this function make independent git calls with
+    independent timeouts, so a hung or overloaded git can time out the ``ls-files``
+    here while ``add -A``/``write-tree`` still succeed. A failure therefore
+    degrades the run to *uncached* — the same way :func:`worktree_tree_hash`
+    returns ``None`` for a git that cannot write a tree — never to a confident key.
 
     The git tree is the cache key's backbone, and it cannot see an ignored file:
     ``git add -A`` skips them, so editing one leaves the tree hash untouched and
@@ -545,21 +633,26 @@ def ignored_files_digest(root: Path, *, max_files: int = 20_000) -> str:
             check=False,
         )
     except OSError, subprocess.SubprocessError:
-        return ""
+        logger.debug("gate test cache: git ls-files raised; treating ignored set as unknown")
+        return None
     if listed.returncode != 0:
         logger.debug("gate test cache: git ls-files failed: %s", listed.stderr[:200])
-        return ""
+        return None
 
     digest = hashlib.sha256()
     seen = 0
     for raw in listed.stdout.split(b"\0"):
         if not raw:
             continue
-        if seen >= max_files:
-            break
         rel = raw.decode("utf-8", "surrogateescape")
-        if any(part in _IGNORED_TREE_DIRS for part in rel.split("/")):
+        if _is_skipped_ignored_path(root, rel):
             continue
+        # Every ignored file is folded in by path AND content. A max_files cap
+        # that stopped the walk made every file past the cutoff invisible: the
+        # path could change and the content could be edited and the digest stayed
+        # the same, so a stored verdict was replayed for a tree whose gitignored
+        # input had changed — the one stale hit this digest exists to prevent.
+        # There is no cutoff; correctness outranks the bound it was meant to be.
         digest.update(rel.encode("utf-8", "surrogateescape") + b"\0")
         seen += 1
         _update_with_ignored_entry(digest, Path(root) / rel)
@@ -596,7 +689,9 @@ def _update_with_ignored_entry(digest: hashlib._Hash, path: Path) -> None:
     digest.update(b"\0")
 
 
-def cache_key(tree_hash: str, test_files: Sequence[str], *, package: str, ignored: str = "") -> str:
+def cache_key(
+    tree_hash: str, test_files: Sequence[str], *, package: str, ignored: str | None = ""
+) -> str:
     """Key a result by worktree tree + ignored-file digest + the exact test list.
 
     The test list is sorted so argument order cannot create a second entry for
@@ -607,7 +702,11 @@ def cache_key(tree_hash: str, test_files: Sequence[str], *, package: str, ignore
     given the gate's own worktrees distinct keys and no reuse at all.
 
     *ignored* folds in the worktree's gitignored files, which the tree hash
-    cannot see, so editing one misses instead of replaying a stale result.
+    cannot see, so editing one misses instead of replaying a stale result. A
+    ``None`` *ignored* (the listing failed) is tagged distinctly in the payload so
+    it can never mint the same key as a repository that genuinely holds no
+    ignored files; :func:`run_pytest` does not consult the cache in that case at
+    all.
     """
     payload = json.dumps(
         {
@@ -615,6 +714,7 @@ def cache_key(tree_hash: str, test_files: Sequence[str], *, package: str, ignore
             "tree": tree_hash,
             "package": package,
             "ignored": ignored,
+            "ignored_known": ignored is not None,
             "tests": sorted(test_files),
         },
         sort_keys=True,
