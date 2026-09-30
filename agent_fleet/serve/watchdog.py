@@ -77,7 +77,7 @@ if TYPE_CHECKING:
 
     from agent_fleet.serve.clock import Clock
     from agent_fleet.serve.config import ServeConfig
-    from agent_fleet.serve.supervisor import Supervisor
+    from agent_fleet.serve.supervisor import ChildState, Supervisor
 
 RULE_STUCK_STAGE = "stuck_stage"
 RULE_ORPHAN = "orphan_blocking"
@@ -181,6 +181,10 @@ class Watchdog:
         self.dry_run = dry_run
         #: stage -> retries already spent, enforcing ``stage_retry_budget``.
         self.stage_retries: dict[str, int] = {}
+        #: component -> the ``(mtime, size)`` of its log as the rule last saw it.
+        #: This is what makes "has it done anything since?" a question with an
+        #: answer; see :meth:`_note_output_progress`.
+        self._observed_output: dict[str, tuple[float, int]] = {}
 
     # ------------------------------------------------------------------ helpers
 
@@ -463,15 +467,31 @@ class Watchdog:
         if queued_depth <= 0:
             return
         now = self.clock.time()
-        window_s = max(1.0, float(self.config.watchdog.no_progress_minutes) * 60.0)
         for spec in self.config.enabled_components:
             state = self.supervisor.children.get(spec.name)
             if state is None or state.pid is None:
                 continue
+            if self._note_output_progress(spec.name, state, now=now):
+                continue
+            budget_window_s = max(1.0, float(spec.no_progress_window_minutes) * 60.0)
+            # The rule may not fire more often than the period its own restart
+            # budget is measured over. ``no_progress_window_minutes`` is how long
+            # the restarts it is willing to spend are supposed to be spread
+            # across, so a detection window shorter than that contradicts the
+            # budget it is spending: every finding is charged to a budget sized
+            # for a much longer period, and a component that is merely quiet
+            # between steps is restarted faster than the configuration says it
+            # ever will be. With the shipped defaults the two are equal and this
+            # changes nothing; it only binds where an operator has asked for a
+            # detection interval far tighter than the restart budget, which is
+            # exactly where a live, working component gets churned.
+            window_s = max(
+                max(1.0, float(self.config.watchdog.no_progress_minutes) * 60.0),
+                budget_window_s,
+            )
             idle_s = now - state.last_event_epoch
             if idle_s < window_s:
                 continue
-            budget_window_s = max(1.0, float(spec.no_progress_window_minutes) * 60.0)
             # The budget counts a *burst* of restarts: the ones clustered around
             # the most recent one, measured backwards from it. Measuring
             # forwards from now would let restarts age out one at a time, so a
@@ -525,6 +545,53 @@ class Watchdog:
                 "serve.watchdog.no_progress",
                 component=spec.name,
             )
+
+    def _note_output_progress(self, component: str, state: ChildState, *, now: float) -> bool:
+        """Refresh the event clock when the component's own log has grown.
+
+        A component proves it is working by producing output, and the only file
+        serve can watch for that is the log it hands the child. Comparing it with
+        what this rule saw last time is what turns ``now - last_event_epoch``
+        into a measure of *idleness* at all: that field is otherwise written only
+        at spawn and adopt, so it records when the process launched and never
+        when it last did anything. A healthy long-running component is then
+        indistinguishable from one wedged since launch, and the rule terminates
+        and respawns the first one every window forever — destroying in-flight
+        lane work and spending the restart budget on a component that never
+        needed it.
+
+        The first observation has nothing to compare against, so a log that
+        already carries output counts as evidence the component has been working.
+
+        Growth is judged on the file's own ``(mtime, size)`` changing, never on
+        how the mtime compares to ``now``. A component's log is stamped by
+        whichever clock that process runs on, which is not necessarily the one
+        this watchdog is reading — a test driving an injected clock sits far
+        behind the real filesystem, and a log stamped "in the future" relative to
+        it is still a log that demonstrably grew. Judging growth by comparison to
+        ``now`` threw that evidence away and let a component that was writing
+        every tick look permanently idle.
+
+        Returns True when the component was seen making progress, so the caller
+        skips judging it this tick.
+        """
+        path = self._tracked_output(component)
+        if path is None:
+            self._observed_output.pop(component, None)
+            return False
+        try:
+            st = path.stat()
+        except OSError:
+            self._observed_output.pop(component, None)
+            return False
+        seen = (st.st_mtime, st.st_size)
+        previous = self._observed_output.get(component)
+        self._observed_output[component] = seen
+        grew = st.st_size > 0 if previous is None else seen != previous
+        if not grew:
+            return False
+        state.last_event_epoch = now
+        return True
 
     # ---------------------------------------------------------- grace escalation
 

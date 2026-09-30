@@ -1,8 +1,10 @@
 # `fleet serve` — one supervisor for the whole pipeline
 
-`fleet serve --operator NAME --config fleet.yaml` is a single long-running,
-restart-safe process that keeps the fleet moving at maximum throughput inside
-its resource limits, with no operator watching it.
+`fleet serve run --operator NAME` is a single long-running, restart-safe process
+that keeps the fleet moving at maximum throughput inside its resource limits,
+with no operator watching it. To point it at a specific `fleet.yaml`, the
+`--config` flag belongs *before* `serve` — `fleet --config fleet.yaml serve run
+--operator NAME` — or use `--serve-config` for a serve-specific override.
 
 It exists to replace the thing that made the bash fleet unmanageable. Those
 scripts worked, and they required a human to be present: someone had to notice

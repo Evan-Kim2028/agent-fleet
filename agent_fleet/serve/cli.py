@@ -291,29 +291,44 @@ def register_serve_commands(sub: argparse._SubParsersAction) -> None:
         help="Supervise the fleet end to end (dispatch, gate, fix, merge) with no babysitter",
     )
 
-    def add_common(parser: argparse.ArgumentParser) -> None:
+    def add_common(parser: argparse.ArgumentParser, *, sub: bool = False) -> None:
+        # A subparser's ``default`` is resolved onto the shared ``dest`` after
+        # the parent has finished parsing, so giving the subparser copy a real
+        # default silently overwrote whatever the parent parsed. That made
+        # `fleet serve --operator alice status` lose ``alice`` (it exited 2 with
+        # "--operator is required") and, worse, dropped a named ``--serve-config``
+        # on the floor so a supervisor started on built-in thresholds instead of
+        # the file the operator named — the exact silent-defaults failure the
+        # module docstring says cannot happen. ``SUPPRESS`` means the subparser
+        # writes nothing to the namespace unless the flag was actually given, so
+        # flag position stops mattering and a subcommand value still wins when
+        # the flag is repeated.
+        absent: object = argparse.SUPPRESS if sub else ""
         parser.add_argument(
-            "--operator", default="", help="Operator name (serve state is per-operator)"
+            "--operator",
+            default=absent,
+            help="Operator name (serve state is per-operator)",
         )
         parser.add_argument(
             "--serve-config",
             dest="serve_config",
-            default=None,
+            default=argparse.SUPPRESS if sub else None,
             help="Explicit serve config file (must contain a `serve:` section)",
         )
-        parser.add_argument("--repo-root", default=None, help=argparse.SUPPRESS)
+        parser.add_argument(
+            "--repo-root", default=argparse.SUPPRESS if sub else None, help=argparse.SUPPRESS
+        )
 
     # `fleet serve` with no subcommand runs the supervisor, so the flags `run`
     # understands have to live on the parent too — without them the Namespace
     # that reaches cmd_serve_run has no `operator` at all. The same flags stay
     # on every subparser so the documented `fleet serve run --operator x` still
-    # works; argparse lets the subparser's own value win when the flag is
-    # repeated, and the parent's default only fills in the no-subcommand case.
+    # works, with SUPPRESS defaults so neither position can clobber the other.
     add_common(serve_p)
     serve_sub = serve_p.add_subparsers(dest="serve_command")
 
     run_p = serve_sub.add_parser("run", help="Run the supervisor in the foreground (long-running)")
-    add_common(run_p)
+    add_common(run_p, sub=True)
     run_p.add_argument(
         "--max-ticks",
         type=int,
@@ -328,18 +343,18 @@ def register_serve_commands(sub: argparse._SubParsersAction) -> None:
     run_p.set_defaults(func=cmd_serve_run)
 
     status_p = serve_sub.add_parser("status", help="One screen: components, capacity, stages")
-    add_common(status_p)
+    add_common(status_p, sub=True)
     status_p.add_argument("--json", action="store_true", help="Emit the status snapshot as JSON")
     status_p.set_defaults(func=cmd_serve_status)
 
     stop_p = serve_sub.add_parser("stop", help="Stop the running supervisor (by recorded pid)")
-    add_common(stop_p)
+    add_common(stop_p, sub=True)
     stop_p.set_defaults(func=cmd_serve_stop)
 
     wd_p = serve_sub.add_parser(
         "watchdog", help="Run the watchdog rules once (read-only by default)"
     )
-    add_common(wd_p)
+    add_common(wd_p, sub=True)
     wd_p.add_argument(
         "--apply",
         action="store_true",
@@ -349,12 +364,12 @@ def register_serve_commands(sub: argparse._SubParsersAction) -> None:
     wd_p.set_defaults(func=cmd_serve_watchdog)
 
     dec_p = serve_sub.add_parser("decisions", help="Show the human decision queue")
-    add_common(dec_p)
+    add_common(dec_p, sub=True)
     dec_p.add_argument("--json", action="store_true", help="Emit decisions as JSON")
     dec_p.set_defaults(func=cmd_serve_decisions)
 
     cap_p = serve_sub.add_parser("capacity", help="Print the current capacity file")
-    add_common(cap_p)
+    add_common(cap_p, sub=True)
     cap_p.set_defaults(func=cmd_serve_capacity)
 
     # `fleet serve` with no subcommand defaults to `run`, matching the operator's

@@ -56,6 +56,7 @@ from agent_fleet.serve.paths import (
     component_log_path,
     component_pid_path,
     ensure_serve_dir,
+    lock_path,
     read_json,
     write_json_atomic,
 )
@@ -89,14 +90,22 @@ CAUSE_REQUESTED_KILLED = "requested_killed"
 #: and hide the real fault behind a crash-loop alert.
 _REQUESTED_CAUSES = frozenset({CAUSE_REQUESTED, CAUSE_REQUESTED_KILLED})
 
-#: The signals serve itself sends. A child killed by SIGKILL never ran its own
-#: exit path, so the signalled/exit-code split is meaningless for it and the
-#: recorded cause is the whole truth.
-_KILLED_BY_SIGNAL = {-signal.SIGKILL, -signal.SIGINT}
-
-#: Serve does not send SIGQUIT or SIGUSR1 to a component, so a child killed by
-#: one of those died on its own. SIGTERM is the exception: ``stop_component``
-#: and every watchdog group TERM go through it, which is the whole point.
+#: The signals serve sends to a component itself. SIGTERM comes from every stop
+#: path — ``stop_component`` and every watchdog group TERM go through it — and is
+#: therefore a requested stop, not a crash.
+#:
+#: SIGKILL is deliberately *not* here. It is reached two ways that must not be
+#: conflated: serve's own escalation after the TERM grace expires, and the OOM
+#: killer (or anything else) killing a component serve never asked to stop. The
+#: exit code is -9 either way, so the exit code cannot tell them apart — the
+#: record of whether *we* escalated the KILL is what separates them, and that is
+#: :attr:`ChildState.kill_sent`. Reading -9 as "requested, because a requested
+#: stop ignores its TERM" booked every OOM death as a stop serve asked for: the
+#: cause was requested, so ``_note_crash`` never charged it, so ``crash_epochs``
+#: stayed empty, so a component SIGKILLed on every single start restarted forever
+#: with a permanently unspent budget and no ``serve.component.crash_loop`` alert.
+#: SIGINT is absent for the same reason — serve traps it for itself but never
+#: signals a child with it.
 _SIGNALLED_BY_SERVE = {-signal.SIGTERM}
 
 STATE_STOPPED = "stopped"
@@ -186,6 +195,11 @@ class ChildState:
     #: Set when the watchdog asks for a restart, so a requested stop does not
     #: consume the crash budget.
     pending_cause: str = CAUSE_REQUESTED
+    #: True once serve itself has escalated this component to a group SIGKILL
+    #: after the TERM grace expired. A -9 exit is only a requested stop when
+    #: this is set; otherwise nothing in serve sent that signal, so the child
+    #: died on its own and the death is a crash.
+    kill_sent: bool = False
     adopted: bool = False
     last_event_epoch: float = 0.0
     #: Monotonic instant before which this component must not be restarted.
@@ -208,6 +222,7 @@ class ChildState:
             "last_exit_cause": self.last_exit_cause,
             "last_exit_code": self.last_exit_code,
             "pending_cause": self.pending_cause,
+            "kill_sent": self.kill_sent,
             "adopted": self.adopted,
             "last_event_epoch": self.last_event_epoch,
             "no_progress_restarts": list(self.no_progress_restarts[-_MAX_CRASH_HISTORY:]),
@@ -237,6 +252,7 @@ class ChildState:
                 int(raw["last_exit_code"]) if isinstance(raw.get("last_exit_code"), int) else None
             ),
             pending_cause=str(raw.get("pending_cause") or CAUSE_REQUESTED),
+            kill_sent=bool(raw.get("kill_sent")),
             adopted=bool(raw.get("adopted")),
             last_event_epoch=float(raw.get("last_event_epoch") or 0.0),
             no_progress_restarts=floats("no_progress_restarts"),
@@ -251,6 +267,39 @@ class ChildState:
 
     def crashes_in_window(self, now: float, window_s: float) -> int:
         return sum(1 for epoch in self.crash_epochs if now - epoch <= window_s)
+
+    def crash_burst(self, now: float, window_s: float, threshold: int) -> bool:
+        """True when the last *threshold* crashes were each inside one window.
+
+        A crash loop is a *rate*, not a tally, so it has to be judged on the gap
+        between deaths rather than on how many happen to fall inside one window
+        at the moment of inspection. Counting a sliding window instead makes the
+        verdict depend on the tick length: a component dying every 600s under a
+        15-minute window never has three deaths inside any single window, so a
+        supervisor ticking on that cadence restarted it forever and never
+        declared the loop, while the same component ticking every 15s tripped
+        after three. Whether the budget that exists to stop a crash loop ever
+        engages cannot be a function of how often someone looked.
+
+        The trailing chain is the honest reading: the most recent crash has to be
+        inside the window, and the crashes before it each within a window of
+        their predecessor. A component that crashed three times this morning and
+        has been up since is not in a loop, and a component whose deaths are
+        spaced further apart than the window is being restarted, not crash
+        looping.
+        """
+        if threshold < 1 or not self.crash_epochs:
+            return False
+        if now - self.crash_epochs[-1] > window_s:
+            return False
+        run = 1
+        for index in range(len(self.crash_epochs) - 1, 0, -1):
+            if self.crash_epochs[index] - self.crash_epochs[index - 1] >= window_s:
+                break
+            run += 1
+            if run >= threshold:
+                return True
+        return run >= threshold
 
 
 class Supervisor:
@@ -281,7 +330,28 @@ class Supervisor:
         #: test) leaves it false and paces itself, so nothing waits on a loop
         #: that is not there to release it.
         self.defer_restarts = False
+        self._ensure_lock_file()
         self._restore()
+
+    def _ensure_lock_file(self) -> None:
+        """Create the supervisor lock file for this operator if it is absent.
+
+        The flock itself is the ownership signal, and ``exclusive_lock`` only
+        creates the file when someone tries to take it. That left the lock
+        invisible for an operator's whole first lifetime — the file a second
+        supervisor would have to find to see who owns the roles did not exist
+        until the collision that was supposed to be prevented. Creating it up
+        front costs nothing and makes the ownership record present from the
+        moment a supervisor exists; taking the flock still only happens in
+        ``ServeLoop.run``.
+        """
+        path = lock_path(self.operator)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with suppress(OSError):
+                path.touch()
+        except OSError:
+            return
 
     # ------------------------------------------------------------------ state
 
@@ -365,6 +435,7 @@ class Supervisor:
         state.starttime = starttime
         state.state = STATE_RUNNING
         state.adopted = True
+        state.kill_sent = False
         state.last_event_epoch = self.clock.time()
         emit_serve_event(
             self.operator,
@@ -458,6 +529,7 @@ class Supervisor:
         state.adopted = False
         state.restarts += 1
         state.pending_cause = cause
+        state.kill_sent = False
         state.last_event_epoch = self.clock.time()
         self._procs[name] = proc
         self._handles[name] = handle
@@ -571,6 +643,7 @@ class Supervisor:
                     handle.close()
             state = self.children.get(name)
             cause = state.pending_cause if state else CAUSE_CRASH
+            kill_sent = bool(state.kill_sent) if state else False
             # A death serve asked for is not a crash, whatever the exit code
             # says. A watchdog group TERM arrives as exit code -15, and reading
             # it as "non-zero, so crash" charged every one of them against the
@@ -585,9 +658,15 @@ class Supervisor:
             # sent is a requested stop, a signal it never sends is a crash, and
             # a child that exits by itself after being asked to stop chose that
             # code, so it still counts.
+            #
+            # SIGKILL needs the same question asked of it, and the exit code is
+            # no help: -9 is how both our own post-grace escalation and the OOM
+            # killer appear. ``kill_sent`` is the record of which one it was. It
+            # is checked here, and reset below, so a component that OOM-kills once
+            # and is then stopped properly is booked correctly either way.
             if cause in _REQUESTED_CAUSES and code is not None:
-                if code in _KILLED_BY_SIGNAL:
-                    effective = CAUSE_REQUESTED_KILLED
+                if code == -signal.SIGKILL:
+                    effective = CAUSE_REQUESTED_KILLED if kill_sent else CAUSE_CRASH
                 elif code == 0 or code in _SIGNALLED_BY_SERVE:
                     effective = cause
                 else:
@@ -604,7 +683,7 @@ class Supervisor:
         if state is None:
             return False
         window_s = max(1.0, float(spec.crash_window_minutes) * 60.0)
-        return state.crashes_in_window(self.clock.time(), window_s) >= spec.crash_threshold
+        return state.crash_burst(self.clock.time(), window_s, spec.crash_threshold)
 
     def backoff_for(self, name: str) -> float:
         """Exponential backoff from the restart count, capped by config.
@@ -750,6 +829,19 @@ class Supervisor:
         state = self.children.setdefault(name, ChildState(name=name))
         if state.state == STATE_CRASH_LOOPING:
             return False
+        if self._owned_by_another_supervisor(name, state):
+            emit_serve_event(
+                self.operator,
+                "serve.component.restart_refused",
+                level="warning",
+                data={
+                    "component": name,
+                    "reason": reason,
+                    "owner_pid": state.pid,
+                    "detail": "role is owned by another live supervisor",
+                },
+            )
+            return False
         emit_serve_event(
             self.operator,
             "serve.component.restart_requested",
@@ -760,6 +852,49 @@ class Supervisor:
             return False
         state.no_progress_restarts.append(self.clock.time())
         return self.start(name, cause=CAUSE_REQUESTED)
+
+    def _owned_by_another_supervisor(self, name: str, state: ChildState) -> bool:
+        """True when *name* is being run by a supervisor that is not this one.
+
+        ``serve watchdog --apply`` builds its own :class:`Supervisor` over the same
+        serve directory as the running one, and that process is short-lived: it
+        was constructed before the live supervisor's component existed, so it
+        holds no handle for it and never adopted it. Restarting from there stopped
+        the live supervisor's dispatcher and spawned a rival for a role that was
+        still occupied, while the real supervisor reaped its own child and
+        respawned too — two live processes for one role, neither visible to the
+        crash budget because each exit was booked as ``requested``, both writing
+        the same capacity file.
+
+        The ownership signal is the component's own pid file: it is written by
+        the supervisor that spawned the process and names that exact process. A
+        component this supervisor is responsible for is one it holds a handle for
+        (``_procs``) or one it adopted at boot (``adopted``). A live process
+        under a pid file when we hold neither is a role somebody else owns, and
+        the correct action is to record it and decline — not to kill it.
+
+        The pid is adopted into ``state`` so the caller sees who owns the role
+        rather than seeing an empty slot.
+        """
+        if name in self._procs or state.adopted:
+            return False
+        payload = read_json(component_pid_path(self.operator, name))
+        if not payload:
+            return False
+        pid = payload.get("pid")
+        starttime = payload.get("starttime")
+        if not isinstance(pid, int) or not isinstance(starttime, int):
+            return False
+        if starttime_fingerprint(pid, proc_root=self.proc_root) != starttime:
+            return False
+        if not pid_alive(pid, proc_root=self.proc_root):
+            return False
+        state.pid = pid
+        state.starttime = starttime
+        state.state = STATE_RUNNING
+        state.adopted = True
+        state.last_event_epoch = self.clock.time()
+        return True
 
     def stop_component(self, name: str, *, cause: str = CAUSE_REQUESTED) -> bool:
         """Stop a component, by recorded fingerprint only, and wait for it to go.
@@ -869,6 +1004,12 @@ class Supervisor:
         # nulled it yet, so the escalation can still prove it owns the pid.
         killed = escalate_kill_group(identity, proc_root=self.proc_root)
         if killed.signalled:
+            # Record that *we* sent the KILL. A -9 exit is only a requested stop
+            # when this is set; a child that reached SIGKILL without it (the OOM
+            # killer) died on its own and has to be charged to the crash budget.
+            state = self.children.get(name)
+            if state is not None:
+                state.kill_sent = True
             emit_serve_event(
                 self.operator,
                 "serve.component.kill_escalated",
